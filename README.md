@@ -158,6 +158,13 @@ and GNOME 50 replaces with a hard refusal; GNOME 50 also drops the X11 session
 that the current Selkies release needs. Sessions on *different* machines sharing
 one home directory are unaffected, because those checks are local to a machine.
 
+Neither limit reaches the rest of the design. Nothing in a session -- the X
+server, the streaming, the audio, the isolation -- depends on which desktop is
+started, so `HDW4S_SESSION=startxfce4` sidesteps both. That is worth knowing
+before reaching for something more clever: bridging a Wayland session back onto
+an X11 display is possible, but every route there is either a debug tool or
+carries a visible cost, whereas swapping the desktop costs one line.
+
 ## Documentation
 
 `man hdw4s`, mirrored as [hdw4s.8.md](hdw4s.8.md).

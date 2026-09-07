@@ -129,9 +129,17 @@ xauth -f "${XAUTHORITY}" add "${DISPLAY}" MIT-MAGIC-COOKIE-1 "$(mcookie)"
 # --- session ----------------------------------------------------------------
 
 export XDG_SESSION_TYPE='x11'
-export XDG_CURRENT_DESKTOP='ubuntu:GNOME'
-export GNOME_SHELL_SESSION_MODE='ubuntu'
 export XDG_SESSION_CLASS='user'
+
+# Only claim to be GNOME when GNOME is what is being started. Another desktop
+# reads XDG_CURRENT_DESKTOP to decide which autostart files apply, and telling
+# it the wrong thing starts the wrong set of services.
+case "${HDW4S_SESSION:-gnome-session}" in
+  *gnome-session*)
+    export XDG_CURRENT_DESKTOP='ubuntu:GNOME'
+    export GNOME_SHELL_SESSION_MODE='ubuntu'
+    ;;
+esac
 
 # The unit is a system service, so this account has no systemd user manager of
 # its own and nothing has started the audio stack. On a current Ubuntu that is

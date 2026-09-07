@@ -10,6 +10,13 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 
 : "${DISPLAY:?}" "${XDG_RUNTIME_DIR:?}" "${HDW4S_PORT:?}"
 : "${HDW4S_ADDR:=0.0.0.0}"
+
+# The desktop to run. This is the one line that has to change to outlive GNOME
+# on X11: GNOME 50 removes the X11 session that the streaming server needs,
+# while Xorg and the lighter desktops have no such plan. Everything else here
+# -- the X server, the streaming, the audio, the isolation -- is unaffected by
+# which of them is started.
+: "${HDW4S_SESSION:=gnome-session}"
 : "${HDW4S_FRAMERATE:=30}"
 : "${HDW4S_ENCODER:=x264enc}"
 
@@ -46,7 +53,8 @@ if [ -n "${CREDENTIALS_DIRECTORY:-}" ] &&
   }
 fi
 
-gnome-session &
+# shellcheck disable=SC2086
+${HDW4S_SESSION} &
 children+=($!)
 session_pid="$!"
 

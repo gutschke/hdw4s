@@ -17,7 +17,6 @@ User=%i
 
 CapabilityBoundingSet=
 DevicePolicy=closed
-Environment=GNOME_SHELL_SESSION_MODE=ubuntu
 Environment=LIBGL_ALWAYS_SOFTWARE=1
 Environment=XDG_RUNTIME_DIR=%t/hdw4s/%i
 # Put the application wrappers ahead of the real binaries. They are what

@@ -113,6 +113,13 @@ Three files are read in order, each overriding the last:
     puts the session outside the firewall's coverage; `hdw4s firewall --check`
     reports that.
 
+  * `HDW4S_SESSION`:
+    The desktop to start; defaults to `gnome-session`. Anything that runs on
+    X11 works, and nothing else in a session depends on the choice. GNOME 50,
+    which Ubuntu 26.04 ships, removes the X11 session that the current Selkies
+    release needs, whereas Xorg and the lighter desktops have no such plan, so
+    changing this is the whole migration when that matters.
+
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 
@@ -242,10 +249,17 @@ A second desktop for an account that is already logged in on the same machine
 works only because gnome-session falls back to its own service manager when it
 cannot reach a systemd user manager, and there is only ever one of those per
 account. GNOME 49 removes that fallback and GNOME 50 removes the X11 session
-altogether, so this arrangement does not survive an upgrade past Ubuntu 24.04.
+altogether, so that arrangement does not survive an upgrade past Ubuntu 24.04.
 
-Sessions on *different* machines sharing one home directory are not affected by
-that: the checks involved are local to a machine.
+Sessions on *different* machines sharing one home directory are not affected:
+the checks involved are local to a machine.
+
+Neither limit reaches the rest of the design. The X server, the streaming, the
+audio and the isolation are all indifferent to which desktop is started, so
+setting `HDW4S_SESSION` to one that is not being withdrawn from X11 -- Xfce,
+MATE, LXQt -- avoids both. That is a smaller change than it sounds, and a much
+smaller one than bridging a Wayland session back onto an X11 display, which is
+possible but visibly a workaround.
 
 Snap and Flatpak applications ignore the wrappers and some of the environment
 used to isolate a session, so they may still share state between desktops.
