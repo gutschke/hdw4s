@@ -40,6 +40,23 @@ set_if_present org.gnome.desktop.session      idle-delay       'uint32 0'
 set_if_present org.gnome.settings-daemon.plugins.power \
                                               sleep-inactive-ac-type 'nothing'
 
+# The unit is a system service, so this account has no systemd user manager of
+# its own and nothing has started the audio stack. On a current Ubuntu that is
+# PipeWire; calling pulseaudio here as well would leave two servers racing for
+# the same socket.
+#
+# This has to happen inside the D-Bus session rather than before it. PipeWire
+# and WirePlumber both reach for the session bus at startup, and started any
+# earlier they find nothing there and spend the session complaining about it.
+if [ -x /usr/bin/pipewire ]; then
+  install -d -m0700 "${PULSE_RUNTIME_PATH}"
+  /usr/bin/pipewire &            children+=($!)
+  /usr/bin/wireplumber &         children+=($!)
+  /usr/bin/pipewire-pulse &      children+=($!)
+elif [ -x /usr/bin/pulseaudio ]; then
+  /usr/bin/pulseaudio --start --exit-idle-time=-1 || :
+fi
+
 # Unlock this session's own keyring, if one was set up with "hdw4s keyring".
 # The password arrives from systemd in a read-only, non-swappable file that
 # exists only for the lifetime of the unit, so it is never written to disk here

@@ -10,13 +10,33 @@ set -o nounset -o pipefail
 instance="${1:?usage: hdw4s-session <instance>}"
 
 : "${XDG_RUNTIME_DIR:?must be set by the unit}"
-: "${HDW4S_PORT:?must be set by the unit}"
 
 CONF='/etc/hdw4s/hdw4s.conf'
+SLOTS='/etc/hdw4s/instances'
 # shellcheck source=/dev/null
 [ ! -r "${CONF}" ] || . "${CONF}"
 # shellcheck source=/dev/null
 [ ! -r "/etc/hdw4s/${instance}.conf" ] || . "/etc/hdw4s/${instance}.conf"
+
+# The port comes from the slot table, where it was allocated and where the
+# firewall and any proxy configuration read it from. Deriving it here rather
+# than copying it into an environment file keeps one authoritative answer: a
+# copy would be free to drift, and the copy is what would be wrong. An explicit
+# HDW4S_PORT in a configuration file still wins, for the administrator who
+# needs a session on a particular port.
+if [ -z "${HDW4S_PORT:-}" ]; then
+  : "${HDW4S_BASE_PORT:=7300}"
+  slot="$(awk -v i="${instance}" \
+          '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}" 2>/dev/null)"
+  [ -n "${slot}" ] || {
+    echo "hdw4s: ${instance} has no slot in ${SLOTS}." >&2
+    echo "  Run 'hdw4s enable ${instance}' rather than starting the unit" >&2
+    echo "  directly, so that a port is allocated for it." >&2
+    exit 1
+  }
+  HDW4S_PORT=$(( HDW4S_BASE_PORT + slot ))
+fi
+export HDW4S_PORT
 
 : "${HDW4S_PROFILE_DIR:=/var/lib/hdw4s}"
 : "${HDW4S_ISOLATION:=none}"
@@ -147,20 +167,6 @@ case "${HDW4S_SESSION:-gnome-session}" in
     export GNOME_SHELL_SESSION_MODE='ubuntu'
     ;;
 esac
-
-# The unit is a system service, so this account has no systemd user manager of
-# its own and nothing has started the audio stack. On a current Ubuntu that is
-# PipeWire; calling pulseaudio here as well would leave two servers racing for
-# the same socket.
-if [ -x /usr/bin/pipewire ]; then
-  install -d -m0700 "${PULSE_RUNTIME_PATH}"
-  /usr/bin/pipewire &            children+=($!)
-  /usr/bin/wireplumber &         children+=($!)
-  /usr/bin/pipewire-pulse &      children+=($!)
-elif [ -x /usr/bin/pulseaudio ]; then
-  /usr/bin/pulseaudio --start --exit-idle-time=-1 || :
-fi
-
 
 # dbus-run-session, not dbus-launch: the bus is owned by this process and dies
 # with it, rather than being left behind for nothing to reap.

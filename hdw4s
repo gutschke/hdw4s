@@ -225,18 +225,36 @@ cmd_enable() {
   split_instance "${inst}"
   idx="$(alloc_slot "${inst}")"
 
+  install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
+
   # systemd has no specifier for "the part of the instance name before the
   # colon", so a unit whose instance carries a session number cannot express
   # User= on its own. A drop-in supplies it. The unit's own User=%i still
   # covers the common single-session case unaided.
   if [ "${inst}" != "${user}" ]; then
-    install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
     printf '%s\n' \
       '# Written by "hdw4s enable"; edit /etc/hdw4s/'"${inst}"'.conf instead.' \
       '[Service]' \
       "User=${user}" \
       > "${DROPIN}/hdw4s@${inst}.service.d/50-user.conf"
   fi
+
+  # ProtectSystem=strict makes the whole filesystem read-only apart from what
+  # is named, and a desktop has to be able to write its own home. The unit
+  # cannot name it, because there is no specifier for the home directory of the
+  # account in User= -- %h is the *manager's* home, which for a system unit is
+  # /root. So it is looked up here, at the one moment the account is known.
+  #
+  # Assuming /home would be wrong: plenty of sites keep home directories
+  # somewhere else entirely, and the failure is a session that starts and then
+  # cannot save anything.
+  home="$(getent passwd -- "${user}" | cut -d: -f6)"
+  [ -n "${home}" ] || die "hdw4s: ${user} has no home directory"
+  printf '%s\n' \
+    '# Written by "hdw4s enable". Re-run it if the home directory moves.' \
+    '[Service]' \
+    "ReadWritePaths=${home}" \
+    > "${DROPIN}/hdw4s@${inst}.service.d/40-home.conf"
 
   systemctl daemon-reload
   systemctl enable --now "hdw4s@${inst}.service"

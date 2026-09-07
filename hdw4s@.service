@@ -55,7 +55,11 @@ ProtectKernelTunables=yes
 # machine that hosts desktops for several people.
 ProtectProc=invisible
 ProtectSystem=strict
-ReadWritePaths=/home /var/lib/hdw4s
+# The session's own home is added by "hdw4s enable", which is the only
+# point at which the account -- and so its home directory -- is known. A
+# unit cannot name it: there is no specifier for the home of the account in
+# User=, and %h is the manager's home, which here is /root.
+ReadWritePaths=/var/lib/hdw4s
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

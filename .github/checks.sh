@@ -107,6 +107,28 @@ for setting in HDW4S_BASE_PORT:7300 HDW4S_BLOCK_SIZE:64; do
 done
 note 'defaults agree' 'ok'
 
+# A package that builds but cannot be installed is not a working package. CI
+# never installs this one -- pulling a whole desktop onto a runner is not worth
+# it -- so at least check that every dependency names a package the archive
+# actually has. This catches depending on something only one distribution
+# ships, which is otherwise discovered by a person trying to install it.
+if command -v apt-cache >/dev/null; then
+  missing=''
+  while read -r dep; do
+    [ -n "${dep}" ] || continue
+    cand="$(apt-cache policy "${dep}" 2>/dev/null | sed -n 's/  Candidate: //p')"
+    [ -n "${cand}" ] && [ "${cand}" != '(none)' ] || missing="${missing} ${dep}"
+  done < <(awk '/^Depends:/ { d = 1; sub(/^Depends:/, "") }
+                /^[A-Z][A-Za-z-]*:/ && !/^Depends:/ { d = 0 }
+                d { print }' debian/control |
+           tr -d ' ' | tr ',' '\n' | grep -v '^[$]' | grep .)
+  if [ -z "${missing}" ]; then
+    note 'dependencies exist' 'ok'
+  else
+    bad 'dependencies' "not in the archive:${missing}"
+  fi
+fi
+
 if [ "${1:-}" = '--package' ]; then
   echo
   echo '== build =='
