@@ -8,13 +8,14 @@ set -o nounset -o pipefail
 # directories, and put the instance name in argv.
 
 instance="${1:?usage: hdw4s-session <instance>}"
-user="${instance%%:*}"
 
 : "${XDG_RUNTIME_DIR:?must be set by the unit}"
 : "${HDW4S_PORT:?must be set by the unit}"
 
 CONF='/etc/hdw4s/hdw4s.conf'
+# shellcheck source=/dev/null
 [ ! -r "${CONF}" ] || . "${CONF}"
+# shellcheck source=/dev/null
 [ ! -r "/etc/hdw4s/${instance}.conf" ] || . "/etc/hdw4s/${instance}.conf"
 
 : "${HDW4S_PROFILE_DIR:=/var/lib/hdw4s}"
@@ -108,12 +109,18 @@ mkfifo -m0600 "${fifo}"
   -auth "${XAUTHORITY}" \
   -logfile "${XDG_RUNTIME_DIR}/Xorg.log" \
   -displayfd 3 3>"${fifo}" &
-children+=($!)
 xorg_pid="$!"
+children+=("${xorg_pid}")
 
 if ! IFS= read -r -t 30 display_num < "${fifo}"; then
-  echo "hdw4s: the X server did not come up within 30 seconds" >&2
-  sed -n 's/^\(\[ *[0-9.]*\] \)\?\((EE)\)/\2/p' "${XDG_RUNTIME_DIR}/Xorg.log" >&2 || :
+  if kill -0 "${xorg_pid}" 2>/dev/null; then
+    echo 'hdw4s: the X server is running but never reported a display' >&2
+  else
+    wait "${xorg_pid}" && rc=0 || rc="$?"
+    echo "hdw4s: the X server exited with status ${rc} during startup" >&2
+  fi
+  # The server's own errors say far more than the timeout does.
+  grep -E '^\[? *[0-9.]*\]? *\(EE\)' "${XDG_RUNTIME_DIR}/Xorg.log" >&2 || :
   exit 1
 fi
 rm -f "${fifo}"

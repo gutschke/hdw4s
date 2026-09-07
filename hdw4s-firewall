@@ -14,6 +14,7 @@ RULES='/etc/hdw4s/nftables.conf'
 HDW4S_BASE_PORT=7300
 HDW4S_BLOCK_SIZE=64
 HDW4S_PROXIES=''
+# shellcheck source=/dev/null
 [ ! -r "${CONF}" ] || . "${CONF}"
 
 first="${HDW4S_BASE_PORT}"
@@ -85,7 +86,7 @@ EOF
 }
 
 cmd_apply() {
-  mkdir -m0755 -p "$(dirname "${RULES}")"
+  install -d -m0755 "$(dirname "${RULES}")"
 
   # Tell the kernel never to hand these out as ephemeral ports. Without this a
   # session can fail to bind because an outgoing connection from anything else

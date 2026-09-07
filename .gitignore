@@ -18,3 +18,8 @@
 /debian/.debhelper/
 /debian/debhelper-build-stamp
 /debian/*.debhelper.log
+
+# Private engineering notes. NEVER published: contains deployment specifics,
+# live security findings and network details. If you are about to remove this
+# line, do not.
+/private/

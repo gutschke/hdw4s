@@ -2,6 +2,7 @@
 export LC_ALL='C'
 export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
+# shellcheck disable=SC2154  # rc is assigned inside the trap itself
 trap 'rc="$?"
       trap "" INT TERM QUIT HUP EXIT ERR
       [ "${rc}" -eq 0 ] || {
@@ -64,7 +65,7 @@ python3 -c 'import gi' >&/dev/null || missing="${missing} python3-gi"
 [ -z "${missing}" ] || {
   echo 'Error: required packages are missing. Install them with:'
   echo
-  echo "  apt install$(echo ${missing} | tr -s ' ' | sed 's/ / /g')"
+  echo "  apt install$(printf '%s' "${missing}" | tr -s '[:space:]' ' ')"
   echo
   exit 1
 }
@@ -78,9 +79,11 @@ U="$(tput smul 2>/dev/null || :)"
 R="$(tput rmul 2>/dev/null || :)"
 
 while :; do
-  read -p 'Install path [/usr/local/lib/hdw4s]: ' dst
+  read -r -p 'Install path [/usr/local/lib/hdw4s]: ' dst
   [ -n "${dst}" ] || dst='/usr/local/lib/hdw4s'
-  [[ "${dst}" =~ ^/ ]] && break || :
+  case "${dst}" in
+    /*) break;;
+  esac
   echo 'Please give an absolute path.'
 done
 dst="${dst%/}"
@@ -95,7 +98,7 @@ esac
 man="${sys}/share/man/man8"
 
 echo -n 'Installing files...'
-mkdir -m0755 -p "${dst}" "${dst}/wrappers" "${man}" /etc/hdw4s
+install -d -m0755 "${dst}" "${dst}/wrappers" "${man}" /etc/hdw4s
 for f in "${SOURCES[@]}"; do
   cp -f "${src}/${f}" "${dst}/${f}"
 done

@@ -3,6 +3,7 @@ export LC_ALL='C'
 export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 set -o nounset -o pipefail
 
+# shellcheck disable=SC2154  # rc is assigned inside the trap itself
 trap 'rc="$?"
       trap "" INT TERM QUIT HUP EXIT ERR
       [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
@@ -38,11 +39,7 @@ HDW4S_BLOCK_SIZE=64
 # work there.
 HDW4S_PROFILE_DIR='/var/lib/hdw4s'
 
-# Sources allowed to reach a session port. Empty means the package's firewall
-# table drops every remote connection and only loopback works, which is the
-# right default for something that expects a reverse proxy in front of it.
-HDW4S_PROXIES=''
-
+# shellcheck source=/dev/null
 [ ! -r "${CONF}" ] || . "${CONF}"
 
 usage() {
@@ -117,7 +114,7 @@ alloc_slot() {
   idx="$(slot_of "${inst}")"
   [ -z "${idx}" ] || { echo "${idx}"; return 0; }
 
-  mkdir -m0755 -p "$(dirname "${SLOTS}")"
+  install -d -m0755 "$(dirname "${SLOTS}")"
   [ -e "${SLOTS}" ] || {
     printf '%s\n' \
       '# Session slots. One line per session: <index> <instance>.' \
@@ -205,7 +202,7 @@ cmd_enable() {
   # User= on its own. A drop-in supplies it. The unit's own User=%i still
   # covers the common single-session case unaided.
   if [ "${inst}" != "${user}" ]; then
-    mkdir -m0755 -p "${DROPIN}/hdw4s@${inst}.service.d"
+    install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
     printf '%s\n' \
       '# Written by "hdw4s enable"; edit /etc/hdw4s/'"${inst}"'.conf instead.' \
       '[Service]' \
@@ -249,7 +246,7 @@ cmd_keyring() {
   fi
   unset pw
 
-  mkdir -m0755 -p "${DROPIN}/hdw4s@${inst}.service.d"
+  install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
   printf '%s\n' \
     '# Written by "hdw4s keyring".' \
     '[Service]' \

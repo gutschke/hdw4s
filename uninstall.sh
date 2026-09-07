@@ -2,6 +2,7 @@
 export LC_ALL='C'
 export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
+# shellcheck disable=SC2154  # rc is assigned inside the trap itself
 trap 'rc="$?"
       trap "" INT TERM QUIT HUP EXIT ERR
       [ "${rc}" -eq 0 ] || {
@@ -20,14 +21,15 @@ dst=''
 [ -z "$(systemctl cat hdw4s@.service 2>/dev/null)" ] ||
   dst="$(systemctl cat hdw4s@.service 2>/dev/null |
          sed -n 's|^ExecStart=\(.*\)/hdw4s .*|\1|p' | head -n1)"
-[ -n "${dst}" ] && [ -d "${dst}" ] || {
+if [ -z "${dst}" ] || [ ! -d "${dst}" ]; then
+  # Fall back to resolving the symlink that install.sh left on the PATH.
   link="$(command -v hdw4s 2>/dev/null || :)"
   [ -z "${link}" ] || dst="$(dirname "$(readlink -f "${link}")")"
-}
-[ -n "${dst}" ] && [ -d "${dst}" ] || {
-  read -p 'Install path [/usr/local/lib/hdw4s]: ' dst
+fi
+if [ -z "${dst}" ] || [ ! -d "${dst}" ]; then
+  read -r -p 'Install path [/usr/local/lib/hdw4s]: ' dst
   [ -n "${dst}" ] || dst='/usr/local/lib/hdw4s'
-}
+fi
 dst="${dst%/}"
 
 echo -n 'Stopping sessions...'
@@ -39,7 +41,9 @@ echo ' done.'
 
 echo -n 'Removing the firewall table...'
 # Only our own table is touched; anything else on the machine is left alone.
-nft list table inet hdw4s >/dev/null 2>&1 && nft delete table inet hdw4s || :
+if nft list table inet hdw4s >/dev/null 2>&1; then
+  nft delete table inet hdw4s || :
+fi
 echo ' done.'
 
 echo -n 'Removing units...'

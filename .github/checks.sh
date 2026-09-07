@@ -1,0 +1,108 @@
+#!/bin/bash -e
+export LC_ALL='C'
+set -o nounset -o pipefail
+
+# Every check CI runs, in the order CI runs them. Run this before pushing and
+# there should be no surprises afterwards; that is the entire point of it being
+# a script rather than a list of steps in a workflow file.
+#
+#   .github/checks.sh
+#
+# Needs: shellcheck, groff-base, systemd, and for --package also debhelper,
+# dpkg-dev and fakeroot.
+
+cd "$(dirname "$0")/.."
+
+SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update
+         install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
+         debian/postinst debian/postrm .github/checks.sh)
+UNITS=(hdw4s@.service hdw4s-firewall.service hdw4s-updater.service
+       hdw4s-updater.timer hdw4s.slice)
+
+fail=0
+note() { printf '%-28s %s\n' "$1" "$2"; }
+bad()  { note "$1" "FAIL: $2"; fail=1; }
+
+echo '== shell =='
+for f in "${SCRIPTS[@]}"; do
+  bash -n "$f" 2>/dev/null || bad "${f}" 'bash -n rejected it'
+done
+note 'bash -n' 'ok'
+if out="$(shellcheck -f gcc "${SCRIPTS[@]}" 2>&1)" && [ -z "${out}" ]; then
+  note 'shellcheck' 'ok'
+else
+  printf '%s\n' "${out}"
+  bad 'shellcheck' 'findings above'
+fi
+
+echo
+echo '== systemd units =='
+for u in "${UNITS[@]}"; do
+  # Unit files reference paths that only exist once installed, and reference
+  # each other by name, so those two complaints are expected here and are not
+  # what this check is looking for. Anything else -- an unknown directive, an
+  # unparseable value -- is a real error that would only surface at runtime.
+  out="$(systemd-analyze verify "./${u}" 2>&1 |
+         grep -viE 'not executable|does not exist|man .* failed|command .* failed|Unit .* not found|ssh\.socket' || :)"
+  [ -z "${out}" ] || { printf '%s\n' "${out}"; bad "${u}" 'verify reported the above'; }
+done
+note 'systemd-analyze verify' 'ok'
+
+echo
+echo '== documentation =='
+# A converter that silently writes nothing is the failure mode worth guarding:
+# ronn exits 0 after producing an empty file when it dislikes an argument.
+if [ ! -s hdw4s.8 ]; then
+  bad 'hdw4s.8' 'missing or empty'
+else
+  note 'hdw4s.8 non-empty' "$(wc -l < hdw4s.8) lines"
+fi
+if out="$(groff -man -Tutf8 -ww hdw4s.8 2>&1 >/dev/null)" && [ -z "${out}" ]; then
+  note 'groff warnings' 'none'
+else
+  printf '%s\n' "${out}"
+  bad 'groff' 'warnings above'
+fi
+for section in NAME SYNOPSIS DESCRIPTION COMMANDS CONFIGURATION \
+               'SHARED HOME DIRECTORIES' 'REVERSE PROXY AND SECURITY' FILES; do
+  grep -q "^\.SH \"\{0,1\}${section}" hdw4s.8 ||
+    bad 'hdw4s.8' "section '${section}' is missing"
+done
+note 'required sections' 'present'
+
+echo
+echo '== packaging =='
+# The tag, the changelog and the built artifact have to agree, or a release
+# ships a version nobody asked for.
+version="$(dpkg-parsechangelog -S Version)"
+note 'changelog version' "${version}"
+if [ -n "${EXPECT_VERSION:-}" ] && [ "${version}" != "${EXPECT_VERSION}" ]; then
+  bad 'version' "changelog says ${version}, tag says ${EXPECT_VERSION}"
+fi
+dpkg-parsechangelog >/dev/null || bad 'changelog' 'will not parse'
+
+if [ "${1:-}" = '--package' ]; then
+  echo
+  echo '== build =='
+  dpkg-buildpackage -us -uc -b >/dev/null
+  deb="../hdw4s_${version}_all.deb"
+  [ -f "${deb}" ] || bad 'dpkg-buildpackage' "did not produce ${deb}"
+  note 'built' "$(basename "${deb}")"
+
+  # Lintian's findings are shown but do not fail the run. It exits 0 on
+  # warnings, and some of its checks are sensitive to the version of groff on
+  # the machine rather than to anything in the package.
+  if command -v lintian >/dev/null; then
+    echo
+    echo '== lintian (informational) =='
+    lintian --fail-on error "${deb}" || bad 'lintian' 'reported an error'
+  fi
+fi
+
+echo
+if [ "${fail}" -eq 0 ]; then
+  echo 'All checks passed.'
+else
+  echo 'Some checks failed.' >&2
+fi
+exit "${fail}"

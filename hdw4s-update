@@ -3,6 +3,7 @@ export LC_ALL='C'
 export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 set -o pipefail
 
+# shellcheck disable=SC2154  # rc is assigned inside the trap itself
 trap 'rc="$?"
       trap "" INT TERM QUIT HUP EXIT ERR
       [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
@@ -31,6 +32,7 @@ KNOWN_GOOD='1.6.2'
 
 # Set SELKIES_VERSION in /etc/hdw4s/hdw4s.conf to pin a specific release and
 # stop tracking upstream entirely.
+# shellcheck source=/dev/null
 [ ! -r /etc/hdw4s/hdw4s.conf ] || . /etc/hdw4s/hdw4s.conf
 
 [ "$(id -u)" -eq 0 ] || {
@@ -235,10 +237,10 @@ healthy='yes'
 for unit in "${units[@]}"; do
   state="$(systemctl show -p ActiveState --value "${unit}")"
   restarts="$(systemctl show -p NRestarts --value "${unit}")"
-  [ "${state}" = 'active' ] && [ "${restarts:-0}" -eq 0 ] || {
+  if [ "${state}" != 'active' ] || [ "${restarts:-0}" -ne 0 ]; then
     echo " ${unit} is ${state} after ${restarts:-0} restart(s)."
     healthy=''
-  }
+  fi
 done
 
 if [ -n "${healthy}" ]; then
