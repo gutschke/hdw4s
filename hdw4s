@@ -60,6 +60,7 @@ Usage: hdw4s <command> [arguments]
   auth <instance>         require a secret from the proxy as well as an address
   proxy <instance>        print an nginx configuration for a session
   seed <instance>         copy existing settings into an isolated profile, once
+  reap                    stop desktops nobody has connected to for a long time
   keyring <instance>      give a session its own keyring, unlocked at start
   --version               print the version
   firewall --apply        rewrite the package's nftables table
@@ -171,6 +172,15 @@ port_of() {
   echo $(( HDW4S_BASE_PORT + idx ))
 }
 
+# Where the streaming server itself listens, on loopback only. The socket unit
+# owns the port the outside world connects to and forwards to this one, so the
+# two cannot be the same. A second block immediately above the first keeps the
+# arithmetic obvious and both blocks reservable in one range.
+internal_port_of() {
+  local idx="$1"
+  echo $(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE + idx ))
+}
+
 # --- commands ---------------------------------------------------------------
 
 cmd_list() {
@@ -256,10 +266,29 @@ cmd_enable() {
     "ReadWritePaths=${home}" \
     > "${DROPIN}/hdw4s@${inst}.service.d/40-home.conf"
 
+  # The relay forwards to wherever the session actually listens.
+  install -d -m0755 "${DROPIN}/hdw4s-proxy@${inst}.service.d"
+  # Only the port. The wait that goes with it lives in the unit, because a
+  # multi-line ExecStartPre= is parsed as several directives and quietly
+  # discarded -- systemd is not a shell and embedding one in a unit file goes
+  # wrong in ways that only show up at runtime.
+  printf '%s\n' \
+    '# Written by "hdw4s enable".' \
+    '[Service]' \
+    'ExecStart=' \
+    "ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:$(internal_port_of "${idx}")" \
+    > "${DROPIN}/hdw4s-proxy@${inst}.service.d/50-port.conf"
+
+  # And the session is told which loopback port to bind.
+  config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_PORT' "$(internal_port_of "${idx}")"
+
   systemctl daemon-reload
-  systemctl enable --now "hdw4s@${inst}.service"
-  echo "Session ${inst} enabled on port $(port_of "${idx}")."
+  # The socket is what gets enabled, not the session. Nothing runs until
+  # somebody connects, so a desktop that is never visited never exists.
+  systemctl enable --now "hdw4s-proxy@${inst}.socket"
+  echo "Session ${inst} is listening on port $(port_of "${idx}")."
   echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
+  echo 'The desktop starts on the first connection, not now.'
 }
 
 # --- editing configuration --------------------------------------------------
@@ -290,6 +319,7 @@ declare -A SETTABLE=(
   [HDW4S_FRAMERATE]='number'
   [HDW4S_RESIZE]='true|false'
   [HDW4S_LANG]='any'
+  [HDW4S_IDLE_DAYS]='number'
   [HDW4S_ENCODER]='any'
   [SELKIES_VERSION]='any'
 )
@@ -505,52 +535,104 @@ cmd_transport() {
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
   port="$(port_of "${idx}")"
-  dir="${DROPIN}/hdw4s-proxy@${inst}.service.d"
+  dir="${DROPIN}/hdw4s-proxy@${inst}.socket.d"
+  install -d -m0755 "${dir}"
 
   case "${mode}" in
     tcp)
-      systemctl disable --now "hdw4s-proxy@${inst}.socket" >/dev/null 2>&1 || :
-      rm -rf "${dir}" "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
+      # Replace the filesystem socket the unit defaults to. An empty
+      # ListenStream= first, because these accumulate rather than replace.
+      printf '%s\n' \
+        '# Written by "hdw4s transport".' \
+        '[Socket]' \
+        'ListenStream=' \
+        "ListenStream=${port}" \
+        > "${dir}/50-listen.conf"
       config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_TRANSPORT' 'tcp'
-      config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_ADDR' "$(quote_value '0.0.0.0')"
       systemctl daemon-reload
+      systemctl restart "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
       echo "Session ${inst} listens on port ${port}."
-      echo "  Who may connect is decided by the firewall; see HDW4S_PROXIES."
+      echo '  Who may connect is decided by the firewall; see HDW4S_PROXIES.'
       ;;
     unix)
       group="${HDW4S_PROXY_GROUP:-www-data}"
       getent group -- "${group}" >/dev/null ||
         die "hdw4s: no such group: ${group}" \
             '  Set HDW4S_PROXY_GROUP to the group the reverse proxy runs as.'
-
-      install -d -m0755 "${dir}" "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
-      printf '%s\n' \
-        '# Written by "hdw4s transport".' \
-        '[Service]' \
-        'ExecStart=' \
-        "ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:${port}" \
-        > "${dir}/50-port.conf"
+      # The unit already listens on the filesystem socket; only the ownership
+      # has to be said, since which account runs the proxy is a local decision.
+      rm -f "${dir}/50-listen.conf"
       printf '%s\n' \
         '# Written by "hdw4s transport".' \
         '[Socket]' \
         "SocketGroup=${group}" \
-        > "${DROPIN}/hdw4s-proxy@${inst}.socket.d/50-group.conf"
-
-      # With a socket in front, the session itself has no reason to be
-      # reachable from anywhere but this machine.
+        > "${dir}/60-group.conf"
       config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_TRANSPORT' 'unix'
-      config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_ADDR' "$(quote_value '127.0.0.1')"
-
       systemctl daemon-reload
-      systemctl enable --now "hdw4s-proxy@${inst}.socket"
+      systemctl restart "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
       echo "Session ${inst} is reachable at /run/hdw4s-proxy/${inst}.sock,"
-      echo "readable by group ${group} only. It no longer listens on the network."
-      echo "  Restart it to take effect: systemctl restart hdw4s@${inst}"
+      echo "readable by group ${group} only. It does not listen on the network."
       ;;
     *)
       die "hdw4s: transport must be 'tcp' or 'unix', not '${mode}'"
       ;;
   esac
+}
+
+# Stop desktops nobody has connected to for a long time.
+#
+# Safe to do because the socket stays listening: a stopped session is not gone,
+# it is asleep, and the next connection starts it again. What is reclaimed is
+# the memory of a desktop somebody opened once and never came back to.
+#
+# Idleness is measured by connections, not by input. A desktop with a window
+# open but no typing may be running a long job somebody deliberately left; a
+# desktop with nothing connected to it is not being watched by anyone. The
+# browser client reconnects by itself, so an open tab counts as connected even
+# across a laptop lid being shut.
+cmd_reap() {
+  local idx inst port established last now age stopped=0
+  : "${HDW4S_IDLE_DAYS:=7}"
+  [ "${HDW4S_IDLE_DAYS}" -gt 0 ] 2>/dev/null || {
+    echo 'hdw4s: idle reaping is disabled (HDW4S_IDLE_DAYS=0)'
+    return 0
+  }
+  now="$(date +%s)"
+  [ -r "${SLOTS}" ] || return 0
+
+  while read -r idx inst; do
+    case "${idx}" in ''|\#*) continue;; esac
+    [ "$(systemctl is-active "hdw4s@${inst}.service" 2>/dev/null)" = 'active' ] ||
+      continue
+    port="$(port_of "${idx}")"
+    established="$(ss -Htn state established "sport = :${port}" 2>/dev/null | wc -l)"
+
+    local stampdir="/run/hdw4s/${inst}"
+    [ -d "${stampdir}" ] || continue
+    if [ "${established}" -gt 0 ]; then
+      printf '%s\n' "${now}" > "${stampdir}/last-seen" 2>/dev/null || :
+      continue
+    fi
+    if [ -r "${stampdir}/last-seen" ]; then
+      last="$(cat "${stampdir}/last-seen" 2>/dev/null)"
+    else
+      # Never seen a connection since it started; measure from then.
+      last="$(date -d "$(systemctl show -p ActiveEnterTimestamp --value \
+              "hdw4s@${inst}.service")" +%s 2>/dev/null || echo "${now}")"
+      printf '%s\n' "${last}" > "${stampdir}/last-seen" 2>/dev/null || :
+    fi
+    case "${last}" in ''|*[!0-9]*) continue;; esac
+    age=$(( (now - last) / 86400 ))
+    [ "${age}" -ge "${HDW4S_IDLE_DAYS}" ] || continue
+
+    echo "hdw4s: stopping ${inst}; nothing has connected for ${age} days."
+    echo '  Its files and settings are untouched, and the next connection'
+    echo '  starts it again.'
+    systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
+    systemctl stop "hdw4s@${inst}.service" 2>/dev/null || :
+    stopped=$(( stopped + 1 ))
+  done < "${SLOTS}"
+  [ "${stopped}" -eq 0 ] || echo "Stopped ${stopped} idle session(s)."
 }
 
 cmd_auth() {
@@ -768,7 +850,9 @@ cmd_keyring() {
 cmd_disable() {
   local inst="$1"
   split_instance "${inst}"
-  systemctl disable --now "hdw4s@${inst}.service" || :
+  systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
+  systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
+  systemctl stop "hdw4s@${inst}.service" 2>/dev/null || :
   echo "Session ${inst} stopped. Its slot is still reserved;"
   echo "use 'hdw4s release ${inst}' to give it up."
 }
@@ -776,8 +860,11 @@ cmd_disable() {
 cmd_release() {
   local inst="$1" tmp
   split_instance "${inst}"
-  systemctl disable --now "hdw4s@${inst}.service" 2>/dev/null || :
-  rm -rf "${DROPIN}/hdw4s@${inst}.service.d"
+  systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
+  systemctl stop "hdw4s-proxy@${inst}.service" "hdw4s@${inst}.service" 2>/dev/null || :
+  rm -rf "${DROPIN}/hdw4s@${inst}.service.d" \
+         "${DROPIN}/hdw4s-proxy@${inst}.service.d" \
+         "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
   rm -f "/etc/hdw4s/${inst}.keyring.cred" "/etc/hdw4s/${inst}.auth.cred"
   if [ -r "${SLOTS}" ]; then
     tmp="$(mktemp "${SLOTS}.XXXXXX")"
@@ -797,6 +884,7 @@ case "${1:-}" in
   disable)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_disable "$@";;
   keyring)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_keyring "$@";;
   seed)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_seed "$@";;
+  reap)     shift; cmd_reap "$@";;
   auth)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_auth "$@";;
   transport) shift; [ $# -eq 2 ] || { usage >&2; exit 2; }; cmd_transport "$@";;
   proxy)    shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_proxy "$@";;

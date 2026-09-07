@@ -51,7 +51,10 @@ export HDW4S_PORT
 
 : "${HDW4S_PROFILE_DIR:=/var/lib/hdw4s}"
 : "${HDW4S_ISOLATION:=none}"
-: "${HDW4S_ADDR:=0.0.0.0}"
+# Loopback only. The socket unit owns the address the outside world
+# connects to and forwards here, which is what lets a desktop exist only
+# while somebody is using it.
+: "${HDW4S_ADDR:=127.0.0.1}"
 : "${HDW4S_FRAMERATE:=30}"
 : "${HDW4S_ENCODER:=x264enc}"
 

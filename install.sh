@@ -17,12 +17,12 @@ trap 'rc="$?"
 }
 
 src="$(cd "$(dirname "$0")" && pwd)"
-SOURCES=(hdw4s{,-session,-run-session,-firewall,-update}
+SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait}
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-firewall.service
          hdw4s-firewall-check.service hdw4s-firewall.timer
-         hdw4s-updater.{service,timer}
+         hdw4s-updater.{service,timer} hdw4s-reaper.{service,timer}
          install.sh uninstall.sh LICENSE)
 
 for f in "${SOURCES[@]}"; do
@@ -105,7 +105,7 @@ for f in "${SOURCES[@]}"; do
   cp -f "${src}/${f}" "${dst}/${f}"
 done
 cp -f "${src}"/wrappers/* "${dst}/wrappers/"
-chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update} \
+chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*
 chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
            "${dst}"/*.conf "${dst}"/hdw4s.8*
@@ -128,7 +128,8 @@ ln -sf "${dst}/hdw4s" "${sys}/sbin/hdw4s"
 for u in hdw4s@.service hdw4s.slice hdw4s-firewall.service \
          hdw4s-proxy@.socket hdw4s-proxy@.service \
          hdw4s-firewall-check.service hdw4s-firewall.timer \
-         hdw4s-updater.service hdw4s-updater.timer; do
+         hdw4s-updater.service hdw4s-updater.timer \
+         hdw4s-reaper.service hdw4s-reaper.timer; do
   ln -sf "${dst}/${u}" "/etc/systemd/system/${u}"
 done
 echo ' done.'
@@ -147,6 +148,7 @@ systemctl daemon-reload
 systemctl enable --now hdw4s-firewall.service
 systemctl enable --now hdw4s-firewall.timer
 systemctl enable --now hdw4s-updater.timer
+systemctl enable --now hdw4s-reaper.timer
 
 # Deliberately no session is started: which accounts get a desktop is a
 # decision for the administrator, not for an installer.

@@ -1,0 +1,48 @@
+#!/bin/bash -e
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+# Waits until a session's streaming server is accepting connections.
+#
+# Run before the relay that fronts a session. The session unit is ordered
+# first and reports ready only once the stream is listening, but if that is
+# ever wrong the relay refuses the connection -- and with a chain of reverse
+# proxies in front, a refusal on the first visit becomes an error page from
+# whichever of them is outermost, long before any browser retry could help.
+# Checking is cheap and a few seconds are invisible next to the time a desktop
+# takes to start.
+
+instance="${1:?usage: hdw4s-wait <instance> [seconds]}"
+deadline="${2:-120}"
+
+CONF='/etc/hdw4s/hdw4s.conf'
+SLOTS='/etc/hdw4s/instances'
+HDW4S_BASE_PORT=7300
+HDW4S_BLOCK_SIZE=64
+# shellcheck source=/dev/null
+[ ! -r "${CONF}" ] || . "${CONF}"
+# shellcheck source=/dev/null
+[ ! -r "/etc/hdw4s/${instance}.conf" ] || . "/etc/hdw4s/${instance}.conf"
+
+if [ -n "${HDW4S_PORT:-}" ]; then
+  port="${HDW4S_PORT}"
+else
+  slot="$(awk -v i="${instance}" \
+          '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}" 2>/dev/null)"
+  [ -n "${slot}" ] || {
+    echo "hdw4s: ${instance} has no slot; nothing to wait for." >&2
+    exit 1
+  }
+  port=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE + slot ))
+fi
+
+for _ in $(seq 1 "${deadline}"); do
+  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "hdw4s: ${instance} never began listening on port ${port}" >&2
+exit 1

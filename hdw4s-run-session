@@ -9,7 +9,7 @@ set -o nounset -o pipefail
 instance="${1:?usage: hdw4s-run-session <instance>}"
 
 : "${DISPLAY:?}" "${XDG_RUNTIME_DIR:?}" "${HDW4S_PORT:?}"
-: "${HDW4S_ADDR:=0.0.0.0}"
+: "${HDW4S_ADDR:=127.0.0.1}"
 
 # The desktop to run. This is the one line that has to change to outlive GNOME
 # on X11: GNOME 50 removes the X11 session that the streaming server needs,
@@ -102,6 +102,20 @@ fi
 # The variables are listed rather than passed with --all, because this
 # environment also holds the session's proxy credential, and everything on the
 # bus can read what is uploaded here.
+# Keep the readiness notification to ourselves.
+#
+# NotifyAccess=all is required because the process that reports ready is a
+# helper rather than the main one -- but it also lets anything else in the
+# control group report ready, and gnome-session does exactly that when it
+# reaches its running phase. That is earlier than the stream is listening, so
+# the unit went active while nothing could yet be connected to, and units
+# ordered After= it started against a promise that had not been kept.
+#
+# Removing the variable from the environment the desktop inherits leaves the
+# notification to the one place that knows what it means.
+HDW4S_NOTIFY_SOCKET="${NOTIFY_SOCKET:-}"
+unset NOTIFY_SOCKET
+
 dbus-update-activation-environment \
   DISPLAY XAUTHORITY ICEAUTHORITY \
   XDG_RUNTIME_DIR XDG_SESSION_TYPE XDG_SESSION_CLASS XDG_CURRENT_DESKTOP \
@@ -159,13 +173,14 @@ stream_pid="$!"
 (
   for _ in $(seq 1 60); do
     if ss -Hltn "sport = :${HDW4S_PORT}" 2>/dev/null | grep -q .; then
-      systemd-notify --ready \
+      NOTIFY_SOCKET="${HDW4S_NOTIFY_SOCKET}" systemd-notify --ready \
         --status="display ${DISPLAY}, port ${HDW4S_PORT}, instance ${instance}"
       exit 0
     fi
     sleep 1
   done
-  systemd-notify --status="stream did not bind port ${HDW4S_PORT}"
+  NOTIFY_SOCKET="${HDW4S_NOTIFY_SOCKET}" \
+    systemd-notify --status="stream did not bind port ${HDW4S_PORT}"
 ) &
 children+=($!)
 

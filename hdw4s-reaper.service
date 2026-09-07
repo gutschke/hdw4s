@@ -1,0 +1,7 @@
+[Unit]
+Description=Stop HDW4S desktops nobody has connected to
+Documentation=man:hdw4s(8)
+
+[Service]
+ExecStart=/usr/lib/hdw4s/hdw4s reap
+Type=oneshot

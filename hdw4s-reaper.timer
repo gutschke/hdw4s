@@ -1,0 +1,13 @@
+[Unit]
+Description=Look for idle HDW4S desktops daily
+Documentation=man:hdw4s(8)
+
+[Timer]
+# Once a day is often enough for a threshold measured in days, and it means a
+# desktop is never stopped within a day of the limit being reached.
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

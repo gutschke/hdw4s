@@ -19,6 +19,11 @@ HDW4S_PROXIES=''
 
 first="${HDW4S_BASE_PORT}"
 last=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE - 1 ))
+# A second block immediately above holds the loopback ports the sessions
+# themselves listen on. The firewall has no need to cover those -- nothing off
+# this machine can reach 127.0.0.1 -- but the kernel must still be told not to
+# hand them out as ephemeral ports.
+internal_last=$(( HDW4S_BASE_PORT + 2 * HDW4S_BLOCK_SIZE - 1 ))
 
 # The rules cover the whole port block, not the ports that happen to be in use.
 # A rule written per session goes stale the moment a session moves, which is
@@ -96,7 +101,7 @@ cmd_apply() {
   # true even if an administrator widens the range later.
   printf '%s\n' \
     '# Written by "hdw4s firewall --apply". Do not edit.' \
-    "net.ipv4.ip_local_reserved_ports = ${first}-${last}" \
+    "net.ipv4.ip_local_reserved_ports = ${first}-${internal_last}" \
     > /etc/sysctl.d/60-hdw4s.conf
   sysctl -q -p /etc/sysctl.d/60-hdw4s.conf || :
 

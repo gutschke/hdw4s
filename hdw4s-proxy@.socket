@@ -1,23 +1,31 @@
 [Unit]
-Description=Unix socket for the HDW4S session %i
+Description=Front door for the HDW4S session %i
 Documentation=man:hdw4s(8)
 
 [Socket]
-# A filesystem socket instead of a TCP port. Who may connect is then a question
-# of file permissions rather than of source address, which is a far stronger
-# answer where it is available: a reverse proxy on the same machine is granted
-# access by being in a group, and nothing that cannot open the file can reach
-# the session at all.
+# Every session is reached through this socket, whichever transport it uses.
+# The address is not set here: "hdw4s enable" writes it into a drop-in, because
+# it depends on the port the session was allocated and on whether the reverse
+# proxy reaches it over the network or over the filesystem.
 #
-# The catch is that it does not cross a machine boundary. A proxy in another
-# container or on another host still needs the TCP transport.
+# Owning the address here rather than in the session is what lets a session
+# exist only while someone is using it. Nothing is started at boot; the first
+# connection brings the desktop up, and a desktop that has been stopped for
+# being idle comes back the same way, so stopping one costs the user nothing
+# but the time it takes to start.
+#
+# A socket unit with no Listen setting is refused at parse time, and a drop-in
+# cannot rescue a unit that will not load -- so the filesystem socket is the
+# default here, and "hdw4s transport ... tcp" replaces it with an empty
+# ListenStream= followed by the port. Nothing binds this path when it does.
 ListenStream=/run/hdw4s-proxy/%i.sock
 RuntimeDirectory=hdw4s-proxy
 RuntimeDirectoryMode=0755
 SocketMode=0660
-# The group is set by "hdw4s transport <instance> unix" from
-# HDW4S_PROXY_GROUP, since which account runs the proxy is a local decision.
 RemoveOnStop=yes
+# A desktop takes a while to come up, and the browser reconnects on its own, so
+# there is no need to hold the first connection open waiting for it.
+Accept=no
 
 [Install]
 WantedBy=sockets.target

@@ -1,15 +1,18 @@
 [Unit]
-Description=Unix socket relay for the HDW4S session %i
+Description=Connection relay for the HDW4S session %i
 Documentation=man:hdw4s(8)
 Requires=hdw4s@%i.service hdw4s-proxy@%i.socket
 After=hdw4s@%i.service hdw4s-proxy@%i.socket
 
 [Service]
 # systemd's own relay, so there is no new daemon and nothing of ours in the
-# data path. The concrete port comes from a drop-in written by
-# "hdw4s transport", because a template unit cannot work it out from %i.
-ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:0
+# data path. The session listens on loopback only; this is what the outside
+# world reaches, and the port it forwards to comes from a drop-in written by
+# "hdw4s enable", because a template unit cannot work it out from %i.
+ExecStartPre=/usr/lib/hdw4s/hdw4s-wait %i
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:1
 CapabilityBoundingSet=
+DynamicUser=yes
 NoNewPrivileges=yes
 PrivateDevices=yes
 PrivateTmp=yes
@@ -27,7 +30,5 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallFilter=@system-service
 Type=notify
-# A byte relay needs no identity of its own and owns nothing that has to
-# outlive it, so systemd can invent an account for each run. The listening
-# socket is created and owned by the .socket unit and simply handed over.
-DynamicUser=yes
+# A cold start waits for the desktop to come up behind it.
+TimeoutStartSec=180

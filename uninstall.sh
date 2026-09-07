@@ -38,6 +38,7 @@ mapfile -t units < <(systemctl list-units --plain --no-legend --all 'hdw4s@*' |
 [ "${#units[@]}" -eq 0 ] || systemctl disable --now "${units[@]}" >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-updater.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-firewall.timer >/dev/null 2>&1 || :
+systemctl disable --now hdw4s-reaper.timer >/dev/null 2>&1 || :
 echo ' done.'
 
 echo -n 'Removing the firewall table...'
@@ -54,7 +55,9 @@ rm -f /etc/systemd/system/hdw4s@.service \
       /etc/systemd/system/hdw4s-firewall-check.service \
       /etc/systemd/system/hdw4s-firewall.timer \
       /etc/systemd/system/hdw4s-updater.service \
-      /etc/systemd/system/hdw4s-updater.timer
+      /etc/systemd/system/hdw4s-updater.timer \
+      /etc/systemd/system/hdw4s-reaper.service \
+      /etc/systemd/system/hdw4s-reaper.timer
 rm -f /etc/systemd/system/multi-user.target.wants/hdw4s@*.service
 systemctl daemon-reload
 echo ' done.'

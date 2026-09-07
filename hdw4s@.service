@@ -97,5 +97,8 @@ WorkingDirectory=~
 #   PrivateUsers=yes          maps every other account to "nobody", which ruins
 #                             group-shared files and is worse over NFS.
 
-[Install]
-WantedBy=multi-user.target
+# Deliberately no [Install] section. A session is not started at boot and is
+# not enabled directly: "hdw4s enable" enables hdw4s-proxy@<instance>.socket,
+# and the first connection to it starts the desktop. A desktop nobody has
+# connected to therefore never exists, rather than being started at boot and
+# reaped later for having been idle since.
