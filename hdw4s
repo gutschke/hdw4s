@@ -669,6 +669,18 @@ SEED_EXCLUDES=(
   '*/Crash Reports' '*/Crashpad' '*/blob_storage'
   '*/Service Worker/CacheStorage' '*/Service Worker/ScriptCache'
   '*/optimization_guide_model_store' '*/segmentation_platform'
+  # Downloaded models and component data. Regenerable, and much larger than
+  # everything else put together: the on-device language model a current Chrome
+  # fetches is nearly three gigabytes on its own, per profile.
+  'OptGuideOnDeviceModel' '*/OptGuideOnDeviceModel'
+  'OnDeviceHeadSuggestModel' '*/OnDeviceHeadSuggestModel'
+  'WasmTtsEngine' '*/WasmTtsEngine'
+  'Safe Browsing' '*/Safe Browsing'
+  'SafetyTips' '*/SafetyTips' 'ZxcvbnData' '*/ZxcvbnData'
+  'hyphen-data' '*/hyphen-data' 'SSLErrorAssistant' '*/SSLErrorAssistant'
+  'Subresource Filter' '*/Subresource Filter'
+  'TrustTokenKeyCommitments' '*/TrustTokenKeyCommitments'
+  'MEIPreload' '*/MEIPreload' 'PKIMetadata' '*/PKIMetadata'
 )
 
 cmd_seed() {

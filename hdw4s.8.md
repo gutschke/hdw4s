@@ -92,7 +92,9 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
     Caches are skipped, including the ones browsers keep inside their profile
     directories rather than under `~/.cache`; they are regenerable and are
-    usually almost all of the size. Saved passwords are skipped too, since the
+    usually almost all of the size. So are downloaded models and component
+    data: a current Chrome fetches an on-device language model of nearly three
+    gigabytes, per profile, which dwarfs everything worth carrying across. Saved passwords are skipped too, since the
     session has its own keyring with its own password.
 
     The session must be stopped, or the copy captures half-written state.
@@ -226,6 +228,14 @@ What becomes per-session:
     saved passwords and online accounts (a separate keyring; see `keyring`)
     browser profile, history and open tabs
     recently-used files
+
+One consequence is worth planning for: browsers download some data per
+profile, and an isolated session is a new profile. A current Chrome fetches an
+on-device language model of nearly three gigabytes that way, so a machine
+running several isolated sessions holds several copies of it on local disk and
+fetches each one over the network. Where that matters, it can be turned off
+for every session at once with a browser policy, which is a decision for the
+administrator rather than something this package should make.
 
 That split is not a compromise that can be tuned away. Those components conflict
 precisely because they are shared, so the only way to stop the conflict is to

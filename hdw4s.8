@@ -70,7 +70,7 @@ Copy an account's existing desktop settings from its home directory into an isol
 .IP
 This is a snapshot and not a link\. The two diverge from that moment on\.
 .IP
-Caches are skipped, including the ones browsers keep inside their profile directories rather than under \fB~/\.cache\fR; they are regenerable and are usually almost all of the size\. Saved passwords are skipped too, since the session has its own keyring with its own password\.
+Caches are skipped, including the ones browsers keep inside their profile directories rather than under \fB~/\.cache\fR; they are regenerable and are usually almost all of the size\. So are downloaded models and component data: a current Chrome fetches an on\-device language model of nearly three gigabytes, per profile, which dwarfs everything worth carrying across\. Saved passwords are skipped too, since the session has its own keyring with its own password\.
 .IP
 The session must be stopped, or the copy captures half\-written state\.
 .TP
@@ -170,6 +170,8 @@ browser profile, history and open tabs
 recently\-used files
 .fi
 .IP "" 0
+.P
+One consequence is worth planning for: browsers download some data per profile, and an isolated session is a new profile\. A current Chrome fetches an on\-device language model of nearly three gigabytes that way, so a machine running several isolated sessions holds several copies of it on local disk and fetches each one over the network\. Where that matters, it can be turned off for every session at once with a browser policy, which is a decision for the administrator rather than something this package should make\.
 .P
 That split is not a compromise that can be tuned away\. Those components conflict precisely because they are shared, so the only way to stop the conflict is to stop sharing them\.
 .SH "DISPLAY AND PORT ALLOCATION"
