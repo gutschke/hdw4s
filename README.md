@@ -121,6 +121,14 @@ add to `/etc/hdw4s/alice.conf`:
 HDW4S_ISOLATION=profile
 ```
 
+That session then has its own keyring rather than sharing the account's. Give
+it one that unlocks without a prompt:
+
+```bash
+sudo hdw4s keyring alice
+sudo systemctl restart hdw4s@alice
+```
+
 ## Security
 
 **A session performs no authentication of its own.** That is deliberate -- it

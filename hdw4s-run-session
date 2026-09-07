@@ -33,6 +33,19 @@ set_if_present org.gnome.desktop.session      idle-delay       'uint32 0'
 set_if_present org.gnome.settings-daemon.plugins.power \
                                               sleep-inactive-ac-type 'nothing'
 
+# Unlock this session's own keyring, if one was set up with "hdw4s keyring".
+# The password arrives from systemd in a read-only, non-swappable file that
+# exists only for the lifetime of the unit, so it is never written to disk here
+# and never appears in the process table.
+if [ -n "${CREDENTIALS_DIRECTORY:-}" ] &&
+   [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-keyring" ] &&
+   command -v gnome-keyring-daemon >/dev/null; then
+  gnome-keyring-daemon --start --components=secrets,pkcs11,ssh --unlock \
+    < "${CREDENTIALS_DIRECTORY}/hdw4s-keyring" >/dev/null 2>&1 || {
+    echo 'hdw4s: could not unlock the session keyring' >&2
+  }
+fi
+
 gnome-session &
 children+=($!)
 session_pid="$!"

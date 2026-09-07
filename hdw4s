@@ -8,6 +8,15 @@ trap 'rc="$?"
       [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
+# Exit with an explanation rather than the trap's generic complaint. The trap
+# is for faults nobody anticipated; anything diagnosed here has already been
+# described to the user and does not need a second, vaguer line after it.
+die() {
+  trap '' INT TERM QUIT HUP EXIT ERR
+  printf '%s\n' "$@" >&2
+  exit 1
+}
+
 CONF='/etc/hdw4s/hdw4s.conf'
 SLOTS='/etc/hdw4s/instances'
 DROPIN='/etc/systemd/system'
@@ -45,6 +54,7 @@ Usage: hdw4s <command> [arguments]
   enable <instance>       allocate a slot for a session and start it at boot
   disable <instance>      stop a session and keep its slot reserved
   release <instance>      stop a session and give up its slot
+  keyring <instance>      give a session its own keyring, unlocked at start
   firewall --apply        rewrite the package's nftables table
   firewall --check        report whether every session port is protected
 
@@ -164,7 +174,8 @@ cmd_show() {
   local inst="$1" idx port
   split_instance "${inst}"
   idx="$(slot_of "${inst}")"
-  [ -n "${idx}" ] || { echo "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}'." >&2; exit 1; }
+  [ -n "${idx}" ] ||
+    die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}'."
   port="$(port_of "${idx}")"
   # Say where each value came from. Guessing which of three files won is the
   # single most common source of confusion in a layered configuration.
@@ -208,6 +219,51 @@ cmd_enable() {
   echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
 }
 
+cmd_keyring() {
+  local inst="$1" cred pw
+  split_instance "${inst}"
+  slot_of "${inst}" >/dev/null || :
+  [ -n "$(slot_of "${inst}")" ] ||
+    die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}' first."
+  command -v systemd-creds >/dev/null ||
+    die 'hdw4s: systemd-creds is not available on this system.'
+
+  # An isolated session has its own keyring, because sharing one store between
+  # two desktops has no locking that survives a network filesystem and loses
+  # secrets quietly when it goes wrong. Its password is generated here and
+  # never has to be seen or typed: systemd seals it to this machine, hands it
+  # to the session at start time in memory that is not swapped, and the session
+  # unlocks the keyring with it.
+  cred="/etc/hdw4s/${inst}.keyring.cred"
+  pw="$(head -c32 /dev/urandom | base64 | tr -d '\n=/+' | head -c24)"
+  if ! ( umask 0077
+         printf '%s' "${pw}" |
+           systemd-creds encrypt --name=hdw4s-keyring - "${cred}" ) 2>/dev/null
+  then
+    unset pw
+    rm -f "${cred}"
+    die 'hdw4s: could not encrypt the keyring password.' \
+        '  systemd-creds needs to run as root and to read the machine secret' \
+        '  in /var/lib/systemd/credential.secret, which it creates on first' \
+        '  use. Check "systemd-creds has-tpm2" and try again as root.'
+  fi
+  unset pw
+
+  mkdir -m0755 -p "${DROPIN}/hdw4s@${inst}.service.d"
+  printf '%s\n' \
+    '# Written by "hdw4s keyring".' \
+    '[Service]' \
+    "LoadCredentialEncrypted=hdw4s-keyring:${cred}" \
+    > "${DROPIN}/hdw4s@${inst}.service.d/60-keyring.conf"
+  systemctl daemon-reload
+
+  echo "Session ${inst} now has its own keyring, unlocked automatically."
+  echo "It is separate from the account's login keyring, so passwords saved in"
+  echo "one are not visible in the other."
+  echo "Restart the session for this to take effect:"
+  echo "  systemctl restart hdw4s@${inst}"
+}
+
 cmd_disable() {
   local inst="$1"
   split_instance "${inst}"
@@ -221,6 +277,7 @@ cmd_release() {
   split_instance "${inst}"
   systemctl disable --now "hdw4s@${inst}.service" 2>/dev/null || :
   rm -rf "${DROPIN}/hdw4s@${inst}.service.d"
+  rm -f "/etc/hdw4s/${inst}.keyring.cred"
   if [ -r "${SLOTS}" ]; then
     tmp="$(mktemp "${SLOTS}.XXXXXX")"
     awk -v i="${inst}" '$1 ~ /^#/ || $2 != i' "${SLOTS}" > "${tmp}"
@@ -237,8 +294,10 @@ case "${1:-}" in
   show)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_show "$@";;
   enable)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_disable "$@";;
+  keyring)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_keyring "$@";;
   release)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_release "$@";;
   firewall) shift; exec /usr/lib/hdw4s/hdw4s-firewall "$@";;
   -h|--help|help|'') usage;;
-  *) echo "hdw4s: unknown command '$1'" >&2; usage >&2; exit 2;;
+  *) echo "hdw4s: unknown command '$1'" >&2; usage >&2
+     trap '' INT TERM QUIT HUP EXIT ERR; exit 2;;
 esac
