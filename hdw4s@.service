@@ -3,6 +3,10 @@ Description=HDW4S headless desktop for %i
 Documentation=man:hdw4s(8)
 After=network-online.target hdw4s-firewall.service
 Wants=network-online.target
+# Deliberately a hard requirement. Stopping the firewall unit runs its
+# ExecStop=, which deletes the table that is the only thing standing
+# between this session and the network, so a session must not outlive it.
+# The package is careful never to stop it during an upgrade.
 Requires=hdw4s-firewall.service
 # A home directory that arrives over the network has to be there before a
 # desktop tries to read settings out of it.

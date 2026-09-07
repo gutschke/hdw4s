@@ -5,7 +5,7 @@ if [ "$1" = 'purge' ]; then
   rm -f /etc/sysctl.d/60-hdw4s.conf /etc/hdw4s/nftables.conf
   # Session slots, per-session overrides and the desktop profiles are the
   # administrator's configuration and the users' state. Purge removes ours.
-  rm -f /etc/hdw4s/instances
+  rm -f /etc/hdw4s/instances /etc/hdw4s/hdw4s.conf
   rmdir --ignore-fail-on-non-empty /etc/hdw4s 2>/dev/null || true
   echo 'hdw4s: /var/lib/hdw4s still holds each session profile; remove it by'
   echo '       hand if those desktops are not wanted again.'

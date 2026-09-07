@@ -8,10 +8,10 @@
 # instance name; which accounts get a desktop is the administrator's decision,
 # made with "hdw4s enable".
 override_dh_installsystemd:
-	dh_installsystemd hdw4s-firewall.service
-	dh_installsystemd --no-start hdw4s-firewall.timer
+	dh_installsystemd --no-stop-on-upgrade hdw4s-firewall.service
+	dh_installsystemd hdw4s-firewall.timer
 	dh_installsystemd --no-enable --no-start hdw4s-firewall-check.service
-	dh_installsystemd --no-start hdw4s-updater.timer
+	dh_installsystemd hdw4s-updater.timer
 	dh_installsystemd --no-enable --no-start hdw4s-updater.service
 	dh_installsystemd --no-enable --no-start hdw4s@.service
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.socket

@@ -196,7 +196,15 @@ cmd_restore() {
 case "${1:-}" in
   --apply) cmd_apply;;
   --restore) cmd_restore;;
-  --check) cmd_check;;
+  --check)
+    # A failing check is a result, not a fault: it means the table is missing
+    # or a session is outside it, which is exactly what this is for. Report the
+    # status without the error trap adding a line implying something went
+    # wrong with the script itself.
+    cmd_check && rc=0 || rc="$?"
+    trap '' INT TERM QUIT HUP EXIT ERR
+    exit "${rc}"
+    ;;
   --print) generate;;
   *) echo 'Usage: hdw4s firewall --apply | --check | --print' >&2; exit 2;;
 esac

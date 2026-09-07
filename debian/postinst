@@ -2,7 +2,19 @@
 set -e
 
 if [ "$1" = 'configure' ]; then
-  if ! /usr/lib/hdw4s/hdw4s-update; then
+  # Created here rather than shipped into /etc, because "hdw4s set" edits it.
+  # A file dpkg owns and a tool rewrites means an interactive conffile prompt on
+  # every upgrade after the first change -- which, in a non-interactive install,
+  # is a package that hangs rather than one that asks.
+  if [ ! -e /etc/hdw4s/hdw4s.conf ]; then
+    mkdir -p /etc/hdw4s
+    cp /usr/share/hdw4s/hdw4s.conf /etc/hdw4s/hdw4s.conf
+    chmod 0644 /etc/hdw4s/hdw4s.conf
+  fi
+
+  # Fetching Selkies needs the network, which an installer cannot assume it
+  # has, and must not wait on indefinitely if it does not. The timer retries.
+  if ! timeout 600 /usr/lib/hdw4s/hdw4s-update; then
     echo 'hdw4s: could not fetch Selkies now; the daily timer will retry.' >&2
     echo '       Run "/usr/lib/hdw4s/hdw4s-update" once the network is up.' >&2
   fi
