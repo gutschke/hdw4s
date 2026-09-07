@@ -10,76 +10,89 @@ on:
 permissions:
   contents: read
 
+# A superseded push should stop burning a runner rather than race the one that
+# replaced it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    # Pinned rather than ubuntu-latest. "latest" moves to a new release without
-    # warning, and this project cares which GNOME and which systemd it is built
-    # against; a runner upgrade should be a deliberate change to this line, not
+    # Pinned rather than ubuntu-latest. "latest" moves to a new release on
+    # GitHub's schedule, taking the shellcheck, lintian, systemd and nft
+    # versions with it; a runner upgrade should be a deliberate edit here, not
     # a build that breaks one morning for no reason anybody asked for.
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build and check dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            debhelper dpkg-dev fakeroot groff-base lintian shellcheck
+          # build-essential is an implicit build dependency of every Debian
+          # package; dpkg-checkbuilddeps refuses without it, and a developer
+          # machine always has it, so its absence only ever shows up here.
+          for attempt in 1 2 3; do
+            sudo apt-get update -qq && \
+            sudo apt-get install -y --no-install-recommends \
+              build-essential debhelper dpkg-dev fakeroot groff-base \
+              lintian shellcheck && break
+            echo "apt attempt ${attempt} failed; retrying"
+            sleep 5
+          done
 
-      # Exactly what .github/checks.sh runs locally, so a green run here means
-      # the same commands passed on a developer's machine first.
+      # Exactly what .github/checks.sh runs locally, so a green run here tells
+      # a maintainer nothing they could not already have known before pushing.
       - name: Checks
         run: .github/checks.sh --package
-
-      - name: Collect the package
-        run: |
-          mkdir -p dist
-          mv ../hdw4s_*_all.deb dist/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hdw4s-deb
-          path: dist/*.deb
-          if-no-files-found: error
 
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends dpkg-dev
+          for attempt in 1 2 3; do
+            sudo apt-get update -qq && \
+            sudo apt-get install -y --no-install-recommends \
+              build-essential debhelper dpkg-dev fakeroot groff-base \
+              lintian shellcheck && break
+            echo "apt attempt ${attempt} failed; retrying"
+            sleep 5
+          done
 
-      # A release whose artifact is not the version the tag claims is worse
-      # than no release, because nobody notices until they install it.
-      - name: Check the tag matches debian/changelog
+      # The package is rebuilt here from the tag rather than carried over from
+      # the build job. It costs seconds and removes any question about what
+      # happened to the file in between.
+      - name: Build and check the tagged tree
+        env:
+          EXPECT_VERSION: ${{ github.ref_name }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          changelog="$(dpkg-parsechangelog -S Version)"
-          if [ "${tag}" != "${changelog}" ]; then
-            echo "Tag ${GITHUB_REF_NAME} says ${tag}," \
-                 "debian/changelog says ${changelog}." >&2
-            exit 1
-          fi
-          echo "Both agree on ${changelog}."
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: hdw4s-deb
-          path: dist
+          # checks.sh compares the changelog against EXPECT_VERSION, so a tag
+          # and a changelog that disagree stop the release here. An artifact
+          # that is not the version its tag claims is worse than no artifact:
+          # nobody notices until they install it.
+          EXPECT_VERSION="${EXPECT_VERSION#v}" .github/checks.sh --package
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/*.deb \
+          version="${GITHUB_REF_NAME#v}"
+          deb="../hdw4s_${version}_all.deb"
+          sha256sum "${deb}" | sed 's|\.\./||' > SHA256SUMS
+          gh release create "${GITHUB_REF_NAME}" "${deb}" SHA256SUMS \
             --title "${GITHUB_REF_NAME}" \
-            --notes "Install with: sudo apt install ./hdw4s_${GITHUB_REF_NAME#v}_all.deb"
+            --notes "Install with:
+
+              sudo apt install ./hdw4s_${version}_all.deb
+
+            Verify with the attached SHA256SUMS."
