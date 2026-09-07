@@ -120,6 +120,21 @@ cmd_apply() {
   fi
 }
 
+# Put the table back only if it is actually gone. Reapplying unconditionally
+# every quarter of an hour would churn the ruleset and reset the counters for
+# no reason; the point is to notice a table that vanished, not to keep
+# rewriting one that is already correct.
+cmd_restore() {
+  if nft list table inet hdw4s >/dev/null 2>&1; then
+    return 0
+  fi
+  echo 'hdw4s: the firewall table was missing; restoring it.' >&2
+  echo '  Something flushed the ruleset -- ufw, netfilter-persistent and some' >&2
+  echo '  configuration-management tools all do. Until now every session was' >&2
+  echo '  reachable from anywhere this machine is.' >&2
+  cmd_apply
+}
+
 cmd_check() {
   local rc=0 exposed='' state
 

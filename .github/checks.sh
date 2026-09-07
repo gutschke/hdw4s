@@ -38,6 +38,22 @@ else
   bad 'shellcheck' 'findings above'
 fi
 
+# Every command a script dispatches must resolve to a function that exists.
+# A "case" branch calling a name nobody defined parses cleanly, survives the
+# linter, and fails only when somebody runs that one subcommand. When that
+# subcommand is one a timer runs rather than a person, nothing surfaces it.
+#
+# (Note for the next person: a comment line may not begin with the linter's own
+# name, because it then gets read as a directive and rejected as malformed.)
+for f in hdw4s hdw4s-firewall; do
+  while read -r fn; do
+    [ -n "${fn}" ] || continue
+    grep -qE "^${fn}\(\) \{" "${f}" ||
+      bad "${f}" "dispatches ${fn}, which is not defined"
+  done < <(grep -oE '\bcmd_[a-z_]+' "${f}" | sort -u)
+done
+note 'dispatch targets exist' 'ok'
+
 echo
 echo '== systemd units =='
 for u in "${UNITS[@]}"; do
