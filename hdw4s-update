@@ -178,11 +178,30 @@ if [ -f "${index}" ]; then
     // label is the only thing distinguishing one open tab from another.
     var host = window.location.hostname.split('.')[0] || 'desktop';
     var title = 'Desktop: ' + host.charAt(0).toUpperCase() + host.slice(1);
-    document.title = title;
-    // The client rewrites document.title once it connects, so put it back.
-    new MutationObserver(function() {
-      if (document.title !== title) document.title = title;
-    }).observe(document.head, { childList: true, subtree: true });
+
+    function applyTitle() {
+      var el = document.querySelector('title');
+      if (!el) { el = document.createElement('title'); document.head.appendChild(el); }
+      if (el.textContent !== title) el.textContent = title;
+    }
+    applyTitle();
+
+    // Refuse the write rather than undo it. Watching for the change and
+    // putting it back leaves the client's own title visible for the moment
+    // between the two, which is a flash of someone else's branding on every
+    // reload. Overriding the property means the write never lands.
+    try {
+      Object.defineProperty(document, 'title', {
+        configurable: true,
+        get: function() { return title; },
+        set: function() { applyTitle(); }
+      });
+    } catch (e) { /* fall through to the observer below */ }
+
+    // Kept as a fallback for the case where the property cannot be redefined,
+    // and for anything that edits the title element directly.
+    new MutationObserver(applyTitle)
+      .observe(document.head, { childList: true, subtree: true, characterData: true });
 
     // Make the desktop fill the window on the first connection.
     //
@@ -292,6 +311,14 @@ if [ -f "${index}" ]; then
           askForResize();
           clearInterval(timer);
           setTimeout(verifyFits, 3000);
+
+          // A hidden tab has no useful size to report, and browsers throttle
+          // its timers besides, so a desktop opened in a background tab is
+          // sized for whatever the window happened to be. Check again when
+          // someone actually looks at it.
+          document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) setTimeout(verifyFits, 500);
+          });
         }
       } catch (e) { /* not ready yet; the next tick will try again */ }
     }, 100);
