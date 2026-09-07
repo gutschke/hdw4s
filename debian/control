@@ -12,6 +12,7 @@ Architecture: all
 Depends: ${misc:Depends},
          curl,
          dbus-daemon,
+         dbus-bin,
          gnome-session,
          nftables,
          python3,

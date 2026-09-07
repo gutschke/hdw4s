@@ -202,4 +202,31 @@ esac
 # user manager per account, and it belongs to whichever session got there
 # first. gnome-session falls back to its own service manager, and the check
 # that would otherwise refuse to start a second session is bypassed with it.
+# Choose the session's locale here, before the bus exists.
+#
+# LC_ALL=C at the top of this script keeps its own parsing predictable and is
+# worth keeping for that. It must not reach the desktop: parts of it, the
+# terminal among them, refuse to run in a non-UTF-8 locale and exit rather than
+# degrade, and text through the clipboard would be mangled besides. That is
+# upstream behaviour, not something to argue with.
+#
+# It has to happen before dbus-run-session rather than inside it. Everything
+# the bus launches by activation inherits the bus's own environment, so an
+# LC_ALL set at this point would reach programs that never see this script --
+# which is exactly how a terminal that nothing could start went unexplained.
+unset LC_ALL
+if [ -z "${HDW4S_LANG:-}" ] && [ -r /etc/default/locale ]; then
+  HDW4S_LANG="$(sed -n 's/^LANG=//p' /etc/default/locale | tr -d \" | head -n1)"
+fi
+: "${HDW4S_LANG:=C.UTF-8}"
+case "${HDW4S_LANG}" in
+  *[Uu][Tt][Ff]*) :;;
+  *)
+    echo "hdw4s: ${HDW4S_LANG} is not a UTF-8 locale; using C.UTF-8 instead," >&2
+    echo '  because parts of the desktop refuse to run without one.' >&2
+    HDW4S_LANG='C.UTF-8'
+    ;;
+esac
+export LANG="${HDW4S_LANG}"
+
 exec dbus-run-session -- /usr/lib/hdw4s/hdw4s-run-session "${instance}"

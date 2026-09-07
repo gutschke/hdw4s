@@ -40,6 +40,7 @@ declare -A NEEDS=(
   [/usr/bin/xauth]='xauth'
   [/usr/bin/xdpyinfo]='x11-utils'
   [/usr/bin/dbus-run-session]='dbus-daemon'
+  [/usr/bin/dbus-update-activation-environment]='dbus-bin'
   [/usr/bin/gnome-session]='gnome-session'
   [/usr/sbin/nft]='nftables'
   [/usr/bin/curl]='curl'
