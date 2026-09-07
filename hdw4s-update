@@ -184,19 +184,102 @@ if [ -f "${index}" ]; then
       if (document.title !== title) document.title = title;
     }).observe(document.head, { childList: true, subtree: true });
 
-    // Make the desktop follow the browser window by default. The client reads
-    // this from localStorage under a key prefixed with a name derived from the
-    // URL path, so the prefix is not known here; match the suffix instead.
-    // Only this one setting is touched. "scaleLocal", the other half of the
-    // pair, already defaults to the inverse of it and needs no help.
-    var get = Storage.prototype.getItem;
-    Storage.prototype.getItem = function(key) {
-      if (typeof key === 'string' &&
-          (key === 'resize' || key.endsWith('_resize'))) {
-        return 'true';
+    // Make the desktop fill the window on the first connection.
+    //
+    // The client only asks the server to resize from a browser "resize" event,
+    // and nothing fires one when a tab is first opened. So the desktop keeps
+    // whatever size the X server started at and the client letterboxes it --
+    // the black bars above and below.
+    //
+    // Forcing the stored "resize" setting to true, which is the obvious fix,
+    // makes it worse: the client assigns that value to a property already
+    // initialised to true, and the watcher that would send the request is
+    // guarded on the value having changed. Setting it to what it already is
+    // guarantees the request is never sent. That is why toggling the setting
+    // by hand fixes it -- toggling is the only thing that produces a change.
+    //
+    // So do not touch the setting. Call the client's own end-of-resize
+    // handler once, as soon as the stream is actually running, which is
+    // exactly what dragging the window edge would do.
+
+    // Bounds on what may be asked for. The server accepts any WxH matching a
+    // digits-x-digits pattern and only rounds it up to an even number, so
+    // nothing else stops a window a few pixels tall, or one shaped like a
+    // hair, from becoming the desktop. A desktop that cannot be clamped into
+    // the window is not a disaster: the client already letterboxes or scrolls,
+    // which is the right outcome for a request that made no sense.
+    var MIN_W = 640, MIN_H = 480;      // below this GNOME is unusable
+    var MAX_W = 7680, MAX_H = 4320;    // matches the X server's VideoRam ceiling
+    var MAX_PIXELS = MAX_W * MAX_H;
+    var MAX_ASPECT = 6;                // 32:9 ultrawide is 3.6; portrait is 0.6
+
+    function clampResolution(w, h) {
+      if (!(w > 0) || !(h > 0)) return null;
+      // Shape first. An absurd ratio is not something to scale down, it is
+      // something to refuse, so pull the long side in to the widest ratio a
+      // real monitor has.
+      if (w / h > MAX_ASPECT) w = Math.round(h * MAX_ASPECT);
+      if (h / w > MAX_ASPECT) h = Math.round(w * MAX_ASPECT);
+      // Then each side.
+      w = Math.min(Math.max(w, MIN_W), MAX_W);
+      h = Math.min(Math.max(h, MIN_H), MAX_H);
+      // Then the total, keeping the shape. Each side can be in range while
+      // the area is not.
+      if (w * h > MAX_PIXELS) {
+        var k = Math.sqrt(MAX_PIXELS / (w * h));
+        w = Math.max(MIN_W, Math.round(w * k));
+        h = Math.max(MIN_H, Math.round(h * k));
       }
-      return get.call(this, key);
-    };
+      // The encoder needs even dimensions. Round down, because the server
+      // rounds up and that could push a clamped value back over a bound.
+      return [w - (w % 2), h - (h % 2)];
+    }
+
+    var clamped = false, done = false, tries = 0;
+    var timer = setInterval(function() {
+      if (done || ++tries > 120) { clearInterval(timer); return; }
+      try {
+        if (typeof webrtc === 'undefined' || !webrtc.input) return;
+
+        // Every resize request leaves through this one function, whether it
+        // came from the initial call below or from the user dragging the
+        // window, so it is the only place the bounds have to be applied.
+        if (!clamped && typeof webrtc.sendDataChannelMessage === 'function') {
+          var send = webrtc.sendDataChannelMessage.bind(webrtc);
+          webrtc.sendDataChannelMessage = function(msg) {
+            var m = (typeof msg === 'string') && msg.match(/^r,(\d+)x(\d+)$/);
+            if (!m) return send(msg);
+            var c = clampResolution(parseInt(m[1], 10), parseInt(m[2], 10));
+            if (!c) return;
+            var out = 'r,' + c[0] + 'x' + c[1];
+            if (out !== msg) {
+              console.log('hdw4s: clamped requested desktop size ' +
+                          m[1] + 'x' + m[2] + ' to ' + c[0] + 'x' + c[1]);
+            }
+            return send(out);
+          };
+          clamped = true;
+        }
+
+        if (typeof webrtc.input.onresizeend !== 'function') return;
+        done = true;
+        clearInterval(timer);
+
+        // Ask for the window's size once the data channel is open, since that
+        // is the channel the request travels over and nothing else fires a
+        // resize when a tab is first opened. Chain onto whatever handler the
+        // client already installed rather than replacing it.
+        var prev = webrtc.ondatachannelopen;
+        webrtc.ondatachannelopen = function() {
+          if (typeof prev === 'function') { try { prev.apply(this, arguments); } catch (e) {} }
+          // Respect someone who has deliberately turned remote resizing off.
+          if (typeof app !== 'undefined' && app.resizeRemote === false) return;
+          setTimeout(function() {
+            try { webrtc.input.onresizeend(); } catch (e) {}
+          }, 250);
+        };
+      } catch (e) { /* not ready yet; the next tick will try again */ }
+    }, 500);
   })();
 </script>
 <!-- HDW4S_PATCH_END -->

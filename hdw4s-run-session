@@ -20,6 +20,13 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_FRAMERATE:=30}"
 : "${HDW4S_ENCODER:=x264enc}"
 
+# The streaming server defaults this to false, and with it off it does not even
+# attach its resize handler -- it simply tells the client that resizing is
+# unavailable and ignores any request. Without it the desktop stays at whatever
+# size the X server started at and the browser letterboxes it. No amount of
+# work in the browser can compensate: the handler is not there to call.
+: "${HDW4S_RESIZE:=true}"
+
 children=()
 trap 'trap "" INT TERM QUIT HUP EXIT
       [ "${#children[@]}" -eq 0 ] || kill "${children[@]}" 2>/dev/null || :' \
@@ -106,6 +113,7 @@ fi
   --addr="${HDW4S_ADDR}" \
   --port="${HDW4S_PORT}" \
   "${auth}" \
+  --enable_resize="${HDW4S_RESIZE}" \
   --encoder="${HDW4S_ENCODER}" \
   --framerate="${HDW4S_FRAMERATE}" &
 children+=($!)
