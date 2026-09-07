@@ -111,10 +111,13 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   # of the variable, which for practical purposes means some Qt input-method
   # configuration. Those stay shared.
 
-  # Applications that ignore the XDG variables need their own redirection.
-  # Chrome reads this one directly; Firefox needs the wrapper in
-  # /usr/lib/hdw4s/wrappers, which the unit puts ahead of /usr/bin in PATH.
-  export CHROME_USER_DATA_DIR="${profile}/chrome"
+  # No CHROME_USER_DATA_DIR here. Chrome's search order ends at
+  # XDG_CONFIG_HOME, which is redirected above, so it lands in the profile with
+  # everything else. Setting it explicitly would put the browser somewhere
+  # different from the rest of the profile, which is worse than not setting it:
+  # it splits the profile in two and hides half of it from anything that copies
+  # or backs one up. Firefox does need the wrapper in /usr/lib/hdw4s/wrappers,
+  # because it ignores the XDG variables entirely.
 
   # Indexing a shared home once per machine is wasted work and multiplies the
   # write load on the file server for no benefit.

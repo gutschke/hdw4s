@@ -13,6 +13,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `proxy` <instance><br>
 `hdw4s` `set` [<instance>] <KEY>=<VALUE>...<br>
 `hdw4s` `unset` [<instance>] <KEY><br>
+`hdw4s` `seed` <instance><br>
 `hdw4s` `keyring` <instance><br>
 `hdw4s` `firewall` `--apply`|`--check`|`--print`
 
@@ -78,6 +79,23 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
   * `unset` [<instance>] <KEY>:
     Comment a setting out so the default applies again. The line is commented
     rather than deleted, so the value that was there stays visible.
+
+  * `seed` <instance>:
+    Copy an account's existing desktop settings from its home directory into an
+    isolated session's profile, once. Only ever in that direction, only when
+    asked, and only into a profile that is still empty -- a profile with
+    anything in it is one somebody has used, and there is no way to tell which
+    of two copies of a setting is the newer. Re-running is refused rather than
+    overwriting; remove the profile first if starting over is really meant.
+
+    This is a snapshot and not a link. The two diverge from that moment on.
+
+    Caches are skipped, including the ones browsers keep inside their profile
+    directories rather than under `~/.cache`; they are regenerable and are
+    usually almost all of the size. Saved passwords are skipped too, since the
+    session has its own keyring with its own password.
+
+    The session must be stopped, or the copy captures half-written state.
 
   * `keyring` <instance>:
     Give a session its own keyring with a generated password, sealed to this
@@ -197,6 +215,10 @@ What stays shared:
 
     Documents, Desktop, Downloads, Pictures, Music, Videos
     everything else in the home directory, including ~/.ssh
+
+Existing settings can be carried across once with `hdw4s seed`, which is the
+only supported way to populate a profile from a home directory and does not run
+by itself.
 
 What becomes per-session:
 

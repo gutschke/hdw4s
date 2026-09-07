@@ -22,6 +22,8 @@
 .br
 \fBhdw4s\fR \fBunset\fR [\fIinstance\fR] \fIKEY\fR
 .br
+\fBhdw4s\fR \fBseed\fR \fIinstance\fR
+.br
 \fBhdw4s\fR \fBkeyring\fR \fIinstance\fR
 .br
 \fBhdw4s\fR \fBfirewall\fR \fB\-\-apply\fR|\fB\-\-check\fR|\fB\-\-print\fR
@@ -62,6 +64,15 @@ Change a setting without opening an editor\. With an instance, writes to that se
 .TP
 \fBunset\fR [\fIinstance\fR] \fIKEY\fR
 Comment a setting out so the default applies again\. The line is commented rather than deleted, so the value that was there stays visible\.
+.TP
+\fBseed\fR \fIinstance\fR
+Copy an account's existing desktop settings from its home directory into an isolated session's profile, once\. Only ever in that direction, only when asked, and only into a profile that is still empty \-\- a profile with anything in it is one somebody has used, and there is no way to tell which of two copies of a setting is the newer\. Re\-running is refused rather than overwriting; remove the profile first if starting over is really meant\.
+.IP
+This is a snapshot and not a link\. The two diverge from that moment on\.
+.IP
+Caches are skipped, including the ones browsers keep inside their profile directories rather than under \fB~/\.cache\fR; they are regenerable and are usually almost all of the size\. Saved passwords are skipped too, since the session has its own keyring with its own password\.
+.IP
+The session must be stopped, or the copy captures half\-written state\.
 .TP
 \fBkeyring\fR \fIinstance\fR
 Give a session its own keyring with a generated password, sealed to this machine with systemd\-creds and handed to the session at start time, so it is unlocked without anyone typing anything\. The session's keyring is separate from the account's login keyring: passwords saved in one are not visible in the other\. Requires root and a restart of the session\.
@@ -147,6 +158,8 @@ Documents, Desktop, Downloads, Pictures, Music, Videos
 everything else in the home directory, including ~/\.ssh
 .fi
 .IP "" 0
+.P
+Existing settings can be carried across once with \fBhdw4s seed\fR, which is the only supported way to populate a profile from a home directory and does not run by itself\.
 .P
 What becomes per\-session:
 .IP "" 4

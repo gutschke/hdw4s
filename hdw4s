@@ -59,6 +59,7 @@ Usage: hdw4s <command> [arguments]
                           reach a session over the network, or over a socket
   auth <instance>         require a secret from the proxy as well as an address
   proxy <instance>        print an nginx configuration for a session
+  seed <instance>         copy existing settings into an isolated profile, once
   keyring <instance>      give a session its own keyring, unlocked at start
   --version               print the version
   firewall --apply        rewrite the package's nftables table
@@ -656,6 +657,90 @@ EOF
   unset pw
 }
 
+# Anything below these names is a cache: regenerable, frequently enormous, and
+# actively unhelpful to carry across. Browsers are the reason this list is not
+# just ".cache" -- Chrome keeps gigabytes of cache inside its profile
+# directory, mixed in with the bookmarks and passwords that are worth keeping.
+SEED_EXCLUDES=(
+  'keyrings'                    # the isolated session has its own, with its own password
+  'dconf/*-lock'
+  '*/Cache' '*/Cache Data' '*/Code Cache' '*/GPUCache' '*/DawnCache'
+  '*/GrShaderCache' '*/ShaderCache' '*/CacheStorage' '*/component_crx_cache'
+  '*/Crash Reports' '*/Crashpad' '*/blob_storage'
+  '*/Service Worker/CacheStorage' '*/Service Worker/ScriptCache'
+  '*/optimization_guide_model_store' '*/segmentation_platform'
+)
+
+cmd_seed() {
+  local inst="$1" from to pair pattern args=() copied=0
+  split_instance "${inst}"
+  [ -n "$(slot_of "${inst}")" ] ||
+    die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}' first."
+
+  local isolation="${HDW4S_ISOLATION:-none}"
+  [ ! -r "/etc/hdw4s/${inst}.conf" ] ||
+    isolation="$(sed -n "s/^[[:space:]]*HDW4S_ISOLATION=[\"']\{0,1\}\([a-z]*\).*/\1/p" \
+                 "/etc/hdw4s/${inst}.conf" | tail -n1)"
+  [ "${isolation}" = 'profile' ] ||
+    die "hdw4s: ${inst} is not an isolated session; there is nothing to seed into." \
+        "  Run 'hdw4s set ${inst} HDW4S_ISOLATION=profile' first."
+
+  # Copying out from under a running desktop would capture half-written state.
+  [ "$(systemctl is-active "hdw4s@${inst}.service" 2>/dev/null)" != 'active' ] ||
+    die "hdw4s: stop ${inst} first: systemctl stop hdw4s@${inst}"
+
+  local home profile
+  home="$(getent passwd -- "${user}" | cut -d: -f6)"
+  profile="${HDW4S_PROFILE_DIR:-/var/lib/hdw4s}/${inst}"
+
+  # This runs once and never merges. A profile that already has something in it
+  # is a profile someone has used, and overwriting it would lose whichever of
+  # the two copies happened to be newer -- silently, because nothing here can
+  # tell which that is.
+  for pair in config data state; do
+    [ ! -d "${profile}/${pair}" ] ||
+      [ -z "$(ls -A "${profile}/${pair}" 2>/dev/null)" ] ||
+      die "hdw4s: ${profile}/${pair} is not empty." \
+          '  Seeding copies once, into an empty profile, and never merges: there' \
+          '  is no way to tell which of two copies of a setting is the newer one.' \
+          "  Remove the profile first if you really mean to start it over."
+  done
+
+  for pattern in "${SEED_EXCLUDES[@]}"; do args+=(--exclude="${pattern}"); done
+
+  echo "Copying settings from ${home} into ${profile}."
+  for pair in "config:.config" "data:.local/share" "state:.local/state"; do
+    to="${profile}/${pair%%:*}"
+    from="${home}/${pair#*:}"
+    [ -d "${from}" ] || continue
+    install -d -m0700 "${to}"
+    # tar rather than cp, because the exclusions are the whole point and cp has
+    # no way to express them.
+    if tar -C "${from}" -cf - "${args[@]}" --warning=no-file-ignored . 2>/dev/null |
+       tar -C "${to}" -xf - 2>/dev/null; then
+      printf '  %-14s %s\n' "${pair#*:}" "$(du -sh "${to}" 2>/dev/null | cut -f1)"
+      copied=$(( copied + 1 ))
+    else
+      echo "  ${pair#*:}: copy failed" >&2
+    fi
+  done
+  chown -R "${user}" "${profile}" 2>/dev/null || :
+
+  [ "${copied}" -gt 0 ] || die 'hdw4s: nothing was found to copy.'
+  cat <<EOF
+
+This was a one-time snapshot, not a link. From now on the two are separate:
+a change made in one will not appear in the other, and running this again is
+refused rather than silently overwriting whichever copy is newer.
+
+Caches were left behind on purpose, browser caches included -- they are
+regenerable and are usually most of the size.
+
+Saved passwords were not copied. The session has its own keyring with its own
+password; see 'hdw4s keyring ${inst}'.
+EOF
+}
+
 cmd_keyring() {
   local inst="$1"
   require_slot "${inst}"
@@ -699,6 +784,7 @@ case "${1:-}" in
   enable)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_disable "$@";;
   keyring)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_keyring "$@";;
+  seed)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_seed "$@";;
   auth)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_auth "$@";;
   transport) shift; [ $# -eq 2 ] || { usage >&2; exit 2; }; cmd_transport "$@";;
   proxy)    shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_proxy "$@";;
