@@ -12,6 +12,12 @@
 .br
 \fBhdw4s\fR \fBrelease\fR \fIinstance\fR
 .br
+\fBhdw4s\fR \fBtransport\fR \fIinstance\fR \fBtcp\fR|\fBunix\fR
+.br
+\fBhdw4s\fR \fBauth\fR \fIinstance\fR
+.br
+\fBhdw4s\fR \fBproxy\fR \fIinstance\fR
+.br
 \fBhdw4s\fR \fBset\fR [\fIinstance\fR] \fIKEY\fR=\fIVALUE\fR\|\.\|\.\|\.
 .br
 \fBhdw4s\fR \fBunset\fR [\fIinstance\fR] \fIKEY\fR
@@ -41,6 +47,15 @@ Stop a session and stop starting it at boot\. The slot stays reserved, so the po
 .TP
 \fBrelease\fR \fIinstance\fR
 Stop a session and give up its slot, so another session may take the port\. The session's profile directory is left in place\.
+.TP
+\fBtransport\fR \fIinstance\fR \fBtcp\fR|\fBunix\fR
+Choose how the reverse proxy reaches this session\. See \fBTRANSPORTS\fR\.
+.TP
+\fBauth\fR \fIinstance\fR
+Require the proxy to present a secret as well as an acceptable address\. Generated here, sealed to this machine, and never shown to the user, so there is still no login screen\.
+.TP
+\fBproxy\fR \fIinstance\fR
+Print an nginx configuration for this session, matching whichever transport and authentication it is set up for\.
 .TP
 \fBset\fR [\fIinstance\fR] \fIKEY\fR=\fIVALUE\fR\|\.\|\.\|\.
 Change a setting without opening an editor\. With an instance, writes to that session's file; without one, to the defaults\. The edit is deliberately conservative: an existing assignment is changed where it stands, keeping its indentation and any note written after it on the same line; otherwise the documented default is uncommented in place, so the explanation above it still applies; otherwise the setting is appended\. Nothing else in the file is touched, and anything not offered here can still be edited by hand\.
@@ -104,6 +119,15 @@ Overrides the allocated port for one session\. Setting this outside the block pu
 \fBHDW4S_ALLOW_SYSTEM_USER\fR
 Set to \fByes\fR to permit a session for an account below UID 1000\.
 .TP
+\fBHDW4S_TRANSPORT\fR
+\fBtcp\fR or \fBunix\fR\. Set with \fBhdw4s transport\fR, which also arranges the units that go with it, rather than by hand\.
+.TP
+\fBHDW4S_PROXY_GROUP\fR
+The group allowed to open a session's Unix socket, i\.e\. the group the reverse proxy runs as\. Defaults to \fBwww\-data\fR\.
+.TP
+\fBHDW4S_AUTH\fR
+\fBnone\fR or \fBbasic\fR\. Set with \fBhdw4s auth\fR, which also generates the secret\.
+.TP
 \fBHDW4S_SESSION\fR
 The desktop to start; defaults to \fBgnome\-session\fR\. Anything that runs on X11 works, and nothing else in a session depends on the choice\. GNOME 50, which Ubuntu 26\.04 ships, removes the X11 session that the current Selkies release needs, whereas Xorg and the lighter desktops have no such plan, so changing this is the whole migration when that matters\.
 .TP
@@ -139,6 +163,21 @@ That split is not a compromise that can be tuned away\. Those components conflic
 A session's TCP port comes from a slot recorded in \fB/etc/hdw4s/instances\fR\. The slot is assigned when the session is first enabled and never moves, so a reverse proxy and a firewall can both be configured against it and stay valid when accounts are added or removed\.
 .P
 The X display number is \fInot\fR allocated\. The X server picks the first free one itself and reports it back, which is the only way to claim one without a race\. Nothing outside the machine ever sees the display number, so it does not need to be predictable\.
+.SH "TRANSPORTS"
+How the reverse proxy reaches a session, in decreasing order of how much the machine itself can guarantee\.
+.TP
+\fBUnix socket\fR (\fBhdw4s transport\fR \fIinstance\fR \fBunix\fR)
+The session listens only on loopback, and systemd exposes it at \fB/run/hdw4s\-proxy/<instance>\.sock\fR, owned by the group named in \fBHDW4S_PROXY_GROUP\fR\. Who may connect is then a question of file permissions: a process that cannot open the socket cannot reach the session at all, whatever address it comes from and whatever it claims to be\. There is no shared secret to leak and no address to spoof\.
+.IP
+This is the right answer whenever it is available\. It requires the proxy to be on the same machine, or to be able to see the same filesystem \-\- which, for a container, can mean a bind mount from the host\.
+.TP
+\fBTCP with a proxy credential\fR (\fBtcp\fR plus \fBhdw4s auth\fR)
+For a proxy on another machine\. The firewall restricts which addresses may connect, and the session additionally requires a secret that only the proxy knows, injected by it as a header\. An attacker who defeats the address check \-\- by spoofing, or simply by being on the same network \-\- still does not have the secret\.
+.IP
+The secret crosses the network in the clear on each request, so this is worth pairing with something that makes the path itself private, such as a point\-to\-point tunnel between the proxy and the session's host, or a hypervisor firewall that pins each container to its own address and so makes spoofing impossible\.
+.TP
+\fBTCP alone\fR (\fBtcp\fR, the default)
+The firewall's address list is the only control\. Adequate on a network where nothing untrusted can route to the machine, and the weakest of the three otherwise\.
 .SH "REVERSE PROXY AND SECURITY"
 \fBA session performs no authentication of its own\.\fR It is built to sit behind a reverse proxy that has already identified the user, so that reaching the desktop takes no second login\. Anything that can open a TCP connection to a session port gets that user's desktop\.
 .P

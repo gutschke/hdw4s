@@ -58,10 +58,37 @@ ${HDW4S_SESSION} &
 children+=($!)
 session_pid="$!"
 
+# A session normally authenticates nobody, because the reverse proxy in front
+# already has. Where the proxy cannot be reached over a filesystem socket and
+# an address is all that distinguishes it, HDW4S_AUTH=basic adds a secret the
+# proxy must present as well: an attacker who reaches the port directly, by
+# spoofing the proxy's address or by being on the same network, still does not
+# have it. The user never sees it, so there is still no login screen.
+#
+# The secret is passed in the environment rather than on the command line,
+# where it would be visible to every account on the machine through ps. It is
+# readable by this session's own user, which is not a concern: it is their
+# desktop and their proxy credential.
+if [ "${HDW4S_AUTH:-none}" = 'basic' ] &&
+   [ -n "${CREDENTIALS_DIRECTORY:-}" ] &&
+   [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ]; then
+  SELKIES_BASIC_AUTH_USER="${instance%%:*}"
+  SELKIES_BASIC_AUTH_PASSWORD="$(cat "${CREDENTIALS_DIRECTORY}/hdw4s-auth")"
+  export SELKIES_BASIC_AUTH_USER SELKIES_BASIC_AUTH_PASSWORD
+  auth='--enable_basic_auth=true'
+else
+  if [ "${HDW4S_AUTH:-none}" = 'basic' ]; then
+    echo 'hdw4s: HDW4S_AUTH=basic but no credential was supplied;' >&2
+    echo "  run 'hdw4s auth ${instance}'. Refusing to start unauthenticated." >&2
+    exit 1
+  fi
+  auth='--enable_basic_auth=false'
+fi
+
 /opt/selkies/bin/selkies-gstreamer \
   --addr="${HDW4S_ADDR}" \
   --port="${HDW4S_PORT}" \
-  --enable_basic_auth=false \
+  "${auth}" \
   --encoder="${HDW4S_ENCODER}" \
   --framerate="${HDW4S_FRAMERATE}" &
 children+=($!)

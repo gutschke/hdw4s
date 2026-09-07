@@ -16,7 +16,8 @@ cd "$(dirname "$0")/.."
 SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
          debian/postinst debian/postrm .github/checks.sh)
-UNITS=(hdw4s@.service hdw4s-firewall.service hdw4s-firewall-check.service
+UNITS=(hdw4s@.service hdw4s-proxy@.socket hdw4s-proxy@.service
+       hdw4s-firewall.service hdw4s-firewall-check.service
        hdw4s-firewall.timer hdw4s-updater.service hdw4s-updater.timer
        hdw4s.slice)
 

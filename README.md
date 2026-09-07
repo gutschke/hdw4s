@@ -133,6 +133,29 @@ sudo hdw4s keyring alice
 sudo systemctl restart hdw4s@alice
 ```
 
+## How the proxy reaches a session
+
+Three transports, in decreasing order of how much the machine can guarantee:
+
+```bash
+sudo hdw4s transport alice unix    # a socket; permissions decide who connects
+sudo hdw4s auth alice              # a secret only the proxy knows
+```
+
+A **Unix socket** is the strongest and the right answer whenever the proxy can
+see the same filesystem: there is no address to spoof and no secret to leak,
+only a file the proxy's group can open and nothing else can. It does not cross
+a machine boundary.
+
+For a proxy **on another machine**, `hdw4s auth` adds a credential the proxy
+injects on every request, so defeating the firewall's address list is no longer
+sufficient on its own. The user never sees it and there is still no login
+screen.
+
+`hdw4s proxy alice` prints an nginx configuration matching whichever of these
+the session is set up for, including the WebSocket and timeout settings a
+desktop needs.
+
 ## Security
 
 **A session performs no authentication of its own.** That is deliberate -- it

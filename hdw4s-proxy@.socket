@@ -1,0 +1,23 @@
+[Unit]
+Description=Unix socket for the HDW4S session %i
+Documentation=man:hdw4s(8)
+
+[Socket]
+# A filesystem socket instead of a TCP port. Who may connect is then a question
+# of file permissions rather than of source address, which is a far stronger
+# answer where it is available: a reverse proxy on the same machine is granted
+# access by being in a group, and nothing that cannot open the file can reach
+# the session at all.
+#
+# The catch is that it does not cross a machine boundary. A proxy in another
+# container or on another host still needs the TCP transport.
+ListenStream=/run/hdw4s-proxy/%i.sock
+RuntimeDirectory=hdw4s-proxy
+RuntimeDirectoryMode=0755
+SocketMode=0660
+# The group is set by "hdw4s transport <instance> unix" from
+# HDW4S_PROXY_GROUP, since which account runs the proxy is a local decision.
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -55,6 +55,10 @@ Usage: hdw4s <command> [arguments]
   release <instance>      stop a session and give up its slot
   set [<instance>] K=V    change one setting, keeping the rest of the file
   unset [<instance>] K    comment a setting out again, restoring the default
+  transport <instance> tcp|unix
+                          reach a session over the network, or over a socket
+  auth <instance>         require a secret from the proxy as well as an address
+  proxy <instance>        print an nginx configuration for a session
   keyring <instance>      give a session its own keyring, unlocked at start
   --version               print the version
   firewall --apply        rewrite the package's nftables table
@@ -255,6 +259,10 @@ cmd_enable() {
 declare -A SETTABLE=(
   [HDW4S_PROXIES]='any'
   [HDW4S_ISOLATION]='none|profile'
+  [HDW4S_AUTH]='none|basic'
+  [HDW4S_TRANSPORT]='tcp|unix'
+  [HDW4S_PROXY_GROUP]='any'
+  [HDW4S_ALLOW_SYSTEM_USER]='yes|no'
   [HDW4S_PROFILE_DIR]='path'
   [HDW4S_ADDR]='any'
   [HDW4S_PORT]='number'
@@ -424,22 +432,13 @@ set_hint() {
   fi
 }
 
-cmd_keyring() {
-  local inst="$1" cred pw
-  split_instance "${inst}"
-  slot_of "${inst}" >/dev/null || :
-  [ -n "$(slot_of "${inst}")" ] ||
-    die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}' first."
-  command -v systemd-creds >/dev/null ||
-    die 'hdw4s: systemd-creds is not available on this system.'
-
-  # An isolated session has its own keyring, because sharing one store between
-  # two desktops has no locking that survives a network filesystem and loses
-  # secrets quietly when it goes wrong. Its password is generated here and
-  # never has to be seen or typed: systemd seals it to this machine, hands it
-  # to the session at start time in memory that is not swapped, and the session
-  # unlocks the keyring with it.
-  cred="/etc/hdw4s/${inst}.keyring.cred"
+# Generate a secret, seal it to this machine, and record the drop-in that hands
+# it to the session at start time. systemd keeps it in memory that is not
+# swapped and exists only for the life of the unit, so it is never written to
+# disk in the clear.
+make_credential() {
+  local inst="$1" name="$2" order="$3" cred pw
+  cred="/etc/hdw4s/${inst}.${name}.cred"
   pw=''
   while [ "${#pw}" -lt 24 ]; do
     # tr removes characters before head truncates, so a single pass can come
@@ -449,26 +448,199 @@ cmd_keyring() {
     pw="${pw}$(head -c48 /dev/urandom | base64 | tr -d '\n=/+')"
   done
   pw="${pw:0:24}"
+
   if ! ( umask 0077
          printf '%s' "${pw}" |
-           systemd-creds encrypt --name=hdw4s-keyring - "${cred}" ) 2>/dev/null
+           systemd-creds encrypt --name="hdw4s-${name}" - "${cred}" ) 2>/dev/null
   then
     unset pw
     rm -f "${cred}"
-    die 'hdw4s: could not encrypt the keyring password.' \
+    die 'hdw4s: could not encrypt the secret.' \
         '  systemd-creds needs to run as root and to read the machine secret' \
         '  in /var/lib/systemd/credential.secret, which it creates on first' \
         '  use. Check "systemd-creds has-tpm2" and try again as root.'
   fi
-  unset pw
 
   install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
   printf '%s\n' \
-    '# Written by "hdw4s keyring".' \
+    "# Written by \"hdw4s ${name}\"." \
     '[Service]' \
-    "LoadCredentialEncrypted=hdw4s-keyring:${cred}" \
-    > "${DROPIN}/hdw4s@${inst}.service.d/60-keyring.conf"
+    "LoadCredentialEncrypted=hdw4s-${name}:${cred}" \
+    > "${DROPIN}/hdw4s@${inst}.service.d/${order}-${name}.conf"
   systemctl daemon-reload
+  printf '%s' "${pw}"
+}
+
+require_slot() {
+  split_instance "$1"
+  [ -n "$(slot_of "$1")" ] ||
+    die "hdw4s: $1 has no slot; run 'hdw4s enable $1' first."
+  command -v systemd-creds >/dev/null ||
+    die 'hdw4s: systemd-creds is not available on this system.'
+}
+
+cmd_transport() {
+  local inst="$1" mode="$2" idx port group dir
+  split_instance "${inst}"
+  idx="$(slot_of "${inst}")"
+  [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
+  port="$(port_of "${idx}")"
+  dir="${DROPIN}/hdw4s-proxy@${inst}.service.d"
+
+  case "${mode}" in
+    tcp)
+      systemctl disable --now "hdw4s-proxy@${inst}.socket" >/dev/null 2>&1 || :
+      rm -rf "${dir}" "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
+      config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_TRANSPORT' 'tcp'
+      config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_ADDR' "$(quote_value '0.0.0.0')"
+      systemctl daemon-reload
+      echo "Session ${inst} listens on port ${port}."
+      echo "  Who may connect is decided by the firewall; see HDW4S_PROXIES."
+      ;;
+    unix)
+      group="${HDW4S_PROXY_GROUP:-www-data}"
+      getent group -- "${group}" >/dev/null ||
+        die "hdw4s: no such group: ${group}" \
+            '  Set HDW4S_PROXY_GROUP to the group the reverse proxy runs as.'
+
+      install -d -m0755 "${dir}" "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
+      printf '%s\n' \
+        '# Written by "hdw4s transport".' \
+        '[Service]' \
+        'ExecStart=' \
+        "ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:${port}" \
+        > "${dir}/50-port.conf"
+      printf '%s\n' \
+        '# Written by "hdw4s transport".' \
+        '[Socket]' \
+        "SocketGroup=${group}" \
+        > "${DROPIN}/hdw4s-proxy@${inst}.socket.d/50-group.conf"
+
+      # With a socket in front, the session itself has no reason to be
+      # reachable from anywhere but this machine.
+      config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_TRANSPORT' 'unix'
+      config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_ADDR' "$(quote_value '127.0.0.1')"
+
+      systemctl daemon-reload
+      systemctl enable --now "hdw4s-proxy@${inst}.socket"
+      echo "Session ${inst} is reachable at /run/hdw4s-proxy/${inst}.sock,"
+      echo "readable by group ${group} only. It no longer listens on the network."
+      echo "  Restart it to take effect: systemctl restart hdw4s@${inst}"
+      ;;
+    *)
+      die "hdw4s: transport must be 'tcp' or 'unix', not '${mode}'"
+      ;;
+  esac
+}
+
+cmd_auth() {
+  local inst="$1" pw
+  require_slot "${inst}"
+  pw="$(make_credential "${inst}" 'auth' 70)"
+  config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_AUTH' 'basic'
+
+  echo "Session ${inst} will now require a credential of its own, in addition"
+  echo 'to the firewall. The reverse proxy has to present it; the user never'
+  echo 'sees it, so there is still no login screen.'
+  echo
+  echo "  hdw4s proxy ${inst}     prints an nginx block that does this"
+  echo
+  echo "Restart the session for this to take effect:"
+  echo "  systemctl restart hdw4s@${inst}"
+  unset pw
+}
+
+cmd_proxy() {
+  local inst="$1" idx port cred user pw
+  split_instance "${inst}"
+  idx="$(slot_of "${inst}")"
+  [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
+  port="$(port_of "${idx}")"
+  cred="/etc/hdw4s/${inst}.auth.cred"
+
+  # Match whichever transport the session is actually configured for; an
+  # nginx block pointing at a port that is no longer listening is a confusing
+  # way to spend an afternoon.
+  local transport upstream
+  transport='tcp'
+  [ ! -r "/etc/hdw4s/${inst}.conf" ] ||
+    transport="$(sed -n "s/^[[:space:]]*HDW4S_TRANSPORT=[\"']\{0,1\}\([a-z]*\).*/\1/p" \
+                 "/etc/hdw4s/${inst}.conf" | tail -n1)"
+  if [ "${transport}" = 'unix' ]; then
+    upstream="        # A filesystem socket: who may connect is a question of
+        # permissions, not of source address. Add nginx's user to the group
+        # that owns it.
+        proxy_pass http://unix:/run/hdw4s-proxy/${inst}.sock:;"
+  else
+    upstream="        proxy_pass http://HOST_RUNNING_HDW4S:${port};"
+  fi
+
+  pw=''
+  if [ -r "${cred}" ]; then
+    pw="$(systemd-creds decrypt --name=hdw4s-auth "${cred}" - 2>/dev/null)" || {
+      echo "# Could not decrypt ${cred}; is this the machine that wrote it?" >&2
+      pw=''
+    }
+  fi
+
+  cat <<EOF
+# nginx configuration for the hdw4s session "${inst}".
+#
+# Terminate TLS and authenticate your users here. Everything below assumes
+# that has already happened: the session performs no user authentication and
+# will hand a full desktop to whatever reaches it.
+
+server {
+    listen 443 ssl;
+    server_name ${inst%%:*}.example.com;
+
+    # ssl_certificate     /etc/ssl/certs/...;
+    # ssl_certificate_key /etc/ssl/private/...;
+
+    # ... your own authentication here: auth_request, OIDC, client certs ...
+
+    location / {
+${upstream}
+        proxy_http_version 1.1;
+
+        # The stream is a WebSocket; without these it will connect and then
+        # sit there.
+        proxy_set_header Upgrade    \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       \$host;
+        proxy_set_header X-Real-IP  \$remote_addr;
+
+        # A desktop is idle for long stretches and must not be timed out.
+        proxy_read_timeout  86400s;
+        proxy_send_timeout  86400s;
+        proxy_buffering     off;
+EOF
+  if [ -n "${pw}" ]; then
+    cat <<EOF
+
+        # Presented by the proxy, never by the user, so there is still no
+        # login screen. This is what an attacker who reaches the session port
+        # directly -- by spoofing the proxy's address, say -- does not have.
+        proxy_set_header Authorization "Basic $(printf '%s:%s' "${user}" "${pw}" | base64 -w0)";
+EOF
+  else
+    cat <<'EOF'
+
+        # This session has no credential of its own, so the firewall is the
+        # only thing protecting it. Run "hdw4s auth <instance>" to add one.
+EOF
+  fi
+  cat <<'EOF'
+    }
+}
+EOF
+  unset pw
+}
+
+cmd_keyring() {
+  local inst="$1"
+  require_slot "${inst}"
+  make_credential "${inst}" 'keyring' 60 >/dev/null
 
   echo "Session ${inst} now has its own keyring, unlocked automatically."
   echo "It is separate from the account's login keyring, so passwords saved in"
@@ -490,7 +662,7 @@ cmd_release() {
   split_instance "${inst}"
   systemctl disable --now "hdw4s@${inst}.service" 2>/dev/null || :
   rm -rf "${DROPIN}/hdw4s@${inst}.service.d"
-  rm -f "/etc/hdw4s/${inst}.keyring.cred"
+  rm -f "/etc/hdw4s/${inst}.keyring.cred" "/etc/hdw4s/${inst}.auth.cred"
   if [ -r "${SLOTS}" ]; then
     tmp="$(mktemp "${SLOTS}.XXXXXX")"
     awk -v i="${inst}" '$1 ~ /^#/ || $2 != i' "${SLOTS}" > "${tmp}"
@@ -508,6 +680,9 @@ case "${1:-}" in
   enable)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_disable "$@";;
   keyring)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_keyring "$@";;
+  auth)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_auth "$@";;
+  transport) shift; [ $# -eq 2 ] || { usage >&2; exit 2; }; cmd_transport "$@";;
+  proxy)    shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_proxy "$@";;
   set)      shift; cmd_set "$@";;
   unset)    shift; cmd_unset "$@";;
   release)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_release "$@";;

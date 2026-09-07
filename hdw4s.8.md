@@ -8,6 +8,9 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `enable` <instance><br>
 `hdw4s` `disable` <instance><br>
 `hdw4s` `release` <instance><br>
+`hdw4s` `transport` <instance> `tcp`|`unix`<br>
+`hdw4s` `auth` <instance><br>
+`hdw4s` `proxy` <instance><br>
 `hdw4s` `set` [<instance>] <KEY>=<VALUE>...<br>
 `hdw4s` `unset` [<instance>] <KEY><br>
 `hdw4s` `keyring` <instance><br>
@@ -50,6 +53,18 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
   * `release` <instance>:
     Stop a session and give up its slot, so another session may take the port.
     The session's profile directory is left in place.
+
+  * `transport` <instance> `tcp`|`unix`:
+    Choose how the reverse proxy reaches this session. See **TRANSPORTS**.
+
+  * `auth` <instance>:
+    Require the proxy to present a secret as well as an acceptable address.
+    Generated here, sealed to this machine, and never shown to the user, so
+    there is still no login screen.
+
+  * `proxy` <instance>:
+    Print an nginx configuration for this session, matching whichever
+    transport and authentication it is set up for.
 
   * `set` [<instance>] <KEY>=<VALUE>...:
     Change a setting without opening an editor. With an instance, writes to
@@ -136,6 +151,17 @@ Three files are read in order, each overriding the last:
   * `HDW4S_ALLOW_SYSTEM_USER`:
     Set to `yes` to permit a session for an account below UID 1000.
 
+  * `HDW4S_TRANSPORT`:
+    `tcp` or `unix`. Set with `hdw4s transport`, which also arranges the units
+    that go with it, rather than by hand.
+
+  * `HDW4S_PROXY_GROUP`:
+    The group allowed to open a session's Unix socket, i.e. the group the
+    reverse proxy runs as. Defaults to `www-data`.
+
+  * `HDW4S_AUTH`:
+    `none` or `basic`. Set with `hdw4s auth`, which also generates the secret.
+
   * `HDW4S_SESSION`:
     The desktop to start; defaults to `gnome-session`. Anything that runs on
     X11 works, and nothing else in a session depends on the choice. GNOME 50,
@@ -194,6 +220,41 @@ The X display number is *not* allocated. The X server picks the first free one
 itself and reports it back, which is the only way to claim one without a race.
 Nothing outside the machine ever sees the display number, so it does not need to
 be predictable.
+
+## TRANSPORTS
+
+How the reverse proxy reaches a session, in decreasing order of how much the
+machine itself can guarantee.
+
+  * **Unix socket** (`hdw4s transport` <instance> `unix`):
+    The session listens only on loopback, and systemd exposes it at
+    `/run/hdw4s-proxy/<instance>.sock`, owned by the group named in
+    `HDW4S_PROXY_GROUP`. Who may connect is then a question of file
+    permissions: a process that cannot open the socket cannot reach the
+    session at all, whatever address it comes from and whatever it claims to
+    be. There is no shared secret to leak and no address to spoof.
+
+    This is the right answer whenever it is available. It requires the proxy
+    to be on the same machine, or to be able to see the same filesystem --
+    which, for a container, can mean a bind mount from the host.
+
+  * **TCP with a proxy credential** (`tcp` plus `hdw4s auth`):
+    For a proxy on another machine. The firewall restricts which addresses may
+    connect, and the session additionally requires a secret that only the proxy
+    knows, injected by it as a header. An attacker who defeats the address
+    check -- by spoofing, or simply by being on the same network -- still does
+    not have the secret.
+
+    The secret crosses the network in the clear on each request, so this is
+    worth pairing with something that makes the path itself private, such as a
+    point-to-point tunnel between the proxy and the session's host, or a
+    hypervisor firewall that pins each container to its own address and so
+    makes spoofing impossible.
+
+  * **TCP alone** (`tcp`, the default):
+    The firewall's address list is the only control. Adequate on a network
+    where nothing untrusted can route to the machine, and the weakest of the
+    three otherwise.
 
 ## REVERSE PROXY AND SECURITY
 
