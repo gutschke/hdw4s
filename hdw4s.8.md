@@ -8,6 +8,8 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `enable` <instance><br>
 `hdw4s` `disable` <instance><br>
 `hdw4s` `release` <instance><br>
+`hdw4s` `set` [<instance>] <KEY>=<VALUE>...<br>
+`hdw4s` `unset` [<instance>] <KEY><br>
 `hdw4s` `keyring` <instance><br>
 `hdw4s` `firewall` `--apply`|`--check`|`--print`
 
@@ -49,6 +51,19 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Stop a session and give up its slot, so another session may take the port.
     The session's profile directory is left in place.
 
+  * `set` [<instance>] <KEY>=<VALUE>...:
+    Change a setting without opening an editor. With an instance, writes to
+    that session's file; without one, to the defaults. The edit is deliberately
+    conservative: an existing assignment is changed where it stands, keeping
+    its indentation and any note written after it on the same line; otherwise
+    the documented default is uncommented in place, so the explanation above it
+    still applies; otherwise the setting is appended. Nothing else in the file
+    is touched, and anything not offered here can still be edited by hand.
+
+  * `unset` [<instance>] <KEY>:
+    Comment a setting out so the default applies again. The line is commented
+    rather than deleted, so the value that was there stays visible.
+
   * `keyring` <instance>:
     Give a session its own keyring with a generated password, sealed to this
     machine with systemd-creds and handed to the session at start time, so it
@@ -64,6 +79,11 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
   * `firewall --check`:
     Report whether the table is loaded and whether every session listens on a
     port the table actually covers. Exits non-zero if not.
+
+  * `firewall --restore`:
+    Put the table back if it has gone missing, and do nothing if it has not.
+    Run periodically by `hdw4s-firewall.timer`; see **REVERSE PROXY AND
+    SECURITY**.
 
   * `firewall --print`:
     Write the ruleset to standard output without loading it.
@@ -112,6 +132,9 @@ Three files are read in order, each overriding the last:
     Overrides the allocated port for one session. Setting this outside the block
     puts the session outside the firewall's coverage; `hdw4s firewall --check`
     reports that.
+
+  * `HDW4S_ALLOW_SYSTEM_USER`:
+    Set to `yes` to permit a session for an account below UID 1000.
 
   * `HDW4S_SESSION`:
     The desktop to start; defaults to `gnome-session`. Anything that runs on
@@ -199,6 +222,17 @@ rule written per session goes stale the moment a session moves, which is how a
 firewall ends up guarding a port nothing listens on while live sessions sit
 unprotected beside it.
 
+The table is also checked periodically, not just applied once at session start.
+`nft flush ruleset` removes every table on the machine, including this one, and
+several common tools issue it -- `ufw reload` and `netfilter-persistent` among
+them. Without a check, the table would vanish while every session carried on
+serving, and nothing would say so. `hdw4s-firewall.timer` notices and puts it
+back.
+
+`hdw4s enable` refuses an account below UID 1000 unless
+`HDW4S_ALLOW_SYSTEM_USER=yes` is set, since a browser-reachable desktop with no
+authentication of its own is rarely what is wanted for a system account.
+
 Each session's X server is given its own authority cookie in its runtime
 directory. Without one, every account on the machine could read the session's
 screen and type into it.
@@ -232,11 +266,23 @@ screen and type into it.
   * `/run/hdw4s/<instance>/`:
     Runtime directory: X authority cookie, X server log, current display.
 
+## UPDATES
+
+A timer follows upstream daily. It verifies what it downloaded before replacing
+anything, and refuses outright to install a release whose layout it does not
+recognise, rather than half-upgrading a working machine.
+
+It restarts only sessions nobody is connected to. A session in use keeps the
+version it started with until it next stops on its own, which is when picking
+up a new one costs nothing. An updater that reboots a desktop somebody is
+working in, at an hour chosen by a timer, is an updater that gets switched off.
+
 ## DIAGNOSTICS
 
     hdw4s list                       what exists and whether it is running
     hdw4s show <instance>            effective settings and their source
     hdw4s firewall --check           whether every session is actually filtered
+    hdw4s --version                  which version this is
     systemctl status hdw4s@<i>       includes the display and port when running
     journalctl -xeu hdw4s@<i>        session output, including the X server
 

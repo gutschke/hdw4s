@@ -1,0 +1,8 @@
+[Unit]
+Description=Restore the HDW4S firewall table if it has gone missing
+Documentation=man:hdw4s(8)
+After=nftables.service
+
+[Service]
+ExecStart=/usr/lib/hdw4s/hdw4s-firewall --restore
+Type=oneshot

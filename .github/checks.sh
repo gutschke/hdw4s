@@ -16,8 +16,9 @@ cd "$(dirname "$0")/.."
 SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
          debian/postinst debian/postrm .github/checks.sh)
-UNITS=(hdw4s@.service hdw4s-firewall.service hdw4s-updater.service
-       hdw4s-updater.timer hdw4s.slice)
+UNITS=(hdw4s@.service hdw4s-firewall.service hdw4s-firewall-check.service
+       hdw4s-firewall.timer hdw4s-updater.service hdw4s-updater.timer
+       hdw4s.slice)
 
 fail=0
 note() { printf '%-28s %s\n' "$1" "$2"; }
@@ -80,6 +81,30 @@ if [ -n "${EXPECT_VERSION:-}" ] && [ "${version}" != "${EXPECT_VERSION}" ]; then
   bad 'version' "changelog says ${version}, tag says ${EXPECT_VERSION}"
 fi
 dpkg-parsechangelog >/dev/null || bad 'changelog' 'will not parse'
+
+# The version is stated in the script rather than generated into it, so that
+# the files in git are the files that ship down both distribution paths. That
+# only works if something checks the two agree.
+declared="$(sed -n "s/^HDW4S_VERSION='\(.*\)'\$/\1/p" hdw4s)"
+if [ "${declared}" = "${version}" ]; then
+  note 'hdw4s --version' "${declared}"
+else
+  bad 'hdw4s --version' "says ${declared}, changelog says ${version}"
+fi
+
+# Defaults are necessarily repeated between the scripts, the sample config and
+# the man page. They drift silently, and only a user notices.
+for setting in HDW4S_BASE_PORT:7300 HDW4S_BLOCK_SIZE:64; do
+  key="${setting%%:*}"; want="${setting#*:}"
+  for f in hdw4s hdw4s-firewall; do
+    got="$(sed -n "s/^${key}=\([0-9]*\)\$/\1/p" "${f}" | head -n1)"
+    [ "${got}" = "${want}" ] ||
+      bad "${f}" "${key} is ${got}, expected ${want}"
+  done
+  grep -q "^#${key}=${want}\$" hdw4s.conf ||
+    bad 'hdw4s.conf' "documents a different ${key}"
+done
+note 'defaults agree' 'ok'
 
 if [ "${1:-}" = '--package' ]; then
   echo

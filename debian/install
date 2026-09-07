@@ -9,5 +9,7 @@ hdw4s.conf               etc/hdw4s
 hdw4s@.service           usr/lib/systemd/system
 hdw4s.slice              usr/lib/systemd/system
 hdw4s-firewall.service   usr/lib/systemd/system
+hdw4s-firewall-check.service  usr/lib/systemd/system
+hdw4s-firewall.timer     usr/lib/systemd/system
 hdw4s-updater.service    usr/lib/systemd/system
 hdw4s-updater.timer      usr/lib/systemd/system

@@ -61,7 +61,7 @@ if [ -n "${SELKIES_VERSION:-}" ]; then
 else
   echo -n 'Checking for Selkies updates...'
   release="${workdir}/release.json"
-  curl -fsSL -o "${release}" "${API}/releases/latest" || {
+  curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o "${release}" "${API}/releases/latest" || {
     echo ' failed.'
     echo 'Could not reach the GitHub release API; leaving the installation alone.' >&2
     exit 0
@@ -104,8 +104,8 @@ if [ "${current}" != "${wanted}" ]; then
   # and is a plausible file" is the only integrity check available; do at least
   # that much before overwriting anything.
   echo -n '  Downloading...'
-  curl -fsSL -o "${workdir}/${wheel}" "${DL}/v${wanted}/${wheel}"
-  curl -fsSL -o "${workdir}/${web}"   "${DL}/v${wanted}/${web}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o "${workdir}/${wheel}" "${DL}/v${wanted}/${wheel}"
+  curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o "${workdir}/${web}"   "${DL}/v${wanted}/${web}"
   echo ' done.'
 
   echo -n '  Verifying...'
@@ -224,7 +224,44 @@ mapfile -t units < <(systemctl list-units --plain --no-legend --all 'hdw4s@*' |
   exit 0
 }
 
-echo -n "Restarting ${#units[@]} session(s)..."
+# Restart only sessions nobody is using. A daily timer that reboots a desktop
+# somebody is working in -- unsaved editors, a half-written mail -- turns an
+# auto-updater from an asset into the reason it gets switched off. Sessions in
+# use keep the old code until they next stop on their own, which is exactly
+# when picking up the new version costs nothing.
+idle=()
+busy=()
+for unit in "${units[@]}"; do
+  inst="${unit#hdw4s@}"; inst="${inst%.service}"
+  port="$(sed -n 's/^[[:space:]]*HDW4S_PORT=\([0-9]\{1,\}\).*/\1/p' \
+          "/etc/hdw4s/${inst}.conf" 2>/dev/null | tail -n1)"
+  if [ -z "${port}" ]; then
+    idx="$(awk -v i="${inst}" '$1 !~ /^#/ && $2 == i { print $1; exit }' \
+           /etc/hdw4s/instances 2>/dev/null)"
+    [ -z "${idx}" ] || port=$(( ${HDW4S_BASE_PORT:-7300} + idx ))
+  fi
+  if [ -n "${port}" ] &&
+     ss -Htn state established "sport = :${port}" 2>/dev/null | grep -q .; then
+    busy+=("${unit}")
+  else
+    idle+=("${unit}")
+  fi
+done
+
+[ "${#busy[@]}" -eq 0 ] || {
+  echo "Leaving ${#busy[@]} session(s) in use on v${current:-none}:"
+  printf '  %s\n' "${busy[@]}"
+  echo '  They will pick up the new version when they next restart.'
+}
+
+[ "${#idle[@]}" -gt 0 ] || {
+  echo 'Every session is in use; nothing to restart.'
+  rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
+  exit 0
+}
+
+units=("${idle[@]}")
+echo -n "Restarting ${#units[@]} idle session(s)..."
 systemctl restart "${units[@]}" || :
 
 # A unit that crashes on the new version is put into auto-restart by

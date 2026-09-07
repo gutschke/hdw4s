@@ -20,6 +20,7 @@ src="$(cd "$(dirname "$0")" && pwd)"
 SOURCES=(hdw4s{,-session,-run-session,-firewall,-update}
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-firewall.service
+         hdw4s-firewall-check.service hdw4s-firewall.timer
          hdw4s-updater.{service,timer}
          install.sh uninstall.sh LICENSE)
 
@@ -124,6 +125,7 @@ echo ' done.'
 echo -n 'Linking...'
 ln -sf "${dst}/hdw4s" "${sys}/sbin/hdw4s"
 for u in hdw4s@.service hdw4s.slice hdw4s-firewall.service \
+         hdw4s-firewall-check.service hdw4s-firewall.timer \
          hdw4s-updater.service hdw4s-updater.timer; do
   ln -sf "${dst}/${u}" "/etc/systemd/system/${u}"
 done
@@ -141,6 +143,7 @@ echo 'Fetching Selkies...'
 
 systemctl daemon-reload
 systemctl enable --now hdw4s-firewall.service
+systemctl enable --now hdw4s-firewall.timer
 systemctl enable --now hdw4s-updater.timer
 
 # Deliberately no session is started: which accounts get a desktop is a

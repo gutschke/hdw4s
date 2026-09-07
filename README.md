@@ -98,9 +98,13 @@ Before starting anything, say which reverse proxy is allowed to reach these
 desktops:
 
 ```bash
-sudo editor /etc/hdw4s/hdw4s.conf     # set HDW4S_PROXIES
+sudo hdw4s set HDW4S_PROXIES='192.0.2.10 2001:db8::10'
 sudo hdw4s firewall --apply
 ```
+
+Settings can be changed from the command line or by editing
+`/etc/hdw4s/hdw4s.conf` directly; `hdw4s set` edits the file in place and
+leaves comments, ordering and anything you wrote by hand exactly where it was.
 
 Then give an account a desktop and see what it was assigned:
 
@@ -115,10 +119,10 @@ alice                alice      7300   active     yes       3
 ```
 
 Point the proxy at that port. To share a home directory with another desktop,
-add to `/etc/hdw4s/alice.conf`:
+turn isolation on for that session:
 
-```ini
-HDW4S_ISOLATION=profile
+```bash
+sudo hdw4s set alice HDW4S_ISOLATION=profile
 ```
 
 That session then has its own keyring rather than sharing the account's. Give
@@ -145,7 +149,11 @@ cannot guarantee it is *open*: an nftables drop overrides another table's
 accept, but not the reverse. If something else filters this machine, the proxy
 may also need a rule there.
 
-Run `hdw4s firewall --check` to confirm every session is actually covered.
+Run `hdw4s firewall --check` to confirm every session is actually covered. A
+timer runs the same check periodically and puts the table back if something
+else flushed the ruleset -- `ufw reload` and `netfilter-persistent` both do,
+and without the check every session would keep serving, unfiltered, in
+silence.
 
 ## Requirements
 

@@ -12,6 +12,10 @@
 .br
 \fBhdw4s\fR \fBrelease\fR \fIinstance\fR
 .br
+\fBhdw4s\fR \fBset\fR [\fIinstance\fR] \fIKEY\fR=\fIVALUE\fR\|\.\|\.\|\.
+.br
+\fBhdw4s\fR \fBunset\fR [\fIinstance\fR] \fIKEY\fR
+.br
 \fBhdw4s\fR \fBkeyring\fR \fIinstance\fR
 .br
 \fBhdw4s\fR \fBfirewall\fR \fB\-\-apply\fR|\fB\-\-check\fR|\fB\-\-print\fR
@@ -38,6 +42,12 @@ Stop a session and stop starting it at boot\. The slot stays reserved, so the po
 \fBrelease\fR \fIinstance\fR
 Stop a session and give up its slot, so another session may take the port\. The session's profile directory is left in place\.
 .TP
+\fBset\fR [\fIinstance\fR] \fIKEY\fR=\fIVALUE\fR\|\.\|\.\|\.
+Change a setting without opening an editor\. With an instance, writes to that session's file; without one, to the defaults\. The edit is deliberately conservative: an existing assignment is changed where it stands, keeping its indentation and any note written after it on the same line; otherwise the documented default is uncommented in place, so the explanation above it still applies; otherwise the setting is appended\. Nothing else in the file is touched, and anything not offered here can still be edited by hand\.
+.TP
+\fBunset\fR [\fIinstance\fR] \fIKEY\fR
+Comment a setting out so the default applies again\. The line is commented rather than deleted, so the value that was there stays visible\.
+.TP
 \fBkeyring\fR \fIinstance\fR
 Give a session its own keyring with a generated password, sealed to this machine with systemd\-creds and handed to the session at start time, so it is unlocked without anyone typing anything\. The session's keyring is separate from the account's login keyring: passwords saved in one are not visible in the other\. Requires root and a restart of the session\.
 .TP
@@ -46,6 +56,9 @@ Rewrite the package's nftables table and the kernel's reserved\-port list from t
 .TP
 \fBfirewall \-\-check\fR
 Report whether the table is loaded and whether every session listens on a port the table actually covers\. Exits non\-zero if not\.
+.TP
+\fBfirewall \-\-restore\fR
+Put the table back if it has gone missing, and do nothing if it has not\. Run periodically by \fBhdw4s\-firewall\.timer\fR; see \fBREVERSE PROXY AND SECURITY\fR\.
 .TP
 \fBfirewall \-\-print\fR
 Write the ruleset to standard output without loading it\.
@@ -87,6 +100,9 @@ The address the streaming server binds\. Defaults to \fB0\.0\.0\.0\fR, because t
 .TP
 \fBHDW4S_PORT\fR
 Overrides the allocated port for one session\. Setting this outside the block puts the session outside the firewall's coverage; \fBhdw4s firewall \-\-check\fR reports that\.
+.TP
+\fBHDW4S_ALLOW_SYSTEM_USER\fR
+Set to \fByes\fR to permit a session for an account below UID 1000\.
 .TP
 \fBHDW4S_SESSION\fR
 The desktop to start; defaults to \fBgnome\-session\fR\. Anything that runs on X11 works, and nothing else in a session depends on the choice\. GNOME 50, which Ubuntu 26\.04 ships, removes the X11 session that the current Selkies release needs, whereas Xorg and the lighter desktops have no such plan, so changing this is the whole migration when that matters\.
@@ -137,6 +153,10 @@ The package owns one nftables table, \fBinet hdw4s\fR\. It restricts and does no
 .P
 The rules cover the whole port block rather than the ports currently in use\. A rule written per session goes stale the moment a session moves, which is how a firewall ends up guarding a port nothing listens on while live sessions sit unprotected beside it\.
 .P
+The table is also checked periodically, not just applied once at session start\. \fBnft flush ruleset\fR removes every table on the machine, including this one, and several common tools issue it \-\- \fBufw reload\fR and \fBnetfilter\-persistent\fR among them\. Without a check, the table would vanish while every session carried on serving, and nothing would say so\. \fBhdw4s\-firewall\.timer\fR notices and puts it back\.
+.P
+\fBhdw4s enable\fR refuses an account below UID 1000 unless \fBHDW4S_ALLOW_SYSTEM_USER=yes\fR is set, since a browser\-reachable desktop with no authentication of its own is rarely what is wanted for a system account\.
+.P
 Each session's X server is given its own authority cookie in its runtime directory\. Without one, every account on the machine could read the session's screen and type into it\.
 .SH "FILES"
 .TP
@@ -163,11 +183,16 @@ An isolated session's profile\.
 .TP
 \fB/run/hdw4s/<instance>/\fR
 Runtime directory: X authority cookie, X server log, current display\.
+.SH "UPDATES"
+A timer follows upstream daily\. It verifies what it downloaded before replacing anything, and refuses outright to install a release whose layout it does not recognise, rather than half\-upgrading a working machine\.
+.P
+It restarts only sessions nobody is connected to\. A session in use keeps the version it started with until it next stops on its own, which is when picking up a new one costs nothing\. An updater that reboots a desktop somebody is working in, at an hour chosen by a timer, is an updater that gets switched off\.
 .SH "DIAGNOSTICS"
 .nf
 hdw4s list                       what exists and whether it is running
 hdw4s show <instance>            effective settings and their source
 hdw4s firewall \-\-check           whether every session is actually filtered
+hdw4s \-\-version                  which version this is
 systemctl status hdw4s@<i>       includes the display and port when running
 journalctl \-xeu hdw4s@<i>        session output, including the X server
 .fi

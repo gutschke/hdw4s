@@ -12,6 +12,8 @@ trap 'rc="$?"
 # Exit with an explanation rather than the trap's generic complaint. The trap
 # is for faults nobody anticipated; anything diagnosed here has already been
 # described to the user and does not need a second, vaguer line after it.
+HDW4S_VERSION='1.0'
+
 die() {
   trap '' INT TERM QUIT HUP EXIT ERR
   printf '%s\n' "$@" >&2
@@ -51,7 +53,10 @@ Usage: hdw4s <command> [arguments]
   enable <instance>       allocate a slot for a session and start it at boot
   disable <instance>      stop a session and keep its slot reserved
   release <instance>      stop a session and give up its slot
+  set [<instance>] K=V    change one setting, keeping the rest of the file
+  unset [<instance>] K    comment a setting out again, restoring the default
   keyring <instance>      give a session its own keyring, unlocked at start
+  --version               print the version
   firewall --apply        rewrite the package's nftables table
   firewall --check        report whether every session port is protected
 
@@ -60,6 +65,14 @@ number for a second concurrent desktop belonging to the same account:
 
   hdw4s enable alice
   hdw4s enable alice:2
+
+"set" and "unset" without an instance act on the defaults for every session:
+
+  hdw4s set HDW4S_PROXIES='192.0.2.10 2001:db8::10'
+  hdw4s set alice HDW4S_ISOLATION=profile
+
+Anything the command line does not cover can still be edited by hand; these
+just save a trip to an editor for the settings people change most.
 
 See hdw4s(8) for configuration and for how to put a reverse proxy in front of
 these sessions safely.
@@ -88,9 +101,20 @@ split_instance() {
     ''|*[!0-9]*|0*)
       echo "hdw4s: '${inst}' has a bad session number" >&2; return 1;;
   esac
-  getent passwd -- "${user}" >/dev/null || {
+  local uid
+  uid="$(getent passwd -- "${user}" | cut -d: -f3)" || :
+  [ -n "${uid}" ] || {
     echo "hdw4s: no such user: ${user}" >&2; return 1
   }
+  # A session is a full desktop reachable from a browser with no
+  # authentication of its own. Handing one to a system account is almost
+  # certainly a mistake, and the failure mode if it is not caught is severe.
+  if [ "${uid}" -lt 1000 ] && [ "${HDW4S_ALLOW_SYSTEM_USER:-}" != 'yes' ]; then
+    echo "hdw4s: ${user} is a system account (uid ${uid})." >&2
+    echo '  Set HDW4S_ALLOW_SYSTEM_USER=yes in the configuration if this is' >&2
+    echo '  really intended.' >&2
+    return 1
+  fi
 }
 
 # --- slot table -------------------------------------------------------------
@@ -216,6 +240,190 @@ cmd_enable() {
   echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
 }
 
+# --- editing configuration --------------------------------------------------
+#
+# Settings people change often should not require an editor, but the file is
+# the administrator's, so an edit has to disturb as little of it as possible.
+# In order of preference: change an existing assignment where it stands; else
+# uncomment the documented default where it stands, so the comment above it
+# still explains the value; else append. Comments, ordering, spacing and
+# anything the administrator wrote are preserved in every case.
+
+# Settings that may be set from the command line, and how to check a value.
+# Anything absent from here is rejected rather than written, because a typo
+# that silently does nothing is worse than an error.
+declare -A SETTABLE=(
+  [HDW4S_PROXIES]='any'
+  [HDW4S_ISOLATION]='none|profile'
+  [HDW4S_PROFILE_DIR]='path'
+  [HDW4S_ADDR]='any'
+  [HDW4S_PORT]='number'
+  [HDW4S_BASE_PORT]='number'
+  [HDW4S_BLOCK_SIZE]='number'
+  [HDW4S_SESSION]='any'
+  [HDW4S_FRAMERATE]='number'
+  [HDW4S_ENCODER]='any'
+  [SELKIES_VERSION]='any'
+)
+
+check_value() {
+  local key="$1" value="$2" rule="${SETTABLE[$1]}"
+  case "${rule}" in
+    number) case "${value}" in ''|*[!0-9]*)
+              die "hdw4s: ${key} takes a number, not '${value}'";; esac;;
+    path)   case "${value}" in /*) :;;
+              *) die "hdw4s: ${key} takes an absolute path, not '${value}'";; esac;;
+    any)    :;;
+    *)      case "|${rule}|" in
+              *"|${value}|"*) :;;
+              *) die "hdw4s: ${key} must be one of ${rule//|/, }, not '${value}'";;
+            esac;;
+  esac
+}
+
+# Quote only when the value needs it, so a file edited by hand keeps looking
+# the way the administrator wrote it.
+quote_value() {
+  case "$1" in
+    ''|*[![:alnum:]_./:-]*) printf "'%s'" "${1//\'/\'\\\'\'}";;
+    *) printf '%s' "$1";;
+  esac
+}
+
+config_file() {
+  if [ -z "$1" ]; then echo "${CONF}"; else echo "/etc/hdw4s/$1.conf"; fi
+}
+
+config_write() {
+  local file="$1" key="$2" value="$3" tmp
+  install -d -m0755 /etc/hdw4s
+  [ -e "${file}" ] || {
+    printf '%s\n' \
+      "# Settings for this session. Read after ${CONF}, and wins over it." \
+      '# Edit by hand, or with "hdw4s set".' \
+      '' > "${file}"
+    chmod 0644 "${file}"
+  }
+
+  tmp="$(mktemp "${file}.XXXXXX")"
+  chmod 0644 "${tmp}"
+  KEY="${key}" VALUE="${value}" awk '
+    # A note the administrator wrote at the end of the line is theirs, and
+    # replacing the value is no reason to throw it away. Only treat a "#" as
+    # the start of one when the text before it has balanced quotes, so a "#"
+    # inside a quoted value is left alone.
+    function trailing(line,   i, c, head, sq, dq) {
+      for (i = length(line); i > 1; i--) {
+        if (substr(line, i, 1) != "#") continue
+        c = substr(line, i - 1, 1)
+        if (c != " " && c != "\t") continue
+        head = substr(line, 1, i - 1)
+        sq = gsub(/'"'"'/, "&", head)
+        dq = gsub(/"/, "&", head)
+        if (sq % 2 == 0 && dq % 2 == 0) return "   " substr(line, i)
+      }
+      return ""
+    }
+    BEGIN { key = ENVIRON["KEY"]; value = ENVIRON["VALUE"]; live = 0; comment = 0 }
+    # Remember the last assignment that is in effect, and the last commented
+    # one, so the replacement happens where a reader would expect to find it.
+    $0 ~ "^[[:space:]]*" key "=" { live = NR }
+    $0 ~ "^[[:space:]]*#[[:space:]]*" key "="  { comment = NR }
+    { lines[NR] = $0 }
+    END {
+      target = live ? live : comment
+      for (i = 1; i <= NR; i++) {
+        if (i == target) {
+          match(lines[i], /^[[:space:]]*/)
+          indent = substr(lines[i], 1, RLENGTH)
+          printf "%s%s=%s%s\n", indent, key, value, trailing(lines[i])
+        } else {
+          print lines[i]
+        }
+      }
+      if (!target) {
+        if (NR > 0 && lines[NR] != "") print ""
+        printf "%s=%s\n", key, value
+      }
+    }' "${file}" > "${tmp}"
+  mv "${tmp}" "${file}"
+}
+
+cmd_set() {
+  local inst='' file key value pair
+  if [ "$#" -gt 1 ] && [ "${1#*=}" = "$1" ]; then
+    inst="$1"; shift
+    split_instance "${inst}"
+  fi
+  [ "$#" -gt 0 ] || die 'hdw4s: nothing to set'
+  file="$(config_file "${inst}")"
+
+  for pair in "$@"; do
+    case "${pair}" in
+      *=*) :;;
+      *) die "hdw4s: '${pair}' is not KEY=VALUE";;
+    esac
+    key="${pair%%=*}"
+    value="${pair#*=}"
+    [ -n "${SETTABLE[${key}]+set}" ] ||
+      die "hdw4s: ${key} cannot be set from the command line." \
+          "  Settable: ${!SETTABLE[*]}" \
+          "  Anything else can still be edited in ${file}."
+    check_value "${key}" "${value}"
+    config_write "${file}" "${key}" "$(quote_value "${value}")"
+    echo "${file}: ${key}=${value}"
+  done
+  set_hint "${inst}" "$@"
+}
+
+cmd_unset() {
+  local inst='' file key tmp
+  if [ "$#" -gt 1 ]; then inst="$1"; shift; split_instance "${inst}"; fi
+  [ "$#" -eq 1 ] || die 'hdw4s: unset takes one setting'
+  key="$1"
+  file="$(config_file "${inst}")"
+  [ -e "${file}" ] || die "hdw4s: ${file} does not exist"
+
+  # Comment the assignment out rather than deleting the line, so the value that
+  # was there stays visible and the file still documents what was tried.
+  tmp="$(mktemp "${file}.XXXXXX")"
+  chmod 0644 "${tmp}"
+  KEY="${key}" awk '
+    BEGIN { key = ENVIRON["KEY"] }
+    $0 ~ "^[[:space:]]*" key "=" { print "#" $0; next }
+    { print }' "${file}" > "${tmp}"
+  if cmp -s "${file}" "${tmp}"; then
+    rm -f "${tmp}"
+    echo "${file}: ${key} was not set"
+  else
+    mv "${tmp}" "${file}"
+    echo "${file}: ${key} commented out; the default applies again"
+  fi
+  set_hint "${inst}" "${key}="
+}
+
+# Say what has to happen for a change to take effect. Silently writing a value
+# that does nothing until some unmentioned command is run is how configuration
+# files get a reputation for not working.
+set_hint() {
+  local inst="$1" pair firewall='' session=''
+  shift
+  for pair in "$@"; do
+    case "${pair%%=*}" in
+      HDW4S_PROXIES|HDW4S_BASE_PORT|HDW4S_BLOCK_SIZE) firewall='yes';;
+      *) session='yes';;
+    esac
+  done
+  [ -z "${firewall}" ] || echo "  Run 'hdw4s firewall --apply' to use it."
+  if [ -n "${session}" ]; then
+    if [ -n "${inst}" ]; then
+      echo "  Run 'systemctl restart hdw4s@${inst}' to use it."
+    else
+      echo '  Restart the affected sessions to use it.'
+    fi
+  fi
+}
+
 cmd_keyring() {
   local inst="$1" cred pw
   split_instance "${inst}"
@@ -232,7 +440,15 @@ cmd_keyring() {
   # to the session at start time in memory that is not swapped, and the session
   # unlocks the keyring with it.
   cred="/etc/hdw4s/${inst}.keyring.cred"
-  pw="$(head -c32 /dev/urandom | base64 | tr -d '\n=/+' | head -c24)"
+  pw=''
+  while [ "${#pw}" -lt 24 ]; do
+    # tr removes characters before head truncates, so a single pass can come
+    # out short. Loop until it is the length it is supposed to be rather than
+    # hoping, because a one-in-a-thousand weak credential is the kind nobody
+    # ever finds.
+    pw="${pw}$(head -c48 /dev/urandom | base64 | tr -d '\n=/+')"
+  done
+  pw="${pw:0:24}"
   if ! ( umask 0077
          printf '%s' "${pw}" |
            systemd-creds encrypt --name=hdw4s-keyring - "${cred}" ) 2>/dev/null
@@ -292,8 +508,11 @@ case "${1:-}" in
   enable)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_disable "$@";;
   keyring)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_keyring "$@";;
+  set)      shift; cmd_set "$@";;
+  unset)    shift; cmd_unset "$@";;
   release)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_release "$@";;
   firewall) shift; exec /usr/lib/hdw4s/hdw4s-firewall "$@";;
+  --version) echo "hdw4s ${HDW4S_VERSION}";;
   -h|--help|help|'') usage;;
   *) echo "hdw4s: unknown command '$1'" >&2; usage >&2
      trap '' INT TERM QUIT HUP EXIT ERR; exit 2;;

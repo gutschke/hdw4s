@@ -1,0 +1,18 @@
+[Unit]
+Description=Check that the HDW4S firewall table is still there
+Documentation=man:hdw4s(8)
+
+[Timer]
+Unit=hdw4s-firewall-check.service
+# A session binds every interface and performs no authentication of its own,
+# so this table is the only thing between it and the network. Requires= in the
+# session unit guarantees the table was applied once, at start. It does not
+# survive another tool issuing "nft flush ruleset", which ufw, netfilter-
+# persistent and a number of configuration-management tools all do: the table
+# disappears, every session stays up and reachable, and nothing says a word.
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
