@@ -227,17 +227,16 @@ cmd_enable() {
 
   install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
 
-  # systemd has no specifier for "the part of the instance name before the
-  # colon", so a unit whose instance carries a session number cannot express
-  # User= on its own. A drop-in supplies it. The unit's own User=%i still
-  # covers the common single-session case unaided.
-  if [ "${inst}" != "${user}" ]; then
-    printf '%s\n' \
-      '# Written by "hdw4s enable"; edit /etc/hdw4s/'"${inst}"'.conf instead.' \
-      '[Service]' \
-      "User=${user}" \
-      > "${DROPIN}/hdw4s@${inst}.service.d/50-user.conf"
-  fi
+  # The unit carries no User= of its own. systemd has no specifier for "the
+  # part of the instance name before the colon", and "User=%i" cannot be
+  # rescued by a drop-in: an invalid user name in the base unit is a fatal
+  # parse error, so the unit never loads far enough for an override to apply.
+  # Every instance therefore gets its account named here.
+  printf '%s\n' \
+    '# Written by "hdw4s enable"; edit /etc/hdw4s/'"${inst}"'.conf instead.' \
+    '[Service]' \
+    "User=${user}" \
+    > "${DROPIN}/hdw4s@${inst}.service.d/50-user.conf"
 
   # ProtectSystem=strict makes the whole filesystem read-only apart from what
   # is named, and a desktop has to be able to write its own home. The unit

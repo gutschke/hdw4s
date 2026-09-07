@@ -13,11 +13,13 @@ Requires=hdw4s-firewall.service
 RequiresMountsFor=/home
 
 [Service]
-# The instance name is "<user>" or "<user>:<session>". "User=%i" covers the
-# first form on its own; for the second, "hdw4s enable" writes a drop-in with
-# the parsed user name, because systemd has no specifier for "the part of the
-# instance before the colon".
-User=%i
+# There is deliberately no User= here. The instance name is "<user>" or
+# "<user>:<session>", and systemd has no specifier for "the part before the
+# colon" -- but "User=%i" cannot simply be overridden by a drop-in either,
+# because an invalid user name in the base unit is a fatal parse error and the
+# unit never loads far enough for the override to apply. So "hdw4s enable"
+# writes User= into a drop-in for every instance, and hdw4s-session refuses to
+# run as root, which is what a missing drop-in would otherwise mean.
 
 CapabilityBoundingSet=
 DevicePolicy=closed

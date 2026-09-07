@@ -32,20 +32,30 @@ trap 'trap "" INT TERM QUIT HUP EXIT
       [ "${#children[@]}" -eq 0 ] || kill "${children[@]}" 2>/dev/null || :' \
      INT TERM QUIT HUP EXIT
 
-# Only set a key if its schema is actually installed. A missing schema makes
-# gsettings abort, and which extensions are present varies between installs.
+# Only set a key if its schema is actually installed, and never wait long. A
+# missing schema makes gsettings abort, and every one of these calls goes to
+# the settings service over the session bus, where a service that is slow to
+# activate -- or that is never going to answer -- would otherwise block with no
+# timeout of its own.
 set_if_present() {
   local schema="$1" key="$2" value="$3"
-  gsettings writable "${schema}" "${key}" >/dev/null 2>&1 || return 0
-  gsettings set "${schema}" "${key}" "${value}" 2>/dev/null || :
+  timeout 10 gsettings writable "${schema}" "${key}" >/dev/null 2>&1 || return 0
+  timeout 10 gsettings set "${schema}" "${key}" "${value}" 2>/dev/null ||
+    echo "hdw4s: could not set ${schema} ${key}" >&2
 }
 
-# Nobody can unlock a screen that has no keyboard attached to it, and a blanked
-# screen would stop the stream updating with no way to wake it.
-set_if_present org.gnome.desktop.screensaver  lock-enabled     false
-set_if_present org.gnome.desktop.session      idle-delay       'uint32 0'
-set_if_present org.gnome.settings-daemon.plugins.power \
-                                              sleep-inactive-ac-type 'nothing'
+# Applied in the background, once the desktop is on its way up. These three are
+# conveniences: nobody can unlock a screen with no keyboard attached to it, and
+# a blanked screen would stop the stream updating with no way to wake it. None
+# is worth delaying a desktop for, let alone preventing one from starting --
+# which is exactly what happened when the settings service did not answer.
+(
+  set_if_present org.gnome.desktop.screensaver  lock-enabled     false
+  set_if_present org.gnome.desktop.session      idle-delay       'uint32 0'
+  set_if_present org.gnome.settings-daemon.plugins.power \
+                                                sleep-inactive-ac-type 'nothing'
+) &
+children+=($!)
 
 # The unit is a system service, so this account has no systemd user manager of
 # its own and nothing has started the audio stack. On a current Ubuntu that is

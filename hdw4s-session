@@ -9,6 +9,17 @@ set -o nounset -o pipefail
 
 instance="${1:?usage: hdw4s-session <instance>}"
 
+# The unit names no account; "hdw4s enable" writes one into a drop-in. If that
+# drop-in is missing -- someone ran "systemctl enable hdw4s@name" by hand --
+# this would otherwise be a desktop running as root, reachable from a browser.
+# Refuse, and say what to run instead.
+[ "$(id -u)" -ne 0 ] || {
+  echo 'hdw4s: refusing to run a desktop as root.' >&2
+  echo "  Enable the session with 'hdw4s enable ${instance}', which records" >&2
+  echo '  which account it belongs to, rather than starting the unit by hand.' >&2
+  exit 1
+}
+
 : "${XDG_RUNTIME_DIR:?must be set by the unit}"
 
 CONF='/etc/hdw4s/hdw4s.conf'
@@ -74,17 +85,31 @@ trap cleanup INT TERM QUIT HUP EXIT
 # per-session config home, and Qt looks for ~/.config/ibus regardless of it.
 # The dconf profile is moved on its own instead, which is the supported knob.
 if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
+  export XDG_CONFIG_HOME="${profile}/config"
   export XDG_DATA_HOME="${profile}/data"
   export XDG_STATE_HOME="${profile}/state"
   export XDG_CACHE_HOME="${profile}/cache"
-  install -d -m0700 "${XDG_DATA_HOME}" "${XDG_STATE_HOME}" "${XDG_CACHE_HOME}"
+  install -d -m0700 "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" \
+                    "${XDG_STATE_HOME}" "${XDG_CACHE_HOME}"
 
-  # The keyfile back end writes a plain text file with ordinary read and write
-  # calls, unlike the default database, which is mmap'd. That is what makes it
-  # the supported choice when the settings could land on a network filesystem.
-  export DCONF_PROFILE="${profile}/dconf-profile"
-  [ -e "${DCONF_PROFILE}" ] ||
-    printf 'service-db:keyfile/hdw4s\n' > "${DCONF_PROFILE}"
+  # XDG_CONFIG_HOME is redirected along with the rest, which is what puts the
+  # settings database on local disk. That is the whole point: dconf's default
+  # database is memory-mapped and is documented as unsuitable on NFS, and the
+  # stores behind gvfs and the desktop indexer are journalled SQLite, which is
+  # documented as not working there either. Moving them off the network
+  # filesystem removes the problem rather than working around it.
+  #
+  # The alternative -- leaving the config home shared and pointing dconf at its
+  # keyfile back end instead -- was tried and abandoned. It needs a service
+  # that has to answer before any setting can be read, so when it does not, the
+  # desktop does not start at all; and it leaves a lock beside its database
+  # that a killed session does not clean up, which blocks the next one.
+  # Trading a documented filesystem limitation for a new startup dependency is
+  # not an improvement.
+  #
+  # What this does not cover: applications that hardcode ~/.config regardless
+  # of the variable, which for practical purposes means some Qt input-method
+  # configuration. Those stay shared.
 
   # Applications that ignore the XDG variables need their own redirection.
   # Chrome reads this one directly; Firefox needs the wrapper in
