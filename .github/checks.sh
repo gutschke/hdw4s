@@ -72,6 +72,25 @@ for section in NAME SYNOPSIS DESCRIPTION COMMANDS CONFIGURATION \
 done
 note 'required sections' 'present'
 
+# The updater injects JavaScript into the streaming client's page. It is code
+# we ship, and a syntax error in it would otherwise be found by a user looking
+# at a blank browser tab, with nothing in any log to explain it.
+if command -v node >/dev/null; then
+  jstmp="$(mktemp --suffix=.js)"
+  if python3 "$(dirname "$0")/extract-injected-js.py" > "${jstmp}" 2>/dev/null &&
+     [ -s "${jstmp}" ]; then
+    if node --check "${jstmp}" 2>/dev/null; then
+      note 'injected javascript' 'parses'
+    else
+      node --check "${jstmp}" 2>&1 | head -5
+      bad 'injected javascript' 'does not parse'
+    fi
+  else
+    bad 'injected javascript' 'could not be extracted from hdw4s-update'
+  fi
+  rm -f "${jstmp}"
+fi
+
 echo
 echo '== packaging =='
 # The tag, the changelog and the built artifact have to agree, or a release

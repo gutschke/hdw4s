@@ -235,15 +235,31 @@ if [ -f "${index}" ]; then
       return [w - (w % 2), h - (h % 2)];
     }
 
-    var clamped = false, done = false, tries = 0;
+    var clamped = false, asked = false, tries = 0;
+
+    function askForResize() {
+      if (asked) return;
+      // Respect someone who has deliberately turned remote resizing off.
+      if (typeof app !== 'undefined' && app.resizeRemote === false) return;
+      if (!webrtc.input || typeof webrtc.input.onresizeend !== 'function') return;
+      asked = true;
+      try { webrtc.input.onresizeend(); } catch (e) { asked = false; }
+    }
+
+    // Poll often enough to be in place before the connection completes. The
+    // handler below is chained onto an event, and an event that has already
+    // fired cannot be chained onto -- which is the whole reason the desktop
+    // sometimes came up letterboxed on a first connection and was fine after a
+    // reload. So the request is triggered by whichever of the two happens
+    // first, and asked-once guards against sending it twice.
     var timer = setInterval(function() {
-      if (done || ++tries > 120) { clearInterval(timer); return; }
+      if (++tries > 600) { clearInterval(timer); return; }
       try {
         if (typeof webrtc === 'undefined' || !webrtc.input) return;
 
         // Every resize request leaves through this one function, whether it
-        // came from the initial call below or from the user dragging the
-        // window, so it is the only place the bounds have to be applied.
+        // came from here or from the user dragging the window, so it is the
+        // only place the bounds have to be applied.
         if (!clamped && typeof webrtc.sendDataChannelMessage === 'function') {
           var send = webrtc.sendDataChannelMessage.bind(webrtc);
           webrtc.sendDataChannelMessage = function(msg) {
@@ -259,27 +275,48 @@ if [ -f "${index}" ]; then
             return send(out);
           };
           clamped = true;
+
+          // Path one: the channel has not opened yet, so chain onto the event.
+          var prev = webrtc.ondatachannelopen;
+          webrtc.ondatachannelopen = function() {
+            if (typeof prev === 'function') {
+              try { prev.apply(this, arguments); } catch (e) {}
+            }
+            setTimeout(askForResize, 250);
+          };
         }
 
-        if (typeof webrtc.input.onresizeend !== 'function') return;
-        done = true;
-        clearInterval(timer);
-
-        // Ask for the window's size once the data channel is open, since that
-        // is the channel the request travels over and nothing else fires a
-        // resize when a tab is first opened. Chain onto whatever handler the
-        // client already installed rather than replacing it.
-        var prev = webrtc.ondatachannelopen;
-        webrtc.ondatachannelopen = function() {
-          if (typeof prev === 'function') { try { prev.apply(this, arguments); } catch (e) {} }
-          // Respect someone who has deliberately turned remote resizing off.
-          if (typeof app !== 'undefined' && app.resizeRemote === false) return;
-          setTimeout(function() {
-            try { webrtc.input.onresizeend(); } catch (e) {}
-          }, 250);
-        };
+        // Path two: it opened already, and the event is gone. Frames arriving
+        // means the channel is up, whether or not we saw it happen.
+        if (webrtc.element && webrtc.element.videoWidth) {
+          askForResize();
+          clearInterval(timer);
+          setTimeout(verifyFits, 3000);
+        }
       } catch (e) { /* not ready yet; the next tick will try again */ }
-    }, 500);
+    }, 100);
+
+    // Last line of defence. If the desktop still does not match the window a
+    // few seconds in -- a request lost, a race nobody anticipated -- ask once
+    // more rather than leaving the user to reload the tab. Compares against
+    // the video's own intrinsic size, which is the resolution the server
+    // actually settled on.
+    function verifyFits() {
+      try {
+        if (typeof app !== 'undefined' && app.resizeRemote === false) return;
+        var v = webrtc.element;
+        if (!v || !v.videoWidth) return;
+        var want = webrtc.input.getWindowResolution();
+        var w = clampResolution(parseInt(want[0], 10), parseInt(want[1], 10));
+        if (!w) return;
+        if (Math.abs(v.videoWidth - w[0]) > 2 || Math.abs(v.videoHeight - w[1]) > 2) {
+          console.log('hdw4s: desktop is ' + v.videoWidth + 'x' + v.videoHeight +
+                      ' but the window wants ' + w[0] + 'x' + w[1] + '; asking again');
+          asked = false;
+          askForResize();
+        }
+      } catch (e) {}
+    }
   })();
 </script>
 <!-- HDW4S_PATCH_END -->
