@@ -1,0 +1,47 @@
+Source: hdw4s
+Section: x11
+Priority: optional
+Maintainer: Markus Gutschke <gutschke@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Homepage: https://github.com/gutschke/hdw4s
+Rules-Requires-Root: no
+
+Package: hdw4s
+Architecture: all
+Depends: ${misc:Depends},
+         curl,
+         dbus-daemon,
+         gnome-session,
+         nftables,
+         python3,
+         python3-gi,
+         python3-psutil,
+         python3-venv,
+         x11-utils,
+         xauth,
+         xserver-xorg-core,
+         xserver-xorg-input-void,
+         xserver-xorg-video-dummy,
+         gir1.2-gst-plugins-base-1.0,
+         gir1.2-gstreamer-1.0,
+         gstreamer1.0-plugins-bad,
+         gstreamer1.0-plugins-base,
+         gstreamer1.0-plugins-good,
+         gstreamer1.0-plugins-ugly,
+         gstreamer1.0-tools,
+         gstreamer1.0-x
+Recommends: pipewire-pulse, wireplumber
+Description: headless GNOME desktop streamed to a web browser
+ Gives an existing account on an existing machine a full GNOME desktop that is
+ reachable from a browser, without containers and without a graphics card. A
+ systemd template unit starts an X server on the dummy driver, a GNOME session
+ and the Selkies streaming server, one instance per session.
+ .
+ Sessions are allocated a display and a port automatically, so a reverse proxy
+ in front of the machine can be configured from a predictable mapping, and each
+ session's port is added to the package's own nftables table while it runs.
+ .
+ A session may optionally be isolated from any other desktop belonging to the
+ same account, which allows a browser session to coexist with a desktop that is
+ already logged in against the same shared home directory.

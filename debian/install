@@ -1,0 +1,13 @@
+hdw4s                    usr/lib/hdw4s
+hdw4s-session            usr/lib/hdw4s
+hdw4s-run-session        usr/lib/hdw4s
+hdw4s-firewall           usr/lib/hdw4s
+hdw4s-update             usr/lib/hdw4s
+hdw4s.xorg.conf          usr/lib/hdw4s
+wrappers/*               usr/lib/hdw4s/wrappers
+hdw4s.conf               etc/hdw4s
+hdw4s@.service           usr/lib/systemd/system
+hdw4s.slice              usr/lib/systemd/system
+hdw4s-firewall.service   usr/lib/systemd/system
+hdw4s-updater.service    usr/lib/systemd/system
+hdw4s-updater.timer      usr/lib/systemd/system

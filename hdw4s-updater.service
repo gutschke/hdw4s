@@ -1,0 +1,12 @@
+[Unit]
+Description=HDW4S Selkies Updater
+Documentation=man:hdw4s(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/lib/hdw4s/hdw4s-update
+# The script downloads into its own mktemp directory, but a private /tmp means
+# a crashed run cannot leave anything behind for the next one to trip over.
+PrivateTmp=yes
+Type=oneshot

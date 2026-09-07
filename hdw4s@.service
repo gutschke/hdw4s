@@ -1,0 +1,92 @@
+[Unit]
+Description=HDW4S headless desktop for %i
+Documentation=man:hdw4s(8)
+After=network-online.target hdw4s-firewall.service
+Wants=network-online.target
+Requires=hdw4s-firewall.service
+# A home directory that arrives over the network has to be there before a
+# desktop tries to read settings out of it.
+RequiresMountsFor=/home
+
+[Service]
+# The instance name is "<user>" or "<user>:<session>". "User=%i" covers the
+# first form on its own; for the second, "hdw4s enable" writes a drop-in with
+# the parsed user name, because systemd has no specifier for "the part of the
+# instance before the colon".
+User=%i
+
+CapabilityBoundingSet=
+DevicePolicy=closed
+Environment=GNOME_SHELL_SESSION_MODE=ubuntu
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=XDG_RUNTIME_DIR=%t/hdw4s/%i
+# Put the application wrappers ahead of the real binaries. They are what
+# redirects programs that ignore the XDG variables, Firefox above all.
+Environment=PATH=/usr/lib/hdw4s/wrappers:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/hdw4s/hdw4s.conf
+EnvironmentFile=-/etc/hdw4s/%i.conf
+# PrivateTmp= gives this unit an empty /tmp, and systemd-tmpfiles only
+# populates the host's, so the socket directory has to be created in
+# here. ExecStartPre runs inside the namespace, so this is the private
+# one and no other session can see it.
+ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
+ExecStart=/usr/lib/hdw4s/hdw4s-session %i
+KillMode=control-group
+LockPersonality=yes
+# Readiness is reported once the stream is accepting connections, so that
+# "systemctl start" blocks until the desktop can actually be reached. The
+# notification comes from a helper rather than the main process, which is why
+# NotifyAccess has to be "all".
+NotifyAccess=all
+OOMPolicy=continue
+PrivateDevices=yes
+# Gives this session its own /tmp, so the X11 socket and lock file cannot
+# collide with another desktop on this machine and there is nothing left to
+# clean up when the unit stops, however it stops.
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+# The session IS the home directory; it cannot be hidden or made read-only.
+ProtectHome=no
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+# Stops one session from seeing another session's processes, which matters on a
+# machine that hosts desktops for several people.
+ProtectProc=invisible
+ProtectSystem=strict
+ReadWritePaths=/home /var/lib/hdw4s
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=hdw4s/%i
+RuntimeDirectoryMode=0700
+Slice=hdw4s-%i.slice
+StateDirectory=hdw4s/%i
+StateDirectoryMode=0700
+TimeoutStartSec=120
+Type=notify
+UMask=0077
+WorkingDirectory=~
+
+# Deliberately NOT set, because each of these breaks a working desktop:
+#
+#   NoNewPrivileges=yes       sudo, pkexec, fusermount3 and chrome-sandbox are
+#                             all setuid, and with unprivileged user namespaces
+#                             restricted by default on current Ubuntu, Chrome
+#                             depends on its setuid helper to start at all.
+#   RestrictNamespaces=yes    breaks Chrome and Electron's sandbox, flatpak,
+#                             bubblewrap and snap.
+#   SystemCallFilter=...      the @system-service set excludes @mount, which
+#                             gvfs and flatpak need, and @privileged, which
+#                             sudo needs from a terminal in the session.
+#   MemoryDenyWriteExecute=   gnome-shell is JavaScript; denying writable
+#                             executable memory stops its engine from starting.
+#   PrivateUsers=yes          maps every other account to "nobody", which ruins
+#                             group-shared files and is worse over NFS.
+
+[Install]
+WantedBy=multi-user.target

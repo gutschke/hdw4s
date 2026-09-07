@@ -1,0 +1,172 @@
+.TH "HDW4S" "8" "September 2026" "Linux" "System Administration"
+.SH "NAME"
+\fBhdw4s\fR \- headless GNOME desktop streamed to a web browser
+.SH "SYNOPSIS"
+\fBhdw4s\fR \fBlist\fR
+.br
+\fBhdw4s\fR \fBshow\fR \fIinstance\fR
+.br
+\fBhdw4s\fR \fBenable\fR \fIinstance\fR
+.br
+\fBhdw4s\fR \fBdisable\fR \fIinstance\fR
+.br
+\fBhdw4s\fR \fBrelease\fR \fIinstance\fR
+.br
+\fBhdw4s\fR \fBfirewall\fR \fB\-\-apply\fR|\fB\-\-check\fR|\fB\-\-print\fR
+.SH "DESCRIPTION"
+\fBhdw4s\fR gives an existing account on an existing machine a full GNOME desktop that is reachable from a web browser\. It needs no graphics card and no container: the point is to reach the machine and the account that are already there\.
+.P
+Each session is a systemd unit that runs, as that user, an X server on the \fBdummy\fR driver, a GNOME session, and the Selkies streaming server\. The X server never touches a virtual terminal, a DRM device or an input device, which is what lets an ordinary account start one from a service with no seat and no login\.
+.P
+Sessions are expected to sit behind a reverse proxy that terminates TLS and identifies the user\. The streaming server itself runs with authentication switched off, so that a user who is already known to the proxy lands on their desktop without a second login\. See \fBREVERSE PROXY AND SECURITY\fR\.
+.SH "COMMANDS"
+.TP
+\fBlist\fR
+Print every configured session with its user, port, unit state, whether anything is listening on its port, and its current display\. This is the quickest way to see whether reality matches the configuration\.
+.TP
+\fBshow\fR \fIinstance\fR
+Print one session's settings and, for each of them, which file it came from\.
+.TP
+\fBenable\fR \fIinstance\fR
+Allocate a slot for a session, start it, and start it again at boot\.
+.TP
+\fBdisable\fR \fIinstance\fR
+Stop a session and stop starting it at boot\. The slot stays reserved, so the port does not change if the session is enabled again\.
+.TP
+\fBrelease\fR \fIinstance\fR
+Stop a session and give up its slot, so another session may take the port\. The session's profile directory is left in place\.
+.TP
+\fBfirewall \-\-apply\fR
+Rewrite the package's nftables table and the kernel's reserved\-port list from the current configuration\. Run this after changing \fBHDW4S_PROXIES\fR, \fBHDW4S_BASE_PORT\fR or \fBHDW4S_BLOCK_SIZE\fR\.
+.TP
+\fBfirewall \-\-check\fR
+Report whether the table is loaded and whether every session listens on a port the table actually covers\. Exits non\-zero if not\.
+.TP
+\fBfirewall \-\-print\fR
+Write the ruleset to standard output without loading it\.
+.SH "INSTANCES"
+An instance is a user name, optionally followed by a colon and a session number:
+.IP "" 4
+.nf
+hdw4s enable alice
+hdw4s enable alice:2
+.fi
+.IP "" 0
+.P
+The second form gives one account a second concurrent desktop on the same machine\. A colon is used because systemd leaves it untouched when it escapes an instance name, and because it cannot occur in a user name, so splitting on it can never cut a name in half\.
+.SH "CONFIGURATION"
+Three files are read in order, each overriding the last:
+.IP "" 4
+.nf
+/etc/hdw4s/hdw4s\.conf         defaults for every session
+/etc/hdw4s/<instance>\.conf    settings for one session
+.fi
+.IP "" 0
+.P
+\fBhdw4s show\fR \fIinstance\fR prints the result and where each value came from\.
+.TP
+\fBHDW4S_PROXIES\fR
+Addresses allowed to reach a session, separated by spaces; IPv4 and IPv6 addresses and prefixes are both accepted\. Empty means this machine only\.
+.TP
+\fBHDW4S_ISOLATION\fR
+\fBnone\fR or \fBprofile\fR\. See \fBSHARED HOME DIRECTORIES\fR\. Defaults to \fBnone\fR\.
+.TP
+\fBHDW4S_PROFILE_DIR\fR
+Where an isolated session keeps its private profile\. Defaults to \fB/var/lib/hdw4s\fR\.
+.TP
+\fBHDW4S_BASE_PORT\fR, \fBHDW4S_BLOCK_SIZE\fR
+The block of TCP ports sessions are allocated from\. Defaults to 7300 and 64\.
+.TP
+\fBHDW4S_ADDR\fR
+The address the streaming server binds\. Defaults to \fB0\.0\.0\.0\fR, because the reverse proxy is normally on another machine\. What limits who may connect is the firewall, not this\.
+.TP
+\fBHDW4S_PORT\fR
+Overrides the allocated port for one session\. Setting this outside the block puts the session outside the firewall's coverage; \fBhdw4s firewall \-\-check\fR reports that\.
+.TP
+\fBSELKIES_VERSION\fR
+Pin a Selkies release and stop following upstream\.
+.SH "SHARED HOME DIRECTORIES"
+A GNOME session assumes it is the only one using its home directory\. That assumption breaks when the same home is mounted on more than one machine, or when another desktop is already logged in against it\. Two sessions then write the same settings database, the same keyring and the same metadata stores\. None of those are safe to share, and the settings database and the metadata stores use memory\-mapped and journalled files that are documented not to work over NFS at all\.
+.P
+Setting \fBHDW4S_ISOLATION=profile\fR keeps the shared home for the user's files but moves the session's settings, state and cache to a private directory on local disk\. Concretely, the session gets its own \fBXDG_DATA_HOME\fR, \fBXDG_STATE_HOME\fR, \fBXDG_CACHE_HOME\fR and dconf profile, its own X authority cookie, its own audio server socket, and wrappers that give Firefox and Thunderbird their own profiles\.
+.P
+\fBXDG_CONFIG_HOME\fR is deliberately left alone\. dconf does not support a per\-session config home, and some toolkits look for \fB~/\.config\fR regardless of it; the dconf profile is moved on its own instead, which is the supported way\.
+.P
+What stays shared:
+.IP "" 4
+.nf
+Documents, Desktop, Downloads, Pictures, Music, Videos
+everything else in the home directory, including ~/\.ssh
+.fi
+.IP "" 0
+.P
+What becomes per\-session:
+.IP "" 4
+.nf
+desktop appearance, extensions, keyboard shortcuts
+saved passwords and online accounts (a separate keyring)
+browser profile, history and open tabs
+recently\-used files
+.fi
+.IP "" 0
+.P
+That split is not a compromise that can be tuned away\. Those components conflict precisely because they are shared, so the only way to stop the conflict is to stop sharing them\.
+.SH "DISPLAY AND PORT ALLOCATION"
+A session's TCP port comes from a slot recorded in \fB/etc/hdw4s/instances\fR\. The slot is assigned when the session is first enabled and never moves, so a reverse proxy and a firewall can both be configured against it and stay valid when accounts are added or removed\.
+.P
+The X display number is \fInot\fR allocated\. The X server picks the first free one itself and reports it back, which is the only way to claim one without a race\. Nothing outside the machine ever sees the display number, so it does not need to be predictable\.
+.SH "REVERSE PROXY AND SECURITY"
+\fBA session performs no authentication of its own\.\fR It is built to sit behind a reverse proxy that has already identified the user, so that reaching the desktop takes no second login\. Anything that can open a TCP connection to a session port gets that user's desktop\.
+.P
+Two things follow, and both matter:
+.IP "\[ci]" 4
+\fBHDW4S_PROXIES\fR must list the proxy, and nothing else\. It is the only thing standing between a session and everything that can route to the machine\.
+.IP "\[ci]" 4
+The proxy must be the only path\. Terminate TLS there, authenticate there, and do not expose a session port by any other route\.
+.IP "" 0
+.P
+The package owns one nftables table, \fBinet hdw4s\fR\. It restricts and does not grant\. A drop in this table overrides any other table's accept, so the port block can be closed reliably\. An accept in it is only advisory: if another firewall on the machine drops the packet first, nothing here brings it back, so opening the block to the proxy may need a rule wherever that firewall is configured\.
+.P
+The rules cover the whole port block rather than the ports currently in use\. A rule written per session goes stale the moment a session moves, which is how a firewall ends up guarding a port nothing listens on while live sessions sit unprotected beside it\.
+.P
+Each session's X server is given its own authority cookie in its runtime directory\. Without one, every account on the machine could read the session's screen and type into it\.
+.SH "FILES"
+.TP
+\fB/etc/hdw4s/hdw4s\.conf\fR
+Defaults for every session\.
+.TP
+\fB/etc/hdw4s/<instance>\.conf\fR
+Settings for one session\.
+.TP
+\fB/etc/hdw4s/instances\fR
+Slot table mapping instances to ports\. Edit with \fBhdw4s release\fR, not by hand while a session is running\.
+.TP
+\fB/etc/hdw4s/nftables\.conf\fR
+Generated ruleset\. Regenerated by \fBhdw4s firewall \-\-apply\fR\.
+.TP
+\fB/usr/lib/hdw4s/hdw4s\.xorg\.conf\fR
+X server configuration for the \fBdummy\fR driver\. Deliberately not \fB/etc/X11/xorg\.conf\fR, which belongs to the machine's own display\.
+.TP
+\fB/var/lib/hdw4s/<instance>/\fR
+An isolated session's profile\.
+.TP
+\fB/run/hdw4s/<instance>/\fR
+Runtime directory: X authority cookie, X server log, current display\.
+.SH "DIAGNOSTICS"
+.nf
+hdw4s list                       what exists and whether it is running
+hdw4s show <instance>            effective settings and their source
+hdw4s firewall \-\-check           whether every session is actually filtered
+systemctl status hdw4s@<i>       includes the display and port when running
+journalctl \-xeu hdw4s@<i>        session output, including the X server
+.fi
+.P
+The X server's log is kept in the session's runtime directory rather than the home directory, so it disappears with the session instead of accumulating\.
+.SH "LIMITATIONS"
+A second desktop for an account that is already logged in on the same machine works only because gnome\-session falls back to its own service manager when it cannot reach a systemd user manager, and there is only ever one of those per account\. GNOME 49 removes that fallback and GNOME 50 removes the X11 session altogether, so this arrangement does not survive an upgrade past Ubuntu 24\.04\.
+.P
+Sessions on \fIdifferent\fR machines sharing one home directory are not affected by that: the checks involved are local to a machine\.
+.P
+Snap and Flatpak applications ignore the wrappers and some of the environment used to isolate a session, so they may still share state between desktops\.
+.SH "SEE ALSO"
+\fBsystemd\.unit\fR(5), \fBsystemd\.exec\fR(5), \fBnft\fR(8), \fBXorg\fR(1), \fBXserver\fR(1), \fBxauth\fR(1), \fBdbus\-run\-session\fR(1), \fBdconf\fR(7)

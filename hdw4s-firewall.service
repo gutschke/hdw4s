@@ -1,0 +1,20 @@
+[Unit]
+Description=HDW4S firewall table
+Documentation=man:hdw4s(8)
+# Load before anything can reach the network, the way nftables.service does, so
+# there is never a window in which a session port is open to everyone.
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+ExecStart=/usr/lib/hdw4s/hdw4s-firewall --apply
+# Only this package's own table is removed. Whatever else filters this machine
+# is left exactly as it was found.
+ExecStop=-/usr/sbin/nft delete table inet hdw4s
+RemainAfterExit=yes
+Type=oneshot
+
+[Install]
+WantedBy=multi-user.target

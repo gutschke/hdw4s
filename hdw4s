@@ -1,0 +1,244 @@
+#!/bin/bash -e
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+trap 'rc="$?"
+      trap "" INT TERM QUIT HUP EXIT ERR
+      [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
+      exit "${rc}"' INT TERM QUIT HUP EXIT ERR
+
+CONF='/etc/hdw4s/hdw4s.conf'
+SLOTS='/etc/hdw4s/instances'
+DROPIN='/etc/systemd/system'
+
+# Defaults. Every one of these may be overridden in /etc/hdw4s/hdw4s.conf.
+#
+# The port block is fixed and contiguous on purpose. It is reserved with the
+# kernel and opened in the firewall once, at install time, so a rule can never
+# lag behind which sessions happen to be running. Sessions then allocate inside
+# a block that is already protected. 7300-7363 is clear of /etc/services and
+# far below the ephemeral range (32768-60999), where a fixed service port would
+# collide intermittently with outbound connections.
+HDW4S_BASE_PORT=7300
+HDW4S_BLOCK_SIZE=64
+
+# Where an isolated session keeps its GNOME profile. Local disk by design: the
+# home directory this exists to share is typically NFS, and dconf's database
+# and the SQLite stores behind tracker and gvfs-metadata are documented not to
+# work there.
+HDW4S_PROFILE_DIR='/var/lib/hdw4s'
+
+# Sources allowed to reach a session port. Empty means the package's firewall
+# table drops every remote connection and only loopback works, which is the
+# right default for something that expects a reverse proxy in front of it.
+HDW4S_PROXIES=''
+
+[ ! -r "${CONF}" ] || . "${CONF}"
+
+usage() {
+  cat <<'EOF'
+Usage: hdw4s <command> [arguments]
+
+  list                    show every configured session and its current state
+  show <instance>         show one session's settings and where each came from
+  enable <instance>       allocate a slot for a session and start it at boot
+  disable <instance>      stop a session and keep its slot reserved
+  release <instance>      stop a session and give up its slot
+  firewall --apply        rewrite the package's nftables table
+  firewall --check        report whether every session port is protected
+
+An instance is a user name, optionally followed by a colon and a session
+number for a second concurrent desktop belonging to the same account:
+
+  hdw4s enable alice
+  hdw4s enable alice:2
+
+See hdw4s(8) for configuration and for how to put a reverse proxy in front of
+these sessions safely.
+EOF
+}
+
+# --- instance names ---------------------------------------------------------
+
+# A colon is the only separator that is safe here. systemd leaves ":" untouched
+# when it escapes an instance name, so "%i" and "%I" are identical and no path
+# built from either can acquire a surprise separator. A "-" would be unescaped
+# by "%I" into "/", which would silently turn user "jean-luc" into "jean/luc".
+# A ":" also cannot appear in a user name, because it separates the fields of
+# /etc/passwd, so splitting on it can never cut a name in half.
+split_instance() {
+  local inst="$1"
+  user="${inst%%:*}"
+  session="${inst#*:}"
+  [ "${session}" != "${inst}" ] || session='1'
+
+  case "${user}" in
+    ''|*[!A-Za-z0-9._-]*)
+      echo "hdw4s: '${inst}' does not name a user" >&2; return 1;;
+  esac
+  case "${session}" in
+    ''|*[!0-9]*|0*)
+      echo "hdw4s: '${inst}' has a bad session number" >&2; return 1;;
+  esac
+  getent passwd -- "${user}" >/dev/null || {
+    echo "hdw4s: no such user: ${user}" >&2; return 1
+  }
+}
+
+# --- slot table -------------------------------------------------------------
+#
+# The slot is keyed on the instance name and, once assigned, never moves. The
+# obvious alternative -- deriving a port from the UID -- looks stateless but is
+# not a function of the session at all: accounts that share a UID collide by
+# definition, UIDs below 1000 collide after clamping, and large UIDs run off
+# the end of the port range. Forty bytes of state buys a mapping that a reverse
+# proxy and a firewall can both be configured against and that survives edits
+# to /etc/passwd.
+
+slot_of() {
+  local inst="$1"
+  [ ! -r "${SLOTS}" ] || awk -v i="${inst}" \
+    '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}"
+}
+
+alloc_slot() {
+  local inst="$1" idx used
+  idx="$(slot_of "${inst}")"
+  [ -z "${idx}" ] || { echo "${idx}"; return 0; }
+
+  mkdir -m0755 -p "$(dirname "${SLOTS}")"
+  [ -e "${SLOTS}" ] || {
+    printf '%s\n' \
+      '# Session slots. One line per session: <index> <instance>.' \
+      '# The index fixes the port (base + index); it is assigned once and does' \
+      '# not move, so proxy and firewall configuration stays valid. Remove a' \
+      '# line only with "hdw4s release", never by hand while a session runs.' \
+      > "${SLOTS}"
+  }
+
+  used="$(awk '$1 !~ /^#/ { print $1 }' "${SLOTS}" | sort -n)"
+  for ((idx = 0; idx < HDW4S_BLOCK_SIZE; idx++)); do
+    grep -qx "${idx}" <<<"${used}" || break
+  done
+  [ "${idx}" -lt "${HDW4S_BLOCK_SIZE}" ] || {
+    echo "hdw4s: all ${HDW4S_BLOCK_SIZE} session slots are in use." >&2
+    echo "  Raise HDW4S_BLOCK_SIZE in ${CONF} and rerun 'hdw4s firewall --apply'." >&2
+    return 1
+  }
+  printf '%s %s\n' "${idx}" "${inst}" >> "${SLOTS}"
+  echo "${idx}"
+}
+
+port_of() {
+  local idx="$1"
+  echo $(( HDW4S_BASE_PORT + idx ))
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_list() {
+  local idx inst port state listen
+  printf '%-20s %-10s %-6s %-10s %-8s %s\n' \
+    INSTANCE USER PORT STATE LISTENING DISPLAY
+  [ -r "${SLOTS}" ] || return 0
+  # Slots are reused as they are released, so the file is not in index order.
+  while read -r idx inst; do
+    case "${idx}" in ''|\#*) continue;; esac
+    split_instance "${inst}" || continue
+    port="$(port_of "${idx}")"
+    state="$(systemctl show -p ActiveState --value "hdw4s@${inst}.service" \
+             2>/dev/null || echo unknown)"
+    if ss -Hltn "sport = :${port}" 2>/dev/null | grep -q .; then
+      listen='yes'
+    else
+      listen='no'
+    fi
+    printf '%-20s %-10s %-6s %-10s %-8s %s\n' \
+      "${inst}" "${user}" "${port}" "${state}" "${listen}" \
+      "$(cat "/run/hdw4s/${inst}/display" 2>/dev/null || echo '-')"
+  done < <(sort -n "${SLOTS}")
+}
+
+cmd_show() {
+  local inst="$1" idx port
+  split_instance "${inst}"
+  idx="$(slot_of "${inst}")"
+  [ -n "${idx}" ] || { echo "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}'." >&2; exit 1; }
+  port="$(port_of "${idx}")"
+  # Say where each value came from. Guessing which of three files won is the
+  # single most common source of confusion in a layered configuration.
+  echo "instance      ${inst}"
+  echo "user          ${user}  (from the instance name)"
+  echo "session       ${session}"
+  echo "slot          ${idx}  (${SLOTS})"
+  echo "port          ${port}  (${HDW4S_BASE_PORT} + slot)"
+  if [ -r "/etc/hdw4s/${inst}.conf" ]; then
+    echo "overrides     /etc/hdw4s/${inst}.conf"
+    sed 's/^/              /' "/etc/hdw4s/${inst}.conf"
+  else
+    echo "overrides     none  (/etc/hdw4s/${inst}.conf does not exist)"
+  fi
+  echo "profile       ${HDW4S_PROFILE_DIR}/${inst}"
+  echo "display       $(cat "/run/hdw4s/${inst}/display" 2>/dev/null ||
+                        echo 'not running (assigned at start)')"
+}
+
+cmd_enable() {
+  local inst="$1" idx
+  split_instance "${inst}"
+  idx="$(alloc_slot "${inst}")"
+
+  # systemd has no specifier for "the part of the instance name before the
+  # colon", so a unit whose instance carries a session number cannot express
+  # User= on its own. A drop-in supplies it. The unit's own User=%i still
+  # covers the common single-session case unaided.
+  if [ "${inst}" != "${user}" ]; then
+    mkdir -m0755 -p "${DROPIN}/hdw4s@${inst}.service.d"
+    printf '%s\n' \
+      '# Written by "hdw4s enable"; edit /etc/hdw4s/'"${inst}"'.conf instead.' \
+      '[Service]' \
+      "User=${user}" \
+      > "${DROPIN}/hdw4s@${inst}.service.d/50-user.conf"
+  fi
+
+  systemctl daemon-reload
+  systemctl enable --now "hdw4s@${inst}.service"
+  echo "Session ${inst} enabled on port $(port_of "${idx}")."
+  echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
+}
+
+cmd_disable() {
+  local inst="$1"
+  split_instance "${inst}"
+  systemctl disable --now "hdw4s@${inst}.service" || :
+  echo "Session ${inst} stopped. Its slot is still reserved;"
+  echo "use 'hdw4s release ${inst}' to give it up."
+}
+
+cmd_release() {
+  local inst="$1" tmp
+  split_instance "${inst}"
+  systemctl disable --now "hdw4s@${inst}.service" 2>/dev/null || :
+  rm -rf "${DROPIN}/hdw4s@${inst}.service.d"
+  if [ -r "${SLOTS}" ]; then
+    tmp="$(mktemp "${SLOTS}.XXXXXX")"
+    awk -v i="${inst}" '$1 ~ /^#/ || $2 != i' "${SLOTS}" > "${tmp}"
+    chmod 0644 "${tmp}"
+    mv "${tmp}" "${SLOTS}"
+  fi
+  systemctl daemon-reload
+  echo "Session ${inst} released. Its profile under"
+  echo "${HDW4S_PROFILE_DIR}/${inst} was left in place."
+}
+
+case "${1:-}" in
+  list)     shift; cmd_list "$@";;
+  show)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_show "$@";;
+  enable)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_enable "$@";;
+  disable)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_disable "$@";;
+  release)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_release "$@";;
+  firewall) shift; exec /usr/lib/hdw4s/hdw4s-firewall "$@";;
+  -h|--help|help|'') usage;;
+  *) echo "hdw4s: unknown command '$1'" >&2; usage >&2; exit 2;;
+esac

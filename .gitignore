@@ -1,0 +1,20 @@
+# Build artifacts
+/build/
+/*.deb
+
+# Editor and OS noise
+*~
+*.swp
+.DS_Store
+
+# Local scratch space for experiments
+/tmp/
+
+# debhelper build output
+/debian/hdw4s/
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/*.debhelper.log

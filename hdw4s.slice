@@ -1,0 +1,17 @@
+[Unit]
+Description=Slice for HDW4S desktop sessions
+Documentation=man:hdw4s(8)
+Before=slices.target
+
+[Slice]
+CPUAccounting=yes
+IOAccounting=yes
+MemoryAccounting=yes
+# A soft limit reclaims and throttles rather than killing, which is what you
+# want for a desktop: one session that overreaches slows down instead of
+# vanishing, and it stops doing so to everyone else on the machine.
+MemoryHigh=75%
+# Let systemd-oomd pick the worst-behaved session under pressure, rather than
+# leaving it to the kernel, which is as likely to choose sshd.
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=60%

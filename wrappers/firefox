@@ -1,0 +1,11 @@
+#!/bin/sh
+# Firefox keeps its profile in ~/.mozilla and ignores the XDG directories, so
+# an isolated session would otherwise share one profile with every other
+# desktop using this home. Worse, a second Firefox hands its command line to
+# the first and the window opens on the other desktop.
+#
+# Only act when the session asked to be isolated; otherwise get out of the way.
+if [ -n "${XDG_DATA_HOME}" ] && [ "${HDW4S_ISOLATION}" = 'profile' ]; then
+  exec /usr/bin/firefox --profile "${XDG_DATA_HOME}/firefox" --new-instance "$@"
+fi
+exec /usr/bin/firefox "$@"

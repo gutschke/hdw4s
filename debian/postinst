@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = 'configure' ]; then
+  if ! /usr/lib/hdw4s/hdw4s-update; then
+    echo 'hdw4s: could not fetch Selkies now; the daily timer will retry.' >&2
+    echo '       Run "/usr/lib/hdw4s/hdw4s-update" once the network is up.' >&2
+  fi
+fi
+
+#DEBHELPER#

@@ -1,0 +1,14 @@
+[Unit]
+Description=Check for Selkies updates daily
+Documentation=man:hdw4s(8)
+
+[Timer]
+OnCalendar=daily
+# Upstream is a single GitHub host and the API is rate limited per source
+# address, so spread the fleet out rather than having every machine ask at
+# midnight.
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

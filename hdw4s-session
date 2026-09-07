@@ -1,0 +1,159 @@
+#!/bin/bash -e
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+# Runs one desktop session. Invoked only by hdw4s@.service, which has already
+# selected the account with User=, created XDG_RUNTIME_DIR and the profile
+# directories, and put the instance name in argv.
+
+instance="${1:?usage: hdw4s-session <instance>}"
+user="${instance%%:*}"
+
+: "${XDG_RUNTIME_DIR:?must be set by the unit}"
+: "${HDW4S_PORT:?must be set by the unit}"
+
+CONF='/etc/hdw4s/hdw4s.conf'
+[ ! -r "${CONF}" ] || . "${CONF}"
+[ ! -r "/etc/hdw4s/${instance}.conf" ] || . "/etc/hdw4s/${instance}.conf"
+
+: "${HDW4S_PROFILE_DIR:=/var/lib/hdw4s}"
+: "${HDW4S_ISOLATION:=none}"
+: "${HDW4S_ADDR:=0.0.0.0}"
+: "${HDW4S_FRAMERATE:=30}"
+: "${HDW4S_ENCODER:=x264enc}"
+
+profile="${HDW4S_PROFILE_DIR}/${instance}"
+
+# Everything started here belongs to this unit's control group, and
+# KillMode=control-group tears it down on stop. The trap only exists to make an
+# interactive run behave the same way.
+children=()
+cleanup() {
+  trap '' INT TERM QUIT HUP EXIT ERR
+  [ "${#children[@]}" -eq 0 ] || kill "${children[@]}" 2>/dev/null || :
+}
+trap cleanup INT TERM QUIT HUP EXIT
+
+# --- shared home directory isolation ---------------------------------------
+#
+# A GNOME session assumes it is the only one using its home directory. When the
+# same home is mounted on several machines -- the case this exists for -- two
+# desktops write the same dconf database, the same keyring and the same
+# gvfs-metadata store, none of which have any locking that survives a network
+# filesystem.
+#
+# With HDW4S_ISOLATION=profile the session keeps the shared home for the user's
+# data but takes its settings, state and cache from a private directory on
+# local disk. That fixes three problems at once, because dconf's database and
+# the SQLite stores behind tracker and gvfs-metadata are all documented not to
+# work over NFS.
+#
+# XDG_CONFIG_HOME is deliberately NOT redirected. dconf's manual forbids a
+# per-session config home, and Qt looks for ~/.config/ibus regardless of it.
+# The dconf profile is moved on its own instead, which is the supported knob.
+if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
+  export XDG_DATA_HOME="${profile}/data"
+  export XDG_STATE_HOME="${profile}/state"
+  export XDG_CACHE_HOME="${profile}/cache"
+  install -d -m0700 "${XDG_DATA_HOME}" "${XDG_STATE_HOME}" "${XDG_CACHE_HOME}"
+
+  # The keyfile back end writes a plain text file with ordinary read and write
+  # calls, unlike the default database, which is mmap'd. That is what makes it
+  # the supported choice when the settings could land on a network filesystem.
+  export DCONF_PROFILE="${profile}/dconf-profile"
+  [ -e "${DCONF_PROFILE}" ] ||
+    printf 'service-db:keyfile/hdw4s\n' > "${DCONF_PROFILE}"
+
+  # Applications that ignore the XDG variables need their own redirection.
+  # Chrome reads this one directly; Firefox needs the wrapper in
+  # /usr/lib/hdw4s/wrappers, which the unit puts ahead of /usr/bin in PATH.
+  export CHROME_USER_DATA_DIR="${profile}/chrome"
+
+  # Indexing a shared home once per machine is wasted work and multiplies the
+  # write load on the file server for no benefit.
+  export TRACKER_DISABLE_MINERS='all'
+fi
+
+# gvfs exposes one FUSE mount per runtime directory. Two sessions for the same
+# account would otherwise fight over the same mount point.
+export GVFS_DISABLE_FUSE=1
+
+export PULSE_RUNTIME_PATH="${XDG_RUNTIME_DIR}/pulse"
+export PULSE_SERVER="unix:${XDG_RUNTIME_DIR}/pulse/native"
+export PIPEWIRE_RUNTIME_DIR="${XDG_RUNTIME_DIR}"
+
+# --- X server ---------------------------------------------------------------
+
+# A per-session cookie in the runtime directory, never ~/.Xauthority. Sharing
+# that file across sessions is what breaks when a home directory is shared, and
+# its lock is taken with link(), which is unreliable over NFS and stalls for
+# twenty seconds when contended.
+export XAUTHORITY="${XDG_RUNTIME_DIR}/Xauthority"
+export ICEAUTHORITY="${XDG_RUNTIME_DIR}/ICEauthority"
+install -m0600 /dev/null "${XAUTHORITY}"
+
+# Let the server pick the display. It creates the lock file itself with O_EXCL
+# and retries until it wins, which is the only race-free way to claim one, and
+# it reports the result only once it is accepting connections. Nothing outside
+# this machine ever sees the display number, so it does not need to be
+# predictable -- only the TCP port does.
+fifo="${XDG_RUNTIME_DIR}/displayfd"
+rm -f "${fifo}"
+mkfifo -m0600 "${fifo}"
+
+/usr/lib/xorg/Xorg -noreset -nolisten tcp \
+  +extension GLX +extension RANDR +extension RENDER \
+  -config /usr/lib/hdw4s/hdw4s.xorg.conf \
+  -auth "${XAUTHORITY}" \
+  -logfile "${XDG_RUNTIME_DIR}/Xorg.log" \
+  -displayfd 3 3>"${fifo}" &
+children+=($!)
+xorg_pid="$!"
+
+if ! IFS= read -r -t 30 display_num < "${fifo}"; then
+  echo "hdw4s: the X server did not come up within 30 seconds" >&2
+  sed -n 's/^\(\[ *[0-9.]*\] \)\?\((EE)\)/\2/p' "${XDG_RUNTIME_DIR}/Xorg.log" >&2 || :
+  exit 1
+fi
+rm -f "${fifo}"
+export DISPLAY=":${display_num}"
+printf '%s\n' "${display_num}" > "${XDG_RUNTIME_DIR}/display"
+
+# The cookie has to exist before anything connects. An auth file that exists
+# but holds no entry for this display is not partial protection: the server
+# falls back to allowing every local connection, so the session would be
+# readable by any account on the machine.
+xauth -f "${XAUTHORITY}" add "${DISPLAY}" MIT-MAGIC-COOKIE-1 "$(mcookie)"
+
+# --- session ----------------------------------------------------------------
+
+export XDG_SESSION_TYPE='x11'
+export XDG_CURRENT_DESKTOP='ubuntu:GNOME'
+export GNOME_SHELL_SESSION_MODE='ubuntu'
+export XDG_SESSION_CLASS='user'
+
+# The unit is a system service, so this account has no systemd user manager of
+# its own and nothing has started the audio stack. On a current Ubuntu that is
+# PipeWire; calling pulseaudio here as well would leave two servers racing for
+# the same socket.
+if [ -x /usr/bin/pipewire ]; then
+  install -d -m0700 "${PULSE_RUNTIME_PATH}"
+  /usr/bin/pipewire &            children+=($!)
+  /usr/bin/wireplumber &         children+=($!)
+  /usr/bin/pipewire-pulse &      children+=($!)
+elif [ -x /usr/bin/pulseaudio ]; then
+  /usr/bin/pulseaudio --start --exit-idle-time=-1 || :
+fi
+
+
+# dbus-run-session, not dbus-launch: the bus is owned by this process and dies
+# with it, rather than being left behind for nothing to reap.
+#
+# It is also what makes a second desktop for the same account possible at all.
+# On a private bus the systemd manager is not reachable, so gnome-session
+# cannot start its components as user units -- there is only ever one systemd
+# user manager per account, and it belongs to whichever session got there
+# first. gnome-session falls back to its own service manager, and the check
+# that would otherwise refuse to start a second session is bypassed with it.
+exec dbus-run-session -- /usr/lib/hdw4s/hdw4s-run-session "${instance}"

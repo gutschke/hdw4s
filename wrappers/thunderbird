@@ -1,0 +1,7 @@
+#!/bin/sh
+# Same engine as Firefox, same shared-profile and window-handoff problem.
+if [ -n "${XDG_DATA_HOME}" ] && [ "${HDW4S_ISOLATION}" = 'profile' ]; then
+  exec /usr/bin/thunderbird --profile "${XDG_DATA_HOME}/thunderbird" \
+       --new-instance "$@"
+fi
+exec /usr/bin/thunderbird "$@"

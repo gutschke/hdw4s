@@ -1,0 +1,185 @@
+#!/bin/bash -e
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+trap 'rc="$?"
+      trap "" INT TERM QUIT HUP EXIT ERR
+      [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
+      exit "${rc}"' INT TERM QUIT HUP EXIT ERR
+
+CONF='/etc/hdw4s/hdw4s.conf'
+RULES='/etc/hdw4s/nftables.conf'
+
+HDW4S_BASE_PORT=7300
+HDW4S_BLOCK_SIZE=64
+HDW4S_PROXIES=''
+[ ! -r "${CONF}" ] || . "${CONF}"
+
+first="${HDW4S_BASE_PORT}"
+last=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE - 1 ))
+
+# The rules cover the whole port block, not the ports that happen to be in use.
+# A rule written per session goes stale the moment a session moves, which is
+# exactly how a firewall ends up guarding a port nothing listens on while the
+# live sessions sit unprotected next to it. Covering the block means the
+# ruleset is correct before any session starts and stays correct afterwards.
+generate() {
+  local v4='' v6='' addr
+  for addr in ${HDW4S_PROXIES}; do
+    case "${addr}" in
+      *:*) v6="${v6}${v6:+, }${addr}";;
+      *)   v4="${v4}${v4:+, }${addr}";;
+    esac
+  done
+
+  cat <<EOF
+#!/usr/sbin/nft -f
+#
+# Written by "hdw4s firewall --apply". Edit HDW4S_PROXIES in
+# ${CONF} and run that command again rather than editing this file.
+#
+# This table restricts; it cannot grant. A drop here overrides any other
+# table's accept, so the block can be closed reliably. An accept here is only
+# advisory: if ufw or another firewall drops the packet first, nothing in this
+# table can bring it back. Opening the block to a reverse proxy may therefore
+# need a rule in whatever else manages this machine's firewall.
+
+table inet hdw4s {}
+delete table inet hdw4s
+
+table inet hdw4s {
+        set proxies4 {
+                type ipv4_addr
+                flags interval$( [ -z "${v4}" ] || printf '\n                elements = { %s }' "${v4}" )
+        }
+
+        set proxies6 {
+                type ipv6_addr
+                flags interval$( [ -z "${v6}" ] || printf '\n                elements = { %s }' "${v6}" )
+        }
+
+        chain input {
+                type filter hook input priority filter; policy accept;
+
+                # Leave immediately unless this is TCP addressed to a
+                # session port. Both tests are needed: "tcp dport" cannot match
+                # a packet that has no TCP header, so without the first line
+                # every UDP and ICMP packet would fall past the port test and
+                # reach the drop at the bottom. Getting out of the way quickly
+                # is also what lets this table coexist with whatever else
+                # filters the machine.
+                meta l4proto != tcp accept
+                tcp dport != ${first}-${last} accept
+
+                ct state established,related accept
+                iifname "lo" accept
+                ip  saddr @proxies4 accept
+                ip6 saddr @proxies6 accept
+
+                # Addressed to a session, from somewhere not allowed.
+                counter drop
+        }
+}
+EOF
+}
+
+cmd_apply() {
+  mkdir -m0755 -p "$(dirname "${RULES}")"
+
+  # Tell the kernel never to hand these out as ephemeral ports. Without this a
+  # session can fail to bind because an outgoing connection from anything else
+  # on the machine happened to be holding its port, which is intermittent and
+  # close to impossible to reproduce. The default ephemeral range starts at
+  # 32768, so the block only has to stay below that; the reservation makes it
+  # true even if an administrator widens the range later.
+  printf '%s\n' \
+    '# Written by "hdw4s firewall --apply". Do not edit.' \
+    "net.ipv4.ip_local_reserved_ports = ${first}-${last}" \
+    > /etc/sysctl.d/60-hdw4s.conf
+  sysctl -q -p /etc/sysctl.d/60-hdw4s.conf || :
+
+  generate > "${RULES}.tmp"
+  chmod 0644 "${RULES}.tmp"
+  mv "${RULES}.tmp" "${RULES}"
+  # nft applies a whole file as one transaction, so the table is never
+  # half-replaced and a syntax error changes nothing.
+  nft -f "${RULES}"
+  if [ -z "${HDW4S_PROXIES}" ]; then
+    echo "Sessions on ports ${first}-${last} accept loopback connections only."
+    echo "Set HDW4S_PROXIES in ${CONF} to the reverse proxy's addresses."
+  else
+    echo "Sessions on ports ${first}-${last} accept connections from:"
+    echo "  ${HDW4S_PROXIES}"
+  fi
+}
+
+# The port a session will actually listen on: derived from its slot, unless
+# an override file names a different one.
+effective_port() {
+  local inst="$1" idx="$2" port
+  port=$(( HDW4S_BASE_PORT + idx ))
+  if [ -r "/etc/hdw4s/${inst}.conf" ]; then
+    port="$(sed -n 's/^[[:space:]]*HDW4S_PORT=\([0-9]\{1,\}\).*/\1/p' \
+            "/etc/hdw4s/${inst}.conf" | tail -n1)" || :
+    [ -n "${port}" ] || port=$(( HDW4S_BASE_PORT + idx ))
+  fi
+  echo "${port}"
+}
+
+cmd_check() {
+  local rc=0 idx inst port outside='' state
+
+  if nft list table inet hdw4s >/dev/null 2>&1; then
+    echo 'table       present'
+  else
+    echo "table       MISSING -- run 'hdw4s firewall --apply'"
+    rc=1
+  fi
+
+  # An override in /etc/hdw4s/<instance>.conf can move a session off its
+  # allocated port and out of the range the rules cover. That session would
+  # then be reachable from anywhere this machine is, with the firewall still
+  # looking correct. This is the check that notices.
+  if [ -r /etc/hdw4s/instances ]; then
+    while read -r idx inst; do
+      case "${idx}" in ''|\#*) continue;; esac
+      port="$(effective_port "${inst}" "${idx}")"
+      if [ "${port}" -lt "${first}" ] || [ "${port}" -gt "${last}" ]; then
+        outside="${outside} ${inst}:${port}"
+        rc=1
+      fi
+    done < /etc/hdw4s/instances
+  fi
+
+  if [ -n "${outside}" ]; then
+    echo "ports       NOT COVERED --${outside}"
+    echo "            these sessions listen outside ${first}-${last} and this"
+    echo "            table does not filter them"
+  else
+    echo "ports       every session is inside ${first}-${last}"
+  fi
+
+  # Anything else listening inside our block is either a stale process or
+  # something that has taken a port a session will later want.
+  state="$(ss -Hltn 2>/dev/null |
+           awk -v a="${first}" -v b="${last}" \
+               '{ n = $4; sub(/.*:/, "", n)
+                  if (n + 0 >= a && n + 0 <= b) print n }' |
+           sort -un | tr '\n' ' ' || :)"
+  echo "listening  ${state:- (nothing in the block)}"
+
+  if [ -z "${HDW4S_PROXIES}" ]; then
+    echo 'sources     loopback only'
+  else
+    echo "sources     ${HDW4S_PROXIES}"
+  fi
+  return "${rc}"
+}
+
+case "${1:-}" in
+  --apply) cmd_apply;;
+  --check) cmd_check;;
+  --print) generate;;
+  *) echo 'Usage: hdw4s firewall --apply | --check | --print' >&2; exit 2;;
+esac
