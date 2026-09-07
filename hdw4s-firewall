@@ -120,21 +120,8 @@ cmd_apply() {
   fi
 }
 
-# The port a session will actually listen on: derived from its slot, unless
-# an override file names a different one.
-effective_port() {
-  local inst="$1" idx="$2" port
-  port=$(( HDW4S_BASE_PORT + idx ))
-  if [ -r "/etc/hdw4s/${inst}.conf" ]; then
-    port="$(sed -n 's/^[[:space:]]*HDW4S_PORT=\([0-9]\{1,\}\).*/\1/p' \
-            "/etc/hdw4s/${inst}.conf" | tail -n1)" || :
-    [ -n "${port}" ] || port=$(( HDW4S_BASE_PORT + idx ))
-  fi
-  echo "${port}"
-}
-
 cmd_check() {
-  local rc=0 idx inst port outside='' state
+  local rc=0 exposed='' state
 
   if nft list table inet hdw4s >/dev/null 2>&1; then
     echo 'table       present'
@@ -143,36 +130,38 @@ cmd_check() {
     rc=1
   fi
 
-  # An override in /etc/hdw4s/<instance>.conf can move a session off its
-  # allocated port and out of the range the rules cover. That session would
-  # then be reachable from anywhere this machine is, with the firewall still
-  # looking correct. This is the check that notices.
-  if [ -r /etc/hdw4s/instances ]; then
-    while read -r idx inst; do
-      case "${idx}" in ''|\#*) continue;; esac
-      port="$(effective_port "${inst}" "${idx}")"
-      if [ "${port}" -lt "${first}" ] || [ "${port}" -gt "${last}" ]; then
-        outside="${outside} ${inst}:${port}"
-        rc=1
-      fi
-    done < /etc/hdw4s/instances
-  fi
+  # What matters is not which port a session was allocated -- the socket unit
+  # binds that, and it is inside the block by construction. It is whether
+  # anything reachable from off this machine is listening outside the block,
+  # where these rules do not apply. A session binds loopback and is fronted by
+  # its socket; if one is bound to a real address instead, an override has put
+  # it somewhere nothing is filtering.
+  exposed="$(ss -Hltnp 2>/dev/null |
+    awk -v a="${first}" -v b="${last}" '
+      {
+        addr = $4
+        port = addr; sub(/.*:/, "", port)
+        host = addr; sub(/:[^:]*$/, "", host)
+        if (host == "127.0.0.1" || host == "[::1]") next    # loopback is fine
+        if (port + 0 >= a && port + 0 <= b) next            # inside the block
+        if ($0 ~ /selkies|systemd-socket-|Xorg/) print port
+      }' | sort -un | tr '\n' ' ')"
 
-  if [ -n "${outside}" ]; then
-    echo "ports       NOT COVERED --${outside}"
-    echo "            these sessions listen outside ${first}-${last} and this"
-    echo "            table does not filter them"
+  if [ -n "${exposed}" ]; then
+    echo "ports       NOT COVERED -- ${exposed}"
+    echo "            reachable from off this machine and outside" \
+         "${first}-${last},"
+    echo '            so these rules do not apply to them'
+    rc=1
   else
-    echo "ports       every session is inside ${first}-${last}"
+    echo "ports       nothing of ours is reachable outside ${first}-${last}"
   fi
 
-  # Anything else listening inside our block is either a stale process or
-  # something that has taken a port a session will later want.
   state="$(ss -Hltn 2>/dev/null |
            awk -v a="${first}" -v b="${last}" \
                '{ n = $4; sub(/.*:/, "", n)
                   if (n + 0 >= a && n + 0 <= b) print n }' |
-           sort -un | tr '\n' ' ' || :)"
+           sort -un | tr '\n' ' ')"
   echo "listening  ${state:- (nothing in the block)}"
 
   if [ -z "${HDW4S_PROXIES}" ]; then
@@ -181,21 +170,6 @@ cmd_check() {
     echo "sources     ${HDW4S_PROXIES}"
   fi
   return "${rc}"
-}
-
-# Put the table back only if it is actually gone. Reapplying unconditionally
-# every quarter of an hour would churn the ruleset and reset the counters for
-# no reason; the point is to notice a table that vanished, not to keep writing
-# one that is already correct.
-cmd_restore() {
-  if nft list table inet hdw4s >/dev/null 2>&1; then
-    exit 0
-  fi
-  echo 'hdw4s: the firewall table was missing; restoring it.' >&2
-  echo '  Something flushed the ruleset -- ufw, netfilter-persistent and some' >&2
-  echo '  configuration-management tools all do. Until now every session was' >&2
-  echo '  reachable from anywhere this machine is.' >&2
-  cmd_apply
 }
 
 case "${1:-}" in
