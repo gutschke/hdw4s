@@ -235,8 +235,15 @@ machine itself can guarantee.
     be. There is no shared secret to leak and no address to spoof.
 
     This is the right answer whenever it is available. It requires the proxy
-    to be on the same machine, or to be able to see the same filesystem --
-    which, for a container, can mean a bind mount from the host.
+    to be on the same machine, or to be able to see the same filesystem.
+
+    Two containers on one host can share a socket if the same directory is
+    bind-mounted into both and they use the same user-id mapping, which is the
+    usual default. It then behaves exactly as it would locally: file
+    permissions decide who may connect, and `SO_PEERCRED` reports the peer's
+    identity translated correctly into the reading side's namespace. Containers
+    with *different* id mappings see different ownership on the same file, and
+    that is where the arrangement stops working.
 
   * **TCP with a proxy credential** (`tcp` plus `hdw4s auth`):
     For a proxy on another machine. The firewall restricts which addresses may
@@ -245,11 +252,16 @@ machine itself can guarantee.
     check -- by spoofing, or simply by being on the same network -- still does
     not have the secret.
 
-    The secret crosses the network in the clear on each request, so this is
+    The secret crosses the network in the clear on each request, so it is
     worth pairing with something that makes the path itself private, such as a
-    point-to-point tunnel between the proxy and the session's host, or a
-    hypervisor firewall that pins each container to its own address and so
-    makes spoofing impossible.
+    point-to-point encrypted tunnel between the proxy and the session's host.
+
+        It is also worth making the address check mean something. Where the
+    network can pin each host to the addresses it was assigned, a neighbour can
+    no longer claim to be the proxy, which is otherwise the easy way past an
+    address list. Most hypervisors and many switches offer some form of this;
+    consult their documentation, and check afterwards that a dynamically
+    assigned address has not been left out.
 
   * **TCP alone** (`tcp`, the default):
     The firewall's address list is the only control. Adequate on a network

@@ -1,0 +1,9 @@
+# groff 1.23.0 segfaults when lintian renders a manual page, because of an
+# AppArmor interaction with /usr/bin/man during lintian's own pipeline. It is
+# unrelated to the content of the page: the same pipeline run by hand succeeds,
+# and bisecting the page finds nothing that triggers it.
+#
+# Ubuntu bug LP #2055402, fixed upstream in groff 1.23.0-5; Ubuntu 24.04 still
+# ships 1.23.0-3build2. When this override starts being reported as unused,
+# the runner has a fixed groff and this file can go.
+hdw4s: groff-message
