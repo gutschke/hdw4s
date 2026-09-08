@@ -84,9 +84,8 @@ trap cleanup INT TERM QUIT HUP EXIT
 # the SQLite stores behind tracker and gvfs-metadata are all documented not to
 # work over NFS.
 #
-# XDG_CONFIG_HOME is deliberately NOT redirected. dconf's manual forbids a
-# per-session config home, and Qt looks for ~/.config/ibus regardless of it.
-# The dconf profile is moved on its own instead, which is the supported knob.
+# All four XDG base directories move together. Splitting them was tried and
+# abandoned; the reasoning is with the redirection itself, below.
 if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   export XDG_CONFIG_HOME="${profile}/config"
   export XDG_DATA_HOME="${profile}/data"

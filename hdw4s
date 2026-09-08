@@ -344,6 +344,13 @@ cmd_enable() {
   # The socket is what gets enabled, not the session. Nothing runs until
   # somebody connects, so a desktop that is never visited never exists.
   systemctl enable --now "hdw4s-proxy@${inst}.socket"
+
+  # Give the front door its listener. Without this the socket unit keeps the
+  # filesystem socket it defaults to, while everything that reports on the
+  # session -- the line below, "list", "proxy" -- describes the TCP port it
+  # was assigned, and the two disagree with nobody the wiser.
+  cmd_transport "${inst}" "${HDW4S_TRANSPORT:-tcp}" >/dev/null
+
   echo "Session ${inst} is listening on port $(port_of "${idx}")."
   echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
   echo 'The desktop starts on the first connection, not now.'
@@ -1014,8 +1021,11 @@ cmd_release() {
     mv "${tmp}" "${SLOTS}"
   fi
   systemctl daemon-reload
-  echo "Session ${inst} released. Its profile under"
-  echo "${HDW4S_PROFILE_DIR}/${inst} was left in place."
+  echo "Session ${inst} released. Left in place: its profile under"
+  echo "${HDW4S_PROFILE_DIR}/${inst}, and its settings in"
+  echo "/etc/hdw4s/${inst}.conf -- so that re-enabling it restores them. The"
+  echo "slot, and with it the port, is not reserved and may go to someone else;"
+  echo "enabling again rewrites the port that conf file records."
 }
 
 case "${1:-}" in
