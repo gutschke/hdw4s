@@ -84,6 +84,17 @@ Either install the package:
 sudo apt install ./hdw4s_1.0_all.deb
 ```
 
+Two of the dependencies -- `gir1.2-gst-plugins-bad-1.0` and `gstreamer1.0-nice`
+-- live in Ubuntu's **universe** component, so it has to be enabled:
+
+```bash
+sudo add-apt-repository universe
+```
+
+Both are reached by the streaming server through GObject introspection and
+GStreamer plugin loading rather than by name, so without them a session starts,
+reports success at every layer, and never produces a desktop.
+
 or install from a checkout:
 
 ```bash

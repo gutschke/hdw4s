@@ -61,7 +61,20 @@ python3 -c 'import gi' >&/dev/null || missing="${missing} python3-gi"
   missing="${missing} gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0
            gstreamer1.0-plugins-base gstreamer1.0-plugins-good
            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-           gstreamer1.0-tools gstreamer1.0-x"
+           gstreamer1.0-x"
+
+# Selkies reaches these two through GObject introspection and GStreamer plugin
+# loading, not through any command, so nothing above notices them missing. Both
+# are checked separately because both fail late and quietly: without the first,
+# the session dies at "import GstWebRTC" after every layer has reported
+# success; without the second, webrtcbin builds a pipeline that can never
+# gather a candidate. Both live in Ubuntu's universe component.
+ls /usr/lib/*/girepository-1.0/GstWebRTC-1.0.typelib >&/dev/null ||
+  [ -e /usr/lib/girepository-1.0/GstWebRTC-1.0.typelib ] ||
+  missing="${missing} gir1.2-gst-plugins-bad-1.0"
+ls /usr/lib/*/gstreamer-1.0/libgstnice.so >&/dev/null ||
+  [ -e /usr/lib/gstreamer-1.0/libgstnice.so ] ||
+  missing="${missing} gstreamer1.0-nice"
 
 [ -z "${missing}" ] || {
   echo 'Error: required packages are missing. Install them with:'
