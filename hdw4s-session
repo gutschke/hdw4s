@@ -29,9 +29,35 @@ instance="${1:?usage: hdw4s-session <instance>}"
 CONF='/etc/hdw4s/hdw4s.conf'
 SLOTS='/etc/hdw4s/instances'
 # shellcheck source=/dev/null
-if [ -r "${CONF}" ]; then . "${CONF}" || :; fi
+if [ -r "${CONF}" ]; then
+  # Checked before it is run. Sourcing a file with a syntax error
+  # applies every assignment before the error and none after, and
+  # the "|| :" below would hide that -- leaving the program running
+  # on a configuration that is half the administrator's and half
+  # the defaults, with nothing said.
+  bash -n "${CONF}" || {
+    echo "hdw4s: configuration file has a syntax error; refusing to run." >&2
+    exit 1
+  }
+  # A valid file may still end in a conditional that happens to be
+  # false, which is not an error worth dying over.
+  . "${CONF}" || :
+fi
 # shellcheck source=/dev/null
-if [ -r "/etc/hdw4s/${instance}.conf" ]; then . "/etc/hdw4s/${instance}.conf" || :; fi
+if [ -r "/etc/hdw4s/${instance}.conf" ]; then
+  # Checked before it is run. Sourcing a file with a syntax error
+  # applies every assignment before the error and none after, and
+  # the "|| :" below would hide that -- leaving the program running
+  # on a configuration that is half the administrator's and half
+  # the defaults, with nothing said.
+  bash -n "/etc/hdw4s/${instance}.conf" || {
+    echo "hdw4s: configuration file has a syntax error; refusing to run." >&2
+    exit 1
+  }
+  # A valid file may still end in a conditional that happens to be
+  # false, which is not an error worth dying over.
+  . "/etc/hdw4s/${instance}.conf" || :
+fi
 
 # The port comes from the slot table, where it was allocated and where the
 # firewall and any proxy configuration read it from. Deriving it here rather
@@ -222,7 +248,7 @@ printf '%s\n' "${display_num}" > "${XDG_RUNTIME_DIR}/display"
 
 # Drop the entries for the displays the server did not take.
 for n in $(seq 0 "${auth_displays}"); do
-  [ "${n}" = "${display_num}" ] || printf 'remove :%d\n' "${n}"
+  [ "${n}" -eq "${display_num}" ] || printf 'remove :%d\n' "${n}"
 done | xauth -f "${XAUTHORITY}" source -
 
 # --- session ----------------------------------------------------------------

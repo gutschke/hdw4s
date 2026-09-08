@@ -15,7 +15,20 @@ HDW4S_BASE_PORT=7300
 HDW4S_BLOCK_SIZE=64
 HDW4S_PROXIES=''
 # shellcheck source=/dev/null
-if [ -r "${CONF}" ]; then . "${CONF}" || :; fi
+if [ -r "${CONF}" ]; then
+  # Checked before it is run. Sourcing a file with a syntax error
+  # applies every assignment before the error and none after, and
+  # the "|| :" below would hide that -- leaving the program running
+  # on a configuration that is half the administrator's and half
+  # the defaults, with nothing said.
+  bash -n "${CONF}" || {
+    echo "hdw4s: configuration file has a syntax error; refusing to run." >&2
+    exit 1
+  }
+  # A valid file may still end in a conditional that happens to be
+  # false, which is not an error worth dying over.
+  . "${CONF}" || :
+fi
 
 first="${HDW4S_BASE_PORT}"
 last=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE - 1 ))
@@ -56,20 +69,58 @@ generate() {
   # needs those sockets reachable.
   local media_chain=''
   if [ "${HDW4S_MEDIA_PORTS:-proxied}" != 'direct' ]; then
-    local elo ehi
-    read -r elo ehi < /proc/sys/net/ipv4/ip_local_port_range
-    media_chain="$(cat <<CHAIN
+    # Match the sockets themselves, not the ports they happen to be on. The
+    # first version of this guessed by port range, on the reasoning that a new
+    # inbound connection to an ephemeral port is rarely legitimate. That holds
+    # for TCP and does not hold for UDP: WireGuard, mosh, Tailscale and NFSv3's
+    # lock callbacks all take new inbound UDP on ports in that range, and a drop
+    # in this table cannot be undone by any rule elsewhere. Since NFS-mounted
+    # home directories are the case this package exists for, breaking lock
+    # recovery to close a media socket was a bad trade.
+    #
+    # "socket cgroupv2" resolves the packet to its destination socket and looks
+    # at the cgroup owning it, so this closes exactly the sockets belonging to a
+    # session and nothing else on the machine, whatever port they picked. Level
+    # 1 is the slice: sessions live at /hdw4s.slice/hdw4s-<name>.slice/... while
+    # the relay that fronts the public port sits under system.slice, so the
+    # front door stays open.
+    if nft -c -f - >/dev/null 2>&1 <<'PROBE'
+table inet hdw4s_probe {
+        chain c { type filter hook input priority filter; policy accept;
+                socket cgroupv2 level 1 "hdw4s.slice" drop; }
+}
+PROBE
+    then
+      media_chain="$(cat <<'CHAIN'
 
         # Candidate sockets the streaming server opens on every address.
         chain media {
                 type filter hook input priority filter; policy accept;
 
-                # Both protocols. The candidate sockets this chain exists to
-                # close are mostly UDP, so matching TCP alone left the chain
-                # doing very little while still reporting success. "th dport"
-                # reads the port from either transport header; the guard above
-                # it keeps everything else -- ICMP above all -- from reaching
-                # the drop, which is what a bare port match would otherwise do.
+                ct state established,related accept
+                iifname "lo" accept
+                ip  saddr @proxies4 accept
+                ip6 saddr @proxies6 accept
+                socket cgroupv2 level 1 "hdw4s.slice" counter drop
+        }
+CHAIN
+)"
+    else
+      # Older nftables or a kernel without socket matching. Fall back to the
+      # port range, and say so, because the fallback has the side effects
+      # described above.
+      echo 'hdw4s: this nftables cannot match a socket cgroup; falling back to' >&2
+      echo '       the ephemeral port range, which also drops new inbound UDP' >&2
+      echo '       for anything else using that range (WireGuard, mosh, NFSv3' >&2
+      echo '       lock callbacks). Set HDW4S_MEDIA_PORTS=direct to disable.' >&2
+      local elo ehi
+      read -r elo ehi < /proc/sys/net/ipv4/ip_local_port_range
+      media_chain="$(cat <<CHAIN
+
+        # Candidate sockets the streaming server opens on every address.
+        chain media {
+                type filter hook input priority filter; policy accept;
+
                 meta l4proto != { tcp, udp } accept
                 th dport != ${elo}-${ehi} accept
                 ct state established,related accept
@@ -80,6 +131,7 @@ generate() {
         }
 CHAIN
 )"
+    fi
   fi
 
   cat <<EOF
@@ -179,6 +231,21 @@ cmd_restore() {
   cmd_apply
 }
 
+# Addresses as the kernel would store them: lower-cased, and a prefix reduced
+# to its network address, so that two spellings of one thing compare equal.
+canon_addrs() {
+  printf '%s' "$1" | tr '[:blank:]' '\n' | sed '/^$/d' |
+    "${PYTHON:-python3}" -c '
+import sys, ipaddress
+out = []
+for line in sys.stdin.read().split():
+    try:
+        out.append(str(ipaddress.ip_network(line, strict=False)))
+    except ValueError:
+        out.append(line.lower())
+print(" ".join(sorted(set(out))))' 2>/dev/null || printf '%s' "$1"
+}
+
 cmd_check() {
   local rc=0 exposed='' state have_table='no'
 
@@ -201,13 +268,21 @@ cmd_check() {
   # range covered on that basis. Two invocations rather than "-tu", because
   # asking for both at once prepends a Netid column and shifts the address one
   # field to the right, which silently turns the queue length into a port.
+  # A failed census must not read as a clean one: empty output from a crashed
+  # or missing ss would otherwise take the "nothing exposed" branch and report
+  # success from a check that never ran.
+  if ! { ss -Hltnp; ss -Hlunp; } >/dev/null 2>&1; then
+    echo "ports       UNKNOWN -- could not list sockets"
+    rc=1
+  fi
   exposed="$({ ss -Hltnp; ss -Hlunp; } 2>/dev/null |
     awk -v a="${first}" -v b="${last}" '
       {
         addr = $4
         port = addr; sub(/.*:/, "", port)
         host = addr; sub(/:[^:]*$/, "", host)
-        if (host == "127.0.0.1" || host == "[::1]") next    # loopback is fine
+        sub(/%.*/, "", host)                               # strip any %iface scope
+        if (host ~ /^127\./ || host == "[::1]") next       # loopback is fine
         if (port + 0 >= a && port + 0 <= b) next            # inside the block
         if ($0 ~ /selkies|systemd-socket-|Xorg/) print port
       }' | sort -un | tr '\n' ' ')"
@@ -278,6 +353,10 @@ for o in d.get("nftables",[]):
         for e in st.get("elem",[]) or []:
             if isinstance(e,dict) and "prefix" in e:
                 p=e["prefix"]; out.append("%s/%s"%(p["addr"],p["len"]))
+            elif isinstance(e,dict) and "range" in e:
+                out.append("-".join(e["range"]))
+            elif isinstance(e,dict):
+                continue
             else: out.append(str(e))
 print(" ".join(out))' 2>/dev/null)"
   fi
@@ -287,9 +366,13 @@ print(" ".join(out))' 2>/dev/null)"
     echo "sources     ${live}"
   fi
   # Say so when the two disagree, rather than reporting either as the truth.
+  # Both sides through the same normaliser. Comparing the strings directly
+  # reported a difference between 2001:DB8::/32 and 2001:db8::/32, and between
+  # 192.168.0.1/24 as written and 192.168.0.0/24 as the kernel stores it --
+  # crying wolf on the one check an administrator is meant to believe.
   local want got
-  want="$(printf '%s' "${HDW4S_PROXIES}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
-  got="$(printf '%s' "${live}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+  want="$(canon_addrs "${HDW4S_PROXIES}")"
+  got="$(canon_addrs "${live}")"
   if [ "${want}" != "${got}" ]; then
     echo "            CONFIGURED differs: ${HDW4S_PROXIES:-(none)}"
     echo "            run 'hdw4s firewall --apply' to load it"

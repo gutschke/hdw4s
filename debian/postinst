@@ -12,6 +12,33 @@ if [ "$1" = 'configure' ]; then
     chmod 0644 /etc/hdw4s/hdw4s.conf
   fi
 
+  # Drop-ins written by an earlier version carry only ReadWritePaths=. The
+  # mount ordering used to live in the template unit as RequiresMountsFor=/home
+  # and now lives here, per instance, because a home directory is not always
+  # under /home -- so without this an upgrade would leave every existing
+  # session with no ordering at all, which is worse than the assumption it
+  # replaced. Rewriting the drop-in is what "hdw4s enable" already does.
+  if [ -r /etc/hdw4s/instances ]; then
+    while read -r idx inst; do
+      case "${idx}" in ''|\#*) continue;; esac
+      d="/etc/systemd/system/hdw4s@${inst}.service.d"
+      [ -e "${d}/40-home.conf" ] || continue
+      grep -q '^RequiresMountsFor=' "${d}/40-home.conf" && continue
+      user="${inst%%:*}"
+      home="$(getent passwd -- "${user}" | cut -d: -f6)"
+      [ -n "${home}" ] || continue
+      printf '%s\n' \
+        '# Written by "hdw4s enable". Re-run it if the home directory moves.' \
+        '[Unit]' \
+        "RequiresMountsFor=${home}" \
+        '' \
+        '[Service]' \
+        "ReadWritePaths=${home}" \
+        > "${d}/40-home.conf"
+    done < /etc/hdw4s/instances
+    systemctl daemon-reload || :
+  fi
+
   # Fetching Selkies needs the network, which an installer cannot assume it
   # has, and must not wait on indefinitely if it does not. The timer retries.
   if ! timeout 600 /usr/lib/hdw4s/hdw4s-update; then

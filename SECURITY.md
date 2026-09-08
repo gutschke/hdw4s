@@ -44,6 +44,15 @@ machine running the updater -- a Python wheel can ship a `.pth` file that runs
 on every interpreter start. Pin a version, or turn the timer off, if
 that trade is not acceptable.
 
+## Known weaknesses not yet fixed
+
+The streaming server writes its full argument list to the journal at startup,
+and that list includes the credential `hdw4s auth` generated. Anything that can
+read the journal for a session's unit can therefore read its proxy credential.
+The journal is not world-readable, so this is a widening of who can see the
+secret rather than an exposure of it, but it is worth knowing before deciding
+who belongs in `systemd-journal`.
+
 ## Reports that are in scope
 
 Anything that lets one account reach another account's session or display;

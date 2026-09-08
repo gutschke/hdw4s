@@ -108,13 +108,24 @@ case "${dst}" in
      echo "  Try /usr/lib/hdw4s or /usr/local/lib/hdw4s." >&2
      exit 1;;
 esac
+# The path is interpolated into a sed replacement and into unit files. A
+# backslash becomes a back-reference and aborts the rewrite after the copy; a
+# space makes systemd read ExecStart= as two words; a percent is a systemd
+# specifier. Restrict to what is unambiguous in all three.
 case "${dst}" in
-  *[\&\|]*) echo "hdw4s: the install path may not contain & or |." >&2; exit 1;;
+  *[!A-Za-z0-9/._-]*)
+    echo "hdw4s: the install path may only contain letters, digits, and / . _ -" >&2
+    echo "  got '${dst}'" >&2
+    exit 1;;
 esac
+[ -n "${sys}" ] || {
+  echo "hdw4s: cannot derive a prefix from '${dst}'." >&2
+  exit 1
+}
 man="${sys}/share/man/man8"
 
 echo -n 'Installing files...'
-install -d -m0755 "${dst}" "${dst}/wrappers" "${man}" /etc/hdw4s
+install -d -m0755 "${dst}" "${dst}/wrappers" "${sys}/sbin" "${man}" /etc/hdw4s
 for f in "${SOURCES[@]}"; do
   cp -f "${src}/${f}" "${dst}/${f}"
 done
@@ -139,15 +150,28 @@ chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
 # and firewall-restore units do the same. A list is exactly what goes stale
 # when a file is added.
 if [ "${dst}" != '/usr/lib/hdw4s' ]; then
-  grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null | while IFS= read -r f; do
-    sed -i "s|/usr/lib/hdw4s|${dst}|g" -- "${f}"
-  done
-  if grep -rq -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null; then
-    echo >&2
-    echo "hdw4s: could not rewrite the install path in:" >&2
-    grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null | sed 's|^|  |' >&2
-    exit 1
-  fi
+  # Not this script: its own help text names the default path, and rewriting
+  # that leaves the installed copy differing from the one in the repository for
+  # no benefit.
+  grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null |
+    grep -v '/install\.sh$' | while IFS= read -r f; do
+      sed -i "s|/usr/lib/hdw4s|${dst}|g" -- "${f}"
+    done
+  # Only meaningful when the new path does not itself contain the old one.
+  # /srv/usr/lib/hdw4s rewrites correctly and then matches this grep, which
+  # aborted a perfectly good install in exactly the half-finished state the
+  # rewrite exists to avoid.
+  case "${dst}" in
+    */usr/lib/hdw4s) ;;
+    *) if grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null |
+            grep -qv '/install\.sh$'; then
+         echo >&2
+         echo "hdw4s: could not rewrite the install path in:" >&2
+         grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null |
+           grep -v '/install\.sh$' | sed 's|^|  |' >&2
+         exit 1
+       fi;;
+  esac
 fi
 echo ' done.'
 

@@ -46,7 +46,20 @@ HDW4S_PROFILE_DIR='/var/lib/hdw4s'
 # ending in a conditional that happens to be false. Sourcing then returns
 # non-zero, and under -e that takes the whole program down over a file that is
 # perfectly valid.
-if [ -r "${CONF}" ]; then . "${CONF}" || :; fi
+if [ -r "${CONF}" ]; then
+  # Checked before it is run. Sourcing a file with a syntax error
+  # applies every assignment before the error and none after, and
+  # the "|| :" below would hide that -- leaving the program running
+  # on a configuration that is half the administrator's and half
+  # the defaults, with nothing said.
+  bash -n "${CONF}" || {
+    echo "hdw4s: configuration file has a syntax error; refusing to run." >&2
+    exit 1
+  }
+  # A valid file may still end in a conditional that happens to be
+  # false, which is not an error worth dying over.
+  . "${CONF}" || :
+fi
 
 usage() {
   cat <<'EOF'
@@ -101,7 +114,10 @@ EOF
 # by "%I" into "/", which would silently turn user "jean-luc" into "jean/luc".
 # A ":" also cannot appear in a user name, because it separates the fields of
 # /etc/passwd, so splitting on it can never cut a name in half.
-split_instance() {
+# The name only. Split out from the account lookup below because "release" has
+# to work for a session whose account has since been deleted, and must not buy
+# that by giving up the check that keeps an instance name out of a file path.
+split_name() {
   local inst="$1"
   user="${inst%%:*}"
   session="${inst#*:}"
@@ -115,6 +131,11 @@ split_instance() {
     ''|*[!0-9]*|0*)
       echo "hdw4s: '${inst}' has a bad session number" >&2; return 1;;
   esac
+}
+
+split_instance() {
+  local inst="$1"
+  split_name "${inst}" || return 1
   local uid
   uid="$(getent passwd -- "${user}" | cut -d: -f3)" || :
   [ -n "${uid}" ] || {
@@ -149,9 +170,6 @@ slot_of() {
 
 alloc_slot() {
   local inst="$1" idx used lock
-  idx="$(slot_of "${inst}")"
-  [ -z "${idx}" ] || { echo "${idx}"; return 0; }
-
   install -d -m0755 "$(dirname "${SLOTS}")"
   [ -e "${SLOTS}" ] || {
     printf '%s\n' \
@@ -168,6 +186,16 @@ alloc_slot() {
   # index, and appended both. Every socket unit but one then failed to bind.
   exec {lock}<>"${SLOTS}"
   flock "${lock}"
+
+  # Inside the lock, not before it: asking whether this instance already has a
+  # slot and then claiming one are the same decision, and two runs for the same
+  # name raced between them and were handed three different indices.
+  idx="$(slot_of "${inst}")"
+  if [ -n "${idx}" ]; then
+    exec {lock}<&-
+    echo "${idx}"
+    return 0
+  fi
 
   used="$(awk '$1 !~ /^#/ { print $1 }' "${SLOTS}" | sort -n)"
   for ((idx = 0; idx < HDW4S_BLOCK_SIZE; idx++)); do
@@ -268,7 +296,7 @@ cmd_show() {
   [ -n "${idx}" ] ||
     die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}'."
   port="$(port_of "${idx}")"
-  # Say where each value came from. Guessing which of three files won is the
+  # Say where each value came from. Guessing which of the two files won is the
   # single most common source of confusion in a layered configuration.
   echo "instance      ${inst}"
   echo "user          ${user}  (from the instance name)"
@@ -564,7 +592,7 @@ cmd_set() {
 
 cmd_unset() {
   local inst='' file key tmp
-  if [ "$#" -gt 1 ]; then inst="$1"; shift; split_instance "${inst}"; fi
+  if [ "$#" -gt 1 ]; then inst="$1"; shift; split_instance "${inst}" || exit 1; fi
   [ "$#" -eq 1 ] || die 'hdw4s: unset takes one setting'
   key="$1"
   file="$(config_file "${inst}")"
@@ -1057,7 +1085,9 @@ cmd_release() {
   # An account that has since been deleted still holds a slot, and its port
   # stays open in the firewall. Refusing to release it because the account is
   # gone leaves editing the table by hand as the only way out -- which its own
-  # header tells the administrator never to do.
+  # header tells the administrator never to do. The name is still checked: it
+  # is interpolated into the paths this function removes.
+  split_name "${inst}" || exit 1
   split_instance "${inst}" || :
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" "hdw4s@${inst}.service" 2>/dev/null || :

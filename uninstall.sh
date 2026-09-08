@@ -32,6 +32,23 @@ if [ -z "${dst}" ] || [ ! -d "${dst}" ]; then
 fi
 dst="${dst%/}"
 
+# Before anything is stopped or removed. This used to sit beside the other
+# guards, hundreds of lines down, where it protected the final "rm -rf" and
+# nothing else -- so a .deb install was already missing its units, its firewall
+# table, its sysctl drop-in and /opt/selkies by the time the script announced it
+# was refusing to touch anything. README offers this script and "apt remove"
+# next to each other, so picking the wrong one is an ordinary mistake.
+if command -v dpkg-query >/dev/null 2>&1 &&
+   dpkg-query -S "${dst}" >/dev/null 2>&1; then
+  pkg="$(dpkg-query -S "${dst}" 2>/dev/null | head -n1 | cut -d: -f1)"
+  echo "hdw4s: ${dst} belongs to the package ${pkg}." >&2
+  echo '  This installation came from a package. Removing it here would take' >&2
+  echo '  the files out from under dpkg, which would go on reporting the' >&2
+  echo '  package as installed and correct. Use instead:' >&2
+  echo "    apt remove ${pkg}      # or 'apt purge' to take the configuration too" >&2
+  exit 1
+fi
+
 echo -n 'Stopping sessions...'
 mapfile -t units < <(systemctl list-units --plain --no-legend --all 'hdw4s@*' |
                      awk '{print $1}')
@@ -99,11 +116,6 @@ unsafe=''
 #    package's payload out from under dpkg, which goes on reporting it as
 #    installed. README offers this script and "apt remove" side by side, so
 #    reaching for the wrong one is an ordinary mistake, not an exotic one.
-if command -v dpkg-query >/dev/null 2>&1 &&
-   dpkg-query -S "${dst}" >/dev/null 2>&1; then
-  unsafe="it belongs to the package $(dpkg-query -S "${dst}" 2>/dev/null |
-                                      head -n1 | cut -d: -f1); use apt remove"
-fi
 # 1. Never a directory that holds other things: only ever our own.
 [ "$(basename -- "${dst}")" = 'hdw4s' ] ||
   unsafe="it is not a directory named hdw4s"

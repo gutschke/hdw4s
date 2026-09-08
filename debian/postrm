@@ -1,8 +1,17 @@
 #!/bin/sh
 set -e
 
+# The port reservation is ours and is meaningless once the package is gone, so
+# it goes on plain remove rather than waiting for a purge that may never come.
+if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
+  if [ -e /etc/sysctl.d/60-hdw4s.conf ]; then
+    rm -f /etc/sysctl.d/60-hdw4s.conf
+    sysctl -q --system 2>/dev/null || :
+  fi
+fi
+
 if [ "$1" = 'purge' ]; then
-  rm -f /etc/sysctl.d/60-hdw4s.conf /etc/hdw4s/nftables.conf
+  rm -f /etc/hdw4s/nftables.conf
   # Session slots, per-session overrides and the desktop profiles are the
   # administrator's configuration and the users' state. Purge removes ours.
   rm -f /etc/hdw4s/instances /etc/hdw4s/hdw4s.conf
@@ -16,6 +25,8 @@ if [ "$1" = 'purge' ]; then
          /etc/systemd/system/hdw4s-proxy@*.socket.d
   rm -f /etc/systemd/system/sockets.target.wants/hdw4s-proxy@*.socket
   rmdir --ignore-fail-on-non-empty /etc/hdw4s 2>/dev/null || true
+  # postinst fetches these; nothing else owns them.
+  rm -rf /opt/selkies /opt/selkies.bak /opt/gst-web /opt/gst-web.bak
   echo 'hdw4s: /var/lib/hdw4s still holds each session profile; remove it by'
   echo '       hand if those desktops are not wanted again.'
 fi
