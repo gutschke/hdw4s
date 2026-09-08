@@ -19,6 +19,14 @@ Documentation=man:hdw4s(8)
 # default here, and "hdw4s transport ... tcp" replaces it with an empty
 # ListenStream= followed by the port. Nothing binds this path when it does.
 ListenStream=/run/hdw4s-proxy/%i.sock
+# The runtime directory is shared by every instance, so it must outlive any one
+# of them. systemd removes the innermost RuntimeDirectory= when a unit stops,
+# and that directory is the shared parent here -- so without this, "hdw4s
+# disable bob" unlinks alice.sock too. Alice's socket unit goes on reporting
+# that it is listening, because its fd still holds the unlinked inode, while
+# the reverse proxy gets ENOENT for as long as it keeps trying. RemoveOnStop=
+# below already takes care of the one socket that really is per-instance.
+RuntimeDirectoryPreserve=yes
 RuntimeDirectory=hdw4s-proxy
 RuntimeDirectoryMode=0755
 SocketMode=0660

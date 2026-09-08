@@ -62,8 +62,14 @@ fi
 if [ -n "${HDW4S_PORT:-}" ]; then
   port="${HDW4S_PORT}"
 else
-  slot="$(awk -v i="${instance}" \
-          '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}" 2>/dev/null)"
+  # awk exits non-zero when the file is not there, and the assignment carries
+  # that status out, so under errexit the script died here and the diagnostic
+  # below -- the one that says what to do about it -- never printed.
+  slot=''
+  if [ -r "${SLOTS}" ]; then
+    slot="$(awk -v i="${instance}" \
+            '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}")" || :
+  fi
   [ -n "${slot}" ] || {
     echo "hdw4s: ${instance} has no slot; nothing to wait for." >&2
     exit 1

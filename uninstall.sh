@@ -30,7 +30,11 @@ if [ -z "${dst}" ] || [ ! -d "${dst}" ]; then
   read -r -p 'Install path [/usr/local/lib/hdw4s]: ' dst
   [ -n "${dst}" ] || dst='/usr/local/lib/hdw4s'
 fi
-dst="${dst%/}"
+# Canonicalised before any guard looks at it. Every check below compares this
+# string against a known path, and "/usr/lib/./hdw4s", "//usr/lib/hdw4s" and
+# "/usr/lib/hdw4s/" all name the directory the guards mean to protect while
+# matching none of them. readlink -m normalises a path that need not exist.
+dst="$(readlink -m -- "${dst}")"
 
 # Before anything is stopped or removed. This used to sit beside the other
 # guards, hundreds of lines down, where it protected the final "rm -rf" and

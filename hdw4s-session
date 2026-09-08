@@ -75,8 +75,15 @@ fi
 # needs a session on a particular port.
 if [ -z "${HDW4S_PORT:-}" ]; then
   : "${HDW4S_BASE_PORT:=7300}"
-  slot="$(awk -v i="${instance}" \
-          '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}" 2>/dev/null)"
+  : "${HDW4S_BLOCK_SIZE:=64}"
+  # awk exits non-zero when the file is not there, and the assignment carries
+  # that status out, so under errexit the script died here and the diagnostic
+  # below -- the one that says what to do about it -- never printed.
+  slot=''
+  if [ -r "${SLOTS}" ]; then
+    slot="$(awk -v i="${instance}" \
+            '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}")" || :
+  fi
   [ -n "${slot}" ] || {
     echo "hdw4s: ${instance} has no slot in ${SLOTS}." >&2
     echo "  Run 'hdw4s enable ${instance}' rather than starting the unit" >&2

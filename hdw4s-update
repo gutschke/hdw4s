@@ -402,9 +402,16 @@ for unit in "${units[@]}"; do
   if [ -z "${port}" ]; then
     idx="$(awk -v i="${inst}" '$1 !~ /^#/ && $2 == i { print $1; exit }' \
            /etc/hdw4s/instances 2>/dev/null)"
-    [ -z "${idx}" ] || # The internal port, as the reaper uses: a session on a filesystem socket
+    # Digits only before it reaches an arithmetic context. The slot table is
+    # root-owned, so this is not a way in today, but $(( )) evaluates what it
+    # is given -- a stray word there is a command substitution, not a syntax
+    # error -- and a file parsed by three scripts should not rely on all of
+    # them being careful.
+    case "${idx}" in *[!0-9]*) idx='';; esac
+    # The internal port, as the reaper uses: a session on a filesystem socket
     # has no connections on the external one and would look idle when busy.
-    port=$(( ${HDW4S_BASE_PORT:-7300} + ${HDW4S_BLOCK_SIZE:-64} + idx ))
+    [ -z "${idx}" ] ||
+      port=$(( ${HDW4S_BASE_PORT:-7300} + ${HDW4S_BLOCK_SIZE:-64} + idx ))
   fi
   if [ -n "${port}" ] &&
      ss -Htn state established "sport = :${port}" 2>/dev/null | grep -q .; then
