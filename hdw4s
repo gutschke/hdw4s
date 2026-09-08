@@ -349,7 +349,10 @@ cmd_enable() {
   # filesystem socket it defaults to, while everything that reports on the
   # session -- the line below, "list", "proxy" -- describes the TCP port it
   # was assigned, and the two disagree with nobody the wiser.
-  cmd_transport "${inst}" "${HDW4S_TRANSPORT:-tcp}" >/dev/null
+  # The instance's own setting, not the global default: "enable" is documented
+  # as safe to re-run, and reading the global here would quietly move a session
+  # that had deliberately been put on a filesystem socket back onto the network.
+  cmd_transport "${inst}" "$(setting_of "${inst}" HDW4S_TRANSPORT tcp)" >/dev/null
 
   echo "Session ${inst} is listening on port $(port_of "${idx}")."
   echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
@@ -539,6 +542,14 @@ cmd_unset() {
 
   # Comment the assignment out rather than deleting the line, so the value that
   # was there stays visible and the file still documents what was tried.
+  # The key goes into an awk regular expression below, so it has to be a name
+  # and not a pattern. Without this, "hdw4s unset '.*'" comments out every line
+  # in the file and reports success.
+  case "${key}" in
+    ''|*[!A-Za-z0-9_]*)
+      die "hdw4s: '${key}' is not a setting name." ;;
+  esac
+
   tmp="$(mktemp "${file}.XXXXXX")"
   chmod 0644 "${tmp}"
   KEY="${key}" awk '
@@ -699,7 +710,12 @@ cmd_reap() {
     case "${idx}" in ''|\#*) continue;; esac
     [ "$(systemctl is-active "hdw4s@${inst}.service" 2>/dev/null)" = 'active' ] ||
       continue
-    port="$(port_of "${idx}")"
+    # The internal port, not the one the socket unit binds. systemd-socket-proxyd
+    # holds one loopback connection to it per client, so this counts real users
+    # on either transport -- whereas the external port has no connections at all
+    # when the session is on a filesystem socket, which made the reaper stop
+    # desktops that were in constant use.
+    port="$(internal_port_of "${idx}")"
     established="$(ss -Htn state established "sport = :${port}" 2>/dev/null | wc -l)"
 
     local stampdir="/run/hdw4s/${inst}"
