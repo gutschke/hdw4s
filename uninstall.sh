@@ -39,6 +39,13 @@ mapfile -t units < <(systemctl list-units --plain --no-legend --all 'hdw4s@*' |
 systemctl disable --now hdw4s-updater.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-firewall.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-reaper.timer >/dev/null 2>&1 || :
+systemctl disable --now hdw4s-firewall.service >/dev/null 2>&1 || :
+systemctl disable --now hdw4s-updater.timer >/dev/null 2>&1 || :
+# The relay sockets, which hold the public ports open until they are stopped.
+for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 2>/dev/null |
+           awk '{print $1}'); do
+  systemctl disable --now "${u}" >/dev/null 2>&1 || :
+done
 echo ' done.'
 
 echo -n 'Removing the firewall table...'
@@ -50,6 +57,8 @@ echo ' done.'
 
 echo -n 'Removing units...'
 rm -f /etc/systemd/system/hdw4s@.service \
+      /etc/systemd/system/hdw4s-proxy@.service \
+      /etc/systemd/system/hdw4s-proxy@.socket \
       /etc/systemd/system/hdw4s.slice \
       /etc/systemd/system/hdw4s-firewall.service \
       /etc/systemd/system/hdw4s-firewall-check.service \
@@ -58,7 +67,16 @@ rm -f /etc/systemd/system/hdw4s@.service \
       /etc/systemd/system/hdw4s-updater.timer \
       /etc/systemd/system/hdw4s-reaper.service \
       /etc/systemd/system/hdw4s-reaper.timer
+# Per-instance state. The glob below never matched anything -- hdw4s@.service
+# has no [Install] section, so nothing is ever linked into multi-user.target --
+# while the drop-ins and the socket links that "hdw4s enable" really does write
+# were left behind. Reinstalling then came back up with stale User= and port
+# assignments for slots that had since been handed to somebody else.
 rm -f /etc/systemd/system/multi-user.target.wants/hdw4s@*.service
+rm -f /etc/systemd/system/sockets.target.wants/hdw4s-proxy@*.socket
+rm -rf /etc/systemd/system/hdw4s@*.service.d \
+       /etc/systemd/system/hdw4s-proxy@*.service.d \
+       /etc/systemd/system/hdw4s-proxy@*.socket.d
 
 # Written by "hdw4s firewall --apply" to keep the session ports out of the
 # ephemeral range. Nothing else owns it, and leaving it behind reserves ports

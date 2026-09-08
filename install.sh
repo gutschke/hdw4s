@@ -97,6 +97,20 @@ case "${dst}" in
   /usr/*)       sys='/usr';;
   *)            sys="${dst%/lib/hdw4s}";;
 esac
+# Checked before anything is copied. A prefix that does not end in /lib/hdw4s
+# left sys pointing at the payload directory itself, and the run failed at the
+# symlink -- after the files were in place and before any unit was linked,
+# which is the least useful moment to stop.
+case "${dst}" in
+  */lib/hdw4s) ;;
+  *) echo >&2
+     echo "hdw4s: the install path has to end in /lib/hdw4s; got '${dst}'." >&2
+     echo "  Try /usr/lib/hdw4s or /usr/local/lib/hdw4s." >&2
+     exit 1;;
+esac
+case "${dst}" in
+  *[\&\|]*) echo "hdw4s: the install path may not contain & or |." >&2; exit 1;;
+esac
 man="${sys}/share/man/man8"
 
 echo -n 'Installing files...'
