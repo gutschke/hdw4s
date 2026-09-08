@@ -16,9 +16,16 @@ export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 # list changes, when the Selkies version moves, and before cutting a release.
 #
 #   sudo .github/clean-install-test.sh [--keep] [--tmpfs] [--suite noble]
+#                                      [--inspect CMD] [--inspect-script F] [--shell]
 #
 #   --keep    leave the chroot behind for inspection; you must remove it
 #   --tmpfs   build in a tmpfs, so a reboot cleans up whatever this misses
+#   --inspect CMD        run CMD inside the finished system (repeatable)
+#   --inspect-script F   copy F in and run it there
+#   --shell              open an interactive shell inside it; implies --keep
+#
+# The inspection hooks run after the checks and cannot change their verdict,
+# so they are safe to use on a passing run as well as a failing one.
 #
 # HDW4S_TEST_DNS sets the resolver used inside the sandbox (default 1.1.1.1),
 # and HDW4S_TEST_MIRROR the archive; the mirror otherwise follows this host.
@@ -46,6 +53,9 @@ DNS="${HDW4S_TEST_DNS:-1.1.1.1}"
 KEEP=''
 TMPFS=''
 TMPFS_MOUNTED=''
+SHELL_IN=''
+INSPECT=()
+INSPECT_SCRIPT=''
 MARKER='.hdw4s-clean-install-root'   # written into BASE, not ROOT
 
 while [ "$#" -gt 0 ]; do
@@ -53,6 +63,9 @@ while [ "$#" -gt 0 ]; do
     --keep)  KEEP='yes';;
     --tmpfs) TMPFS='yes';;
     --suite) shift; SUITE="${1:?--suite needs a value}";;
+    --inspect) shift; INSPECT+=("${1:?--inspect needs a command}");;
+    --inspect-script) shift; INSPECT_SCRIPT="${1:?--inspect-script needs a path}";;
+    --shell) SHELL_IN='yes'; KEEP='yes';;
     -h|--help) sed -n '/^#   sudo /,/^# Downloads/p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
@@ -389,6 +402,92 @@ fi
 
 # The CLI has to work as installed, not just as a file in the source tree.
 run hdw4s --version >/dev/null 2>&1 || fail 'hdw4s --version failed'
+
+# --- what is actually there ---------------------------------------------------
+# Filtered on purpose. A full dpkg listing or apt log is thousands of lines and
+# nobody reads it, so what gets printed is the handful of facts that have
+# actually mattered: versions, what pip put in the venv, whether the elements a
+# stream needs exist, and any complaint the install made. Someone checking this
+# run should be able to see whether it is healthy without trusting one word.
+echo
+echo '--- installed system -------------------------------------------------'
+printf '  %-24s %s\n' 'hdw4s' \
+  "$(grep -A1 -x 'Package: hdw4s' "${ROOT}/var/lib/dpkg/status" 2>/dev/null |
+     sed -n 's/^Version: //p' | head -1)"
+printf '  %-24s %s\n' 'selkies' \
+  "$(find "${VENV}" -maxdepth 1 -name 'selkies_gstreamer-*.dist-info' \
+     -printf '%f\n' 2>/dev/null | sed 's/^selkies_gstreamer-//;s/\.dist-info$//')"
+printf '  %-24s %s\n' 'debs installed' \
+  "$(grep -c '^Status: install ok installed' "${ROOT}/var/lib/dpkg/status" 2>/dev/null)"
+printf '  %-24s %s\n' 'size on disk' "$(du -sh "${ROOT}" 2>/dev/null | cut -f1)"
+
+echo '  packages pip put in the venv:'
+find "${VENV}" -maxdepth 1 -name '*.dist-info' -printf '%f\n' 2>/dev/null |
+  sed 's/\.dist-info$//' | sort | sed 's/^/    /'
+
+echo '  GStreamer elements a stream needs:'
+run /opt/selkies/bin/python -c '
+import gi
+gi.require_version("Gst", "1.0")
+from gi.repository import Gst
+Gst.init(None)
+for el in ("webrtcbin","nicesrc","nicesink","x264enc","vp8enc","opusenc",
+           "ximagesrc","videoconvert","audioconvert"):
+    print("    %-16s %s" % (el, "ok" if Gst.ElementFactory.make(el, None) else "MISSING"))
+' 2>/dev/null || echo '    (could not be listed)'
+
+echo '  typelibs Selkies reaches by introspection:'
+find "${ROOT}"/usr/lib -name 'Gst*.typelib' -printf '%f\n' 2>/dev/null |
+  sort | tr '\n' ' ' | fold -s -w 66 | sed 's/^/    /'
+
+# Only complaints. dpkg is verbose and almost all of it is noise; these are the
+# lines that have ever meant anything here.
+warn="$(grep -iE '^(W|E): |error:|failed|not installed|cannot' \
+        "${ROOT}/tmp/install.log" 2>/dev/null |
+        grep -viE 'invoke-rc.d|policy-rc.d|Failed to (connect to|take) |dbus|systemd|dpkg-preconfigure|locale' |
+        sort -u | head -8)"
+if [ -n "${warn}" ]; then
+  echo '  complaints during install (filtered):'
+  printf '%s\n' "${warn}" | sed 's/^/    /'
+else
+  echo '  complaints during install     none'
+fi
+echo '----------------------------------------------------------------------'
+
+# --- inspection hooks ---------------------------------------------------------
+# run() scrubs the environment with "env -i" so that the install is reproducible
+# and cannot inherit anything from the host. That is right for the test and
+# wrong for a person poking around, who expects a normal-looking shell -- so
+# these get a TERM and a sensible PATH, and a script is copied in rather than
+# executed across the chroot boundary, where its interpreter would be looked up
+# on the wrong side.
+inspect_run() {
+  unshare --fork --pid --mount-proc="${ROOT}/proc" chroot "${ROOT}" \
+    /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/root TERM="${TERM:-dumb}" DEBIAN_FRONTEND=noninteractive "$@"
+}
+
+for cmd in ${INSPECT+"${INSPECT[@]}"}; do
+  echo "--- inspect: ${cmd}"
+  inspect_run /bin/sh -c "${cmd}" || echo "  (exited $?)"
+done
+
+if [ -n "${INSPECT_SCRIPT}" ]; then
+  if [ -r "${INSPECT_SCRIPT}" ]; then
+    cp "${INSPECT_SCRIPT}" "${ROOT}/tmp/inspect-script"
+    chmod 0755 "${ROOT}/tmp/inspect-script"
+    echo "--- inspect-script: $(basename "${INSPECT_SCRIPT}")"
+    inspect_run /tmp/inspect-script || echo "  (exited $?)"
+  else
+    echo "hdw4s: cannot read ${INSPECT_SCRIPT}" >&2
+    rc=1
+  fi
+fi
+
+if [ -n "${SHELL_IN}" ]; then
+  echo "--- shell inside the installed system; exit when done ---"
+  inspect_run /bin/bash -i || :
+fi
 
 if [ "${rc}" -eq 0 ]; then
   echo
