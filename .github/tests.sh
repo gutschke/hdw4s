@@ -209,6 +209,66 @@ echo '== a machine-wide setting is refused per session =='
   ( cmd_set "${me}" 'HDW4S_ISOLATION=profile' ) >/dev/null 2>&1 \
     && ok  'a per-session setting is still accepted' \
     || bad 'a per-session setting is still accepted'
+
+  # Settings whose effect lives in a drop-in only a dedicated command writes.
+  # Accepting these recorded a value that "list", "show" and "proxy" then
+  # reported while the session went on using the old one.
+  for k in HDW4S_TRANSPORT=unix HDW4S_AUTH=basic; do
+    ( cmd_set "${me}" "${k}" ) >/dev/null 2>&1 \
+      && bad "${k%%=*} is not settable this way" \
+      || ok  "${k%%=*} is not settable this way"
+  done
+  out="$( ( cmd_set "${me}" 'HDW4S_TRANSPORT=unix' ) 2>&1 )"
+  has 'and says which command does write it' "${out}" 'hdw4s transport'
+)
+
+echo '== show can say which file a value came from =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # "show" is documented as reporting where each setting came from, and could
+  # not: it printed the instance file and nothing else, so every inherited
+  # value -- the ones somebody runs the command to find -- was missing.
+  printf 'HDW4S_FRAMERATE=60\n' > "${CONF}"
+  r="$(setting_with_source alice HDW4S_FRAMERATE 30)"
+  is 'a global value is found'   "${r%%$'\t'*}" '60'
+  is 'and attributed to the global file' "${r#*$'\t'}" "${CONF}"
+
+  printf 'HDW4S_FRAMERATE=24\n' > "${SB}/etc/alice.conf"
+  r="$(setting_with_source alice HDW4S_FRAMERATE 30)"
+  is 'the instance value wins'   "${r%%$'\t'*}" '24'
+  is 'and is attributed to it'   "${r#*$'\t'}" "${SB}/etc/alice.conf"
+
+  r="$(setting_with_source bob HDW4S_NOTHING zzz)"
+  is 'a default is reported as such' "${r%%$'\t'*}" 'zzz'
+  is 'with no file named'            "${r#*$'\t'}" ''
+)
+
+echo '== the profile directory is read the same way everywhere =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # hdw4s-session honours the instance file. "seed", "show" and "release" read
+  # the globally sourced variable instead, so setting this per session made
+  # "seed" populate a directory the session would never open -- and report that
+  # it had seeded the profile.
+  HDW4S_PROFILE_DIR='/var/lib/hdw4s'
+  printf 'HDW4S_PROFILE_DIR=/srv/profiles\n' > "${SB}/etc/alice.conf"
+  is 'the instance value is used'  "$(profile_dir_of alice)" '/srv/profiles'
+  is 'and the global for another'  "$(profile_dir_of bob)"   '/var/lib/hdw4s'
+  printf 'HDW4S_PROFILE_DIR=/srv/all\n' > "${CONF}"
+  is 'a global setting is honoured' "$(profile_dir_of bob)"  '/srv/all'
+  is 'and the instance still wins'  "$(profile_dir_of alice)" '/srv/profiles'
+)
+
+echo '== a setting is pointed at the action that applies it =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # Every one of these used to print "restart the session", which for all
+  # three of them does nothing at all.
+  out="$(set_hint '' 'HDW4S_MEDIA_PORTS=direct' 2>&1)"
+  has   'media ports point at the firewall' "${out}" 'firewall --apply'
+  hasnt 'and not at a restart'              "${out}" 'estart'
+  out="$(set_hint '' 'SELKIES_VERSION=1.6.2' 2>&1)"
+  has   'a pinned version points at the updater' "${out}" 'hdw4s-update'
+  out="$(set_hint 'alice' 'HDW4S_RESIZE=true' 2>&1)"
+  has   'an ordinary setting still points at a restart' \
+        "${out}" 'systemctl restart hdw4s@alice'
 )
 
 echo '== firewall ruleset shape =='
@@ -393,7 +453,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=64   # update when tests are added; a wrong number is the point
+EXPECTED=81   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

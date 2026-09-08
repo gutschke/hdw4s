@@ -154,17 +154,22 @@ if [ "${current}" != "${wanted}" ]; then
   # between releases, so glob for whatever it turned out to be instead of
   # guessing. Extracting into a scratch directory first keeps a failed unpack
   # from leaving a half-populated web root behind.
-  rm -rf "${workdir}/web"
-  mkdir -p "${workdir}/web"
+  rm -rf "${workdir}/web" "${WEBROOT}.new"
+  mkdir -p "${workdir}/web" "${WEBROOT}.new"
   tar -xzf "${workdir}/${web}" -C "${workdir}/web"
-  rm -rf "${WEBROOT}"
-  mkdir -p "${WEBROOT}"
+  # Assembled complete, beside the live one, and only then swapped in. The old
+  # order removed the web root as soon as pip had succeeded, so a failure in
+  # the unpack left it empty -- and permanently, because the version file had
+  # already moved on and every later run reported the release as already
+  # installed and skipped this block entirely.
   if [ "$(find "${workdir}/web" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] &&
      [ "$(find "${workdir}/web" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]; then
-    mv "${workdir}"/web/*/* "${WEBROOT}/"
+    mv "${workdir}"/web/*/* "${WEBROOT}.new/"
   else
-    mv "${workdir}"/web/* "${WEBROOT}/"
+    mv "${workdir}"/web/* "${WEBROOT}.new/"
   fi
+  rm -rf "${WEBROOT}"
+  mv "${WEBROOT}.new" "${WEBROOT}"
   echo ' done.'
   upgraded='yes'
 else
@@ -382,10 +387,44 @@ fi
 # upgrade.
 mapfile -t units < <(systemctl list-units --plain --no-legend --state=active 'hdw4s@*' |
                      awk '{print $1}')
+# Sessions are socket-activated and are not started at boot, so this list is
+# normally empty and this is the branch nearly every upgrade takes. It used to
+# discard both backups and exit 0 without having executed a single byte of the
+# new installation -- the verification and rollback below were dead code in the
+# ordinary case. Import what the streaming server imports first: that is what a
+# missing GStreamer typelib or a broken dependency actually breaks, and it
+# breaks it in a way nothing else here would notice until a user saw a desktop
+# that never appeared.
 [ "${#units[@]}" -gt 0 ] || {
-  echo 'Upgrade complete; no sessions were running.'
-  rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
-  exit 0
+  echo -n '  Checking that the new installation loads...'
+  if "${PREFIX}/bin/python" -c '
+import gi
+gi.require_version("Gst", "1.0")
+gi.require_version("GstWebRTC", "1.0")
+from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp
+import selkies_gstreamer' >/dev/null 2>&1; then
+    echo ' done.'
+    echo 'Upgrade complete; no sessions were running.'
+    rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
+    exit 0
+  fi
+  echo ' failed.'
+  echo 'CRITICAL: the new installation cannot be imported.' >&2
+  "${PREFIX}/bin/python" -c '
+import gi
+gi.require_version("Gst", "1.0")
+gi.require_version("GstWebRTC", "1.0")
+from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp
+import selkies_gstreamer' 2>&1 | tail -3 >&2
+  if [ -d "${PREFIX}.bak" ] || [ -d "${WEBROOT}.bak" ]; then
+    echo '  Rolling back...' >&2
+    [ ! -d "${PREFIX}.bak" ]  || { rm -rf "${PREFIX}";  mv "${PREFIX}.bak"  "${PREFIX}"; }
+    [ ! -d "${WEBROOT}.bak" ] || { rm -rf "${WEBROOT}"; mv "${WEBROOT}.bak" "${WEBROOT}"; }
+    echo "  Rolled back to v${current:-none}." >&2
+  else
+    echo '  No previous installation to restore.' >&2
+  fi
+  exit 1
 }
 
 # Restart only sessions nobody is using. A daily timer that reboots a desktop
@@ -462,9 +501,11 @@ fi
 
 echo 'CRITICAL: sessions did not come back up. Rolling back...' >&2
 if [ -d "${PREFIX}.bak" ] || [ -d "${WEBROOT}.bak" ]; then
-  rm -rf "${PREFIX}" "${WEBROOT}"
-  [ ! -d "${PREFIX}.bak" ]  || mv "${PREFIX}.bak"  "${PREFIX}"
-  [ ! -d "${WEBROOT}.bak" ] || mv "${WEBROOT}.bak" "${WEBROOT}"
+  # Each side guarded by its own backup. Removing both and restoring one left
+  # the half with no backup deleted and unrecoverable, while the script
+  # reported that it had rolled back.
+  [ ! -d "${PREFIX}.bak" ]  || { rm -rf "${PREFIX}";  mv "${PREFIX}.bak"  "${PREFIX}"; }
+  [ ! -d "${WEBROOT}.bak" ] || { rm -rf "${WEBROOT}"; mv "${WEBROOT}.bak" "${WEBROOT}"; }
   systemctl restart "${units[@]}" || :
   echo "Rolled back to v${current:-none}." >&2
 else

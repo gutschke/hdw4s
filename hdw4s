@@ -238,16 +238,34 @@ internal_port_of() {
 
 # The effective value of a setting for one session: its own file if it says
 # anything, otherwise the site default, otherwise the fallback given here.
-setting_of() {
+# The value and the file it came from, tab-separated. Which of the two files
+# won is the single most common source of confusion in a layered
+# configuration, so the answer is computed once, here, and both the plain
+# lookup and "show" read it from the same place.
+setting_with_source() {
   local inst="$1" key="$2" fallback="$3" v=''
   local f
   for f in "${ETCDIR}/${inst}.conf" "${CONF}"; do
     [ -r "${f}" ] || continue
     v="$(sed -n "s/^[[:space:]]*${key}=[\"']\{0,1\}\([^\"'#]*\).*/\1/p" \
          "${f}" | tail -n1 | sed 's/[[:space:]]*$//')"
-    [ -z "${v}" ] || { printf '%s' "${v}"; return 0; }
+    [ -z "${v}" ] || { printf '%s\t%s' "${v}" "${f}"; return 0; }
   done
-  printf '%s' "${fallback}"
+  printf '%s\t' "${fallback}"
+}
+
+setting_of() {
+  local r
+  r="$(setting_with_source "$1" "$2" "$3")"
+  printf '%s' "${r%%$'\t'*}"
+}
+
+# Where a session's profile lives. hdw4s-session honours the instance file, so
+# everything that names this directory has to read it the same way: "seed" used
+# the globally sourced variable and so populated a directory the session would
+# never look at, saying it had seeded the profile.
+profile_dir_of() {
+  setting_of "$1" HDW4S_PROFILE_DIR "${HDW4S_PROFILE_DIR:-/var/lib/hdw4s}"
 }
 
 # Whether a session has a credential of its own that a proxy must present.
@@ -320,7 +338,7 @@ cmd_show() {
   local prof
   prof="$(setting_of "${inst}" HDW4S_ISOLATION none)"
   if [ "${prof}" = 'profile' ]; then
-    echo "isolation     profile  (settings kept in ${HDW4S_PROFILE_DIR}/${inst})"
+    echo "isolation     profile  (settings kept in $(profile_dir_of "${inst}")/${inst})"
   else
     echo 'isolation     none  (settings kept in the home directory, shared with'
     echo '                    any other desktop using it)'
@@ -335,6 +353,22 @@ cmd_show() {
     echo 'auth          NONE -- anything that can reach the port gets this'
     echo "              desktop. Add one with 'hdw4s auth ${inst}'."
   fi
+  local sk skey sdef sval ssrc
+  echo 'settings      effective value, and where it came from'
+  for sk in "${SESSION_SETTINGS[@]}"; do
+    skey="${sk%%:*}"; sdef="${sk#*:}"
+    ssrc="$(setting_with_source "${inst}" "${skey}" "${sdef}")"
+    sval="${ssrc%%$'\t'*}"; ssrc="${ssrc#*$'\t'}"
+    printf '              %-20s %-22s %s\n' \
+      "${skey}" "${sval}" "${ssrc:-built-in default}"
+  done
+  # LANG is not in that table because its default is not a constant: it is read
+  # from /etc/default/locale at session start and only falls back to C.UTF-8.
+  ssrc="$(setting_with_source "${inst}" HDW4S_LANG '')"
+  sval="${ssrc%%$'\t'*}"; ssrc="${ssrc#*$'\t'}"
+  printf '              %-20s %-22s %s\n' 'HDW4S_LANG' \
+    "${sval:-(from /etc/default/locale)}" "${ssrc:-built-in default}"
+
   [ ! -r "${ETCDIR}/${inst}.keyring.cred" ] ||
     echo 'keyring       its own, unlocked at start'
   echo "display       $(cat "/run/hdw4s/${inst}/display" 2>/dev/null ||
@@ -342,7 +376,7 @@ cmd_show() {
 }
 
 cmd_enable() {
-  local inst="$1" idx fresh='no'
+  local inst="$1" idx prof fresh='no'
   split_instance "${inst}" || exit 1
   # Whether this instance is being created rather than re-enabled, decided
   # before anything below writes the file. "enable" is documented as safe to
@@ -389,6 +423,24 @@ cmd_enable() {
     '[Service]' \
     "ReadWritePaths=${home}" \
     > "${DROPIN}/hdw4s@${inst}.service.d/40-home.conf"
+
+  # ProtectSystem=strict makes everything read-only but what is named, and the
+  # unit names only /var/lib/hdw4s. Any other profile directory was therefore
+  # read-only inside the session, which failed at "install -d" with a bare
+  # EROFS -- so the setting parsed, passed validation, was reported back by
+  # "show", and could not work. Named here for the same reason the home
+  # directory is: this is the one moment the value is known.
+  prof="$(profile_dir_of "${inst}")"
+  if [ "${prof}" = '/var/lib/hdw4s' ]; then
+    rm -f "${DROPIN}/hdw4s@${inst}.service.d/45-profile.conf"
+  else
+    printf '%s\n' \
+      '# Written by "hdw4s enable". Re-run it if HDW4S_PROFILE_DIR changes.' \
+      '[Service]' \
+      "ReadWritePaths=${prof}" \
+      > "${DROPIN}/hdw4s@${inst}.service.d/45-profile.conf"
+    install -d -m0755 "${prof}"
+  fi
 
   # The relay forwards to wherever the session actually listens.
   install -d -m0755 "${DROPIN}/hdw4s-proxy@${inst}.service.d"
@@ -491,6 +543,35 @@ EOF
 declare -A GLOBAL_ONLY=(
   [HDW4S_PROXIES]=1 [HDW4S_BASE_PORT]=1 [HDW4S_BLOCK_SIZE]=1
   [HDW4S_MEDIA_PORTS]=1 [HDW4S_ALLOW_SYSTEM_USER]=1 [SELKIES_VERSION]=1
+)
+
+# Settings whose effect does not live in the configuration file at all. The
+# value there is read back by "show", "list" and "proxy", but what actually
+# takes effect is a drop-in or a credential that only the named command
+# writes. Setting one here parsed, passed every check, was echoed back, and
+# changed nothing -- so "list" reported the new transport while the session
+# stayed on the old one, which is the disagreement the whole slot mechanism
+# exists to prevent, arriving through a different door.
+# Everything a session reads that is not already reported by name in "show",
+# with the default the session scripts fall back to. "show" is documented as
+# reporting the settings that apply and where each came from, and it only ever
+# printed the instance file -- so the values that were inherited, which are
+# exactly the ones somebody runs this command to find, were the ones it did not
+# show. Kept in the order an administrator is likely to want them; the defaults
+# are checked against the scripts by .github/checks.sh.
+SESSION_SETTINGS=(
+  'HDW4S_SESSION:gnome-session'
+  'HDW4S_ADDR:127.0.0.1'
+  'HDW4S_ENCODER:x264enc'
+  'HDW4S_FRAMERATE:30'
+  'HDW4S_RESIZE:true'
+  'HDW4S_IDLE_DAYS:7'
+  'HDW4S_PROFILE_DIR:/var/lib/hdw4s'
+)
+
+declare -A OWNED_BY=(
+  [HDW4S_TRANSPORT]='transport'
+  [HDW4S_AUTH]='auth'
 )
 
 declare -A SETTABLE=(
@@ -617,6 +698,11 @@ cmd_set() {
       die "hdw4s: ${key} cannot be set from the command line." \
           "  Settable: ${!SETTABLE[*]}" \
           "  Anything else can still be edited in ${file}."
+    [ -z "${OWNED_BY[${key}]+set}" ] ||
+      die "hdw4s: ${key} is not set this way." \
+          "  It takes effect through a drop-in that only 'hdw4s ${OWNED_BY[${key}]}'" \
+          '  writes, so setting it here would be recorded and ignored. Run:' \
+          "    hdw4s ${OWNED_BY[${key}]} ${inst:-<session>}${value:+ ${value}}"
     [ -z "${inst}" ] || [ -z "${GLOBAL_ONLY[${key}]+set}" ] ||
       die "hdw4s: ${key} only takes effect machine-wide." \
           "  Nothing reads it per session, so writing it into ${file}" \
@@ -667,15 +753,29 @@ cmd_unset() {
 # that does nothing until some unmentioned command is run is how configuration
 # files get a reputation for not working.
 set_hint() {
-  local inst="$1" pair firewall='' session=''
+  local inst="$1" pair firewall='' session='' updater='' atenable='' relay=''
   shift
   for pair in "$@"; do
     case "${pair%%=*}" in
-      HDW4S_PROXIES|HDW4S_BASE_PORT|HDW4S_BLOCK_SIZE) firewall='yes';;
+      # Read only by hdw4s-firewall. Restarting a session does nothing for
+      # these, and HDW4S_MEDIA_PORTS used to be told to do exactly that.
+      HDW4S_PROXIES|HDW4S_BASE_PORT|HDW4S_BLOCK_SIZE|HDW4S_MEDIA_PORTS)
+        firewall='yes';;
+      # Read only by the updater.
+      SELKIES_VERSION) updater='yes';;
+      # Read by the CLI when a session is created, and nowhere else.
+      HDW4S_ALLOW_SYSTEM_USER) atenable='yes';;
+      # Written into the socket drop-in by "hdw4s transport", not read at
+      # session start, so a restart does not pick it up.
+      HDW4S_PROXY_GROUP) relay='yes';;
       *) session='yes';;
     esac
   done
   [ -z "${firewall}" ] || echo "  Run 'hdw4s firewall --apply' to use it."
+  [ -z "${updater}" ] || echo "  Run '/usr/lib/hdw4s/hdw4s-update' to use it."
+  [ -z "${atenable}" ] || echo '  Applies to sessions created after this.'
+  [ -z "${relay}" ] ||
+    echo "  Run 'hdw4s transport ${inst:-<session>} unix' again to use it."
   if [ -n "${session}" ]; then
     if [ -n "${inst}" ]; then
       echo "  Run 'systemctl restart hdw4s@${inst}' to use it."
@@ -1032,7 +1132,7 @@ cmd_seed() {
 
   local home profile
   home="$(getent passwd -- "${user}" | cut -d: -f6)"
-  profile="${HDW4S_PROFILE_DIR:-/var/lib/hdw4s}/${inst}"
+  profile="$(profile_dir_of "${inst}")/${inst}"
 
   # This runs once and never merges. A profile that already has something in it
   # is a profile someone has used, and overwriting it would lose whichever of
@@ -1206,7 +1306,7 @@ cmd_release() {
   echo "Session ${inst} released. Its credentials were removed with it, so a"
   echo 'keyring in the profile below can no longer be unlocked. Left in place:'
   echo "its profile under"
-  echo "${HDW4S_PROFILE_DIR}/${inst}, and its settings in"
+  echo "$(profile_dir_of "${inst}")/${inst}, and its settings in"
   echo "${ETCDIR}/${inst}.conf -- so that re-enabling it restores them. The"
   echo "slot, and with it the port, is not reserved and may go to someone else;"
   echo "enabling again rewrites the port that conf file records."

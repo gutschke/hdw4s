@@ -207,6 +207,34 @@ for setting in HDW4S_BASE_PORT:7300 HDW4S_BLOCK_SIZE:64; do
 done
 okif 'defaults agree'
 
+# "hdw4s show" carries its own table of the defaults a session falls back to,
+# so that it can report an effective value for a setting nobody has written
+# down. A table like that is drift waiting to happen, and the drift is
+# invisible: show would confidently report a default the session does not use.
+begin
+while IFS=: read -r key def; do
+  [ -n "${key}" ] || continue
+  found=''
+  for f in hdw4s-run-session hdw4s-session hdw4s; do
+    got="$(sed -n "s/^ *: \"\${${key}:=\(.*\)}\"\$/\1/p" "${f}" | head -n1)"
+    [ -n "${got}" ] || continue
+    found='yes'
+    [ "${got}" = "${def}" ] ||
+      bad 'hdw4s show' "${key} defaults to ${def} here and ${got} in ${f}"
+    break
+  done
+  # HDW4S_IDLE_DAYS is not defaulted with the ":=" form; the reaper passes it
+  # to setting_of instead.
+  if [ -z "${found}" ] && [ "${key}" = 'HDW4S_IDLE_DAYS' ]; then
+    grep -q "setting_of \"\${inst}\" ${key} ${def}\b" hdw4s || found=''
+    grep -q "setting_of \"\${inst}\" ${key} ${def}" hdw4s && found='yes'
+  fi
+  [ -n "${found}" ] ||
+    bad 'hdw4s show' "${key} is in its table but nothing defaults it to ${def}"
+done < <(sed -n '/^SESSION_SETTINGS=(/,/^)/p' hdw4s |
+         sed -n "s/^  '\(.*\)'\$/\1/p")
+okif 'show defaults match the session scripts'
+
 # A package that builds but cannot be installed is not a working package. CI
 # never installs this one -- pulling a whole desktop onto a runner is not worth
 # it -- so at least check that every dependency names a package the archive
