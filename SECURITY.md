@@ -32,9 +32,9 @@ is not a substitute for authenticating people at the proxy.
 reach a session to a set of addresses. An address is a weak thing to rely on by
 itself: it can be spoofed unless the network prevents it, and on a shared
 network anything on that network can present it. Treat it as a second lock,
-never the first. The nftables rules also drop new inbound connections to the
-ephemeral range, where the streaming server scatters its media sockets across
-every address the machine has.
+never the first. The nftables rules also close the connection candidates the
+streaming server scatters across every address the machine has -- see the note
+on the media chain below for how, and for what that does and does not cover.
 
 **The updater installs an unsigned upstream wheel as root.** `hdw4s-update`
 fetches the streaming server from its upstream GitHub releases over TLS and
@@ -62,23 +62,33 @@ one that has already been logged; and rotating a credential does not shorten
 that window.
 
 The nftables `media` chain closes the streaming server's connection-candidate
-sockets by matching the cgroup that owns each socket, which means it constrains
-sockets **by what created them, not by which port they use**. Two consequences
+sockets. Where the kernel allows it, it matches the cgroup that owns each
+socket, which means it constrains sockets **by what created them, not by which
+port they use**. Where it does not -- an older kernel, older nftables, or a
+container below kernel 6.11, where matching a cgroup by level silently never
+matches -- it falls back to dropping new inbound connections to the ephemeral
+port range instead, and says so when it applies the rules. The two have
+opposite blind spots, so which one is in force matters: `hdw4s firewall
+--check` reports it. Two consequences
 follow. A session cannot escape it by choosing a different port. But equally, it
 constrains nothing the account creates by another route — a cron job, an `at`
 job, an ssh login — because those are outside the session's slice. Anything that
 opens a listener there and forwards to the session's loopback port exposes a
 desktop that authenticates nobody. The chain is a limit on the streaming server,
-not on the account.
+not on the account. Under the port-range fallback both of those invert: a
+session escapes by binding outside the range, and an unrelated program of the
+same account inside it is caught.
 
-The same chain has a narrow timing window. It drops a packet only when a socket
-in the slice already exists to match; before the streaming server binds a given
-port, a packet addressed to it finds no socket, the chain does not match, and
-conntrack records the flow. If a candidate socket later lands on that port and
-answers, that recorded flow is `established` and passes above the drop. Reaching
-it still needs credentials from the authenticated signalling channel, and
-provoking it means spraying a large port range noisily, but it is a real
-difference from filtering by port number.
+The cgroup form has a narrow timing window that the port-range form does not.
+It drops a packet only when a socket in the slice already exists to match, so a
+packet arriving before the streaming server binds that port finds no socket and
+is recorded by conntrack instead. That recorded flow only becomes `established`
+-- and so only passes above the drop -- if something later answers on that port,
+which for a candidate socket means answering with credentials from the
+authenticated signalling channel. So this is a narrowing of the guarantee rather
+than a way in, and provoking it means spraying a large port range noisily. It is
+stated because the guarantee is narrower than "the candidate sockets are
+closed", not because it is known to be reachable.
 
 ## Reports that are in scope
 

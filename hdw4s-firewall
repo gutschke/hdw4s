@@ -8,7 +8,7 @@ trap 'rc="$?"
       [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
-CONF='/etc/hdw4s/hdw4s.conf'
+CONF="${HDW4S_ETCDIR:-/etc/hdw4s}/hdw4s.conf"
 RULES='/etc/hdw4s/nftables.conf'
 
 HDW4S_BASE_PORT=7300
@@ -95,8 +95,6 @@ generate() {
     # failed on every boot and quietly installed the fallback instead.
     # Starting it explicitly also pins it, so the inode does not change when the
     # last session stops and the slice would otherwise be garbage collected.
-    systemctl start hdw4s.slice >/dev/null 2>&1 || :
-
     # Probed against a slice that is always present, so a failure here means
     # what the message says it means rather than "the slice was missing".
     # Matching a cgroup by namespace-relative level was broken until kernel
@@ -226,6 +224,13 @@ EOF
 }
 
 cmd_apply() {
+  # Here rather than in generate(), which "--print" also calls: printing a
+  # ruleset is documented as showing what would be loaded without loading it,
+  # and starting a unit is not that. Starting the slice explicitly also pins
+  # it, so the cgroup the rule names is not garbage collected when the last
+  # session stops.
+  systemctl start hdw4s.slice >/dev/null 2>&1 || :
+
   install -d -m0755 "$(dirname "${RULES}")"
 
   # Tell the kernel never to hand these out as ephemeral ports. Without this a

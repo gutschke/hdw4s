@@ -84,11 +84,38 @@ else
   bad 'groff' 'warnings above'
 fi
 for section in NAME SYNOPSIS DESCRIPTION COMMANDS CONFIGURATION \
-               'SHARED HOME DIRECTORIES' 'REVERSE PROXY AND SECURITY' FILES; do
+               'SHARED HOME DIRECTORIES' 'REVERSE PROXY AND SECURITY' FILES \
+               DIAGNOSTICS UPDATES LIMITATIONS; do
   grep -q "^\.SH \"\{0,1\}${section}" hdw4s.8 ||
     bad 'hdw4s.8' "section '${section}' is missing"
 done
 note 'required sections' 'present'
+
+# The roff page is generated from the markdown one and committed alongside it,
+# so the two can drift: an edit to the source that nobody regenerates ships a
+# manual describing the previous release. Naming sections cannot catch that --
+# the whole LIMITATIONS section could vanish and every named section would
+# still be present. Regenerating and comparing can.
+if command -v ronn >/dev/null; then
+  regen="$(mktemp)"
+  # The .TH line carries the build date and the leading .\" lines name the
+  # generator's version, so both differ between machines and neither says
+  # anything about content. Everything else must match exactly.
+  strip() { grep -v '^\.\\"' "$1" | grep -v '^\.TH '; }
+  if ronn --roff --pipe --manual='hdw4s' --organization='hdw4s' \
+          --date='2000-01-01' hdw4s.8.md > "${regen}" 2>/dev/null &&
+     [ -s "${regen}" ]; then
+    if diff -q <(strip "${regen}") <(strip hdw4s.8) >/dev/null; then
+      note 'hdw4s.8 matches its source' 'yes'
+    else
+      bad 'hdw4s.8' 'differs from hdw4s.8.md -- regenerate it'
+      diff <(strip hdw4s.8) <(strip "${regen}") | head -10
+    fi
+  else
+    bad 'hdw4s.8' 'could not be regenerated for comparison'
+  fi
+  rm -f "${regen}"
+fi
 
 # The updater injects JavaScript into the streaming client's page. It is code
 # we ship, and a syntax error in it would otherwise be found by a user looking

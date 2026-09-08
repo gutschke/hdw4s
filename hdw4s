@@ -20,8 +20,12 @@ die() {
   exit 1
 }
 
-CONF='/etc/hdw4s/hdw4s.conf'
-SLOTS='/etc/hdw4s/instances'
+# Every path this program writes goes through these, so that a test can point
+# them somewhere disposable. Without that the tests read -- and would sooner or
+# later write -- the real configuration of the machine they run on.
+ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
+CONF="${ETCDIR}/hdw4s.conf"
+SLOTS="${ETCDIR}/instances"
 DROPIN='/etc/systemd/system'
 
 # Defaults. Every one of these may be overridden in /etc/hdw4s/hdw4s.conf.
@@ -237,7 +241,7 @@ internal_port_of() {
 setting_of() {
   local inst="$1" key="$2" fallback="$3" v=''
   local f
-  for f in "/etc/hdw4s/${inst}.conf" "${CONF}"; do
+  for f in "${ETCDIR}/${inst}.conf" "${CONF}"; do
     [ -r "${f}" ] || continue
     v="$(sed -n "s/^[[:space:]]*${key}=[\"']\{0,1\}\([^\"'#]*\).*/\1/p" \
          "${f}" | tail -n1 | sed 's/[[:space:]]*$//')"
@@ -248,7 +252,7 @@ setting_of() {
 
 # Whether a session has a credential of its own that a proxy must present.
 has_auth() {
-  [ -r "/etc/hdw4s/$1.auth.cred" ] &&
+  [ -r "${ETCDIR}/$1.auth.cred" ] &&
   [ "$(setting_of "$1" HDW4S_AUTH none)" = 'basic' ]
 }
 
@@ -307,11 +311,11 @@ cmd_show() {
   echo "session       ${session}"
   echo "slot          ${idx}  (${SLOTS})"
   echo "port          ${port}  (${HDW4S_BASE_PORT} + slot)"
-  if [ -r "/etc/hdw4s/${inst}.conf" ]; then
-    echo "overrides     /etc/hdw4s/${inst}.conf"
-    sed 's/^/              /' "/etc/hdw4s/${inst}.conf"
+  if [ -r "${ETCDIR}/${inst}.conf" ]; then
+    echo "overrides     ${ETCDIR}/${inst}.conf"
+    sed 's/^/              /' "${ETCDIR}/${inst}.conf"
   else
-    echo "overrides     none  (/etc/hdw4s/${inst}.conf does not exist)"
+    echo "overrides     none  (${ETCDIR}/${inst}.conf does not exist)"
   fi
   local prof
   prof="$(setting_of "${inst}" HDW4S_ISOLATION none)"
@@ -322,7 +326,7 @@ cmd_show() {
     echo '                    any other desktop using it)'
   fi
   if has_auth "${inst}"; then
-    echo "auth          a credential of its own, in /etc/hdw4s/${inst}.auth.cred"
+    echo "auth          a credential of its own, in ${ETCDIR}/${inst}.auth.cred"
     echo "              the proxy must present it; see 'hdw4s proxy ${inst}'"
   elif [ "$(setting_of "${inst}" HDW4S_TRANSPORT tcp)" = 'unix' ]; then
     echo 'auth          none, but reached over a filesystem socket, so access'
@@ -331,7 +335,7 @@ cmd_show() {
     echo 'auth          NONE -- anything that can reach the port gets this'
     echo "              desktop. Add one with 'hdw4s auth ${inst}'."
   fi
-  [ ! -r "/etc/hdw4s/${inst}.keyring.cred" ] ||
+  [ ! -r "${ETCDIR}/${inst}.keyring.cred" ] ||
     echo 'keyring       its own, unlocked at start'
   echo "display       $(cat "/run/hdw4s/${inst}/display" 2>/dev/null ||
                         echo 'not running (assigned at start)')"
@@ -393,7 +397,7 @@ cmd_enable() {
     > "${DROPIN}/hdw4s-proxy@${inst}.service.d/50-port.conf"
 
   # And the session is told which loopback port to bind.
-  config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_PORT' "$(internal_port_of "${idx}")"
+  config_write "${ETCDIR}/${inst}.conf" 'HDW4S_PORT' "$(internal_port_of "${idx}")"
 
   systemctl daemon-reload
   # The socket is what gets enabled, not the session. Nothing runs until
@@ -464,7 +468,6 @@ declare -A SETTABLE=(
   [HDW4S_ALLOW_SYSTEM_USER]='yes|no'
   [HDW4S_PROFILE_DIR]='path'
   [HDW4S_ADDR]='any'
-  [HDW4S_PORT]='number'
   [HDW4S_BASE_PORT]='number'
   [HDW4S_BLOCK_SIZE]='number'
   [HDW4S_SESSION]='any'
@@ -502,12 +505,12 @@ quote_value() {
 }
 
 config_file() {
-  if [ -z "$1" ]; then echo "${CONF}"; else echo "/etc/hdw4s/$1.conf"; fi
+  if [ -z "$1" ]; then echo "${CONF}"; else echo "${ETCDIR}/$1.conf"; fi
 }
 
 config_write() {
   local file="$1" key="$2" value="$3" tmp
-  install -d -m0755 /etc/hdw4s
+  install -d -m0755 "${ETCDIR}"
   [ -e "${file}" ] || {
     printf '%s\n' \
       "# Settings for this session. Read after ${CONF}, and wins over it." \
@@ -649,7 +652,7 @@ set_hint() {
 # disk in the clear.
 make_credential() {
   local inst="$1" name="$2" order="$3" cred pw
-  cred="/etc/hdw4s/${inst}.${name}.cred"
+  cred="${ETCDIR}/${inst}.${name}.cred"
   pw=''
   while [ "${#pw}" -lt 24 ]; do
     # tr removes characters before head truncates, so a single pass can come
@@ -709,14 +712,14 @@ cmd_transport() {
         'ListenStream=' \
         "ListenStream=${port}" \
         > "${dir}/50-listen.conf"
-      config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_TRANSPORT' 'tcp'
+      config_write "${ETCDIR}/${inst}.conf" 'HDW4S_TRANSPORT' 'tcp'
       systemctl daemon-reload
       systemctl restart "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
       echo "Session ${inst} listens on port ${port}."
       echo '  Who may connect is decided by the firewall; see HDW4S_PROXIES.'
       ;;
     unix)
-      group="${HDW4S_PROXY_GROUP:-www-data}"
+      group="$(setting_of "${inst}" HDW4S_PROXY_GROUP www-data)"
       getent group -- "${group}" >/dev/null ||
         die "hdw4s: no such group: ${group}" \
             '  Set HDW4S_PROXY_GROUP to the group the reverse proxy runs as.'
@@ -728,7 +731,7 @@ cmd_transport() {
         '[Socket]' \
         "SocketGroup=${group}" \
         > "${dir}/60-group.conf"
-      config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_TRANSPORT' 'unix'
+      config_write "${ETCDIR}/${inst}.conf" 'HDW4S_TRANSPORT' 'unix'
       systemctl daemon-reload
       systemctl restart "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
       echo "Session ${inst} is reachable at /run/hdw4s-proxy/${inst}.sock,"
@@ -752,12 +755,7 @@ cmd_transport() {
 # browser client reconnects by itself, so an open tab counts as connected even
 # across a laptop lid being shut.
 cmd_reap() {
-  local idx inst port established last now age stopped=0
-  : "${HDW4S_IDLE_DAYS:=7}"
-  [ "${HDW4S_IDLE_DAYS}" -gt 0 ] 2>/dev/null || {
-    echo 'hdw4s: idle reaping is disabled (HDW4S_IDLE_DAYS=0)'
-    return 0
-  }
+  local idx inst port established last now age days stopped=0
   now="$(date +%s)"
   [ -r "${SLOTS}" ] || return 0
 
@@ -765,6 +763,12 @@ cmd_reap() {
     case "${idx}" in ''|\#*) continue;; esac
     [ "$(systemctl is-active "hdw4s@${inst}.service" 2>/dev/null)" = 'active' ] ||
       continue
+    # Per instance, not once for the whole run: a session that should never be
+    # reaped is a per-session decision, and reading the global here meant
+    # setting it on an instance did nothing at all.
+    days="$(setting_of "${inst}" HDW4S_IDLE_DAYS 7)"
+    case "${days}" in ''|*[!0-9]*) days=7;; esac
+    [ "${days}" -gt 0 ] || continue
     # The internal port, not the one the socket unit binds. systemd-socket-proxyd
     # holds one loopback connection to it per client, so this counts real users
     # on either transport -- whereas the external port has no connections at all
@@ -789,7 +793,7 @@ cmd_reap() {
     fi
     case "${last}" in ''|*[!0-9]*) continue;; esac
     age=$(( (now - last) / 86400 ))
-    [ "${age}" -ge "${HDW4S_IDLE_DAYS}" ] || continue
+    [ "${age}" -ge "${days}" ] || continue
 
     echo "hdw4s: stopping ${inst}; nothing has connected for ${age} days."
     echo '  Its files and settings are untouched, and the next connection'
@@ -805,7 +809,7 @@ cmd_auth() {
   local inst="$1" pw
   require_slot "${inst}"
   pw="$(make_credential "${inst}" 'auth' 70)"
-  config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_AUTH' 'basic'
+  config_write "${ETCDIR}/${inst}.conf" 'HDW4S_AUTH' 'basic'
 
   echo "Session ${inst} will now require a credential of its own, in addition"
   echo 'to the firewall. The reverse proxy has to present it; the user never'
@@ -821,14 +825,14 @@ cmd_auth() {
 cmd_noauth() {
   local inst="$1"
   split_instance "${inst}" || exit 1
-  [ -r "/etc/hdw4s/${inst}.auth.cred" ] ||
+  [ -r "${ETCDIR}/${inst}.auth.cred" ] ||
     [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ] || {
       echo "Session ${inst} already has no credential."
       return 0
     }
-  rm -f "/etc/hdw4s/${inst}.auth.cred" \
+  rm -f "${ETCDIR}/${inst}.auth.cred" \
         "${DROPIN}/hdw4s@${inst}.service.d/70-auth.conf"
-  config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_AUTH' 'none'
+  config_write "${ETCDIR}/${inst}.conf" 'HDW4S_AUTH' 'none'
   systemctl daemon-reload
   echo "Session ${inst} no longer requires a credential."
   echo '  Whatever can reach its port now gets this desktop. That is a'
@@ -844,16 +848,16 @@ cmd_proxy() {
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
   port="$(port_of "${idx}")"
-  cred="/etc/hdw4s/${inst}.auth.cred"
+  cred="${ETCDIR}/${inst}.auth.cred"
 
   # Match whichever transport the session is actually configured for; an
   # nginx block pointing at a port that is no longer listening is a confusing
   # way to spend an afternoon.
   local transport upstream
   transport='tcp'
-  [ ! -r "/etc/hdw4s/${inst}.conf" ] ||
+  [ ! -r "${ETCDIR}/${inst}.conf" ] ||
     transport="$(sed -n "s/^[[:space:]]*HDW4S_TRANSPORT=[\"']\{0,1\}\([a-z]*\).*/\1/p" \
-                 "/etc/hdw4s/${inst}.conf" | tail -n1)"
+                 "${ETCDIR}/${inst}.conf" | tail -n1)"
   if [ "${transport}" = 'unix' ]; then
     upstream="        # A filesystem socket: who may connect is a question of
         # permissions, not of source address. Add nginx's user to the group
@@ -999,6 +1003,10 @@ cmd_seed() {
   for pattern in "${SEED_EXCLUDES[@]}"; do args+=(--exclude="${pattern}"); done
 
   echo "Copying settings from ${home} into ${profile}."
+  # An --only path that names none of the three trees below matched nothing and
+  # said nothing, so "--only .mozilla" -- the case the manual singles out --
+  # copied silently less than the administrator asked for.
+  local -A matched=()
   for pair in "config:.config" "data:.local/share" "state:.local/state"; do
     to="${profile}/${pair%%:*}"
     from="${home}/${pair#*:}"
@@ -1013,7 +1021,7 @@ cmd_seed() {
     if [ "${#only[@]}" -gt 0 ]; then
       for entry in "${only[@]}"; do
         rel="${entry#./}"
-        case "${rel}" in "${pair#*:}"/*) ;; *) continue;; esac
+        case "${rel}" in "${pair#*:}"/*) matched["${entry}"]=1;; *) continue;; esac
         rel="${rel#"${pair#*:}"/}"
         if [ -e "${from}/${rel}" ] || [ -L "${from}/${rel}" ]; then
           members+=("./${rel}")
@@ -1038,6 +1046,13 @@ cmd_seed() {
       echo "  ${pair#*:}: copy failed" >&2
     fi
   done
+  for entry in "${only[@]:-}"; do
+    [ -n "${entry}" ] || continue
+    [ -n "${matched[${entry}]:-}" ] || {
+      echo "  ${entry}: outside .config, .local/share and .local/state; not copied" >&2
+    }
+  done
+
   chown -R "${user}" "${profile}" 2>/dev/null || :
 
   [ "${copied}" -gt 0 ] || die 'hdw4s: nothing was found to copy.'
@@ -1058,6 +1073,20 @@ EOF
 cmd_keyring() {
   local inst="$1"
   require_slot "${inst}"
+
+  # A keyring is only separate if the data directory holding it is. Without
+  # isolation, XDG_DATA_HOME is the account's own ~/.local/share, so this would
+  # point gnome-keyring at the login keyring and try to unlock it with a
+  # freshly generated password. That fails, leaving one line on stderr -- after
+  # telling the administrator the two are separate, which they are not.
+  if [ "$(setting_of "${inst}" HDW4S_ISOLATION none)" != 'profile' ]; then
+    die "hdw4s: ${inst} shares the account's home directory." \
+        '  A separate keyring needs a separate data directory. Set' \
+        "  'hdw4s set ${inst} HDW4S_ISOLATION=profile' first, or the keyring" \
+        "  this would create could not be reached and the account's own login" \
+        '  keyring would be the one unlocked.'
+  fi
+
   make_credential "${inst}" 'keyring' 60 >/dev/null
 
   echo "Session ${inst} now has its own keyring, unlocked automatically."
@@ -1091,7 +1120,7 @@ cmd_release() {
   rm -rf "${DROPIN}/hdw4s@${inst}.service.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.service.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
-  rm -f "/etc/hdw4s/${inst}.keyring.cred" "/etc/hdw4s/${inst}.auth.cred"
+  rm -f "${ETCDIR}/${inst}.keyring.cred" "${ETCDIR}/${inst}.auth.cred"
   if [ -r "${SLOTS}" ]; then
     tmp="$(mktemp "${SLOTS}.XXXXXX")"
     awk -v i="${inst}" '$1 ~ /^#/ || $2 != i' "${SLOTS}" > "${tmp}"
@@ -1101,7 +1130,7 @@ cmd_release() {
   systemctl daemon-reload
   echo "Session ${inst} released. Left in place: its profile under"
   echo "${HDW4S_PROFILE_DIR}/${inst}, and its settings in"
-  echo "/etc/hdw4s/${inst}.conf -- so that re-enabling it restores them. The"
+  echo "${ETCDIR}/${inst}.conf -- so that re-enabling it restores them. The"
   echo "slot, and with it the port, is not reserved and may go to someone else;"
   echo "enabling again rewrites the port that conf file records."
 }

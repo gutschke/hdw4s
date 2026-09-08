@@ -92,6 +92,14 @@ export HDW4S_PORT
 
 : "${HDW4S_PROFILE_DIR:=/var/lib/hdw4s}"
 : "${HDW4S_ISOLATION:=none}"
+# Exported deliberately. The unit also passes the configuration through
+# EnvironmentFile=, but that is not a shell: a file written with "export" or a
+# conditional sets the variable when this script sources it and not when
+# systemd reads it. The application wrappers test this variable from their own
+# environment, so without exporting it here they would keep the shared profile
+# while the session had already moved -- which is the one case profile
+# isolation exists to fix, failing silently.
+export HDW4S_ISOLATION
 # Loopback only. The socket unit owns the address the outside world
 # connects to and forwards here, which is what lets a desktop exist only
 # while somebody is using it.

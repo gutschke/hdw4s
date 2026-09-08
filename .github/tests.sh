@@ -49,15 +49,29 @@ sandbox() {
 load() {
   # shellcheck source=/dev/null
   . "${SB}/lib.sh"
+  # The sourced script installs its own EXIT/ERR trap. An ERR trap fires even
+  # under "set +e", so any bare non-zero command -- a grep that matches
+  # nothing, a test used as a statement -- killed the rest of the group on the
+  # spot: remaining assertions never ran, no failure was recorded, and the run
+  # exited 0. It also replaced the sandbox cleanup, leaking a temp directory
+  # per group.
+  trap - ERR
+  trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
   CONF="${SB}/etc/hdw4s.conf"; SLOTS="${SB}/etc/instances"
   DROPIN="${SB}/dropin"; HDW4S_PROFILE_DIR="${SB}/profiles"
+  ETCDIR="${SB}/etc"
   : > "${CONF}"
 }
 
 echo '== instance names =='
 ( set +e; sandbox; load
-  split_name 'alice'        2>/dev/null && is 'plain name accepted'        "${user}:${session}" 'alice:1'
-  split_name 'alice:2'      2>/dev/null && is 'colon selects a session'    "${user}:${session}" 'alice:2'
+  # Not "split_name … && is …": if the call fails the assertion never runs and
+  # nothing is recorded, so making split_name reject every name looked like a
+  # pass.
+  user=''; session=''
+  split_name 'alice'   2>/dev/null || :; is 'plain name accepted'     "${user}:${session}" 'alice:1'
+  user=''; session=''
+  split_name 'alice:2' 2>/dev/null || :; is 'colon selects a session' "${user}:${session}" 'alice:2'
   # A name reaches file paths, so it is checked even where the account need not exist.
   split_name '../../root/x' 2>/dev/null && bad 'path traversal rejected' || ok 'path traversal rejected'
   split_name 'alice:0'      2>/dev/null && bad 'session 0 rejected'       || ok 'session 0 rejected'
@@ -119,10 +133,19 @@ echo '== configuration is validated before it is trusted =='
   bash -n "${SB}/broken.conf" 2>/dev/null && bad 'broken config rejected' || ok 'broken config rejected'
   printf 'HDW4S_PROXIES=10.0.0.1\n[ -n "" ] && HDW4S_X=1\n' > "${SB}/falsy.conf"
   bash -n "${SB}/falsy.conf" 2>/dev/null && ok 'valid config accepted' || bad 'valid config accepted'
-  for f in hdw4s hdw4s-session hdw4s-wait hdw4s-firewall hdw4s-update; do
-    grep -q 'bash -n' "${ROOT}/${f}" && ok "${f} validates before sourcing" \
-      || bad "${f} validates before sourcing"
-  done
+  # Run the real thing. Grepping for the literal "bash -n" passed with the
+  # check pointed at /dev/null -- the string present, the validation gone,
+  # which is the mechanism-not-outcome mistake this suite exists to end.
+  mkdir -p "${SB}/etc"
+  printf 'HDW4S_PROXIES=10.0.0.1\nif [ x\n' > "${SB}/etc/hdw4s.conf"
+  out="$(HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" --version 2>&1)" && rc=0 || rc=$?
+  is  'a broken config stops the CLI'      "${rc}" '1'
+  has 'and the refusal names the file'     "${out}" "${SB}/etc/hdw4s.conf"
+  out="$(HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s-firewall" --print 2>&1)" && rc=0 || rc=$?
+  is  'a broken config stops the firewall' "${rc}" '1'
+  printf 'HDW4S_PROXIES=10.0.0.1\n' > "${SB}/etc/hdw4s.conf"
+  HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" --version >/dev/null 2>&1 \
+    && ok 'a good config does not' || bad 'a good config does not'
 )
 
 echo '== unset takes a name, not a pattern =='
@@ -140,6 +163,8 @@ echo '== firewall ruleset shape =='
   sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s-firewall" > "${SB}/fw.sh"
   # shellcheck source=/dev/null
   . "${SB}/fw.sh" 2>/dev/null || :
+  trap - ERR
+  trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
   HDW4S_PROXIES='10.0.0.1'; HDW4S_BASE_PORT=7300; HDW4S_BLOCK_SIZE=64
 
   HDW4S_MEDIA_PORTS='proxied'; out="$(generate 2>/dev/null)"
@@ -150,7 +175,10 @@ echo '== firewall ruleset shape =='
   has  'media keeps a protocol guard' "${out}" 'meta l4proto != { tcp, udp } accept'
   has  'established traffic accepted' "${out}" 'ct state established,related accept'
   has  'loopback accepted'            "${out}" 'iifname "lo" accept'
-  has  'the chain actually drops'     "${out}" 'drop'
+  # 'drop' alone matches the explanatory comments in the generated ruleset, so
+  # turning every verdict into accept left this green.
+  has  'input chain drops'            "${out}" 'counter drop'
+  is   'both chains carry a verdict'  "$(printf '%s' "${out}" | grep -c 'counter drop')" '2'
 
   # generate() emits one of two media chains depending on whether this machine
   # can match a cgroup, so a test of its output only ever exercises one of them.
@@ -169,7 +197,12 @@ echo '== proxy addresses compare by value, not by spelling =='
   sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s-firewall" > "${SB}/fw.sh"
   # shellcheck source=/dev/null
   . "${SB}/fw.sh" 2>/dev/null || :
+  trap - ERR
+  trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
   # A check that cries wolf is a check nobody reads.
+  # An absolute assertion first: comparing the function against itself passes
+  # even when it returns nothing at all.
+  is 'canonical form'             "$(canon_addrs '192.168.0.1/24')" '192.168.0.0/24'
   is 'case is not a difference'   "$(canon_addrs '2001:DB8::/32')" "$(canon_addrs '2001:db8::/32')"
   is 'host bits are not either'   "$(canon_addrs '192.168.0.1/24')" "$(canon_addrs '192.168.0.0/24')"
   is 'order is not either'        "$(canon_addrs '10.0.0.0/8 172.16.0.0/12')" \
@@ -187,17 +220,31 @@ echo '== an install rewrites every file that names the payload path =='
   before="$(grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null | wc -l)"
   [ "${before}" -gt 4 ] && ok "more than four files name the path (${before})" \
     || bad 'fixture did not reproduce the condition' "found ${before}"
-  # The bug: an enumerated list named four of them and missed the rest.
-  grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null | grep -v '/install\.sh$' |
-    while IFS= read -r f; do sed -i "s|/usr/lib/hdw4s|${dst}|g" -- "${f}"; done
+  # The real block out of install.sh, executed here. A copy of it would only
+  # ever prove that this file's own sed works; install.sh needs root, so
+  # running the whole script is not possible, but running the part under test
+  # is. If the markers ever go missing the test fails rather than passing
+  # vacuously.
+  block="$(sed -n '/^# BEGIN path-rewrite/,/^# END path-rewrite/p' "${ROOT}/install.sh")"
+  case "${block}" in
+    *'grep -rl'*) ok 'the rewrite block was found and is not a list';;
+    *) bad 'the rewrite block was found and is not a list' 'markers missing';;
+  esac
+  eval "${block}"
   after="$(grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null | wc -l)"
   is 'none left after the rewrite' "${after}" '0'
 )
 
 echo
+# A group that dies partway leaves its remaining assertions unrecorded, which
+# looks identical to a shorter suite. Counting them is the only way to notice.
+EXPECTED=45   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
-if [ "${fail:-0}" -eq 0 ] && [ "${pass:-0}" -gt 0 ]; then
+if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
+  echo "$(( pass + fail )) of ${EXPECTED} tests ran -- a group exited early." >&2
+  exit 1
+elif [ "${fail:-0}" -eq 0 ] && [ "${pass:-0}" -gt 0 ]; then
   echo "All ${pass} tests passed."
 elif [ "${pass:-0}" -eq 0 ]; then
   echo 'No tests ran.' >&2

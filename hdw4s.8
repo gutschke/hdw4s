@@ -38,7 +38,7 @@ Sessions are expected to sit behind a reverse proxy that terminates TLS and iden
 .SH "COMMANDS"
 .TP
 \fBlist\fR
-Print every configured session with its user, port, unit state, whether anything is listening on its port, and its current display\. This is the quickest way to see whether reality matches the configuration\.
+Print every configured session with its user, port, whether it has a credential of its own, whether it keeps its settings apart from the home directory, its transport, its unit state and its current display\.
 .TP
 \fBshow\fR \fIinstance\fR
 Print one session's settings and, for each of them, which file it came from\.
@@ -138,8 +138,6 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_ADDR\fR: The address the streaming server binds\. Defaults to \fB127\.0\.0\.1\fR\. Leave it alone unless you know why you are changing it: the socket unit in front is the only way in, and the firewall decides who may reach that\. Binding anything wider publishes the streaming server directly, at a port in the second block, which the firewall does not cover and nothing authenticates\.
 .IP "\[ci]" 4
-\fBHDW4S_PORT\fR: Overrides the allocated port for one session\. Setting this outside the block puts the session outside the firewall's coverage; \fBhdw4s firewall \-\-check\fR reports that\.
-.IP "\[ci]" 4
 \fBHDW4S_ALLOW_SYSTEM_USER\fR: Set to \fByes\fR to permit a session for an account below UID 1000\.
 .IP "\[ci]" 4
 \fBHDW4S_TRANSPORT\fR: \fBtcp\fR or \fBunix\fR\. Set with \fBhdw4s transport\fR, which also arranges the units that go with it, rather than by hand\.
@@ -156,7 +154,7 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_RESIZE\fR: Whether the desktop follows the size of the browser window\. Defaults to true\.
 .IP "\[ci]" 4
-\fBHDW4S_LANG\fR: The locale the session runs in\. Defaults to \fBC\.UTF\-8\fR\. It has to be a UTF\-8 locale: some terminals refuse to start otherwise\.
+\fBHDW4S_LANG\fR: The locale the session runs in\. Unset, the machine's own \fBLANG\fR from \fB/etc/default/locale\fR is used, and \fBC\.UTF\-8\fR only if that is absent\. It has to be a UTF\-8 locale: some terminals refuse to start otherwise\.
 .IP "\[ci]" 4
 \fBHDW4S_FRAMERATE\fR, \fBHDW4S_ENCODER\fR: Passed through to the streaming server\. Leave them alone unless the picture is visibly wrong; the defaults suit a machine with no graphics card\.
 .IP "\[ci]" 4
@@ -234,6 +232,8 @@ The table is also checked periodically, not just applied once at session start\.
 \fBhdw4s enable\fR refuses an account below UID 1000 unless \fBHDW4S_ALLOW_SYSTEM_USER=yes\fR is set, since a browser\-reachable desktop with no authentication of its own is rarely what is wanted for a system account\.
 .P
 Each session's X server is given its own authority cookie in its runtime directory\. Without one, every account on the machine could read the session's screen and type into it\.
+.P
+\fBHDW4S_PORT\fR appears in an instance's file but is not a setting: \fBenable\fR writes it, and the relay in front of the session is configured from the same allocation at the same moment\. Changing it moves where the session listens without moving where the relay connects, so the desktop starts and is unreachable, and nothing reports it\.
 .SH "FILES"
 .TP
 \fB/etc/hdw4s/hdw4s\.conf\fR
@@ -260,14 +260,14 @@ An isolated session's profile\.
 \fB/run/hdw4s/<instance>/\fR
 Runtime directory: X authority cookie, X server log, current display\.
 .SH "UPDATES"
-A timer follows upstream daily\. It verifies what it downloaded before replacing anything, and refuses outright to install a release whose layout it does not recognise, rather than half\-upgrading a working machine\.
+A timer follows upstream daily\. It checks that what it downloaded is a well\-formed archive before replacing anything, and refuses outright to install a release whose layout it does not recognise, rather than half\-upgrading a working machine\. It does not verify authenticity: there is no signature and no recorded hash, so a well\-formed archive from the right URL is all it can establish\. See SECURITY\.md\.
 .P
 It restarts only sessions nobody is connected to\. A session in use keeps the version it started with until it next stops on its own, which is when picking up a new one costs nothing\. An updater that reboots a desktop somebody is working in, at an hour chosen by a timer, is an updater that gets switched off\.
 .SH "DIAGNOSTICS"
 .nf
 hdw4s list                       what exists and whether it is running
 hdw4s show <instance>            effective settings and their source
-hdw4s firewall \-\-check           whether every session is actually filtered
+hdw4s firewall \-\-check           whether the table is loaded and what it covers
 hdw4s \-\-version                  which version this is
 systemctl status hdw4s@<i>       includes the display and port when running
 journalctl \-xeu hdw4s@<i>        session output, including the X server

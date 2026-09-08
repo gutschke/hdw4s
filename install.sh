@@ -153,6 +153,7 @@ chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
 # hdw4s-session execs hdw4s-run-session by absolute path, and the proxy, reaper
 # and firewall-restore units do the same. A list is exactly what goes stale
 # when a file is added.
+# BEGIN path-rewrite (.github/tests.sh executes this block verbatim)
 if [ "${dst}" != '/usr/lib/hdw4s' ]; then
   # Not this script: its own help text names the default path, and rewriting
   # that leaves the installed copy differing from the one in the repository for
@@ -177,6 +178,7 @@ if [ "${dst}" != '/usr/lib/hdw4s' ]; then
        fi;;
   esac
 fi
+# END path-rewrite
 echo ' done.'
 
 echo -n 'Linking...'

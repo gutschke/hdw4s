@@ -37,9 +37,9 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 ## COMMANDS
 
   * `list`:
-    Print every configured session with its user, port, unit state, whether
-    anything is listening on its port, and its current display. This is the
-    quickest way to see whether reality matches the configuration.
+    Print every configured session with its user, port, whether it has a
+    credential of its own, whether it keeps its settings apart from the home
+    directory, its transport, its unit state and its current display.
 
   * `show` <instance>:
     Print one session's settings and, for each of them, which file it came from.
@@ -193,11 +193,6 @@ Two files are read in order, the second overriding the first:
     anything wider publishes the streaming server directly, at a port in the
     second block, which the firewall does not cover and nothing authenticates.
 
-  * `HDW4S_PORT`:
-    Overrides the allocated port for one session. Setting this outside the block
-    puts the session outside the firewall's coverage; `hdw4s firewall --check`
-    reports that.
-
   * `HDW4S_ALLOW_SYSTEM_USER`:
     Set to `yes` to permit a session for an account below UID 1000.
 
@@ -236,8 +231,9 @@ Two files are read in order, the second overriding the first:
     true.
 
   * `HDW4S_LANG`:
-    The locale the session runs in. Defaults to `C.UTF-8`. It has to be a UTF-8
-    locale: some terminals refuse to start otherwise.
+    The locale the session runs in. Unset, the machine's own `LANG` from
+    `/etc/default/locale` is used, and `C.UTF-8` only if that is absent. It has
+    to be a UTF-8 locale: some terminals refuse to start otherwise.
 
   * `HDW4S_FRAMERATE`, `HDW4S_ENCODER`:
     Passed through to the streaming server. Leave them alone unless the picture
@@ -400,6 +396,12 @@ Each session's X server is given its own authority cookie in its runtime
 directory. Without one, every account on the machine could read the session's
 screen and type into it.
 
+`HDW4S_PORT` appears in an instance's file but is not a setting: `enable`
+writes it, and the relay in front of the session is configured from the same
+allocation at the same moment. Changing it moves where the session listens
+without moving where the relay connects, so the desktop starts and is
+unreachable, and nothing reports it.
+
 ## FILES
 
   * `/etc/hdw4s/hdw4s.conf`:
@@ -431,9 +433,12 @@ screen and type into it.
 
 ## UPDATES
 
-A timer follows upstream daily. It verifies what it downloaded before replacing
-anything, and refuses outright to install a release whose layout it does not
-recognise, rather than half-upgrading a working machine.
+A timer follows upstream daily. It checks that what it downloaded is a
+well-formed archive before replacing anything, and refuses outright to install a
+release whose layout it does not recognise, rather than half-upgrading a working
+machine. It does not verify authenticity: there is no signature and no recorded
+hash, so a well-formed archive from the right URL is all it can establish. See
+SECURITY.md.
 
 It restarts only sessions nobody is connected to. A session in use keeps the
 version it started with until it next stops on its own, which is when picking
@@ -444,7 +449,7 @@ working in, at an hour chosen by a timer, is an updater that gets switched off.
 
     hdw4s list                       what exists and whether it is running
     hdw4s show <instance>            effective settings and their source
-    hdw4s firewall --check           whether every session is actually filtered
+    hdw4s firewall --check           whether the table is loaded and what it covers
     hdw4s --version                  which version this is
     systemctl status hdw4s@<i>       includes the display and port when running
     journalctl -xeu hdw4s@<i>        session output, including the X server
