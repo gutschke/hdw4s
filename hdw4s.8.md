@@ -13,7 +13,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `proxy` <instance><br>
 `hdw4s` `set` [<instance>] <KEY>=<VALUE>...<br>
 `hdw4s` `unset` [<instance>] <KEY><br>
-`hdw4s` `seed` <instance><br>
+`hdw4s` `seed` <instance> [`--only` <path>]...<br>
 `hdw4s` `keyring` <instance><br>
 `hdw4s` `firewall` `--apply`|`--check`|`--print`
 
@@ -80,7 +80,7 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Comment a setting out so the default applies again. The line is commented
     rather than deleted, so the value that was there stays visible.
 
-  * `seed` <instance>:
+  * `seed` <instance> [`--only` <path>]...:
     Copy an account's existing desktop settings from its home directory into an
     isolated session's profile, once. Only ever in that direction, only when
     asked, and only into a profile that is still empty -- a profile with
@@ -89,6 +89,18 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     overwriting; remove the profile first if starting over is really meant.
 
     This is a snapshot and not a link. The two diverge from that moment on.
+
+    `--only` limits the copy to the named paths, relative to the home
+    directory, and may be given more than once. An account that has been in
+    use for years accumulates settings for programs that will never run in
+    this session; copying all of it forward only carries the accumulation
+    into a second place. Naming what matters -- the settings database, the
+    browser profile, the handful of applications actually used -- is usually
+    a great deal less than what is there. Paths that do not exist are
+    reported and skipped, and the exclusions above still apply inside the
+    paths that do.
+
+        hdw4s seed alice --only .config/dconf --only .config/google-chrome
 
     Caches are skipped, including the ones browsers keep inside their profile
     directories rather than under `~/.cache`; they are regenerable and are

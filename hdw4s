@@ -60,7 +60,10 @@ Usage: hdw4s <command> [arguments]
   auth <instance>         require a secret from the proxy as well as an address
   noauth <instance>       stop requiring one, and say what that means
   proxy <instance>        print an nginx configuration for a session
-  seed <instance>         copy existing settings into an isolated profile, once
+  seed <instance> [--only <path>]...
+                          copy existing settings into an isolated profile,
+                          once; --only limits the copy to the named
+                          home-relative paths, e.g. --only .config/dconf
   reap                    stop desktops nobody has connected to for a long time
   keyring <instance>      give a session its own keyring, unlocked at start
   --version               print the version
@@ -871,7 +874,16 @@ SEED_EXCLUDES=(
 )
 
 cmd_seed() {
-  local inst="$1" from to pair pattern args=() copied=0
+  local inst="$1" from to pair pattern args=() copied=0 only=()
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --only)   [ $# -ge 2 ] || die 'hdw4s: --only needs a path.'
+                only+=("$2"); shift 2;;
+      --only=*) only+=("${1#--only=}"); shift;;
+      *)        die "hdw4s: seed: unexpected argument '$1'";;
+    esac
+  done
   split_instance "${inst}"
   [ -n "$(slot_of "${inst}")" ] ||
     die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}' first."
@@ -912,10 +924,34 @@ cmd_seed() {
     to="${profile}/${pair%%:*}"
     from="${home}/${pair#*:}"
     [ -d "${from}" ] || continue
+
+    # Without --only the whole tree is copied. With it, only the named entries
+    # are, which is the usual case for an account that has been in use for
+    # years: most of what has collected in there belongs to programs that will
+    # never run in this session, and copying it forward just carries the
+    # accumulation into a second place.
+    local members=() entry rel
+    if [ "${#only[@]}" -gt 0 ]; then
+      for entry in "${only[@]}"; do
+        rel="${entry#./}"
+        case "${rel}" in "${pair#*:}"/*) ;; *) continue;; esac
+        rel="${rel#"${pair#*:}"/}"
+        if [ -e "${from}/${rel}" ] || [ -L "${from}/${rel}" ]; then
+          members+=("./${rel}")
+        else
+          echo "  ${entry}: not there, skipped" >&2
+        fi
+      done
+      [ "${#members[@]}" -gt 0 ] || continue
+    else
+      members=(.)
+    fi
+
     install -d -m0700 "${to}"
     # tar rather than cp, because the exclusions are the whole point and cp has
     # no way to express them.
-    if tar -C "${from}" -cf - "${args[@]}" --warning=no-file-ignored . 2>/dev/null |
+    if tar -C "${from}" -cf - "${args[@]}" --warning=no-file-ignored \
+           "${members[@]}" 2>/dev/null |
        tar -C "${to}" -xf - 2>/dev/null; then
       printf '  %-14s %s\n' "${pair#*:}" "$(du -sh "${to}" 2>/dev/null | cut -f1)"
       copied=$(( copied + 1 ))
@@ -988,7 +1024,7 @@ case "${1:-}" in
   enable)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_disable "$@";;
   keyring)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_keyring "$@";;
-  seed)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_seed "$@";;
+  seed)     shift; [ $# -ge 1 ] || { usage >&2; exit 2; }; cmd_seed "$@";;
   reap)     shift; cmd_reap "$@";;
   auth)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_auth "$@";;
   noauth)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_noauth "$@";;

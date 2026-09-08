@@ -1,4 +1,6 @@
-.TH "HDW4S" "8" "September 2026" "Linux" "System Administration"
+.\" generated with Ronn-NG/v0.9.1
+.\" http://github.com/apjanke/ronn-ng/tree/0.9.1
+.TH "HDW4S" "8" "September 2026" "hdw4s" "hdw4s"
 .SH "NAME"
 \fBhdw4s\fR \- headless GNOME desktop streamed to a web browser
 .SH "SYNOPSIS"
@@ -22,7 +24,7 @@
 .br
 \fBhdw4s\fR \fBunset\fR [\fIinstance\fR] \fIKEY\fR
 .br
-\fBhdw4s\fR \fBseed\fR \fIinstance\fR
+\fBhdw4s\fR \fBseed\fR \fIinstance\fR [\fB\-\-only\fR \fIpath\fR]\|\.\|\.\|\.
 .br
 \fBhdw4s\fR \fBkeyring\fR \fIinstance\fR
 .br
@@ -65,10 +67,17 @@ Change a setting without opening an editor\. With an instance, writes to that se
 \fBunset\fR [\fIinstance\fR] \fIKEY\fR
 Comment a setting out so the default applies again\. The line is commented rather than deleted, so the value that was there stays visible\.
 .TP
-\fBseed\fR \fIinstance\fR
+\fBseed\fR \fIinstance\fR [\fB\-\-only\fR \fIpath\fR]\|\.\|\.\|\.
 Copy an account's existing desktop settings from its home directory into an isolated session's profile, once\. Only ever in that direction, only when asked, and only into a profile that is still empty \-\- a profile with anything in it is one somebody has used, and there is no way to tell which of two copies of a setting is the newer\. Re\-running is refused rather than overwriting; remove the profile first if starting over is really meant\.
 .IP
 This is a snapshot and not a link\. The two diverge from that moment on\.
+.IP
+\fB\-\-only\fR limits the copy to the named paths, relative to the home directory, and may be given more than once\. An account that has been in use for years accumulates settings for programs that will never run in this session; copying all of it forward only carries the accumulation into a second place\. Naming what matters \-\- the settings database, the browser profile, the handful of applications actually used \-\- is usually a great deal less than what is there\. Paths that do not exist are reported and skipped, and the exclusions above still apply inside the paths that do\.
+.IP "" 4
+.nf
+hdw4s seed alice \-\-only \.config/dconf \-\-only \.config/google\-chrome
+.fi
+.IP "" 0
 .IP
 Caches are skipped, including the ones browsers keep inside their profile directories rather than under \fB~/\.cache\fR; they are regenerable and are usually almost all of the size\. So are downloaded models and component data: a current Chrome fetches an on\-device language model of nearly three gigabytes, per profile, which dwarfs everything worth carrying across\. Saved passwords are skipped too, since the session has its own keyring with its own password\.
 .IP
