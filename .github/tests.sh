@@ -94,11 +94,38 @@ echo '== port arithmetic =='
   is 'blocks do not overlap' "$(( $(internal_port_of 0) - $(port_of 63) ))" '1'
 )
 
+echo '== a session counts as protected only when both halves are there =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # "hdw4s enable" decides whether to generate a credential by asking this, and
+  # "hdw4s list" counts unprotected sessions with it. Made to return true
+  # unconditionally, every session reports AUTH=yes and the warning about
+  # sessions that authenticate nobody never appears again.
+  printf 'HDW4S_AUTH=basic\n' > "${SB}/etc/alice.conf"
+  : > "${SB}/etc/alice.auth.cred"
+  has_auth alice && is 'setting and credential together' 'yes' 'yes' \
+                 || is 'setting and credential together' 'no' 'yes'
+
+  rm -f "${SB}/etc/alice.auth.cred"
+  has_auth alice && is 'setting without credential' 'yes' 'no' \
+                 || is 'setting without credential' 'no' 'no'
+
+  : > "${SB}/etc/bob.auth.cred"
+  : > "${SB}/etc/bob.conf"
+  has_auth bob && is 'credential without setting' 'yes' 'no' \
+               || is 'credential without setting' 'no' 'no'
+)
+
 echo '== settings lookup =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   printf 'HDW4S_TRANSPORT=unix\n' > "${CONF}"
   is 'global is read'            "$(setting_of alice HDW4S_TRANSPORT tcp)" 'unix'
   printf 'HDW4S_TRANSPORT=tcp\n' > "${SB}/etc/alice.conf"
+  # The whole point of per-instance configuration, and the one direction the
+  # group never asserted: with both files present the instance's must win.
+  # Reversing the two file names inside setting_of left every test here
+  # passing while every per-session override silently stopped working.
+  is 'instance file wins over global' \
+     "$(setting_of alice HDW4S_TRANSPORT zzz)" 'tcp'
   # cmd_seed once had its own copy of this and read only the instance file,
   # so a site-wide setting looked unset.
   mkdir -p "${SB}/etc"; CONF="${SB}/etc/hdw4s.conf"
@@ -205,22 +232,57 @@ echo '== firewall ruleset shape =='
   # turning every verdict into accept left this green.
   has  'input chain drops'            "${out}" 'counter drop'
   is   'both chains carry a verdict'  "$(printf '%s' "${out}" | grep -c 'counter drop')" '2'
+  # Presence is not enough: nftables takes the first rule that matches, so an
+  # accept placed above the drop makes the chain accept everything while every
+  # assertion above still passes. Assert the position, not the existence -- the
+  # last verdict in each chain has to be the drop.
+  # Every legitimate accept in these chains carries a condition -- a protocol
+  # test, a port test, "ct state", "iifname", a set lookup. An accept with no
+  # condition matches everything, and because nftables takes the first rule
+  # that matches, one placed anywhere above the drop opens the chain
+  # completely. So the invariant is not where the drop sits but that nothing
+  # unconditional precedes it: the drop is the only rule in a chain that
+  # applies to every packet reaching it.
+  uncond="$(printf '%s\n' "${out}" |
+            sed 's/^[[:space:]]*//' |
+            grep -cE '^(counter )?accept$')"
+  is 'no chain accepts unconditionally' "${uncond}" '0'
+  # And the drop is still there, once per chain, at the end of it.
+  ends="$(printf '%s\n' "${out}" |
+          awk '/chain [a-z]+ \{/ { inchain = 1; last = "" }
+               inchain && !/^[[:space:]]*#/ && /accept$|drop$/ { last = $0 }
+               inchain && /^[[:space:]]*\}/ {
+                 inchain = 0; sub(/^[[:space:]]+/, "", last); print last }')"
+  is 'input chain ends in the drop' \
+     "$(printf '%s\n' "${ends}" | sed -n 1p)" 'counter drop'
+  is 'media chain ends in the drop' \
+     "$(printf '%s\n' "${ends}" | sed -n 2p)" 'counter drop'
 
   # generate() emits one of two media chains depending on whether this machine
   # can match a cgroup, so a test of its output only ever exercises one of them.
   # Every variant has to carry the guard, so count them in the source.
   chains="$(grep -c 'chain media {' "${ROOT}/hdw4s-firewall")"
-  guards="$(grep -c 'meta l4proto != { tcp, udp } accept' "${ROOT}/hdw4s-firewall")"
+  # Anchored past the indentation so that commenting a guard out removes it
+  # from the count. Counting the bare string meant "# meta l4proto ..." still
+  # counted, and the guard could be disabled in every chain with this green.
+  guards="$(grep -cE '^[[:space:]]+meta l4proto != \{ tcp, udp \} accept' \
+            "${ROOT}/hdw4s-firewall")"
   is 'every media chain has a protocol guard' "${guards}" "${chains}"
+  # Same reasoning for the unconditional-accept check above: generate() only
+  # ever emits one of the two media chains on any given machine, so the
+  # variant this machine does not build is never inspected. Both live in the
+  # source, and neither may contain a verdict that matches every packet.
+  srcuncond="$(grep -cE '^[[:space:]]+(counter )?accept$' "${ROOT}/hdw4s-firewall")"
+  is 'no chain in the source accepts unconditionally' "${srcuncond}" '0'
 
   HDW4S_MEDIA_PORTS='direct'; out="$(generate 2>/dev/null)"
   hasnt 'direct omits the media chain' "${out}" 'chain media'
   has   'direct keeps the input chain' "${out}" 'chain input'
 )
 
-echo '== the check reads the slot table =='
+echo '== the check reads the slot table against the loaded table =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
-  mkdir -p "${SB}/etc"
+  mkdir -p "${SB}/etc" "${SB}/bin"
   export HDW4S_ETCDIR="${SB}/etc"
   sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s-firewall" > "${SB}/fw.sh"
   # shellcheck source=/dev/null
@@ -228,22 +290,61 @@ echo '== the check reads the slot table =='
   trap - ERR
   trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
   HDW4S_BASE_PORT=7300; HDW4S_BLOCK_SIZE=4; HDW4S_PROXIES=''
-  # Redirect the configuration directory the way an operator would, and let the
-  # script derive its own paths. Setting SLOTS here directly is what let this
-  # group pass while the shipped script died on an unbound variable.
-  # "every session is filtered" was documented and never computed: the check
-  # never opened this file. A slot beyond the block the table was built from is
-  # a session listening with nothing in front of it.
+
+  # A stub nft, so the range the check reads comes from a "loaded table" that
+  # this test controls independently of the configuration. That separation is
+  # the whole point: the previous version of this group computed the expected
+  # range from HDW4S_BLOCK_SIZE, which is the same expression the code used,
+  # so it compared the configuration against itself and would have passed with
+  # the table-reading removed entirely. The JSON below is the shape nft 1.0.9
+  # really emits for "tcp dport != 7300-7303 accept".
+  cat > "${SB}/bin/nft" <<'NFT'
+#!/bin/sh
+case "$*" in
+  *"-j list chain inet hdw4s input"*)
+    [ -n "${STUB_RANGE}" ] || exit 1
+    lo="${STUB_RANGE% *}"; hi="${STUB_RANGE#* }"
+    printf '%s' '{"nftables":[{"rule":{"family":"inet","table":"hdw4s","chain":"input","expr":[{"match":{"op":"!=","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":{"range":['"${lo}"','"${hi}"']}}},{"accept":null}]}}]}'
+    ;;
+  *"list table inet hdw4s"*) [ -n "${STUB_RANGE}" ] || exit 1;;
+  *"list chain inet hdw4s media"*) exit 1;;
+  *) exit 1;;
+esac
+NFT
+  chmod +x "${SB}/bin/nft"
+  PATH="${SB}/bin:${PATH}"
+
+  export STUB_RANGE='7300 7303'
   printf '# comment\n0 alice\n1 bob\n' > "${SLOTS}"
   out="$(cmd_check 2>&1)"
-  has 'counts the sessions it found'   "${out}" 'sessions    2, all within 7300-7303'
+  has 'counts the sessions it found' "${out}" 'sessions    2, all within the loaded range 7300-7303'
+
   printf '# comment\n0 alice\n9 carol\n' > "${SLOTS}"
   out="$(cmd_check 2>&1)"
-  has 'names a session outside the block' "${out}" 'carol was allocated port 7309'
-  has 'and says how many'                 "${out}" '1 of 2 not covered'
+  has 'names a session outside the loaded range' "${out}" 'carol was allocated port 7309'
+  has 'and says how many'                        "${out}" '1 of 2 not covered'
+
   printf '# only comments\n' > "${SLOTS}"
   out="$(cmd_check 2>&1)"
-  has 'reports none when none exist'   "${out}" 'sessions    none allocated'
+  has 'reports none when none exist' "${out}" 'sessions    none allocated'
+
+  # The invariant the old group could not express: widen the block in the
+  # configuration, leave the loaded table on the old range, and the check must
+  # notice. Under the previous implementation both sides moved together and
+  # this said everything was covered.
+  HDW4S_BLOCK_SIZE=16
+  printf '# comment\n0 alice\n9 carol\n' > "${SLOTS}"
+  out="$(cmd_check 2>&1)"
+  has 'a slot inside the config but outside the table is caught' \
+      "${out}" 'carol was allocated port 7309'
+  HDW4S_BLOCK_SIZE=4
+
+  # And when there is no table at all it must say so, not answer from config.
+  STUB_RANGE=''
+  printf '# comment\n0 alice\n' > "${SLOTS}"
+  out="$(cmd_check 2>&1)"
+  has 'says so when no table is loaded' "${out}" 'cannot tell'
+  hasnt 'does not answer from the configuration' "${out}" 'all within'
 )
 
 echo '== proxy addresses compare by value, not by spelling =='
@@ -292,7 +393,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=53   # update when tests are added; a wrong number is the point
+EXPECTED=64   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

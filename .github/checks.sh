@@ -24,14 +24,26 @@ UNITS=(hdw4s@.service hdw4s-proxy@.socket hdw4s-proxy@.service
        hdw4s.slice)
 
 fail=0
+mark=0
 note() { printf '%-28s %s\n' "$1" "$2"; }
 bad()  { note "$1" "FAIL: $2"; fail=1; }
+# A summary line after a loop must not claim success the loop did not have.
+# These used to print "ok" unconditionally, so a run that had already reported
+# a failure went on to say the same check passed two lines later. The exit
+# status was right and the report was not, which is the worse half to get
+# wrong: the report is the part a person reads.
+begin() { mark="${fail}"; }
+okif()  { if [ "${fail}" = "${mark}" ]; then note "$1" 'ok'; fi; }
+# A check that cannot run has to say so. Silently skipping one means CI prints
+# "All checks passed" for a check it never performed.
+skip()  { note "$1" "skipped: $2"; }
 
 echo '== shell =='
+begin
 for f in "${SCRIPTS[@]}"; do
   bash -n "$f" 2>/dev/null || bad "${f}" 'bash -n rejected it'
 done
-note 'bash -n' 'ok'
+okif 'bash -n'
 if out="$(shellcheck -f gcc "${SCRIPTS[@]}" 2>&1)" && [ -z "${out}" ]; then
   note 'shellcheck' 'ok'
 else
@@ -46,6 +58,7 @@ fi
 #
 # (Note for the next person: a comment line may not begin with the linter's own
 # name, because it then gets read as a directive and rejected as malformed.)
+begin
 for f in hdw4s hdw4s-firewall; do
   while read -r fn; do
     [ -n "${fn}" ] || continue
@@ -53,10 +66,11 @@ for f in hdw4s hdw4s-firewall; do
       bad "${f}" "dispatches ${fn}, which is not defined"
   done < <(grep -oE '\bcmd_[a-z_]+' "${f}" | sort -u)
 done
-note 'dispatch targets exist' 'ok'
+okif 'dispatch targets exist'
 
 echo
 echo '== systemd units =='
+begin
 for u in "${UNITS[@]}"; do
   # Unit files reference paths that only exist once installed, and reference
   # each other by name, so those two complaints are expected here and are not
@@ -66,7 +80,7 @@ for u in "${UNITS[@]}"; do
          grep -viE 'not executable|does not exist|man .* failed|command .* failed|Unit .* not found|ssh\.socket' || :)"
   [ -z "${out}" ] || { printf '%s\n' "${out}"; bad "${u}" 'verify reported the above'; }
 done
-note 'systemd-analyze verify' 'ok'
+okif 'systemd-analyze verify'
 
 echo
 echo '== documentation =='
@@ -115,6 +129,8 @@ if command -v ronn >/dev/null; then
     bad 'hdw4s.8' 'could not be regenerated for comparison'
   fi
   rm -f "${regen}"
+else
+  skip 'hdw4s.8 matches its source' 'ronn is not installed (ruby-ronn)'
 fi
 
 # The updater injects JavaScript into the streaming client's page. It is code
@@ -134,6 +150,8 @@ if command -v node >/dev/null; then
     bad 'injected javascript' 'could not be extracted from hdw4s-update'
   fi
   rm -f "${jstmp}"
+else
+  skip 'injected javascript' 'node is not installed'
 fi
 
 echo
@@ -169,17 +187,25 @@ fi
 
 # Defaults are necessarily repeated between the scripts, the sample config and
 # the man page. They drift silently, and only a user notices.
+begin
 for setting in HDW4S_BASE_PORT:7300 HDW4S_BLOCK_SIZE:64; do
   key="${setting%%:*}"; want="${setting#*:}"
-  for f in hdw4s hdw4s-firewall; do
-    got="$(sed -n "s/^${key}=\([0-9]*\)\$/\1/p" "${f}" | head -n1)"
-    [ "${got}" = "${want}" ] ||
+  # Every script that carries its own copy, in either form it is written in.
+  # hdw4s-wait was missing here, and it is the one whose drift is invisible:
+  # ExecStartPre would poll the wrong port and every session start would time
+  # out with nothing to say why.
+  for f in hdw4s hdw4s-firewall hdw4s-wait hdw4s-session; do
+    got="$(sed -n "s/^${key}=\([0-9]*\)\$/\1/p;s/^ *: \"\${${key}:=\([0-9]*\)}\"\$/\1/p" \
+           "${f}" | head -n1)"
+    [ -n "${got}" ] ||
+      bad "${f}" "does not set a default for ${key}"
+    [ -z "${got}" ] || [ "${got}" = "${want}" ] ||
       bad "${f}" "${key} is ${got}, expected ${want}"
   done
   grep -q "^#${key}=${want}\$" hdw4s.conf ||
     bad 'hdw4s.conf' "documents a different ${key}"
 done
-note 'defaults agree' 'ok'
+okif 'defaults agree'
 
 # A package that builds but cannot be installed is not a working package. CI
 # never installs this one -- pulling a whole desktop onto a runner is not worth
@@ -201,6 +227,8 @@ if command -v apt-cache >/dev/null; then
   else
     bad 'dependencies' "not in the archive:${missing}"
   fi
+else
+  skip 'dependencies exist' 'apt-cache is not available'
 fi
 
 if [ "${1:-}" = '--package' ]; then
