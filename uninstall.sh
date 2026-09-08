@@ -146,7 +146,16 @@ else
   echo ' done.'
 fi
 
-for sys in /usr/local /usr; do
+# install.sh derives this prefix from the install path, so a tree under
+# neither /usr nor /usr/local left its symlink and its manual page behind --
+# a dangling link on the PATH, and a manual for software that is gone.
+case "${dst}" in
+  /usr/local/*) own='/usr/local';;
+  /usr/*)       own='/usr';;
+  *)            own="${dst%/lib/hdw4s}";;
+esac
+for sys in /usr/local /usr "${own}"; do
+  [ -n "${sys}" ] || continue
   # install.sh links into sbin, so bin alone left the real symlink dangling.
   [ ! -L "${sys}/sbin/hdw4s" ] || rm -f "${sys}/sbin/hdw4s"
   [ ! -L "${sys}/bin/hdw4s" ] || rm -f "${sys}/bin/hdw4s"

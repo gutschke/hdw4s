@@ -75,7 +75,7 @@ Usage: hdw4s <command> [arguments]
 
   list                    show every configured session and its current state
   show <instance>         show one session's settings and where each came from
-  enable <instance>       allocate a slot for a session and start it at boot
+  enable <instance>       allocate a slot for a session and arm its front door
   disable <instance>      stop a session and keep its slot reserved
   release <instance>      stop a session and give up its slot
   set [<instance>] K=V    change one setting, keeping the rest of the file
@@ -94,6 +94,8 @@ Usage: hdw4s <command> [arguments]
   --version               print the version
   firewall --apply        rewrite the package's nftables table
   firewall --check        report whether every session port is protected
+  firewall --print        print the ruleset that --apply would load
+  firewall --restore      reload the table if something else flushed it
 
 An instance is a user name, optionally followed by a colon and a session
 number for a second concurrent desktop belonging to the same account:
