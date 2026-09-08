@@ -84,10 +84,38 @@ generate() {
     # 1 is the slice: sessions live at /hdw4s.slice/hdw4s-<name>.slice/... while
     # the relay that fronts the public port sits under system.slice, so the
     # front door stays open.
-    if nft -c -f - >/dev/null 2>&1 <<'PROBE'
+    # The slice has to exist before a rule can name it: nft resolves the path
+    # to an inode at parse time and rejects the ruleset if it is not there.
+    # Nothing creates it on its own -- it appears when the first session starts,
+    # and this runs before any session can exist -- so without this the probe
+    # failed on every boot and quietly installed the fallback instead.
+    # Starting it explicitly also pins it, so the inode does not change when the
+    # last session stops and the slice would otherwise be garbage collected.
+    systemctl start hdw4s.slice >/dev/null 2>&1 || :
+
+    # Probed against a slice that is always present, so a failure here means
+    # what the message says it means rather than "the slice was missing".
+    # Matching a cgroup by namespace-relative level was broken until kernel
+    # 6.11 (nft_socket_cgroup_subtree_level). Below that, inside a container,
+    # the level this rule names points at the container's own top slice instead
+    # of ours -- the path exists, nft accepts the expression, and the rule then
+    # matches nothing while looking perfectly healthy. A guard that cannot tell
+    # you it is not guarding is worse than no guard, so where that combination
+    # holds, use the port range and say why.
+    local kmaj kmin kver cgroup_ok='yes'
+    kver="$(uname -r)"; kmaj="${kver%%.*}"; kmin="${kver#*.}"; kmin="${kmin%%.*}"
+    case "${kmaj}${kmin}" in
+      *[!0-9]*) cgroup_ok='no';;
+      *) if [ "${kmaj}" -lt 6 ] || { [ "${kmaj}" -eq 6 ] && [ "${kmin}" -lt 11 ]; }; then
+           [ "$(systemd-detect-virt --container 2>/dev/null)" = 'none' ] || cgroup_ok='no'
+         fi;;
+    esac
+
+    if [ "${cgroup_ok}" = 'yes' ] && [ -d /sys/fs/cgroup/hdw4s.slice ] &&
+       nft -c -f - >/dev/null 2>&1 <<'PROBE'
 table inet hdw4s_probe {
         chain c { type filter hook input priority filter; policy accept;
-                socket cgroupv2 level 1 "hdw4s.slice" drop; }
+                socket cgroupv2 level 1 "system.slice" drop; }
 }
 PROBE
     then
@@ -97,6 +125,13 @@ PROBE
         chain media {
                 type filter hook input priority filter; policy accept;
 
+                # Everything that is not TCP or UDP leaves here. Socket lookup
+                # resolves an ICMP error to the socket of the flow it refers
+                # to, so without this an unreachable or fragmentation-needed
+                # message for a session's own connection reaches the drop once
+                # conntrack has forgotten the flow -- an intermittent path MTU
+                # black hole, and a miserable one to diagnose.
+                meta l4proto != { tcp, udp } accept
                 ct state established,related accept
                 iifname "lo" accept
                 ip  saddr @proxies4 accept
@@ -109,7 +144,7 @@ CHAIN
       # Older nftables or a kernel without socket matching. Fall back to the
       # port range, and say so, because the fallback has the side effects
       # described above.
-      echo 'hdw4s: this nftables cannot match a socket cgroup; falling back to' >&2
+      echo 'hdw4s: cannot match a session by its cgroup here; falling back to' >&2
       echo '       the ephemeral port range, which also drops new inbound UDP' >&2
       echo '       for anything else using that range (WireGuard, mosh, NFSv3' >&2
       echo '       lock callbacks). Set HDW4S_MEDIA_PORTS=direct to disable.' >&2
@@ -243,7 +278,10 @@ for line in sys.stdin.read().split():
         out.append(str(ipaddress.ip_network(line, strict=False)))
     except ValueError:
         out.append(line.lower())
-print(" ".join(sorted(set(out))))' 2>/dev/null || printf '%s' "$1"
+print(" ".join(sorted(set(out))))' 2>/dev/null ||
+    # Without python3 the addresses cannot be canonicalised, but they can still
+    # be ordered and de-duplicated, which is most of what the comparison needs.
+    printf '%s' "$1" | tr '[:blank:]' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
 }
 
 cmd_check() {
@@ -319,7 +357,39 @@ cmd_check() {
       echo "media       ${n} candidate socket(s) reachable by design"
       echo '            (HDW4S_MEDIA_PORTS=direct)'
     elif nft list chain inet hdw4s media >/dev/null 2>&1; then
-      echo "media       ${n} candidate socket(s), covered by the media chain"
+      # nft prints the cgroup by resolving the number the kernel stored back to
+      # a path. If the slice was destroyed and recreated -- a reboot, a stop, a
+      # garbage collection of an empty slice -- the number no longer resolves
+      # and prints as a bare integer, while the rule silently matches nothing.
+      # Reading it back is the only way to tell a working rule from a dead one.
+      local cg
+      cg="$(nft -j list chain inet hdw4s media 2>/dev/null |
+            "${PYTHON:-python3}" -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+def walk(o):
+    if isinstance(o,dict):
+        if o.get("meta",{}).get("key")=="cgroupv2": return True
+        for v in o.values():
+            if walk(v): return True
+    elif isinstance(o,list):
+        for v in o:
+            if walk(v): return True
+    return False
+for o in d.get("nftables",[]):
+    r=o.get("rule")
+    if r and walk(r.get("expr",[])):
+        for e in r["expr"]:
+            m=e.get("match")
+            if m and walk(m.get("left")): print(m.get("right","")); sys.exit(0)' 2>/dev/null)"
+      if [ -n "${cg}" ] && [ "${cg}" != 'hdw4s.slice' ]; then
+        echo "media       STALE -- the rule no longer names hdw4s.slice (${cg});"
+        echo "            it matches nothing. Run 'hdw4s firewall --apply'."
+        rc=1
+      else
+        echo "media       ${n} candidate socket(s), covered by the media chain"
+      fi
     else
       echo "media       ${n} candidate socket(s) NOT covered"
       echo "            run 'hdw4s firewall --apply' to add the media chain"

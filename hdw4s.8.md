@@ -454,6 +454,19 @@ home directory, so it disappears with the session instead of accumulating.
 
 ## LIMITATIONS
 
+There is no way to configure STUN or TURN. The streaming server appends its own
+default STUN server unless it is named exactly, so a setting could only add a
+second and never replace the first; a session therefore always contacts that
+server at startup, which is a third party learning the machine's address and
+when sessions begin. TURN is disabled outright, because the server otherwise
+uses a relay belonging to a third party with a shared secret published in its
+own source -- which would carry the desktop's video, keystrokes and clipboard.
+Enabling a relay you run yourself needs somewhere to keep its credentials that
+a session cannot read, which does not exist yet: the configuration files are
+read by the session as the desktop user, so a secret in them is readable by
+every account with a desktop on that machine.
+
+
 A second desktop for an account that is already logged in on the same machine
 works only because gnome-session falls back to its own service manager when it
 cannot reach a systemd user manager, and there is only ever one of those per

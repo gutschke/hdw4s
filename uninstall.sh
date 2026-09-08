@@ -46,6 +46,7 @@ if command -v dpkg-query >/dev/null 2>&1 &&
   echo '  the files out from under dpkg, which would go on reporting the' >&2
   echo '  package as installed and correct. Use instead:' >&2
   echo "    apt remove ${pkg}      # or 'apt purge' to take the configuration too" >&2
+  trap '' INT TERM QUIT HUP EXIT ERR
   exit 1
 fi
 

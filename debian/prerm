@@ -1,19 +1,19 @@
 #!/bin/sh
 set -e
 
-# dh_installsystemd stops only the units it knows by name, which are the static
-# ones. The instances -- hdw4s@<name>.service and their relay sockets -- are
-# left running with their unit files deleted underneath them, so the sockets go
-# on holding the public ports open with nothing behind them.
-if [ "$1" = 'remove' ] || [ "$1" = 'upgrade' ]; then
-  for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 2>/dev/null |
-             awk '{print $1}'); do
-    systemctl stop "${u}" >/dev/null 2>&1 || :
-  done
-fi
-if [ "$1" = 'remove' ]; then
-  for u in $(systemctl list-units --plain --no-legend 'hdw4s@*' 2>/dev/null |
-             awk '{print $1}'); do
+# Only on removal. Stopping the relay sockets on upgrade would close every
+# desktop's front door and nothing starts them again: the instance sockets are
+# enabled through sockets.target.wants symlinks, which a daemon-reload does not
+# act on, and postinst starts only the static units. The session itself keeps
+# running, unreachable, with no message anywhere. That is exactly what
+# --no-stop-on-upgrade in debian/rules exists to prevent.
+#
+# On removal it is the opposite: dh_installsystemd stops only the units it
+# knows by name, which are the static ones, so the instances would be left
+# holding the public ports with their unit files gone.
+if [ "$1" = 'remove' ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+  for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 'hdw4s@*' \
+             2>/dev/null | awk '{print $1}'); do
     systemctl stop "${u}" >/dev/null 2>&1 || :
   done
 fi

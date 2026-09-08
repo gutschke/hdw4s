@@ -38,7 +38,6 @@ declare -A NEEDS=(
   [/usr/lib/xorg/Xorg]='xserver-xorg-core'
   [/usr/lib/xorg/modules/drivers/dummy_drv.so]='xserver-xorg-video-dummy'
   [/usr/bin/xauth]='xauth'
-  [/usr/bin/xdpyinfo]='x11-utils'
   [/usr/bin/dbus-run-session]='dbus-daemon'
   [/usr/bin/dbus-update-activation-environment]='dbus-bin'
   [/usr/bin/gnome-session]='gnome-session'

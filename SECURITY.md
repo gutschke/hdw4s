@@ -46,12 +46,20 @@ that trade is not acceptable.
 
 ## Known weaknesses not yet fixed
 
-The streaming server writes its full argument list to the journal at startup,
-and that list includes the credential `hdw4s auth` generated. Anything that can
-read the journal for a session's unit can therefore read its proxy credential.
-The journal is not world-readable, so this is a widening of who can see the
-secret rather than an exposure of it, but it is worth knowing before deciding
-who belongs in `systemd-journal`.
+The streaming server logs its **parsed configuration** at startup, including
+the values it took from the environment, and that includes the credential
+`hdw4s auth` generated. This is worth stating precisely: the credential is
+deliberately passed in the environment rather than on a command line, so that
+it does not appear in `/proc`, and it is the logging that undoes that -- not
+anything about how it is passed.
+
+Anything that can read the journal for a session's unit can therefore read that
+session's proxy credential. The journal is not world-readable, but on Debian and
+Ubuntu its access list includes `adm` as well as `systemd-journal`, which is
+usually a wider set than expected. Two further consequences: the credential
+stays in the journal for its retention period, so `hdw4s auth` does not retract
+one that has already been logged; and rotating a credential does not shorten
+that window.
 
 ## Reports that are in scope
 
