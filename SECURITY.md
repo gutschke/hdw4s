@@ -37,10 +37,11 @@ ephemeral range, where the streaming server scatters its media sockets across
 every address the machine has.
 
 **The updater installs an unsigned upstream wheel as root.** `hdw4s-update`
-fetches the streaming server from PyPI over TLS and installs it into a
-system-wide virtual environment. There is no signature to verify, so a
-compromise of that package, or of the index serving it, is a root compromise of
-every machine running the updater. Pin a version, or turn the timer off, if
+fetches the streaming server from its upstream GitHub releases over TLS and
+installs it into a system-wide virtual environment. There is no signature and no
+recorded hash to verify, so whoever can serve those URLs gets root on every
+machine running the updater -- a Python wheel can ship a `.pth` file that runs
+on every interpreter start. Pin a version, or turn the timer off, if
 that trade is not acceptable.
 
 ## Reports that are in scope

@@ -114,8 +114,8 @@ sudo hdw4s list
 ```
 
 ```
-INSTANCE             USER       PORT   STATE      LISTENING DISPLAY
-alice                alice      7300   active     yes       3
+INSTANCE           USER       PORT   AUTH  PROFILE  TRANSPORT  STATE     DISPLAY
+alice              alice      7300   yes   yes      tcp        active    3
 ```
 
 Point the proxy at that port. To share a home directory with another desktop,

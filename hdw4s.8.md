@@ -45,11 +45,22 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Print one session's settings and, for each of them, which file it came from.
 
   * `enable` <instance>:
-    Allocate a slot for a session, start it, and start it again at boot.
+    Allocate a slot for a session and open its front door. The desktop is not
+    started here and is not started at boot: the socket listens, and the first
+    connection to arrive starts the session behind it. Safe to re-run.
 
   * `disable` <instance>:
-    Stop a session and stop starting it at boot. The slot stays reserved, so the
-    port does not change if the session is enabled again.
+    Stop a session and close its front door, so nothing starts it again. The
+    slot stays reserved, so the port does not change if it is enabled later.
+
+  * `noauth` <instance>:
+    Remove the credential `auth` added, and explain when running without one is
+    a reasonable choice. Editing the file by hand is the same decision made
+    quietly; this is the supported way to make it.
+
+  * `reap` :
+    Stop sessions nobody has connected to for `HDW4S_IDLE_DAYS`. Run from a
+    timer; there is no need to invoke it by hand.
 
   * `release` <instance>:
     Stop a session and give up its slot, so another session may take the port.
@@ -149,12 +160,12 @@ can never cut a name in half.
 
 ## CONFIGURATION
 
-Three files are read in order, each overriding the last:
+Two files are read in order, the second overriding the first:
 
     /etc/hdw4s/hdw4s.conf         defaults for every session
     /etc/hdw4s/<instance>.conf    settings for one session
 
-`hdw4s show` <instance> prints the result and where each value came from.
+`hdw4s show` <instance> prints the settings that apply to one session.
 
   * `HDW4S_PROXIES`:
     Addresses allowed to reach a session, separated by spaces; IPv4 and IPv6
@@ -168,7 +179,12 @@ Three files are read in order, each overriding the last:
     `/var/lib/hdw4s`.
 
   * `HDW4S_BASE_PORT`, `HDW4S_BLOCK_SIZE`:
-    The block of TCP ports sessions are allocated from. Defaults to 7300 and 64.
+    The block of TCP ports sessions are allocated from. Defaults to 7300 and
+    64. Two consecutive blocks are actually reserved: the first is what the
+    reverse proxy connects to, and the second, immediately above it, is where
+    each session's streaming server listens on loopback behind its relay. So
+    the defaults reserve 7300-7427, and only 7300-7363 are ever reachable from
+    off the machine.
 
   * `HDW4S_ADDR`:
     The address the streaming server binds. Defaults to `0.0.0.0`, because the
@@ -201,6 +217,30 @@ Three files are read in order, each overriding the last:
     release needs, whereas Xorg and the lighter desktops have no such plan, so
     changing this is the whole migration when that matters.
 
+  * `HDW4S_IDLE_DAYS`:
+    How long a session may go with nobody connected before `reap` stops it.
+    Defaults to 7. Measured by connections rather than by typing, so work left
+    running is not mistaken for an idle desktop. Set it to 0 to never reap.
+
+  * `HDW4S_MEDIA_PORTS`:
+    Either `proxied`, the default, or `direct`. The streaming server scatters
+    connection candidates across the ephemeral port range on every address the
+    machine has. `proxied` drops new inbound connections to that range, which
+    closes them; `direct` leaves them reachable, which is needed only when a
+    browser reaches the streaming server without a proxy in between.
+
+  * `HDW4S_RESIZE`:
+    Whether the desktop follows the size of the browser window. Defaults to
+    true.
+
+  * `HDW4S_LANG`:
+    The locale the session runs in. Defaults to `C.UTF-8`. It has to be a UTF-8
+    locale: some terminals refuse to start otherwise.
+
+  * `HDW4S_FRAMERATE`, `HDW4S_ENCODER`:
+    Passed through to the streaming server. Leave them alone unless the picture
+    is visibly wrong; the defaults suit a machine with no graphics card.
+
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 
@@ -221,9 +261,13 @@ disk. Concretely, the session gets its own `XDG_DATA_HOME`, `XDG_STATE_HOME`,
 server socket, and wrappers that give Firefox and Thunderbird their own
 profiles.
 
-`XDG_CONFIG_HOME` is deliberately left alone. dconf does not support a
-per-session config home, and some toolkits look for `~/.config` regardless of
-it; the dconf profile is moved on its own instead, which is the supported way.
+All four XDG base directories move together: config, data, state and cache.
+Leaving the config home shared and redirecting dconf on its own was tried and
+abandoned, because it needs a service that has to answer before any setting can
+be read, and it leaves a lock beside its database that a killed session does not
+clean up. What this does not cover is a program that hardcodes `~/.config`
+regardless of the variable, which in practice means some input-method
+configuration.
 
 What stays shared:
 

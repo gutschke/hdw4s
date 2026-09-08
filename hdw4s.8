@@ -44,10 +44,16 @@ Print every configured session with its user, port, unit state, whether anything
 Print one session's settings and, for each of them, which file it came from\.
 .TP
 \fBenable\fR \fIinstance\fR
-Allocate a slot for a session, start it, and start it again at boot\.
+Allocate a slot for a session and open its front door\. The desktop is not started here and is not started at boot: the socket listens, and the first connection to arrive starts the session behind it\. Safe to re\-run\.
 .TP
 \fBdisable\fR \fIinstance\fR
-Stop a session and stop starting it at boot\. The slot stays reserved, so the port does not change if the session is enabled again\.
+Stop a session and close its front door, so nothing starts it again\. The slot stays reserved, so the port does not change if it is enabled later\.
+.TP
+\fBnoauth\fR \fIinstance\fR
+Remove the credential \fBauth\fR added, and explain when running without one is a reasonable choice\. Editing the file by hand is the same decision made quietly; this is the supported way to make it\.
+.TP
+\fBreap\fR
+Stop sessions nobody has connected to for \fBHDW4S_IDLE_DAYS\fR\. Run from a timer; there is no need to invoke it by hand\.
 .TP
 \fBrelease\fR \fIinstance\fR
 Stop a session and give up its slot, so another session may take the port\. The session's profile directory is left in place\.
@@ -108,7 +114,7 @@ hdw4s enable alice:2
 .P
 The second form gives one account a second concurrent desktop on the same machine\. A colon is used because systemd leaves it untouched when it escapes an instance name, and because it cannot occur in a user name, so splitting on it can never cut a name in half\.
 .SH "CONFIGURATION"
-Three files are read in order, each overriding the last:
+Two files are read in order, the second overriding the first:
 .IP "" 4
 .nf
 /etc/hdw4s/hdw4s\.conf         defaults for every session
@@ -116,49 +122,52 @@ Three files are read in order, each overriding the last:
 .fi
 .IP "" 0
 .P
-\fBhdw4s show\fR \fIinstance\fR prints the result and where each value came from\.
-.TP
-\fBHDW4S_PROXIES\fR
-Addresses allowed to reach a session, separated by spaces; IPv4 and IPv6 addresses and prefixes are both accepted\. Empty means this machine only\.
-.TP
-\fBHDW4S_ISOLATION\fR
-\fBnone\fR or \fBprofile\fR\. See \fBSHARED HOME DIRECTORIES\fR\. Defaults to \fBnone\fR\.
-.TP
-\fBHDW4S_PROFILE_DIR\fR
-Where an isolated session keeps its private profile\. Defaults to \fB/var/lib/hdw4s\fR\.
-.TP
-\fBHDW4S_BASE_PORT\fR, \fBHDW4S_BLOCK_SIZE\fR
-The block of TCP ports sessions are allocated from\. Defaults to 7300 and 64\.
-.TP
-\fBHDW4S_ADDR\fR
-The address the streaming server binds\. Defaults to \fB0\.0\.0\.0\fR, because the reverse proxy is normally on another machine\. What limits who may connect is the firewall, not this\.
-.TP
-\fBHDW4S_PORT\fR
-Overrides the allocated port for one session\. Setting this outside the block puts the session outside the firewall's coverage; \fBhdw4s firewall \-\-check\fR reports that\.
-.TP
-\fBHDW4S_ALLOW_SYSTEM_USER\fR
-Set to \fByes\fR to permit a session for an account below UID 1000\.
-.TP
-\fBHDW4S_TRANSPORT\fR
-\fBtcp\fR or \fBunix\fR\. Set with \fBhdw4s transport\fR, which also arranges the units that go with it, rather than by hand\.
-.TP
-\fBHDW4S_PROXY_GROUP\fR
-The group allowed to open a session's Unix socket, i\.e\. the group the reverse proxy runs as\. Defaults to \fBwww\-data\fR\.
-.TP
-\fBHDW4S_AUTH\fR
-\fBnone\fR or \fBbasic\fR\. Set with \fBhdw4s auth\fR, which also generates the secret\.
-.TP
-\fBHDW4S_SESSION\fR
-The desktop to start; defaults to \fBgnome\-session\fR\. Anything that runs on X11 works, and nothing else in a session depends on the choice\. GNOME 50, which Ubuntu 26\.04 ships, removes the X11 session that the current Selkies release needs, whereas Xorg and the lighter desktops have no such plan, so changing this is the whole migration when that matters\.
-.TP
-\fBSELKIES_VERSION\fR
-Pin a Selkies release and stop following upstream\.
+\fBhdw4s show\fR \fIinstance\fR prints the settings that apply to one session\.
+.IP "\[ci]" 4
+\fBHDW4S_PROXIES\fR: Addresses allowed to reach a session, separated by spaces; IPv4 and IPv6 addresses and prefixes are both accepted\. Empty means this machine only\.
+.IP "\[ci]" 4
+\fBHDW4S_ISOLATION\fR: \fBnone\fR or \fBprofile\fR\. See \fBSHARED HOME DIRECTORIES\fR\. Defaults to \fBnone\fR\.
+.IP "\[ci]" 4
+\fBHDW4S_PROFILE_DIR\fR: Where an isolated session keeps its private profile\. Defaults to \fB/var/lib/hdw4s\fR\.
+.IP "\[ci]" 4
+\fBHDW4S_BASE_PORT\fR, \fBHDW4S_BLOCK_SIZE\fR: The block of TCP ports sessions are allocated from\. Defaults to 7300 and
+.IP "1." 4
+Two consecutive blocks are actually reserved: the first is what the reverse proxy connects to, and the second, immediately above it, is where each session's streaming server listens on loopback behind its relay\. So the defaults reserve 7300\-7427, and only 7300\-7363 are ever reachable from off the machine\.
+.IP "" 0
+
+.IP "\[ci]" 4
+\fBHDW4S_ADDR\fR: The address the streaming server binds\. Defaults to \fB0\.0\.0\.0\fR, because the reverse proxy is normally on another machine\. What limits who may connect is the firewall, not this\.
+.IP "\[ci]" 4
+\fBHDW4S_PORT\fR: Overrides the allocated port for one session\. Setting this outside the block puts the session outside the firewall's coverage; \fBhdw4s firewall \-\-check\fR reports that\.
+.IP "\[ci]" 4
+\fBHDW4S_ALLOW_SYSTEM_USER\fR: Set to \fByes\fR to permit a session for an account below UID 1000\.
+.IP "\[ci]" 4
+\fBHDW4S_TRANSPORT\fR: \fBtcp\fR or \fBunix\fR\. Set with \fBhdw4s transport\fR, which also arranges the units that go with it, rather than by hand\.
+.IP "\[ci]" 4
+\fBHDW4S_PROXY_GROUP\fR: The group allowed to open a session's Unix socket, i\.e\. the group the reverse proxy runs as\. Defaults to \fBwww\-data\fR\.
+.IP "\[ci]" 4
+\fBHDW4S_AUTH\fR: \fBnone\fR or \fBbasic\fR\. Set with \fBhdw4s auth\fR, which also generates the secret\.
+.IP "\[ci]" 4
+\fBHDW4S_SESSION\fR: The desktop to start; defaults to \fBgnome\-session\fR\. Anything that runs on X11 works, and nothing else in a session depends on the choice\. GNOME 50, which Ubuntu 26\.04 ships, removes the X11 session that the current Selkies release needs, whereas Xorg and the lighter desktops have no such plan, so changing this is the whole migration when that matters\.
+.IP "\[ci]" 4
+\fBHDW4S_IDLE_DAYS\fR: How long a session may go with nobody connected before \fBreap\fR stops it\. Defaults to 7\. Measured by connections rather than by typing, so work left running is not mistaken for an idle desktop\. Set it to 0 to never reap\.
+.IP "\[ci]" 4
+\fBHDW4S_MEDIA_PORTS\fR: Either \fBproxied\fR, the default, or \fBdirect\fR\. The streaming server scatters connection candidates across the ephemeral port range on every address the machine has\. \fBproxied\fR drops new inbound connections to that range, which closes them; \fBdirect\fR leaves them reachable, which is needed only when a browser reaches the streaming server without a proxy in between\.
+.IP "\[ci]" 4
+\fBHDW4S_RESIZE\fR: Whether the desktop follows the size of the browser window\. Defaults to true\.
+.IP "\[ci]" 4
+\fBHDW4S_LANG\fR: The locale the session runs in\. Defaults to \fBC\.UTF\-8\fR\. It has to be a UTF\-8 locale: some terminals refuse to start otherwise\.
+.IP "\[ci]" 4
+\fBHDW4S_FRAMERATE\fR, \fBHDW4S_ENCODER\fR: Passed through to the streaming server\. Leave them alone unless the picture is visibly wrong; the defaults suit a machine with no graphics card\.
+.IP "\[ci]" 4
+\fBSELKIES_VERSION\fR: Pin a Selkies release and stop following upstream\.
+.IP "" 0
 .SH "SHARED HOME DIRECTORIES"
 A GNOME session assumes it is the only one using its home directory\. That assumption breaks when the same home is mounted on more than one machine, or when another desktop is already logged in against it\. Two sessions then write the same settings database, the same keyring and the same metadata stores\. None of those are safe to share, and the settings database and the metadata stores use memory\-mapped and journalled files that are documented not to work over NFS at all\.
 .P
 Setting \fBHDW4S_ISOLATION=profile\fR keeps the shared home for the user's files but moves the session's settings, state and cache to a private directory on local disk\. Concretely, the session gets its own \fBXDG_DATA_HOME\fR, \fBXDG_STATE_HOME\fR, \fBXDG_CACHE_HOME\fR and dconf profile, its own X authority cookie, its own audio server socket, and wrappers that give Firefox and Thunderbird their own profiles\.
 .P
-\fBXDG_CONFIG_HOME\fR is deliberately left alone\. dconf does not support a per\-session config home, and some toolkits look for \fB~/\.config\fR regardless of it; the dconf profile is moved on its own instead, which is the supported way\.
+All four XDG base directories move together: config, data, state and cache\. Leaving the config home shared and redirecting dconf on its own was tried and abandoned, because it needs a service that has to answer before any setting can be read, and it leaves a lock beside its database that a killed session does not clean up\. What this does not cover is a program that hardcodes \fB~/\.config\fR regardless of the variable, which in practice means some input\-method configuration\.
 .P
 What stays shared:
 .IP "" 4
