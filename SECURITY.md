@@ -61,6 +61,25 @@ stays in the journal for its retention period, so `hdw4s auth` does not retract
 one that has already been logged; and rotating a credential does not shorten
 that window.
 
+The nftables `media` chain closes the streaming server's connection-candidate
+sockets by matching the cgroup that owns each socket, which means it constrains
+sockets **by what created them, not by which port they use**. Two consequences
+follow. A session cannot escape it by choosing a different port. But equally, it
+constrains nothing the account creates by another route — a cron job, an `at`
+job, an ssh login — because those are outside the session's slice. Anything that
+opens a listener there and forwards to the session's loopback port exposes a
+desktop that authenticates nobody. The chain is a limit on the streaming server,
+not on the account.
+
+The same chain has a narrow timing window. It drops a packet only when a socket
+in the slice already exists to match; before the streaming server binds a given
+port, a packet addressed to it finds no socket, the chain does not match, and
+conntrack records the flow. If a candidate socket later lands on that port and
+answers, that recorded flow is `established` and passes above the drop. Reaching
+it still needs credentials from the authenticated signalling channel, and
+provoking it means spraying a large port range noisily, but it is a real
+difference from filtering by port number.
+
 ## Reports that are in scope
 
 Anything that lets one account reach another account's session or display;

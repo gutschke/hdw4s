@@ -16,6 +16,7 @@ Depends: ${misc:Depends},
          gnome-session,
          nftables,
          iproute2,
+         mawk | gawk,
          procps,
          systemd,
          libglib2.0-bin,
@@ -33,7 +34,7 @@ Depends: ${misc:Depends},
          gstreamer1.0-plugins-ugly,
          gstreamer1.0-tools,
          gstreamer1.0-x
-Recommends: pipewire-pulse, wireplumber
+Recommends: pipewire-pulse, wireplumber, gnome-keyring
 Description: headless GNOME desktop streamed to a web browser
  Gives an existing account on an existing machine a full GNOME desktop that is
  reachable from a browser, without containers and without a graphics card. A

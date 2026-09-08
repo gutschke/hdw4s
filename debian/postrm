@@ -19,7 +19,7 @@ if [ "$1" = 'purge' ]; then
   # the credentials contradicted the sentence above, and leaving the drop-ins
   # meant a reinstall came back up with stale User= and port assignments
   # attached to slots that had been handed out again in the meantime.
-  rm -f /etc/hdw4s/*.conf /etc/hdw4s/*.cred
+  rm -rf /etc/hdw4s/*.conf /etc/hdw4s/*.cred
   rm -rf /etc/systemd/system/hdw4s@*.service.d \
          /etc/systemd/system/hdw4s-proxy@*.service.d \
          /etc/systemd/system/hdw4s-proxy@*.socket.d

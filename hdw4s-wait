@@ -22,13 +22,17 @@ HDW4S_BASE_PORT=7300
 HDW4S_BLOCK_SIZE=64
 # shellcheck source=/dev/null
 if [ -r "${CONF}" ]; then
+  f="${CONF}"
   # Checked before it is run. Sourcing a file with a syntax error
   # applies every assignment before the error and none after, and
   # the "|| :" below would hide that -- leaving the program running
   # on a configuration that is half the administrator's and half
   # the defaults, with nothing said.
   bash -n "${CONF}" || {
-    echo "hdw4s: configuration file has a syntax error; refusing to run." >&2
+    echo "hdw4s: ${f} has a syntax error (above); refusing to run on a" >&2
+    echo '  configuration that would be applied only as far as the error.' >&2
+    echo '  Edit it by hand -- "hdw4s set" and "hdw4s unset" read the same' >&2
+    echo '  file and are unavailable until it parses.' >&2
     exit 1
   }
   # A valid file may still end in a conditional that happens to be
@@ -37,13 +41,17 @@ if [ -r "${CONF}" ]; then
 fi
 # shellcheck source=/dev/null
 if [ -r "/etc/hdw4s/${instance}.conf" ]; then
+  f="/etc/hdw4s/${instance}.conf"
   # Checked before it is run. Sourcing a file with a syntax error
   # applies every assignment before the error and none after, and
   # the "|| :" below would hide that -- leaving the program running
   # on a configuration that is half the administrator's and half
   # the defaults, with nothing said.
   bash -n "/etc/hdw4s/${instance}.conf" || {
-    echo "hdw4s: configuration file has a syntax error; refusing to run." >&2
+    echo "hdw4s: ${f} has a syntax error (above); refusing to run on a" >&2
+    echo '  configuration that would be applied only as far as the error.' >&2
+    echo '  Edit it by hand -- "hdw4s set" and "hdw4s unset" read the same' >&2
+    echo '  file and are unavailable until it parses.' >&2
     exit 1
   }
   # A valid file may still end in a conditional that happens to be

@@ -125,10 +125,15 @@ man="${sys}/share/man/man8"
 
 echo -n 'Installing files...'
 install -d -m0755 "${dst}" "${dst}/wrappers" "${sys}/sbin" "${man}" /etc/hdw4s
-for f in "${SOURCES[@]}"; do
-  cp -f "${src}/${f}" "${dst}/${f}"
-done
-cp -f "${src}"/wrappers/* "${dst}/wrappers/"
+# Re-running the installed copy and accepting the same path makes src and dst
+# the same directory, and cp then refuses -- with the generic "failed
+# unexpectedly" line, which says nothing about why.
+if [ "${src}" != "${dst}" ]; then
+  for f in "${SOURCES[@]}"; do
+    cp -f "${src}/${f}" "${dst}/${f}"
+  done
+  cp -f "${src}"/wrappers/* "${dst}/wrappers/"
+fi
 chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*
 chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \

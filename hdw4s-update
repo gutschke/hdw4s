@@ -35,7 +35,9 @@ KNOWN_GOOD='1.6.2'
 # shellcheck source=/dev/null
 if [ -r /etc/hdw4s/hdw4s.conf ]; then
   bash -n /etc/hdw4s/hdw4s.conf || {
-    echo 'hdw4s: /etc/hdw4s/hdw4s.conf has a syntax error; refusing to run.' >&2
+    echo 'hdw4s: /etc/hdw4s/hdw4s.conf has a syntax error (above); refusing' >&2
+    echo '  to run on a configuration that would be applied only as far as' >&2
+    echo '  the error. Edit it by hand.' >&2
     exit 1
   }
   . /etc/hdw4s/hdw4s.conf || :
