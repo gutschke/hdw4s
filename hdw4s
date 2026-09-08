@@ -441,6 +441,13 @@ declare -A SETTABLE=(
   [HDW4S_LANG]='any'
   [HDW4S_IDLE_DAYS]='number'
   [HDW4S_MEDIA_PORTS]='proxied|direct'
+  [HDW4S_STUN_HOST]='any'
+  [HDW4S_STUN_PORT]='number'
+  [HDW4S_TURN_HOST]='any'
+  [HDW4S_TURN_PORT]='number'
+  [HDW4S_TURN_SHARED_SECRET]='any'
+  [HDW4S_TURN_USERNAME]='any'
+  [HDW4S_TURN_PASSWORD]='any'
   [HDW4S_ENCODER]='any'
   [SELKIES_VERSION]='any'
 )

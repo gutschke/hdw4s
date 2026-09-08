@@ -26,6 +26,13 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 # size the X server started at and the browser letterboxes it. No amount of
 # work in the browser can compensate: the handler is not there to call.
 : "${HDW4S_RESIZE:=true}"
+: "${HDW4S_STUN_HOST:=}"
+: "${HDW4S_STUN_PORT:=19302}"
+: "${HDW4S_TURN_HOST:=}"
+: "${HDW4S_TURN_PORT:=3478}"
+: "${HDW4S_TURN_SHARED_SECRET:=}"
+: "${HDW4S_TURN_USERNAME:=}"
+: "${HDW4S_TURN_PASSWORD:=}"
 
 # hdw4s-session already chose the session locale and cleared LC_ALL before
 # creating the bus. This script sets LC_ALL=C again at the top for its own
@@ -156,6 +163,30 @@ else
   fi
   auth='--enable_basic_auth=false'
 fi
+
+# Without a STUN server the streaming server offers only host candidates, which
+# are its own addresses. That is enough when the browser can reach one of them
+# -- the same network, or a routable address -- and useless when it cannot,
+# which is every case where the machine sits behind NAT. Setting this lets it
+# discover the address the outside world sees, so ICE has something to offer
+# the far side and the two can meet in the middle without a relay.
+if [ -n "${HDW4S_STUN_HOST}" ]; then
+  export SELKIES_STUN_HOST="${HDW4S_STUN_HOST}"
+  export SELKIES_STUN_PORT="${HDW4S_STUN_PORT}"
+fi
+
+# The streaming server ships with a third party's TURN relay and a shared
+# secret published in its own source, and uses them unless told otherwise.
+# That silently routes a desktop's video and input through a machine nobody
+# here controls, which is not a decision a package should make on an
+# administrator's behalf. Passed empty unless configured, which drops the
+# server back to its STUN-only configuration. Set HDW4S_TURN_HOST and
+# HDW4S_TURN_SHARED_SECRET to use a relay you actually run.
+export SELKIES_TURN_HOST="${HDW4S_TURN_HOST}"
+export SELKIES_TURN_PORT="${HDW4S_TURN_PORT}"
+export SELKIES_TURN_SHARED_SECRET="${HDW4S_TURN_SHARED_SECRET}"
+export SELKIES_TURN_USERNAME="${HDW4S_TURN_USERNAME}"
+export SELKIES_TURN_PASSWORD="${HDW4S_TURN_PASSWORD}"
 
 /opt/selkies/bin/selkies-gstreamer \
   --addr="${HDW4S_ADDR}" \
