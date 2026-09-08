@@ -58,6 +58,7 @@ Usage: hdw4s <command> [arguments]
   transport <instance> tcp|unix
                           reach a session over the network, or over a socket
   auth <instance>         require a secret from the proxy as well as an address
+  noauth <instance>       stop requiring one, and say what that means
   proxy <instance>        print an nginx configuration for a session
   seed <instance>         copy existing settings into an isolated profile, once
   reap                    stop desktops nobody has connected to for a long time
@@ -183,10 +184,30 @@ internal_port_of() {
 
 # --- commands ---------------------------------------------------------------
 
+# The effective value of a setting for one session: its own file if it says
+# anything, otherwise the site default, otherwise the fallback given here.
+setting_of() {
+  local inst="$1" key="$2" fallback="$3" v=''
+  local f
+  for f in "/etc/hdw4s/${inst}.conf" "${CONF}"; do
+    [ -r "${f}" ] || continue
+    v="$(sed -n "s/^[[:space:]]*${key}=[\"']\{0,1\}\([^\"'#]*\).*/\1/p" \
+         "${f}" | tail -n1 | sed 's/[[:space:]]*$//')"
+    [ -z "${v}" ] || { printf '%s' "${v}"; return 0; }
+  done
+  printf '%s' "${fallback}"
+}
+
+# Whether a session has a credential of its own that a proxy must present.
+has_auth() {
+  [ -r "/etc/hdw4s/$1.auth.cred" ] &&
+  [ "$(setting_of "$1" HDW4S_AUTH none)" = 'basic' ]
+}
+
 cmd_list() {
-  local idx inst port state listen
-  printf '%-20s %-10s %-6s %-10s %-8s %s\n' \
-    INSTANCE USER PORT STATE LISTENING DISPLAY
+  local idx inst port state prof auth trans unprotected=0
+  printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
+    INSTANCE USER PORT AUTH PROFILE TRANSPORT STATE DISPLAY
   [ -r "${SLOTS}" ] || return 0
   # Slots are reused as they are released, so the file is not in index order.
   while read -r idx inst; do
@@ -195,15 +216,30 @@ cmd_list() {
     port="$(port_of "${idx}")"
     state="$(systemctl show -p ActiveState --value "hdw4s@${inst}.service" \
              2>/dev/null || echo unknown)"
-    if ss -Hltn "sport = :${port}" 2>/dev/null | grep -q .; then
-      listen='yes'
+    [ "$(setting_of "${inst}" HDW4S_ISOLATION none)" = 'profile' ] &&
+      prof='yes' || prof='no'
+    trans="$(setting_of "${inst}" HDW4S_TRANSPORT tcp)"
+    if has_auth "${inst}"; then
+      auth='yes'
     else
-      listen='no'
+      auth='NO'
+      # A session on a filesystem socket is protected by permissions instead,
+      # so the absence of a credential there is not the same warning.
+      [ "${trans}" = 'unix' ] || unprotected=$(( unprotected + 1 ))
     fi
-    printf '%-20s %-10s %-6s %-10s %-8s %s\n' \
-      "${inst}" "${user}" "${port}" "${state}" "${listen}" \
+    printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
+      "${inst}" "${user}" "${port}" "${auth}" "${prof}" "${trans}" "${state}" \
       "$(cat "/run/hdw4s/${inst}/display" 2>/dev/null || echo '-')"
   done < <(sort -n "${SLOTS}")
+
+  [ "${unprotected}" -eq 0 ] || {
+    echo
+    echo "${unprotected} session(s) marked AUTH=NO have no credential of their own."
+    echo '  Whatever can reach their port gets a full desktop for that'
+    echo '  account, with no further question. The firewall is the only thing'
+    echo '  standing in the way.'
+    echo "  Add one with 'hdw4s auth <instance>'."
+  }
 }
 
 cmd_show() {
@@ -226,7 +262,26 @@ cmd_show() {
   else
     echo "overrides     none  (/etc/hdw4s/${inst}.conf does not exist)"
   fi
-  echo "profile       ${HDW4S_PROFILE_DIR}/${inst}"
+  local prof
+  prof="$(setting_of "${inst}" HDW4S_ISOLATION none)"
+  if [ "${prof}" = 'profile' ]; then
+    echo "isolation     profile  (settings kept in ${HDW4S_PROFILE_DIR}/${inst})"
+  else
+    echo 'isolation     none  (settings kept in the home directory, shared with'
+    echo '                    any other desktop using it)'
+  fi
+  if has_auth "${inst}"; then
+    echo "auth          a credential of its own, in /etc/hdw4s/${inst}.auth.cred"
+    echo "              the proxy must present it; see 'hdw4s proxy ${inst}'"
+  elif [ "$(setting_of "${inst}" HDW4S_TRANSPORT tcp)" = 'unix' ]; then
+    echo 'auth          none, but reached over a filesystem socket, so access'
+    echo '              is decided by permissions rather than by address'
+  else
+    echo 'auth          NONE -- anything that can reach the port gets this'
+    echo "              desktop. Add one with 'hdw4s auth ${inst}'."
+  fi
+  [ ! -r "/etc/hdw4s/${inst}.keyring.cred" ] ||
+    echo 'keyring       its own, unlocked at start'
   echo "display       $(cat "/run/hdw4s/${inst}/display" 2>/dev/null ||
                         echo 'not running (assigned at start)')"
 }
@@ -289,6 +344,35 @@ cmd_enable() {
   echo "Session ${inst} is listening on port $(port_of "${idx}")."
   echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
   echo 'The desktop starts on the first connection, not now.'
+
+  # A site can make this automatic by setting HDW4S_AUTH=basic in the shared
+  # configuration; otherwise say plainly what is missing. A session with no
+  # credential is not a smaller version of one with a credential -- it is one
+  # where an address is the only thing between a stranger and somebody's
+  # desktop, and that deserves more than a line in a manual.
+  if has_auth "${inst}"; then
+    :
+  elif [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ]; then
+    echo
+    echo 'Generating the credential this session is configured to require...'
+    cmd_auth "${inst}" >/dev/null
+    echo "  done; see 'hdw4s proxy ${inst}' for the proxy configuration."
+  else
+    echo
+    cat <<EOF
+
+  This session has no credential of its own. Anything that can open a
+  connection to port $(port_of "${idx}") gets a full desktop for ${user}, with no
+  further question. The firewall's list of addresses is the only thing in
+  the way, and an address is a weak thing to rely on by itself.
+
+      hdw4s auth ${inst}
+
+  adds a secret the reverse proxy presents on every request. The user never
+  sees it, so there is still no login screen. Setting HDW4S_AUTH=basic in
+  /etc/hdw4s/hdw4s.conf does this for every session from the start.
+EOF
+  fi
 }
 
 # --- editing configuration --------------------------------------------------
@@ -652,6 +736,26 @@ cmd_auth() {
   unset pw
 }
 
+cmd_noauth() {
+  local inst="$1"
+  split_instance "${inst}"
+  [ -r "/etc/hdw4s/${inst}.auth.cred" ] ||
+    [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ] || {
+      echo "Session ${inst} already has no credential."
+      return 0
+    }
+  rm -f "/etc/hdw4s/${inst}.auth.cred" \
+        "${DROPIN}/hdw4s@${inst}.service.d/70-auth.conf"
+  config_write "/etc/hdw4s/${inst}.conf" 'HDW4S_AUTH' 'none'
+  systemctl daemon-reload
+  echo "Session ${inst} no longer requires a credential."
+  echo '  Whatever can reach its port now gets this desktop. That is a'
+  echo '  reasonable choice when the port is reachable only over a filesystem'
+  echo '  socket, or from a network nothing untrusted is on. It is not one to'
+  echo '  make by accident.'
+  echo "  Restart it to take effect: systemctl restart hdw4s@${inst}"
+}
+
 cmd_proxy() {
   local inst="$1" idx port cred user pw
   split_instance "${inst}"
@@ -886,6 +990,7 @@ case "${1:-}" in
   seed)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_seed "$@";;
   reap)     shift; cmd_reap "$@";;
   auth)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_auth "$@";;
+  noauth)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_noauth "$@";;
   transport) shift; [ $# -eq 2 ] || { usage >&2; exit 2; }; cmd_transport "$@";;
   proxy)    shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_proxy "$@";;
   set)      shift; cmd_set "$@";;

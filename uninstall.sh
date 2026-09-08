@@ -63,15 +63,35 @@ systemctl daemon-reload
 echo ' done.'
 
 echo -n 'Removing files...'
+# The install path is discovered rather than known, so check it before handing
+# it to rm. Three tests, because refusing a list of obvious names is not enough:
+# the thing that must never happen is deleting somebody's home directory, and a
+# home directory is not a fixed name.
+unsafe=''
+# 1. Never a directory that holds other things: only ever our own.
+[ "$(basename -- "${dst}")" = 'hdw4s' ] ||
+  unsafe="it is not a directory named hdw4s"
+# 2. Never a well-known location, however it was spelled.
 case "${dst}" in
-  /|/usr|/usr/bin|/usr/lib|/usr/local|/usr/local/bin|/usr/local/lib|/etc|/home)
-    echo ' skipped (unsafe path).'
-    ;;
-  *)
-    rm -rf "${dst}"
-    echo ' done.'
+  /|/usr|/usr/bin|/usr/sbin|/usr/lib|/usr/local|/usr/local/bin|/usr/local/sbin|/usr/local/lib|/etc|/var|/var/lib|/home|/root|/srv|/opt|/boot|/dev|/proc|/sys)
+    unsafe='it is a system location'
     ;;
 esac
+# 3. Never inside an account's home, whatever that account calls it.
+if [ -z "${unsafe}" ]; then
+  while IFS=: read -r _ _ _ _ _ home _; do
+    case "${home}" in ''|/|/nonexistent|/dev/null) continue;; esac
+    case "${dst}/" in
+      "${home}"/*) unsafe='it is inside the home directory of an account'; break;;
+    esac
+  done < /etc/passwd
+fi
+if [ -n "${unsafe}" ]; then
+  echo " skipped: refusing to remove ${dst}, ${unsafe}."
+else
+  rm -rf "${dst}"
+  echo ' done.'
+fi
 
 for sys in /usr/local /usr; do
   [ ! -L "${sys}/bin/hdw4s" ] || rm -f "${sys}/bin/hdw4s"
