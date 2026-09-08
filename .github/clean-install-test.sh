@@ -125,7 +125,13 @@ find_deb() {
 # against a bootstrap of minutes.
 if [ -z "${USE_EXISTING}" ]; then
   echo -n 'Building the package...'
-  .github/checks.sh --package >/dev/null || {
+  # As the invoking user, not as root. dpkg-buildpackage says plainly that
+  # running it with root privileges is not recommended, and the concrete harm
+  # is that it leaves debian/.debhelper, debian/hdw4s and the rest owned by
+  # root in a working tree the user then cannot clean.
+  build_as=(env)
+  [ -z "${SUDO_USER:-}" ] || build_as=(runuser -u "${SUDO_USER}" --)
+  "${build_as[@]}" .github/checks.sh --package >/dev/null || {
     echo ' failed.'
     echo 'Run ".github/checks.sh --package" to see why.' >&2
     exit 1
@@ -258,7 +264,12 @@ mip="$(getent ahostsv4 "${mhost}" 2>/dev/null | awk '{print $1; exit}')"
 echo "Mirror: ${MIRROR}${MIRROR_IP:+  (by address: ${MIRROR_IP})}"
 echo "Resolver inside the sandbox: ${DNS}"
 
-bootstrap_with() {
+# debootstrap runs wget with the current directory as its own, and wget drops a
+# wget-log wherever it is standing -- which was the source tree. The change is
+# confined to a subshell: leaving this shell parked inside BASE would make the
+# umount in cleanup fail with "target is busy".
+bootstrap_with() (
+  cd "${BASE}" || exit 1
   case "${BOOTSTRAP}" in
   *mmdebstrap)
     # universe, because gir1.2-gst-plugins-bad-1.0 and gstreamer1.0-nice are
@@ -278,7 +289,7 @@ bootstrap_with() {
     "${BOOTSTRAP}" --variant=minbase --components='main,universe' \
       "${SUITE}" "${ROOT}" "$1" > "${BASE}/bootstrap.log" 2>&1;;
   esac
-}
+)
 
 echo -n "Bootstrapping ${SUITE}..."
 if bootstrap_with "${MIRROR}"; then

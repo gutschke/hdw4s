@@ -81,6 +81,12 @@ ls /usr/lib/*/gstreamer-1.0/libgstnice.so >&/dev/null ||
 # be here -- see the comment in hdw4s-update for why the distro one is right.
 python3 -c 'import Xlib' >&/dev/null || missing="${missing} python3-xlib"
 
+# GPUtil, which Selkies imports to look for a GPU it will not find, still does
+# "from distutils import spawn". Python 3.12 removed distutils; setuptools
+# ships the replacement and a .pth that puts it back on the import path. So a
+# session that never touches a GPU cannot start without it.
+python3 -c 'import distutils' >&/dev/null || missing="${missing} python3-setuptools"
+
 [ -z "${missing}" ] || {
   echo 'Error: required packages are missing. Install them with:'
   echo
