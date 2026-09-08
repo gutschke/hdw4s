@@ -218,6 +218,34 @@ echo '== firewall ruleset shape =='
   has   'direct keeps the input chain' "${out}" 'chain input'
 )
 
+echo '== the check reads the slot table =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  mkdir -p "${SB}/etc"
+  export HDW4S_ETCDIR="${SB}/etc"
+  sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s-firewall" > "${SB}/fw.sh"
+  # shellcheck source=/dev/null
+  . "${SB}/fw.sh" 2>/dev/null || :
+  trap - ERR
+  trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
+  HDW4S_BASE_PORT=7300; HDW4S_BLOCK_SIZE=4; HDW4S_PROXIES=''
+  # Redirect the configuration directory the way an operator would, and let the
+  # script derive its own paths. Setting SLOTS here directly is what let this
+  # group pass while the shipped script died on an unbound variable.
+  # "every session is filtered" was documented and never computed: the check
+  # never opened this file. A slot beyond the block the table was built from is
+  # a session listening with nothing in front of it.
+  printf '# comment\n0 alice\n1 bob\n' > "${SLOTS}"
+  out="$(cmd_check 2>&1)"
+  has 'counts the sessions it found'   "${out}" 'sessions    2, all within 7300-7303'
+  printf '# comment\n0 alice\n9 carol\n' > "${SLOTS}"
+  out="$(cmd_check 2>&1)"
+  has 'names a session outside the block' "${out}" 'carol was allocated port 7309'
+  has 'and says how many'                 "${out}" '1 of 2 not covered'
+  printf '# only comments\n' > "${SLOTS}"
+  out="$(cmd_check 2>&1)"
+  has 'reports none when none exist'   "${out}" 'sessions    none allocated'
+)
+
 echo '== proxy addresses compare by value, not by spelling =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s-firewall" > "${SB}/fw.sh"
@@ -264,7 +292,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=49   # update when tests are added; a wrong number is the point
+EXPECTED=53   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

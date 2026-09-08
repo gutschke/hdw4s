@@ -8,7 +8,12 @@ trap 'rc="$?"
       [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
-CONF="${HDW4S_ETCDIR:-/etc/hdw4s}/hdw4s.conf"
+ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
+CONF="${ETCDIR}/hdw4s.conf"
+# The slot table, so that --check can say whether every session that exists is
+# one these rules cover. It lives with the configuration and is written by the
+# CLI; nothing here modifies it.
+SLOTS="${ETCDIR}/instances"
 RULES='/etc/hdw4s/nftables.conf'
 
 HDW4S_BASE_PORT=7300
@@ -294,7 +299,7 @@ print(" ".join(sorted(set(out))))' 2>/dev/null ||
 }
 
 cmd_check() {
-  local rc=0 exposed='' state have_table='no'
+  local rc=0 exposed='' state have_table='no' p
 
   if nft list table inet hdw4s >/dev/null 2>&1; then
     have_table='yes'
@@ -302,6 +307,37 @@ cmd_check() {
   else
     echo "table       MISSING -- run 'hdw4s firewall --apply'"
     rc=1
+  fi
+
+  # Every session that has been allocated a slot, and whether the port it was
+  # given is one these rules actually cover. The comment below is right that a
+  # slot's port is inside the block by construction -- but only while the block
+  # is the one the table was built from. Raise HDW4S_BLOCK_SIZE, allocate a
+  # slot beyond the old range, and forget to re-apply, and the session listens
+  # on a port with nothing in front of it. Reading the table is the only way to
+  # say "every session is filtered" and mean it.
+  local sfirst slast n_sessions=0 n_outside=0 idx inst
+  sfirst="${HDW4S_BASE_PORT}"
+  slast=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE - 1 ))
+  if [ -r "${SLOTS}" ]; then
+    while read -r idx inst; do
+      case "${idx}" in ''|\#*) continue;; esac
+      case "${idx}" in *[!0-9]*) continue;; esac
+      n_sessions=$(( n_sessions + 1 ))
+      p=$(( HDW4S_BASE_PORT + idx ))
+      if [ "${p}" -lt "${sfirst}" ] || [ "${p}" -gt "${slast}" ]; then
+        echo "sessions    ${inst} was allocated port ${p}, outside ${sfirst}-${slast}"
+        n_outside=$(( n_outside + 1 ))
+      fi
+    done < "${SLOTS}"
+  fi
+  if [ "${n_outside}" -gt 0 ]; then
+    echo "            ${n_outside} of ${n_sessions} not covered -- run 'hdw4s firewall --apply'"
+    rc=1
+  elif [ "${n_sessions}" -gt 0 ]; then
+    echo "sessions    ${n_sessions}, all within ${sfirst}-${slast}"
+  else
+    echo 'sessions    none allocated'
   fi
 
   # What matters is not which port a session was allocated -- the socket unit
