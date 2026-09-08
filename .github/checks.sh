@@ -130,7 +130,7 @@ if command -v ronn >/dev/null; then
   fi
   rm -f "${regen}"
 else
-  skip 'hdw4s.8 matches its source' 'ronn is not installed (ruby-ronn)'
+  skip 'hdw4s.8 matches its source' 'ronn is not installed (apt package: ronn)'
 fi
 
 # The updater injects JavaScript into the streaming client's page. It is code

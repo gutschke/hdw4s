@@ -277,15 +277,26 @@ has_auth() {
 }
 
 cmd_list() {
-  local idx inst port state prof auth trans unprotected=0
+  local idx inst port state prof auth trans unprotected=0 orphaned=0
   printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
     INSTANCE USER PORT AUTH PROFILE TRANSPORT STATE DISPLAY
   [ -r "${SLOTS}" ] || return 0
   # Slots are reused as they are released, so the file is not in index order.
   while read -r idx inst; do
     case "${idx}" in ''|\#*) continue;; esac
-    split_instance "${inst}" || continue
     port="$(port_of "${idx}")"
+    # A slot whose account has been deleted, or which names a system account,
+    # used to be skipped in silence -- so it vanished from the table and from
+    # the AUTH=NO count while still holding its port, which the firewall still
+    # opens. This is the command an administrator uses to find out what is
+    # reachable, so it has to account for every slot, including the ones it
+    # cannot say much about.
+    if ! split_instance "${inst}" 2>/dev/null; then
+      printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
+        "${inst}" '(none)' "${port}" '-' '-' '-' 'orphaned' '-'
+      orphaned=$(( orphaned + 1 ))
+      continue
+    fi
     state="$(systemctl show -p ActiveState --value "hdw4s@${inst}.service" \
              2>/dev/null || echo unknown)"
     [ "$(setting_of "${inst}" HDW4S_ISOLATION none)" = 'profile' ] &&
@@ -303,6 +314,14 @@ cmd_list() {
       "${inst}" "${user}" "${port}" "${auth}" "${prof}" "${trans}" "${state}" \
       "$(cat "/run/hdw4s/${inst}/display" 2>/dev/null || echo '-')"
   done < <(sort -n "${SLOTS}")
+
+  [ "${orphaned}" -eq 0 ] || {
+    echo
+    echo "${orphaned} slot(s) marked orphaned name an account that no longer"
+    echo '  exists, or a system account. Nothing can start them, but the slot'
+    echo '  is still allocated and the firewall still opens its port.'
+    echo "  Free them with 'hdw4s release <instance>'."
+  }
 
   [ "${unprotected}" -eq 0 ] || {
     echo

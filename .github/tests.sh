@@ -222,6 +222,22 @@ echo '== a machine-wide setting is refused per session =='
   has 'and says which command does write it' "${out}" 'hdw4s transport'
 )
 
+echo '== list accounts for every slot, including the ones it cannot resolve =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  me="$(id -un)"
+  # A slot whose account has been deleted was skipped in silence: gone from the
+  # table and from the AUTH=NO count, while still holding its port and while
+  # the firewall still opened it. "list" is what an administrator reads to find
+  # out what is reachable.
+  printf '0 %s\n1 nosuchuser-hdw4s\n' "${me}" > "${SLOTS}"
+  out="$(cmd_list 2>/dev/null)"
+  has 'the resolvable slot is listed'   "${out}" "${me}"
+  has 'the orphaned slot is listed too' "${out}" 'nosuchuser-hdw4s'
+  has 'and is marked as such'           "${out}" 'orphaned'
+  has 'with its port still named'       "${out}" '7301'
+  has 'and says what to do about it'    "${out}" 'hdw4s release'
+)
+
 echo '== show can say which file a value came from =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   # "show" is documented as reporting where each setting came from, and could
@@ -453,7 +469,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=81   # update when tests are added; a wrong number is the point
+EXPECTED=86   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
