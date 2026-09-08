@@ -146,9 +146,20 @@ cleanup() {
   esac
   echo -n 'Removing the test root...'
   rm -rf "${ROOT}"
+  # The marker and the bootstrap log live in BASE, so removing only the root
+  # left BASE behind on every run: the rmdir below failed silently because the
+  # directory was not empty. The last twenty lines of the log have already
+  # been printed if the bootstrap failed, and --keep preserves everything.
+  rm -f "${BASE}/${MARKER}" "${BASE}/bootstrap.log"
   [ -z "${TMPFS}" ] || umount -l "${BASE}" 2>/dev/null
   rmdir "${BASE}" 2>/dev/null || :
-  echo ' done.'
+  if [ -e "${BASE}" ]; then
+    echo
+    echo "hdw4s: ${BASE} could not be removed; it still holds:" >&2
+    find "${BASE}" -mindepth 1 -maxdepth 1 -printf '  %f\n' 2>/dev/null >&2
+  else
+    echo ' done.'
+  fi
 }
 trap cleanup INT TERM QUIT HUP EXIT
 
@@ -305,6 +316,8 @@ run hdw4s --version >/dev/null 2>&1 || { echo 'hdw4s --version failed' >&2; rc=1
 if [ "${rc}" -eq 0 ]; then
   echo
   echo 'PASS: a clean system installs this package and can load a session.'
+  echo 'Nothing is left behind except downloaded .debs in the host archive'
+  echo "cache, which are shared deliberately; 'apt clean' reclaims them."
 else
   echo
   echo 'FAIL: see the output above.' >&2
