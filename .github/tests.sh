@@ -10,7 +10,9 @@
 #   SC2015  "cond && ok ... || bad ..." is the assertion idiom here. The
 #           warning is about C running when A is true, which needs B to fail;
 #           ok() is an echo and a printf and does not.
-# shellcheck disable=SC2034,SC2154,SC2030,SC2031,SC2015
+#   SC1091  setup.sh is written by sandbox() at run time, so there is nothing
+#           on disk for the linter to follow.
+# shellcheck disable=SC2034,SC2154,SC2030,SC2031,SC2015,SC1091
 export LC_ALL='C'
 set -o nounset -o pipefail
 
@@ -45,8 +47,12 @@ sandbox() {
   SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s" > "${SB}/lib.sh"
   mkdir -p "${SB}/etc" "${SB}/dropin" "${SB}/profiles"
-}
-load() {
+  # Written here, sourced at a group's top level, never from a function:
+  # "declare -A" inside a function is local to it, so sourcing hdw4s from a
+  # helper made SETTABLE and GLOBAL_ONLY disappear the moment the helper
+  # returned -- and every test that depends on them then passed or failed for
+  # reasons unrelated to what it names.
+  cat > "${SB}/setup.sh" <<'SETUP'
   # shellcheck source=/dev/null
   . "${SB}/lib.sh"
   # The sourced script installs its own EXIT/ERR trap. An ERR trap fires even
@@ -61,10 +67,11 @@ load() {
   DROPIN="${SB}/dropin"; HDW4S_PROFILE_DIR="${SB}/profiles"
   ETCDIR="${SB}/etc"
   : > "${CONF}"
+SETUP
 }
 
 echo '== instance names =='
-( set +e; sandbox; load
+( set +e; sandbox; . "${SB}/setup.sh"
   # Not "split_name … && is …": if the call fails the assertion never runs and
   # nothing is recorded, so making split_name reject every name looked like a
   # pass.
@@ -79,7 +86,7 @@ echo '== instance names =='
 )
 
 echo '== port arithmetic =='
-( set +e; sandbox; load
+( set +e; sandbox; . "${SB}/setup.sh"
   # The relay binds the first block; the streaming server listens on the second.
   # Deriving one where the other was meant made the reaper stop busy sessions.
   is 'external port'  "$(port_of 0)"          '7300'
@@ -88,7 +95,7 @@ echo '== port arithmetic =='
 )
 
 echo '== settings lookup =='
-( set +e; sandbox; load
+( set +e; sandbox; . "${SB}/setup.sh"
   printf 'HDW4S_TRANSPORT=unix\n' > "${CONF}"
   is 'global is read'            "$(setting_of alice HDW4S_TRANSPORT tcp)" 'unix'
   printf 'HDW4S_TRANSPORT=tcp\n' > "${SB}/etc/alice.conf"
@@ -102,7 +109,7 @@ echo '== settings lookup =='
 )
 
 echo '== slot allocation =='
-( set +e; sandbox; load
+( set +e; sandbox; . "${SB}/setup.sh"
   a="$(alloc_slot alice)"; b="$(alloc_slot bob)"
   is 'first slot'  "${a}" '0'
   is 'second slot' "${b}" '1'
@@ -111,7 +118,7 @@ echo '== slot allocation =='
 )
 
 echo '== slot allocation is atomic =='
-( set +e; sandbox; load
+( set +e; sandbox; . "${SB}/setup.sh"
   # Scanning for a free slot and claiming it must be one operation: two runs
   # at once used to read the same table and append the same index.
   for i in 1 2 3 4 5 6 7 8; do ( alloc_slot "u${i}" >> "${SB}/out" ) & done
@@ -149,13 +156,32 @@ echo '== configuration is validated before it is trusted =='
 )
 
 echo '== unset takes a name, not a pattern =='
-( set +e; sandbox; load
+( set +e; sandbox; . "${SB}/setup.sh"
   printf 'HDW4S_A=1\nHDW4S_B=2\nHDW4S_C=3\n' > "${CONF}"
   # "hdw4s unset '.*'" once commented out every line and reported success.
   ( cmd_unset '.*' ) >/dev/null 2>&1 && bad 'pattern rejected' || ok 'pattern rejected'
   is 'file untouched by a rejected key' "$(grep -c '^HDW4S_' "${CONF}")" '3'
   ( cmd_unset 'HDW4S_B' ) >/dev/null 2>&1 || :
   is 'a real key is commented out' "$(grep -c '^HDW4S_' "${CONF}")" '2'
+)
+
+echo '== a machine-wide setting is refused per session =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  me="$(id -un)"
+  # A session sources both files, so most settings work per instance for free.
+  # These are read by the CLI, the firewall or the updater, none of which has an
+  # instance in hand -- writing one into an instance file parses, passes every
+  # check, and does nothing.
+  ( cmd_set "${me}" 'HDW4S_PROXIES=10.0.0.1' ) >/dev/null 2>&1 \
+    && bad 'machine-wide setting refused on an instance' \
+    || ok  'machine-wide setting refused on an instance'
+  is 'and nothing was written' "$([ -e "${ETCDIR}/${me}.conf" ] && echo yes || echo no)" 'no'
+  ( cmd_set 'HDW4S_PROXIES=10.0.0.1' ) >/dev/null 2>&1 \
+    && ok  'the same setting is accepted globally' \
+    || bad 'the same setting is accepted globally'
+  ( cmd_set "${me}" 'HDW4S_ISOLATION=profile' ) >/dev/null 2>&1 \
+    && ok  'a per-session setting is still accepted' \
+    || bad 'a per-session setting is still accepted'
 )
 
 echo '== firewall ruleset shape =='
@@ -238,7 +264,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=45   # update when tests are added; a wrong number is the point
+EXPECTED=49   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

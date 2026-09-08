@@ -123,6 +123,8 @@ Two files are read in order, the second overriding the first:
 .IP "" 0
 .P
 \fBhdw4s show\fR \fIinstance\fR prints the settings that apply to one session\.
+.P
+Most settings work per session for free, because a session reads the shared file and then its own\. Six do not, and \fBhdw4s set\fR refuses to write them to a session's file rather than accepting something that would have no effect: \fBHDW4S_PROXIES\fR, \fBHDW4S_BASE_PORT\fR, \fBHDW4S_BLOCK_SIZE\fR and \fBHDW4S_MEDIA_PORTS\fR are read when the firewall is applied, which happens once for the machine; \fBHDW4S_ALLOW_SYSTEM_USER\fR is read before a session exists; and \fBSELKIES_VERSION\fR belongs to the copy of the streaming server, of which there is one\.
 .IP "\[ci]" 4
 \fBHDW4S_PROXIES\fR: Addresses allowed to reach a session, separated by spaces; IPv4 and IPv6 addresses and prefixes are both accepted\. Empty means this machine only\.
 .IP "\[ci]" 4

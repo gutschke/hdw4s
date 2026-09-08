@@ -459,6 +459,16 @@ EOF
 # Settings that may be set from the command line, and how to check a value.
 # Anything absent from here is rejected rather than written, because a typo
 # that silently does nothing is worse than an error.
+# Settings that only ever take effect machine-wide. A session sources both the
+# global file and its own, so most settings work per instance for free -- but
+# these are read by the CLI, by the firewall, or by the updater, none of which
+# has an instance in hand. Writing one into an instance's file parses, passes
+# every check and does nothing at all, which is the quietest kind of wrong.
+declare -A GLOBAL_ONLY=(
+  [HDW4S_PROXIES]=1 [HDW4S_BASE_PORT]=1 [HDW4S_BLOCK_SIZE]=1
+  [HDW4S_MEDIA_PORTS]=1 [HDW4S_ALLOW_SYSTEM_USER]=1 [SELKIES_VERSION]=1
+)
+
 declare -A SETTABLE=(
   [HDW4S_PROXIES]='any'
   [HDW4S_ISOLATION]='none|profile'
@@ -583,6 +593,11 @@ cmd_set() {
       die "hdw4s: ${key} cannot be set from the command line." \
           "  Settable: ${!SETTABLE[*]}" \
           "  Anything else can still be edited in ${file}."
+    [ -z "${inst}" ] || [ -z "${GLOBAL_ONLY[${key}]+set}" ] ||
+      die "hdw4s: ${key} only takes effect machine-wide." \
+          "  Nothing reads it per session, so writing it into ${file}" \
+          '  would parse, pass every check, and do nothing. Set it without' \
+          "  an instance name: hdw4s set ${key}=${value}"
     check_value "${key}" "${value}"
     config_write "${file}" "${key}" "$(quote_value "${value}")"
     echo "${file}: ${key}=${value}"
@@ -1128,7 +1143,9 @@ cmd_release() {
     mv "${tmp}" "${SLOTS}"
   fi
   systemctl daemon-reload
-  echo "Session ${inst} released. Left in place: its profile under"
+  echo "Session ${inst} released. Its credentials were removed with it, so a"
+  echo 'keyring in the profile below can no longer be unlocked. Left in place:'
+  echo "its profile under"
   echo "${HDW4S_PROFILE_DIR}/${inst}, and its settings in"
   echo "${ETCDIR}/${inst}.conf -- so that re-enabling it restores them. The"
   echo "slot, and with it the port, is not reserved and may go to someone else;"

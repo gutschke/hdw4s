@@ -167,6 +167,14 @@ Two files are read in order, the second overriding the first:
 
 `hdw4s show` <instance> prints the settings that apply to one session.
 
+Most settings work per session for free, because a session reads the shared file
+and then its own. Six do not, and `hdw4s set` refuses to write them to a
+session's file rather than accepting something that would have no effect:
+`HDW4S_PROXIES`, `HDW4S_BASE_PORT`, `HDW4S_BLOCK_SIZE` and `HDW4S_MEDIA_PORTS`
+are read when the firewall is applied, which happens once for the machine;
+`HDW4S_ALLOW_SYSTEM_USER` is read before a session exists; and `SELKIES_VERSION`
+belongs to the copy of the streaming server, of which there is one.
+
   * `HDW4S_PROXIES`:
     Addresses allowed to reach a session, separated by spaces; IPv4 and IPv6
     addresses and prefixes are both accepted. Empty means this machine only.
