@@ -220,6 +220,44 @@ echo '== a machine-wide setting is refused per session =='
   done
   out="$( ( cmd_set "${me}" 'HDW4S_TRANSPORT=unix' ) 2>&1 )"
   has 'and says which command does write it' "${out}" 'hdw4s transport'
+
+  # Machine-wide is a different thing and has to keep working: hdw4s.conf and
+  # the manual both document setting HDW4S_AUTH=basic there so that every
+  # session created afterwards gets a credential. Refusing that left the
+  # documented flow with no command behind it.
+  ( cmd_set 'HDW4S_AUTH=basic' ) >/dev/null 2>&1 \
+    && ok  'the same setting is accepted machine-wide' \
+    || bad 'the same setting is accepted machine-wide'
+  out="$( ( cmd_set 'HDW4S_AUTH=basic' ) 2>&1 )"
+  has 'and warns about sessions that have no credential yet' \
+      "${out}" 'hdw4s auth'
+
+  # "set" was guarded and "unset" was not, so authentication could be turned
+  # off in one word while the credential file stayed and "show" went on
+  # reporting it.
+  printf 'HDW4S_AUTH=basic\n' > "${SB}/etc/${me}.conf"
+  ( cmd_unset "${me}" 'HDW4S_AUTH' ) >/dev/null 2>&1 \
+    && bad 'unset is guarded the same way as set' \
+    || ok  'unset is guarded the same way as set'
+  has 'and the setting survived the refusal' \
+      "$(cat "${SB}/etc/${me}.conf")" 'HDW4S_AUTH=basic'
+)
+
+echo '== the clean-install test will not delete outside its own directory =='
+( set +e
+  # ROOT is "${BASE}/${SUITE}" and that script runs "rm -rf" on it as root, so
+  # a suite name that walks upwards deletes something else entirely. Argument
+  # parsing happens before the root check, so this is safe to run here.
+  for bad_suite in '../../tmp/x' '/etc' 'noble/../..' '-rf' ''; do
+    if "${ROOT}/.github/clean-install-test.sh" --suite "${bad_suite}" >/dev/null 2>&1; then
+      bad "rejects --suite '${bad_suite}'"
+    else
+      ok  "rejects --suite '${bad_suite}'"
+    fi
+  done
+  "${ROOT}/.github/clean-install-test.sh" --suite noble --help >/dev/null 2>&1 \
+    && ok 'and still accepts a real suite name' \
+    || bad 'and still accepts a real suite name'
 )
 
 echo '== list accounts for every slot, including the ones it cannot resolve =='
@@ -469,7 +507,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=86   # update when tests are added; a wrong number is the point
+EXPECTED=96   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

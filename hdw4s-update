@@ -457,8 +457,18 @@ Gst.init(None)
 
 # webrtcbin comes from plugins-bad and the ICE agent from gstreamer1.0-nice.
 # A missing plugin is invisible until the element is actually made.
-for el in ("webrtcbin", "nicesrc"):
+# The elements the default pipeline builds, not just the two that were missing
+# once. rtpgccbwe is deliberately absent: it lives in gst-plugins-rs and is
+# only reached with an AV1 encoder or congestion control enabled.
+for el in ("webrtcbin", "nicesrc", "ximagesrc", "videoconvert", "capsfilter",
+           "queue", "x264enc", "rtph264pay", "opusenc", "rtpopuspay", "pulsesrc"):
     assert Gst.ElementFactory.make(el, None) is not None, "missing element: " + el
+
+# Shelled out to at runtime, so nothing above would notice them missing: the
+# clipboard runs xsel on every copy and paste, and resizing drives xrandr.
+import shutil
+for prog in ("xsel", "xrandr"):
+    assert shutil.which(prog) is not None, "missing program: " + prog
 
 # Gst.Fraction lives in PyGObject's Gst overrides, which are a separate
 # package from the typelib. Without them everything above still passes --

@@ -215,13 +215,16 @@ begin
 while IFS=: read -r key def; do
   [ -n "${key}" ] || continue
   found=''
+  # Every file, not the first one that matches. HDW4S_ADDR, HDW4S_FRAMERATE and
+  # HDW4S_ENCODER are defaulted in both session scripts, and stopping at the
+  # first meant the two could disagree with each other -- the harder kind of
+  # drift to see by eye -- while this reported everything as fine.
   for f in hdw4s-run-session hdw4s-session hdw4s; do
     got="$(sed -n "s/^ *: \"\${${key}:=\(.*\)}\"\$/\1/p" "${f}" | head -n1)"
     [ -n "${got}" ] || continue
     found='yes'
     [ "${got}" = "${def}" ] ||
       bad 'hdw4s show' "${key} defaults to ${def} here and ${got} in ${f}"
-    break
   done
   # HDW4S_IDLE_DAYS is not defaulted with the ":=" form; the reaper passes it
   # to setting_of instead.
@@ -244,8 +247,15 @@ if command -v apt-cache >/dev/null; then
   missing=''
   while read -r dep; do
     [ -n "${dep}" ] || continue
-    cand="$(apt-cache policy "${dep}" 2>/dev/null | sed -n 's/  Candidate: //p')"
-    [ -n "${cand}" ] && [ "${cand}" != '(none)' ] || missing="${missing} ${dep}"
+    # Split alternatives: apt-cache treats "mawk|gawk" as a regular expression
+    # and happily returns a candidate for it, so every "a | b" dependency used
+    # to pass without either name being looked up at all.
+    ok_dep=''
+    for alt in $(printf '%s' "${dep}" | tr '|' ' '); do
+      cand="$(apt-cache policy "${alt}" 2>/dev/null | sed -n 's/  Candidate: //p')"
+      [ -n "${cand}" ] && [ "${cand}" != '(none)' ] && { ok_dep='yes'; break; }
+    done
+    [ -n "${ok_dep}" ] || missing="${missing} ${dep}"
   done < <(awk '/^Depends:/ { d = 1; sub(/^Depends:/, "") }
                 /^[A-Z][A-Za-z-]*:/ && !/^Depends:/ { d = 0 }
                 d { print }' debian/control |

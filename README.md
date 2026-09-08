@@ -84,16 +84,18 @@ Either install the package:
 sudo apt install ./hdw4s_1.0_all.deb
 ```
 
-Two of the dependencies -- `gir1.2-gst-plugins-bad-1.0` and `gstreamer1.0-nice`
--- live in Ubuntu's **universe** component, so it has to be enabled:
+Several dependencies -- among them `gstreamer1.0-nice`, `python3-gst-1.0`,
+`python3-xlib`, `python3-evdev`, `xsel` and `gstreamer1.0-plugins-ugly` --
+live in Ubuntu's **universe** component, so it has to be enabled:
 
 ```bash
 sudo add-apt-repository universe
 ```
 
-Both are reached by the streaming server through GObject introspection and
-GStreamer plugin loading rather than by name, so without them a session starts,
-reports success at every layer, and never produces a desktop.
+Most of these are reached by the streaming server through GObject
+introspection, GStreamer plugin loading, or a command it runs, rather than by
+any name that appears in this package -- so without them a session starts,
+reports success at every layer, and never produces a working desktop.
 
 or install from a checkout:
 
@@ -126,8 +128,12 @@ sudo hdw4s list
 
 ```
 INSTANCE           USER       PORT   AUTH  PROFILE  TRANSPORT  STATE     DISPLAY
-alice              alice      7300   yes   yes      tcp        active    3
+alice              alice      7300   yes   no       tcp        inactive  -
 ```
+
+`inactive` is the normal state: nothing runs until the first connection, and
+the display is assigned when it does. `PROFILE` is `no` until isolation is
+turned on, below.
 
 Point the proxy at that port. To share a home directory with another desktop,
 turn isolation on for that session:

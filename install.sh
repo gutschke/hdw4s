@@ -95,6 +95,12 @@ python3 -c 'import gi; gi.require_version("Gst","1.0")
 from gi.repository import Gst; Gst.init(None); Gst.Fraction(30,1)' >&/dev/null ||
   missing="${missing} python3-gst-1.0"
 
+# Two binaries the streaming server shells out to at runtime. No import test
+# can see these, which is why they were missed: the clipboard reaches for xsel
+# on every copy and paste, and resizing -- on by default -- drives xrandr.
+command -v xsel    >/dev/null || missing="${missing} xsel"
+command -v xrandr  >/dev/null || missing="${missing} x11-xserver-utils"
+
 [ -z "${missing}" ] || {
   echo 'Error: required packages are missing. Install them with:'
   echo

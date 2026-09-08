@@ -65,7 +65,15 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --keep)  KEEP='yes';;
     --tmpfs) TMPFS='yes';;
-    --suite) shift; SUITE="${1:?--suite needs a value}";;
+    --suite) shift
+             SUITE="${1:?--suite needs a value}"
+             # ROOT is "${BASE}/${SUITE}" and this script runs rm -rf on it as
+             # root, so a suite of "../../etc" would delete something else
+             # entirely. A release codename is a lowercase word.
+             case "${SUITE}" in
+               ''|*[!a-z0-9-]*|-*)
+                 echo "hdw4s: '${SUITE}' is not a suite name." >&2; exit 2;;
+             esac;;
     --inspect) shift; INSPECT+=("${1:?--inspect needs a command}");;
     --inspect-script) shift; INSPECT_SCRIPT="${1:?--inspect-script needs a path}";;
     --shell) SHELL_IN='yes'; KEEP='yes';;
@@ -400,7 +408,7 @@ fi
 # 4. The dependencies that are reached through introspection and plugin
 #    loading, which no amount of reading the scripts can reveal.
 for pkg in gir1.2-gst-plugins-bad-1.0 gstreamer1.0-nice python3-gst-1.0 \
-           python3-xlib python3-evdev python3-setuptools; do
+           python3-xlib python3-evdev python3-setuptools xsel x11-xserver-utils; do
   if grep -qx "Package: ${pkg}" "${ROOT}/var/lib/dpkg/status" 2>/dev/null &&
      grep -A3 -x "Package: ${pkg}" "${ROOT}/var/lib/dpkg/status" 2>/dev/null |
        grep -q '^Status: install ok installed'; then
@@ -458,9 +466,19 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 Gst.init(None)
 for el in ("webrtcbin","nicesrc","nicesink","x264enc","vp8enc","opusenc",
-           "ximagesrc","videoconvert","audioconvert"):
+           "ximagesrc","videoconvert","audioconvert","capsfilter","queue",
+           "rtph264pay","rtpopuspay","pulsesrc"):
     print("    %-16s %s" % (el, "ok" if Gst.ElementFactory.make(el, None) else "MISSING"))
 ' 2>/dev/null || echo '    (could not be listed)'
+
+echo '  programs the server shells out to:'
+for prog in xsel xrandr; do
+  if run sh -c "command -v ${prog} >/dev/null"; then
+    printf '    %-16s ok\n' "${prog}"
+  else
+    printf '    %-16s MISSING\n' "${prog}"
+  fi
+done
 
 echo '  typelibs Selkies reaches by introspection:'
 find "${ROOT}"/usr/lib -name 'Gst*.typelib' -printf '%f\n' 2>/dev/null |

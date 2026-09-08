@@ -719,11 +719,19 @@ cmd_set() {
       die "hdw4s: ${key} cannot be set from the command line." \
           "  Settable: ${!SETTABLE[*]}" \
           "  Anything else can still be edited in ${file}."
-    [ -z "${OWNED_BY[${key}]+set}" ] ||
-      die "hdw4s: ${key} is not set this way." \
+    # Only for a named session. Machine-wide these are read when a session is
+    # created -- "hdw4s enable" asks setting_of for both, and generates the
+    # credential when the answer is basic -- so the site-wide default that
+    # hdw4s.conf and the manual both describe has to keep working. It is the
+    # per-session write that would be recorded and then ignored, because the
+    # drop-in and the credential are what actually take effect.
+    [ -z "${inst}" ] || [ -z "${OWNED_BY[${key}]+set}" ] ||
+      die "hdw4s: ${key} is not set this way for one session." \
           "  It takes effect through a drop-in that only 'hdw4s ${OWNED_BY[${key}]}'" \
           '  writes, so setting it here would be recorded and ignored. Run:' \
-          "    hdw4s ${OWNED_BY[${key}]} ${inst:-<session>}${value:+ ${value}}"
+          "    hdw4s ${OWNED_BY[${key}]} ${inst}${value:+ ${value}}" \
+          "  Setting it without a session name applies to sessions created" \
+          '  afterwards, which is what the sample configuration describes.'
     [ -z "${inst}" ] || [ -z "${GLOBAL_ONLY[${key}]+set}" ] ||
       die "hdw4s: ${key} only takes effect machine-wide." \
           "  Nothing reads it per session, so writing it into ${file}" \
@@ -732,6 +740,15 @@ cmd_set() {
     check_value "${key}" "${value}"
     config_write "${file}" "${key}" "$(quote_value "${value}")"
     echo "${file}: ${key}=${value}"
+    # Sessions that already exist have no credential, and a session configured
+    # to require one that does not have one refuses to start. Say so here
+    # rather than let it be discovered the next time one of them is used.
+    if [ -z "${inst}" ] && [ "${key}" = 'HDW4S_AUTH' ] && [ "${value}" = 'basic' ]; then
+      echo "  Sessions created from now on get a credential from 'hdw4s enable'."
+      echo "  Existing ones do not have one yet, and will refuse to start until"
+      echo "  they do. 'hdw4s list' marks them AUTH=NO; give each one:"
+      echo '    hdw4s auth <session>'
+    fi
   done
   set_hint "${inst}" "$@"
 }
@@ -753,6 +770,16 @@ cmd_unset() {
     ''|*[!A-Za-z0-9_]*)
       die "hdw4s: '${key}' is not a setting name." ;;
   esac
+
+  # The same guard "set" carries. Without it the refusal there was half a
+  # guard: "hdw4s set alice HDW4S_AUTH=none" was refused and pointed at the
+  # right command, while "hdw4s unset alice HDW4S_AUTH" commented the setting
+  # out and turned authentication off in one word, leaving the credential file
+  # in place and "show" reporting a session that authenticates nobody.
+  [ -z "${inst}" ] || [ -z "${OWNED_BY[${key}]+set}" ] ||
+    die "hdw4s: ${key} is not unset this way for one session." \
+        "  Use 'hdw4s ${OWNED_BY[${key}]}' so that the drop-in it writes is" \
+        '  brought back into agreement with the setting.'
 
   tmp="$(mktemp "${file}.XXXXXX")"
   chmod 0644 "${tmp}"
@@ -1081,6 +1108,10 @@ EOF
         # Presented by the proxy, never by the user, so there is still no
         # login screen. This is what an attacker who reaches the session port
         # directly -- by spoofing the proxy's address, say -- does not have.
+        # This line carries the session's credential. Whatever file you paste
+        # it into is readable by every account on that machine at the usual
+        # 0644, which is the audience the credential exists to keep out --
+        # so give the file 0640 root:www-data, or whatever group nginx runs as.
         proxy_set_header Authorization "Basic $(printf '%s:%s' "${user}" "${pw}" | base64 -w0)";
 EOF
   else
