@@ -14,7 +14,12 @@ CONF="${ETCDIR}/hdw4s.conf"
 # one these rules cover. It lives with the configuration and is written by the
 # CLI; nothing here modifies it.
 SLOTS="${ETCDIR}/instances"
-RULES='/etc/hdw4s/nftables.conf'
+# Relocates with ETCDIR like everything else here, so that a sandboxed run
+# writes its ruleset beside its own configuration instead of over the real one.
+RULES="${ETCDIR}/nftables.conf"
+# In /run, not beside the configuration: a lock file is state, not settings,
+# and a machine running etckeeper commits every appearance of one in /etc.
+LOCK='/run/hdw4s-firewall.lock'
 
 HDW4S_BASE_PORT=7300
 HDW4S_BLOCK_SIZE=64
@@ -228,6 +233,36 @@ ${media_chain}
 EOF
 }
 
+# The session-port range the loaded table really covers, as "low high", or
+# nothing if the table is absent or its shape is not the one generate() writes.
+# Recomputing this from the configuration would compare the configuration
+# against itself; the whole point of the check is to catch a table that no
+# longer matches the configuration it was built from.
+live_range() {
+  nft -j list chain inet hdw4s input 2>/dev/null |
+  "${PYTHON:-python3}" -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for o in d.get("nftables",[]):
+    r=o.get("rule")
+    if not r: continue
+    for e in r.get("expr",[]):
+        m=e.get("match")
+        if not m: continue
+        l=m.get("left",{})
+        if not isinstance(l,dict): continue
+        pl=l.get("payload",{})
+        if pl.get("protocol")!="tcp" or pl.get("field")!="dport": continue
+        rt=m.get("right")
+        if isinstance(rt,dict) and "range" in rt:
+            a,b=rt["range"][:2]
+            print("%d %d"%(int(a),int(b))); sys.exit(0)
+        if isinstance(rt,int):
+            print("%d %d"%(rt,rt)); sys.exit(0)
+' 2>/dev/null
+}
+
 cmd_apply() {
   # Here rather than in generate(), which "--print" also calls: printing a
   # ruleset is documented as showing what would be loaded without loading it,
@@ -250,11 +285,25 @@ cmd_apply() {
     > /etc/sysctl.d/60-hdw4s.conf
   sysctl -q -p /etc/sysctl.d/60-hdw4s.conf || :
 
-  generate > "${RULES}.tmp"
-  chmod 0644 "${RULES}.tmp"
-  mv "${RULES}.tmp" "${RULES}"
   # nft applies a whole file as one transaction, so the table is never
-  # half-replaced and a syntax error changes nothing.
+  # half-replaced and a syntax error changes nothing. That is true of the
+  # kernel and false of the file, which is why the check comes before the move
+  # rather than after it: HDW4S_PROXIES accepts a hostname, nft does not
+  # resolve one, and committing that ruleset leaves a file that fails to load
+  # at every boot -- with hdw4s@.service requiring this unit, that is every
+  # desktop on the machine, from one accepted setting.
+  local tmp
+  tmp="$(mktemp "${RULES}.XXXXXX")"
+  generate > "${tmp}" || { rm -f "${tmp}"; return 1; }
+  nft -c -f "${tmp}" || {
+    rm -f "${tmp}"
+    echo 'hdw4s: the generated ruleset was rejected; the firewall is' >&2
+    echo '       unchanged. Check HDW4S_PROXIES in '"${CONF}"'; nft needs' >&2
+    echo '       addresses, and does not resolve host names.' >&2
+    return 1
+  }
+  chmod 0644 "${tmp}"
+  mv "${tmp}" "${RULES}"
   nft -f "${RULES}"
   if [ -z "${HDW4S_PROXIES}" ]; then
     echo "Sessions on ports ${first}-${last} accept loopback connections only."
@@ -317,9 +366,16 @@ cmd_check() {
   # on a port with nothing in front of it. Reading the table is the only way to
   # say "every session is filtered" and mean it.
   local sfirst slast n_sessions=0 n_outside=0 idx inst
-  sfirst="${HDW4S_BASE_PORT}"
-  slast=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE - 1 ))
-  if [ -r "${SLOTS}" ]; then
+  sfirst=''; slast=''
+  read -r sfirst slast <<<"$(live_range)" || :
+  if [ -z "${sfirst:-}" ]; then
+    # No table, or one this version does not recognise. Say so rather than
+    # falling back to the configured range, which would answer the question
+    # with the very number the check exists to verify.
+    echo 'sessions    cannot tell -- the loaded table has no recognisable'
+    echo "            session-port rule; run 'hdw4s firewall --apply'"
+    rc=1
+  elif [ -r "${SLOTS}" ]; then
     while read -r idx inst; do
       case "${idx}" in ''|\#*) continue;; esac
       case "${idx}" in *[!0-9]*) continue;; esac
@@ -335,8 +391,8 @@ cmd_check() {
     echo "            ${n_outside} of ${n_sessions} not covered -- run 'hdw4s firewall --apply'"
     rc=1
   elif [ "${n_sessions}" -gt 0 ]; then
-    echo "sessions    ${n_sessions}, all within ${sfirst}-${slast}"
-  else
+    echo "sessions    ${n_sessions}, all within the loaded range ${sfirst}-${slast}"
+  elif [ -n "${sfirst}" ]; then
     echo 'sessions    none allocated'
   fi
 
@@ -415,7 +471,7 @@ try: d=json.load(sys.stdin)
 except Exception: sys.exit(0)
 def walk(o):
     if isinstance(o,dict):
-        if o.get("meta",{}).get("key")=="cgroupv2": return True
+        if o.get("socket",{}).get("key")=="cgroupv2": return True
         for v in o.values():
             if walk(v): return True
     elif isinstance(o,list):
@@ -428,12 +484,21 @@ for o in d.get("nftables",[]):
         for e in r["expr"]:
             m=e.get("match")
             if m and walk(m.get("left")): print(m.get("right","")); sys.exit(0)' 2>/dev/null)"
-      if [ -n "${cg}" ] && [ "${cg}" != 'hdw4s.slice' ]; then
+      # The two forms have opposite blind spots, so which one is loaded is
+      # the answer an administrator actually needs. Naming the form is also
+      # the only way to notice that a machine fell back to the port range
+      # without anyone reading the boot log the day it happened.
+      if [ -z "${cg}" ]; then
+        echo "media       ${n} candidate socket(s), covered by port range"
+        echo '            (fallback form: also drops new inbound UDP in the'
+        echo '            ephemeral range for everything else on this machine)'
+      elif [ "${cg}" != 'hdw4s.slice' ]; then
         echo "media       STALE -- the rule no longer names hdw4s.slice (${cg});"
         echo "            it matches nothing. Run 'hdw4s firewall --apply'."
         rc=1
       else
-        echo "media       ${n} candidate socket(s), covered by the media chain"
+        echo "media       ${n} candidate socket(s), covered by cgroup match"
+        echo '            (matches session sockets only, whatever port)'
       fi
     else
       echo "media       ${n} candidate socket(s) NOT covered"
@@ -497,8 +562,16 @@ print(" ".join(out))' 2>/dev/null)"
 }
 
 case "${1:-}" in
-  --apply) cmd_apply;;
-  --restore) cmd_restore;;
+  --apply|--restore)
+    # The 15-minute check timer can call --restore while an administrator is
+    # running --apply. Both write the same ruleset file and both load a table;
+    # letting them interleave means one truncating the file the other is
+    # reading. The lock is held for the whole operation, not just the write.
+    install -d -m0755 "$(dirname "${LOCK}")"
+    exec 9>"${LOCK}"
+    flock 9
+    case "$1" in --apply) cmd_apply;; *) cmd_restore;; esac
+    ;;
   --check)
     # A failing check is a result, not a fault: it means the table is missing
     # or a session is outside it, which is exactly what this is for. Report the

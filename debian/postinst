@@ -39,6 +39,23 @@ if [ "$1" = 'configure' ]; then
     systemctl daemon-reload || :
   fi
 
+  # On an upgrade the firewall unit is already active, and it is Type=oneshot
+  # with RemainAfterExit=yes, so debhelper's "start" below is a no-op --
+  # deliberately, because --no-stop-on-upgrade is what keeps live sessions from
+  # being torn down by a restart. The consequence is that a version shipping a
+  # corrected rule would keep the old table until someone rebooted, and the
+  # 15-minute check timer cannot help because --restore only acts on a table
+  # that is missing entirely. Re-applying is a single delete-and-add in one nft
+  # transaction; it does not touch the unit and does not disturb a session.
+  if [ -n "$2" ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    if nft list table inet hdw4s >/dev/null 2>&1; then
+      /usr/lib/hdw4s/hdw4s-firewall --apply >/dev/null || {
+        echo 'hdw4s: could not re-apply the firewall; the table still holds' >&2
+        echo '       the previous rules. Run "hdw4s firewall --apply".' >&2
+      }
+    fi
+  fi
+
   # Fetching Selkies needs the network, which an installer cannot assume it
   # has, and must not wait on indefinitely if it does not. The timer retries.
   if ! timeout 600 /usr/lib/hdw4s/hdw4s-update; then
