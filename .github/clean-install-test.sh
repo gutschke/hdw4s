@@ -23,6 +23,8 @@ export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 #   --inspect CMD        run CMD inside the finished system (repeatable)
 #   --inspect-script F   copy F in and run it there
 #   --shell              open an interactive shell inside it; implies --keep
+#   --use-existing-deb   skip the rebuild and test whatever .deb is already
+#                        beside the source tree
 #
 # The inspection hooks run after the checks and cannot change their verdict,
 # so they are safe to use on a passing run as well as a failing one.
@@ -54,6 +56,7 @@ KEEP=''
 TMPFS=''
 TMPFS_MOUNTED=''
 SHELL_IN=''
+USE_EXISTING=''
 INSPECT=()
 INSPECT_SCRIPT=''
 MARKER='.hdw4s-clean-install-root'   # written into BASE, not ROOT
@@ -66,6 +69,7 @@ while [ "$#" -gt 0 ]; do
     --inspect) shift; INSPECT+=("${1:?--inspect needs a command}");;
     --inspect-script) shift; INSPECT_SCRIPT="${1:?--inspect-script needs a path}";;
     --shell) SHELL_IN='yes'; KEEP='yes';;
+    --use-existing-deb) USE_EXISTING='yes';;
     -h|--help) sed -n '/^#   sudo /,/^# Downloads/p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
@@ -113,16 +117,26 @@ find_deb() {
   find .. -maxdepth 1 -name 'hdw4s_*_all.deb' -printf '%T@ %p\n' 2>/dev/null |
     sort -rn | head -n1 | cut -d' ' -f2-
 }
-deb="$(find_deb)"
-if [ -z "${deb}" ]; then
-  echo 'No package found; building one.'
+# Built every time, not reused. A test that takes ten minutes and a gigabyte
+# is worthless if it silently reports on a package from an hour ago: this run
+# said "python3-evdev is not installed" about a .deb built before that
+# dependency was added, and passed its own smoke test because it extracted
+# that test from the stale package it had just installed. The build is seconds
+# against a bootstrap of minutes.
+if [ -z "${USE_EXISTING}" ]; then
+  echo -n 'Building the package...'
   .github/checks.sh --package >/dev/null || {
-    echo 'The build failed; run ".github/checks.sh --package" to see why.' >&2
+    echo ' failed.'
+    echo 'Run ".github/checks.sh --package" to see why.' >&2
     exit 1
   }
-  deb="$(find_deb)"
+  echo ' done.'
 fi
-[ -n "${deb}" ] || { echo 'Still no package to test.' >&2; exit 1; }
+deb="$(find_deb)"
+[ -n "${deb}" ] || {
+  echo 'No package to test; build one with ".github/checks.sh --package".' >&2
+  exit 1
+}
 deb="$(readlink -f "${deb}")"
 echo "Testing $(basename "${deb}") on a clean ${SUITE} system."
 
@@ -412,8 +426,8 @@ run hdw4s --version >/dev/null 2>&1 || fail 'hdw4s --version failed'
 echo
 echo '--- installed system -------------------------------------------------'
 printf '  %-24s %s\n' 'hdw4s' \
-  "$(grep -A1 -x 'Package: hdw4s' "${ROOT}/var/lib/dpkg/status" 2>/dev/null |
-     sed -n 's/^Version: //p' | head -1)"
+  "$(awk '/^Package: hdw4s$/{f=1; next} f&&/^Version:/{print $2; exit} /^$/{f=0}' \
+     "${ROOT}/var/lib/dpkg/status" 2>/dev/null)"
 printf '  %-24s %s\n' 'selkies' \
   "$(find "${VENV}" -maxdepth 1 -name 'selkies_gstreamer-*.dist-info' \
      -printf '%f\n' 2>/dev/null | sed 's/^selkies_gstreamer-//;s/\.dist-info$//')"
@@ -439,12 +453,13 @@ for el in ("webrtcbin","nicesrc","nicesink","x264enc","vp8enc","opusenc",
 echo '  typelibs Selkies reaches by introspection:'
 find "${ROOT}"/usr/lib -name 'Gst*.typelib' -printf '%f\n' 2>/dev/null |
   sort | tr '\n' ' ' | fold -s -w 66 | sed 's/^/    /'
+echo
 
 # Only complaints. dpkg is verbose and almost all of it is noise; these are the
 # lines that have ever meant anything here.
 warn="$(grep -iE '^(W|E): |error:|failed|not installed|cannot' \
         "${ROOT}/tmp/install.log" 2>/dev/null |
-        grep -viE 'invoke-rc.d|policy-rc.d|Failed to (connect to|take) |dbus|systemd|dpkg-preconfigure|locale' |
+        grep -viE 'invoke-rc.d|policy-rc.d|Failed to (connect to|take) |dbus|systemd|dpkg-preconfigure|locale|unlockpt|apt-utils|delaying package configuration' |
         sort -u | head -8)"
 if [ -n "${warn}" ]; then
   echo '  complaints during install (filtered):'
