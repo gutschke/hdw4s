@@ -427,6 +427,19 @@ possible but visibly a workaround.
 Snap and Flatpak applications ignore the wrappers and some of the environment
 used to isolate a session, so they may still share state between desktops.
 
+A session runs with `CAP_NET_RAW` in its capability bounding set and nothing
+else, which is what lets `ping(8)` work. Nothing is granted by that: a program
+still needs the capability on its own file, and marking a file needs
+`CAP_SETFCAP`, which the session does not have. Tools that capture packets are
+a different matter and do not work in a session at all, whatever capabilities
+they carry, because `AF_PACKET` is not among the address families the unit
+permits. Run those over `ssh(1)` instead, where none of these restrictions
+apply. An empty bounding set was tried first and is a trap worth naming: the
+distribution ships `ping` with the effective bit set, the kernel refuses to
+execute a binary whose effective capabilities cannot be granted, and the result
+is `Operation not permitted` from `exec` with nothing said about sockets or
+capabilities.
+
 ## SEE ALSO
 
 `systemd.unit`(5), `systemd.exec`(5), `nft`(8), `Xorg`(1), `Xserver`(1),

@@ -21,7 +21,17 @@ RequiresMountsFor=/home
 # writes User= into a drop-in for every instance, and hdw4s-session refuses to
 # run as root, which is what a missing drop-in would otherwise mean.
 
-CapabilityBoundingSet=
+# CAP_NET_RAW, and nothing else. An empty set looks tidier but breaks ping in a
+# way that takes a long time to understand: the distribution ships /usr/bin/ping
+# with cap_net_raw=ep, and the kernel refuses to execve a binary whose effective
+# capabilities cannot be granted, so the session gets "Operation not permitted"
+# from exec with nothing said about sockets. Allowing the capability into the
+# bounding set does not hand it to anything: a process still needs it on its own
+# file to use it, and setting that needs CAP_SETFCAP, which is not here. So this
+# admits the few binaries the distribution already marked, and no others.
+# Packet capture stays impossible regardless, because AF_PACKET is not in
+# RestrictAddressFamilies below.
+CapabilityBoundingSet=CAP_NET_RAW
 DevicePolicy=closed
 Environment=LIBGL_ALWAYS_SOFTWARE=1
 Environment=XDG_RUNTIME_DIR=%t/hdw4s/%i
