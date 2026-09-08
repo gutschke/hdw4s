@@ -65,21 +65,35 @@ cd "$(dirname "$0")/.."
   exit 1
 }
 
-BOOTSTRAP="$(command -v mmdebstrap || command -v debootstrap || :)"
+# debootstrap first, mmdebstrap only as a fallback. mmdebstrap is the nicer
+# tool, but it runs apt against a target that is not yet a system, and on at
+# least one ordinary Ubuntu 24.04 host every fetch then dies with
+#
+#   Could not create a socket for <ip> (f=2 t=1 p=6) - socket (13: Permission denied)
+#
+# on a machine whose own apt works. It is not the obvious suspects: the _apt
+# user can create sockets there, and the kernel logs no AppArmor or seccomp
+# denial. Disabling apt's seccomp, running its sandbox as root, and
+# --mode=unshare all fail the same way. debootstrap fetches with wget from the
+# host and never runs apt against a half-built root, so the question does not
+# arise. If mmdebstrap works for you, it is still used when debootstrap is
+# absent.
+BOOTSTRAP="$(command -v debootstrap || command -v mmdebstrap || :)"
 if [ -z "${BOOTSTRAP}" ]; then
   # Installed here rather than left as an instruction, because this script is
   # already running as root by the time it can tell, and stopping to say
   # "now run one more command" wastes the expensive half of the work. It is
   # the only thing this script installs on the host.
-  echo 'mmdebstrap is not installed; installing it on this host.'
+  echo 'debootstrap is not installed; installing it on this host.'
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    mmdebstrap >/dev/null 2>&1 || {
-    echo 'Could not install mmdebstrap. Install it and re-run:' >&2
-    echo '  apt install mmdebstrap' >&2
+    debootstrap >/dev/null 2>&1 || {
+    echo 'Could not install debootstrap. Install it and re-run:' >&2
+    echo '  apt install debootstrap' >&2
     exit 1
   }
-  BOOTSTRAP="$(command -v mmdebstrap)"
+  BOOTSTRAP="$(command -v debootstrap)"
 fi
+echo "Bootstrapper: ${BOOTSTRAP}"
 
 find_deb() {
   find .. -maxdepth 1 -name 'hdw4s_*_all.deb' -printf '%T@ %p\n' 2>/dev/null |
@@ -141,7 +155,7 @@ trap cleanup INT TERM QUIT HUP EXIT
 mkdir -p "${BASE}"
 # Written before anything else, so that a bootstrap which dies half way still
 # leaves a root this script is willing to clean up. It lives beside the root
-# rather than inside it because mmdebstrap wants an empty target directory.
+# rather than inside it because the bootstrappers want an empty target.
 touch "${BASE}/${MARKER}"
 
 # A stale root from an interrupted run, removed under the same guard.
@@ -190,13 +204,10 @@ bootstrap_with() {
     # universe, because gir1.2-gst-plugins-bad-1.0 and gstreamer1.0-nice are
     # both there and neither is optional.
     #
-    # The resolver is written into the target as a setup hook: apt runs against
-    # the target as its root, so without this it has no resolver at all and
-    # every fetch fails with "Could not resolve" on a host whose own DNS works.
-    #
-    # APT::Sandbox::User root because apt otherwise drops to _apt, which in a
-    # half-built target cannot read what it needs. This is a throwaway chroot
-    # being built by root regardless.
+    # The resolver is written into the target as a setup hook, and apt's
+    # sandbox user is forced to root. Neither was enough on the host described
+    # above; both are kept because they are correct in themselves and cost
+    # nothing.
     "${BOOTSTRAP}" --variant=minbase \
       --components='main,universe' \
       --aptopt='Dir::Cache::archives "/var/cache/apt/archives"' \
