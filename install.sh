@@ -87,6 +87,14 @@ python3 -c 'import Xlib' >&/dev/null || missing="${missing} python3-xlib"
 # session that never touches a GPU cannot start without it.
 python3 -c 'import distutils' >&/dev/null || missing="${missing} python3-setuptools"
 
+# PyGObject's Gst overrides -- Gst.Fraction and friends -- are a separate
+# package from the typelib. Without them the import succeeds, elements can
+# still be made, and the first thing Selkies does with a framerate dies with
+# "Fraction() takes no arguments".
+python3 -c 'import gi; gi.require_version("Gst","1.0")
+from gi.repository import Gst; Gst.init(None); Gst.Fraction(30,1)' >&/dev/null ||
+  missing="${missing} python3-gst-1.0"
+
 [ -z "${missing}" ] || {
   echo 'Error: required packages are missing. Install them with:'
   echo

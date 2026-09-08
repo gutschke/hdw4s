@@ -460,6 +460,14 @@ Gst.init(None)
 for el in ("webrtcbin", "nicesrc"):
     assert Gst.ElementFactory.make(el, None) is not None, "missing element: " + el
 
+# Gst.Fraction lives in PyGObject's Gst overrides, which are a separate
+# package from the typelib. Without them everything above still passes --
+# the import works and the elements are made -- and the first framerate
+# Selkies constructs dies with "Fraction() takes no arguments", buried under
+# a page of advice about setting GSTREAMER_PATH.
+assert Gst.Fraction(30, 1) is not None, \
+    "PyGObject Gst overrides are missing (python3-gst-1.0)"
+
 # The distro python-xlib carries the fix the upstream fork exists for. A copy
 # without it landing in the venv shadows this one and breaks resizing.
 import Xlib

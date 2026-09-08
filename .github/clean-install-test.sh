@@ -399,7 +399,8 @@ fi
 
 # 4. The dependencies that are reached through introspection and plugin
 #    loading, which no amount of reading the scripts can reveal.
-for pkg in gir1.2-gst-plugins-bad-1.0 gstreamer1.0-nice python3-xlib python3-evdev; do
+for pkg in gir1.2-gst-plugins-bad-1.0 gstreamer1.0-nice python3-gst-1.0 \
+           python3-xlib python3-evdev python3-setuptools; do
   if grep -qx "Package: ${pkg}" "${ROOT}/var/lib/dpkg/status" 2>/dev/null &&
      grep -A3 -x "Package: ${pkg}" "${ROOT}/var/lib/dpkg/status" 2>/dev/null |
        grep -q '^Status: install ok installed'; then
