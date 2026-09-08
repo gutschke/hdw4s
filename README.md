@@ -194,6 +194,14 @@ silence.
 Ubuntu 24.04 or a Debian of comparable vintage, GNOME, and no graphics card
 required.
 
+Ubuntu 24.04 is what this is developed and tested on: `.github/clean-install-test.sh`
+installs the built package onto a freshly bootstrapped 24.04 system and checks
+that a session's code loads. Nothing else is tested that thoroughly. A Debian of
+similar vintage is expected to work and may well need a dependency this list
+does not name -- four of them were only discovered by running that test -- so
+treat a first install elsewhere as something to watch rather than something
+that is known to work. The test takes `--suite`, if you want to find out.
+
 Running a second desktop for an account **on the same machine** relies on
 gnome-session falling back to its own service manager, which GNOME 49 removes
 and GNOME 50 replaces with a hard refusal; GNOME 50 also drops the X11 session
