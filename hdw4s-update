@@ -144,11 +144,68 @@ if [ "${current}" != "${wanted}" ]; then
   echo -n '  Installing...'
   # --system-site-packages lets the venv see the apt-installed GStreamer and
   # PyGObject bindings, which are not on PyPI and cannot be installed into a
-  # sealed virtualenv.
+  # sealed virtualenv. It is also what lets python-xlib come from the distro.
   [ -x "${PREFIX}/bin/pip" ] ||
     python3 -m venv --system-site-packages "${PREFIX}"
+
+  # The wheel asks for python-xlib from a GitHub *branch*, not a release:
+  # "python-xlib@ .../selkies-project/python-xlib/archive/master.zip". Whatever
+  # that branch says on the day this runs is what executes here, as root, and
+  # pinning SELKIES_VERSION does not cover it. The fork exists for one
+  # three-line change in Xlib/ext/randr.py -- making the BadRR* classes inherit
+  # XError rather than Exception -- and Debian's python3-xlib already carries
+  # exactly that change. So the dependency comes from the distro and the branch
+  # is never fetched.
+  #
+  # Removed by path rather than with "pip uninstall": pip in a venv built with
+  # --system-site-packages can see the distro package, and uninstalling that
+  # would take files out from under dpkg.
+  rm -rf "${PREFIX}"/lib/python*/site-packages/Xlib \
+         "${PREFIX}"/lib/python*/site-packages/python_xlib-*.dist-info
+  # --no-deps on pynput as well as on the wheel. pynput requires
+  # python-xlib>=0.17, so without it pip installs the PyPI 0.33 release --
+  # which does not have the randr fix -- into the venv, where it shadows the
+  # distro copy and breaks resizing silently.
+  "${PREFIX}/bin/pip" install --quiet --upgrade --no-deps \
+    "${workdir}/${wheel}" pynput
+  # Everything else the wheel asks for, plus pynput's own two. All ordinary
+  # PyPI releases, which cannot change under a version once published.
   "${PREFIX}/bin/pip" install --quiet --upgrade \
-    "${workdir}/${wheel}" psutil
+    'websockets<14' basicauth gputil prometheus-client msgpack psutil \
+    watchdog Pillow six evdev
+
+  # --no-deps means pip no longer notices when upstream adds a dependency, and
+  # the failure would be an ImportError in a session rather than an error here.
+  # Compare what the installed wheel asks for against what is handled above.
+  unhandled="$("${PREFIX}/bin/python" - <<'DEPCHECK' 2>/dev/null || :
+import glob, re, sys
+handled = {'websockets','basicauth','gputil','prometheus-client','msgpack',
+           'pynput','psutil','watchdog','pillow','python-xlib'}
+out = []
+for m in glob.glob('/opt/selkies/lib/python*/site-packages/'
+                   'selkies_gstreamer-*.dist-info/METADATA'):
+    for line in open(m, encoding='utf-8', errors='replace'):
+        if not line.startswith('Requires-Dist:'):
+            continue
+        req = line.split(':', 1)[1].strip()
+        if ';' in req:                      # environment marker
+            req, marker = req.split(';', 1)
+            if 'linux' not in marker and 'platform' in marker:
+                continue
+        name = re.split(r'[\s<>=!~\[@(]', req.strip(), 1)[0]
+        if name and name.strip().lower() not in handled:
+            out.append(name.strip())
+print(' '.join(sorted(set(out))))
+DEPCHECK
+)"
+  [ -z "${unhandled}" ] || {
+    echo
+    echo "hdw4s: Selkies v${wanted} asks for dependencies this updater does" >&2
+    echo "  not install:${unhandled}" >&2
+    echo '  They were not installed, because the dependency list is explicit' >&2
+    echo '  here so that no dependency is fetched from a moving git branch.' >&2
+    echo '  Add them to hdw4s-update, or sessions will fail on import.' >&2
+  }
 
   # The tarball unpacks into a single top-level directory whose name has changed
   # between releases, so glob for whatever it turned out to be instead of

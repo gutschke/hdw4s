@@ -20,15 +20,32 @@ export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 #   --keep    leave the chroot behind for inspection; you must remove it
 #   --tmpfs   build in a tmpfs, so a reboot cleans up whatever this misses
 #
+# HDW4S_TEST_DNS sets the resolver used inside the sandbox (default 1.1.1.1),
+# and HDW4S_TEST_MIRROR the archive; the mirror otherwise follows this host.
+#
 # Downloads go through the host's /var/cache/apt/archives, so a second run is
 # cheap and a plain "apt clean" on the host reclaims most of the space.
 
 BASE="${HDW4S_TEST_BASE:-/var/tmp/hdw4s-clean-install}"
 SUITE='noble'
-MIRROR="${HDW4S_TEST_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+# Default to the mirror this host already uses: it is known reachable, and the
+# shared archive cache below then holds files the target actually wants.
+host_mirror() {
+  { grep -hE '^deb[[:space:]]+https?://' /etc/apt/sources.list 2>/dev/null |
+      awk '{print $2}'
+    awk '/^URIs:/ {print $2}' /etc/apt/sources.list.d/*.sources 2>/dev/null
+  } | grep -E 'ubuntu' | grep -vE 'esm\.|security\.' | head -n1
+}
+MIRROR="${HDW4S_TEST_MIRROR:-$(host_mirror)}"
+MIRROR="${MIRROR:-http://archive.ubuntu.com/ubuntu}"
+# Hardcoded rather than copied from the host. A host resolv.conf is often a
+# systemd-resolved stub naming 127.0.0.53, which resolves nothing inside a
+# chroot that has no systemd-resolved -- the failure then looks like broken
+# DNS on a machine whose own DNS is fine.
+DNS="${HDW4S_TEST_DNS:-1.1.1.1}"
 KEEP=''
 TMPFS=''
-MARKER='.hdw4s-clean-install-root'
+MARKER='.hdw4s-clean-install-root'   # written into BASE, not ROOT
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -103,8 +120,10 @@ cleanup() {
     return
   fi
   [ -z "${KEEP}" ] || { echo "Left in place: ${ROOT}"; return; }
-  [ -e "${ROOT}/${MARKER}" ] || {
-    echo "hdw4s: ${ROOT} has no ${MARKER}; refusing to remove it." >&2
+  [ -e "${BASE}/${MARKER}" ] || {
+    echo "hdw4s: ${BASE} has no ${MARKER}; refusing to remove ${ROOT}." >&2
+    echo "  If it is left over from an interrupted run, remove it with:" >&2
+    echo "    rm -rf ${ROOT}" >&2
     return
   }
   case "${ROOT}" in
@@ -119,35 +138,68 @@ cleanup() {
 }
 trap cleanup INT TERM QUIT HUP EXIT
 
+mkdir -p "${BASE}"
+# Written before anything else, so that a bootstrap which dies half way still
+# leaves a root this script is willing to clean up. It lives beside the root
+# rather than inside it because mmdebstrap wants an empty target directory.
+touch "${BASE}/${MARKER}"
+
 # A stale root from an interrupted run, removed under the same guard.
-if [ -e "${ROOT}/${MARKER}" ]; then
+if [ -d "${ROOT}" ]; then
   echo 'Removing a previous test root...'
   rm -rf "${ROOT}"
 fi
-
-mkdir -p "${BASE}"
 if [ -n "${TMPFS}" ] && ! mountpoint -q "${BASE}"; then
   # 4G is enough for a minimal system plus Selkies and its GStreamer stack.
   mount -t tmpfs -o size=4G,mode=0755 tmpfs "${BASE}"
 fi
 mkdir -p "${ROOT}"
 
+# "$1" here is mmdebstrap's target directory, expanded by mmdebstrap when it
+# runs the hook -- not a parameter of this script.
+# shellcheck disable=SC2016
+dns_hook='mkdir -p "$1/etc" && printf "nameserver DNSADDR\n" > "$1/etc/resolv.conf"'
+dns_hook="${dns_hook/DNSADDR/${DNS}}"
+
+bootstrap_failed() {
+  echo ' FAILED.'
+  echo "hdw4s: ${BOOTSTRAP##*/} could not build a ${SUITE} root. Last lines:" >&2
+  tail -20 "${BASE}/bootstrap.log" >&2
+  exit 1
+}
+
+mhost="${MIRROR#*://}"; mhost="${mhost%%/*}"
+getent hosts "${mhost}" >/dev/null 2>&1 || {
+  echo "hdw4s: this host cannot resolve ${mhost}; fix DNS before running." >&2
+  exit 1
+}
+echo "Mirror: ${MIRROR}   resolver in the sandbox: ${DNS}"
+
 echo -n "Bootstrapping ${SUITE}..."
 case "${BOOTSTRAP}" in
   *mmdebstrap)
     # universe, because gir1.2-gst-plugins-bad-1.0 and gstreamer1.0-nice are
     # both there and neither is optional.
+    #
+    # The resolver is written into the target as a setup hook: apt runs against
+    # the target as its root, so without this it has no resolver at all and
+    # every fetch fails with "Could not resolve" on a host whose own DNS works.
+    #
+    # APT::Sandbox::User root because apt otherwise drops to _apt, which in a
+    # half-built target cannot read what it needs. This is a throwaway chroot
+    # being built by root regardless.
     "${BOOTSTRAP}" --variant=minbase \
       --components='main,universe' \
       --aptopt='Dir::Cache::archives "/var/cache/apt/archives"' \
-      "${SUITE}" "${ROOT}" "${MIRROR}" >/dev/null 2>&1;;
+      --aptopt='APT::Sandbox::User "root"' \
+      --setup-hook="${dns_hook}" \
+      "${SUITE}" "${ROOT}" "${MIRROR}" > "${BASE}/bootstrap.log" 2>&1 || bootstrap_failed;;
   *)
     "${BOOTSTRAP}" --variant=minbase --components='main,universe' \
-      "${SUITE}" "${ROOT}" "${MIRROR}" >/dev/null 2>&1
+      "${SUITE}" "${ROOT}" "${MIRROR}" > "${BASE}/bootstrap.log" 2>&1 || bootstrap_failed
     printf 'deb %s %s main universe\n' "${MIRROR}" "${SUITE}" \
       > "${ROOT}/etc/apt/sources.list";;
 esac
-touch "${ROOT}/${MARKER}"
 echo ' done.'
 
 # --- mounts ------------------------------------------------------------------
@@ -160,7 +212,7 @@ for m in /proc /sys /dev /dev/pts /var/cache/apt/archives; do
   mount --bind "${m}" "${ROOT}${m}"
   mounted="${m} ${mounted}"
 done
-cp /etc/resolv.conf "${ROOT}/etc/resolv.conf"
+printf 'nameserver %s\n' "${DNS}" > "${ROOT}/etc/resolv.conf"
 cp "${deb}" "${ROOT}/tmp/"
 
 # Package installs must not try to talk to a service manager that is not here.

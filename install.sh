@@ -76,6 +76,11 @@ ls /usr/lib/*/gstreamer-1.0/libgstnice.so >&/dev/null ||
   [ -e /usr/lib/gstreamer-1.0/libgstnice.so ] ||
   missing="${missing} gstreamer1.0-nice"
 
+# Selkies asks for python-xlib from a git branch. The updater installs the
+# distro package instead and never fetches that branch, so the package has to
+# be here -- see the comment in hdw4s-update for why the distro one is right.
+python3 -c 'import Xlib' >&/dev/null || missing="${missing} python3-xlib"
+
 [ -z "${missing}" ] || {
   echo 'Error: required packages are missing. Install them with:'
   echo
