@@ -404,6 +404,7 @@ declare -A SETTABLE=(
   [HDW4S_RESIZE]='true|false'
   [HDW4S_LANG]='any'
   [HDW4S_IDLE_DAYS]='number'
+  [HDW4S_MEDIA_PORTS]='proxied|direct'
   [HDW4S_ENCODER]='any'
   [SELKIES_VERSION]='any'
 )

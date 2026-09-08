@@ -39,6 +39,43 @@ generate() {
     esac
   done
 
+  # The streaming server opens connection-candidate sockets on every address
+  # it can find, in the ephemeral range, and offers no way to confine them.
+  # They are not a way in on their own -- reaching one usefully needs
+  # credentials exchanged over the signalling channel, which is authenticated
+  # -- but they are unauthenticated listeners on whatever addresses the machine
+  # has, including public ones, and that is not a thing to leave unmentioned.
+  #
+  # A new inbound connection to an ephemeral port is almost never legitimate:
+  # that range belongs to the outgoing connections of local programs, whose
+  # replies are already accepted above as established traffic. Dropping new
+  # ones closes the candidate sockets without touching anything else.
+  #
+  # Set HDW4S_MEDIA_PORTS=direct for a deployment where the browser really does
+  # reach the streaming server directly rather than through a proxy, which
+  # needs those sockets reachable.
+  local media_chain=''
+  if [ "${HDW4S_MEDIA_PORTS:-proxied}" != 'direct' ]; then
+    local elo ehi
+    read -r elo ehi < /proc/sys/net/ipv4/ip_local_port_range
+    media_chain="$(cat <<CHAIN
+
+        # Candidate sockets the streaming server opens on every address.
+        chain media {
+                type filter hook input priority filter; policy accept;
+
+                meta l4proto != tcp accept
+                tcp dport != ${elo}-${ehi} accept
+                ct state established,related accept
+                iifname "lo" accept
+                ip  saddr @proxies4 accept
+                ip6 saddr @proxies6 accept
+                counter drop
+        }
+CHAIN
+)"
+  fi
+
   cat <<EOF
 #!/usr/sbin/nft -f
 #
@@ -86,6 +123,7 @@ table inet hdw4s {
                 # Addressed to a session, from somewhere not allowed.
                 counter drop
         }
+${media_chain}
 }
 EOF
 }
@@ -162,14 +200,44 @@ cmd_check() {
         if ($0 ~ /selkies|systemd-socket-|Xorg/) print port
       }' | sort -un | tr '\n' ' ')"
 
-  if [ -n "${exposed}" ]; then
-    echo "ports       NOT COVERED -- ${exposed}"
+  # Most of what turns up here is the streaming server's connection-candidate
+  # sockets, which it scatters across the ephemeral range on every address. They
+  # are covered by the media chain unless that was turned off, so say which case
+  # this is rather than printing thirty port numbers and leaving it to the
+  # reader.
+  local elo ehi ephemeral='' other=''
+  read -r elo ehi < /proc/sys/net/ipv4/ip_local_port_range
+  local p
+  for p in ${exposed}; do
+    if [ "${p}" -ge "${elo}" ] && [ "${p}" -le "${ehi}" ]; then
+      ephemeral="${ephemeral} ${p}"
+    else
+      other="${other} ${p}"
+    fi
+  done
+
+  if [ -n "${other}" ]; then
+    echo "ports       NOT COVERED --${other}"
     echo "            reachable from off this machine and outside" \
          "${first}-${last},"
     echo '            so these rules do not apply to them'
     rc=1
-  else
+  elif [ -z "${ephemeral}" ]; then
     echo "ports       nothing of ours is reachable outside ${first}-${last}"
+  fi
+
+  if [ -n "${ephemeral}" ]; then
+    local n; n="$(echo "${ephemeral}" | wc -w)"
+    if [ "${HDW4S_MEDIA_PORTS:-proxied}" = 'direct' ]; then
+      echo "media       ${n} candidate socket(s) reachable by design"
+      echo '            (HDW4S_MEDIA_PORTS=direct)'
+    elif nft list chain inet hdw4s media >/dev/null 2>&1; then
+      echo "media       ${n} candidate socket(s), covered by the media chain"
+    else
+      echo "media       ${n} candidate socket(s) NOT covered"
+      echo "            run 'hdw4s firewall --apply' to add the media chain"
+      rc=1
+    fi
   fi
 
   state="$(ss -Hltn 2>/dev/null |
