@@ -15,7 +15,8 @@ cd "$(dirname "$0")/.."
 
 SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s-wait
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
-         debian/postinst debian/prerm debian/postrm .github/checks.sh)
+         debian/postinst debian/prerm debian/postrm
+         .github/checks.sh .github/tests.sh)
 UNITS=(hdw4s@.service hdw4s-proxy@.socket hdw4s-proxy@.service
        hdw4s-firewall.service hdw4s-firewall-check.service
        hdw4s-firewall.timer hdw4s-updater.service hdw4s-updater.timer
@@ -109,6 +110,16 @@ if command -v node >/dev/null; then
 fi
 
 echo
+echo '== behaviour tests =='
+if "$(dirname "$0")/tests.sh" > /tmp/hdw4s-tests.$$ 2>&1; then
+  printf '%-28s %s\n' 'tests.sh' "$(tail -n1 /tmp/hdw4s-tests.$$)"
+else
+  bad 'tests.sh' 'behaviour tests failed'
+  grep -E '^  FAIL|failed\.$' /tmp/hdw4s-tests.$$ | sed 's/^/  /'
+fi
+rm -f /tmp/hdw4s-tests.$$
+echo
+
 echo '== packaging =='
 # The tag, the changelog and the built artifact have to agree, or a release
 # ships a version nobody asked for.
