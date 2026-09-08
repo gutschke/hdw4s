@@ -187,9 +187,11 @@ Two files are read in order, the second overriding the first:
     off the machine.
 
   * `HDW4S_ADDR`:
-    The address the streaming server binds. Defaults to `0.0.0.0`, because the
-    reverse proxy is normally on another machine. What limits who may connect is
-    the firewall, not this.
+    The address the streaming server binds. Defaults to `127.0.0.1`. Leave it
+    alone unless you know why you are changing it: the socket unit in front is
+    the only way in, and the firewall decides who may reach that. Binding
+    anything wider publishes the streaming server directly, at a port in the
+    second block, which the firewall does not cover and nothing authenticates.
 
   * `HDW4S_PORT`:
     Overrides the allocated port for one session. Setting this outside the block

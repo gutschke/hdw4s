@@ -136,7 +136,7 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "" 0
 
 .IP "\[ci]" 4
-\fBHDW4S_ADDR\fR: The address the streaming server binds\. Defaults to \fB0\.0\.0\.0\fR, because the reverse proxy is normally on another machine\. What limits who may connect is the firewall, not this\.
+\fBHDW4S_ADDR\fR: The address the streaming server binds\. Defaults to \fB127\.0\.0\.1\fR\. Leave it alone unless you know why you are changing it: the socket unit in front is the only way in, and the firewall decides who may reach that\. Binding anything wider publishes the streaming server directly, at a port in the second block, which the firewall does not cover and nothing authenticates\.
 .IP "\[ci]" 4
 \fBHDW4S_PORT\fR: Overrides the allocated port for one session\. Setting this outside the block puts the session outside the firewall's coverage; \fBhdw4s firewall \-\-check\fR reports that\.
 .IP "\[ci]" 4
