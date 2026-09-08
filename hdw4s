@@ -342,8 +342,15 @@ cmd_show() {
 }
 
 cmd_enable() {
-  local inst="$1" idx
+  local inst="$1" idx fresh='no'
   split_instance "${inst}" || exit 1
+  # Whether this instance is being created rather than re-enabled, decided
+  # before anything below writes the file. "enable" is documented as safe to
+  # re-run, so a session that already exists must come out of it configured
+  # exactly as it went in -- turning authentication on underneath a running
+  # deployment would answer its reverse proxy with 401 and take the desktop
+  # away from someone who changed nothing.
+  [ -e "${ETCDIR}/${inst}.conf" ] || fresh='yes'
   idx="$(alloc_slot "${inst}")"
 
   install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
@@ -429,6 +436,18 @@ cmd_enable() {
     echo 'Generating the credential this session is configured to require...'
     cmd_auth "${inst}" >/dev/null
     echo "  done; see 'hdw4s proxy ${inst}' for the proxy configuration."
+  elif [ "${fresh}" = 'yes' ]; then
+    # New sessions get a credential by default. The firewall stands between
+    # this port and other machines, and nothing stands between it and the other
+    # accounts on this one: the streaming server binds 127.0.0.1, and any local
+    # account can open a loopback port. Since the credential is generated here,
+    # handed to the proxy by "hdw4s proxy", and never shown to the user, having
+    # it costs nothing that not having it saves.
+    echo
+    echo 'Generating a credential for this session...'
+    cmd_auth "${inst}" >/dev/null
+    echo "  done; see 'hdw4s proxy ${inst}' for the proxy configuration."
+    echo '  Set HDW4S_AUTH=none in /etc/hdw4s/'"${inst}"'.conf to turn it off.'
   else
     echo
     cat <<EOF
@@ -437,6 +456,11 @@ cmd_enable() {
   connection to port $(port_of "${idx}") gets a full desktop for ${user}, with no
   further question. The firewall's list of addresses is the only thing in
   the way, and an address is a weak thing to rely on by itself.
+
+  The firewall also does not stand between this session and the other
+  accounts on this machine. It filters what arrives from elsewhere; the
+  streaming server listens on loopback, and any local account can reach a
+  loopback port. A credential is what separates them.
 
       hdw4s auth ${inst}
 
@@ -792,19 +816,27 @@ cmd_reap() {
     port="$(internal_port_of "${idx}")"
     established="$(ss -Htn state established "sport = :${port}" 2>/dev/null | wc -l)"
 
-    local stampdir="/run/hdw4s/${inst}"
-    [ -d "${stampdir}" ] || continue
+    # Not /run/hdw4s/<inst>: that is the session's RuntimeDirectory, owned by
+    # the session user at mode 0700, so the user can replace this file with a
+    # symlink and have the reaper -- which runs as root -- truncate whatever it
+    # points at and write a timestamp into it. /etc/shadow, /etc/sudoers, take
+    # your pick. The stamp is the reaper's own bookkeeping and belongs somewhere
+    # only the reaper can write.
+    local stampdir="/run/hdw4s-reap"
+    install -d -m0700 -o root -g root "${stampdir}" 2>/dev/null || :
+    [ -d "/run/hdw4s/${inst}" ] || continue
+    local stamp="${stampdir}/${inst}"
     if [ "${established}" -gt 0 ]; then
-      printf '%s\n' "${now}" > "${stampdir}/last-seen" 2>/dev/null || :
+      printf '%s\n' "${now}" > "${stamp}" 2>/dev/null || :
       continue
     fi
-    if [ -r "${stampdir}/last-seen" ]; then
-      last="$(cat "${stampdir}/last-seen" 2>/dev/null)"
+    if [ -r "${stamp}" ]; then
+      last="$(cat "${stamp}" 2>/dev/null)"
     else
       # Never seen a connection since it started; measure from then.
       last="$(date -d "$(systemctl show -p ActiveEnterTimestamp --value \
               "hdw4s@${inst}.service")" +%s 2>/dev/null || echo "${now}")"
-      printf '%s\n' "${last}" > "${stampdir}/last-seen" 2>/dev/null || :
+      printf '%s\n' "${last}" > "${stamp}" 2>/dev/null || :
     fi
     case "${last}" in ''|*[!0-9]*) continue;; esac
     age=$(( (now - last) / 86400 ))
@@ -1015,6 +1047,30 @@ cmd_seed() {
           "  Remove the profile first if you really mean to start it over."
   done
 
+  # Checked before anything is opened. The prefix test below is a string test,
+  # so ".config/../../../etc/shadow" passes it; tar then strips the leading
+  # "./../../../" from the member name and the file lands in the profile under
+  # a harmless-looking path. Nothing about a seeded path should ever leave the
+  # home directory.
+  local entry
+  for entry in "${only[@]:-}"; do
+    [ -n "${entry}" ] || continue
+    case "/${entry}/" in
+      */../*) die "hdw4s: '${entry}' leaves the home directory." \
+                  '  A seeded path may not contain "..".';;
+    esac
+  done
+
+  # The profile is created by systemd as StateDirectory and is owned by the
+  # session user, who can therefore replace one of these with a symlink and
+  # have root extract into whatever it points at.
+  for pair in config data state; do
+    [ ! -L "${profile}/${pair}" ] ||
+      die "hdw4s: ${profile}/${pair} is a symbolic link; refusing to write through it."
+  done
+  [ ! -L "${profile}" ] ||
+    die "hdw4s: ${profile} is a symbolic link; refusing to write through it."
+
   for pattern in "${SEED_EXCLUDES[@]}"; do args+=(--exclude="${pattern}"); done
 
   echo "Copying settings from ${home} into ${profile}."
@@ -1052,8 +1108,12 @@ cmd_seed() {
     install -d -m0700 "${to}"
     # tar rather than cp, because the exclusions are the whole point and cp has
     # no way to express them.
-    if tar -C "${from}" -cf - "${args[@]}" --warning=no-file-ignored \
-           "${members[@]}" 2>/dev/null |
+    # Read as the account that owns the home directory, not as root. ~/.config
+    # belongs to the session user, who can replace it with a link to /root or
+    # /etc; root would follow it, copy what it found, and then chown the copies
+    # to that user. Dropping to the user first means the kernel refuses instead.
+    if runuser -u "${user}" -- tar -C "${from}" -cf - "${args[@]}" \
+           --warning=no-file-ignored "${members[@]}" 2>/dev/null |
        tar -C "${to}" -xf - 2>/dev/null; then
       printf '  %-14s %s\n' "${pair#*:}" "$(du -sh "${to}" 2>/dev/null | cut -f1)"
       copied=$(( copied + 1 ))

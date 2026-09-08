@@ -146,7 +146,7 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_PROXY_GROUP\fR: The group allowed to open a session's Unix socket, i\.e\. the group the reverse proxy runs as\. Defaults to \fBwww\-data\fR\.
 .IP "\[ci]" 4
-\fBHDW4S_AUTH\fR: \fBnone\fR or \fBbasic\fR\. Set with \fBhdw4s auth\fR, which also generates the secret\.
+\fBHDW4S_AUTH\fR: \fBnone\fR or \fBbasic\fR\. Set with \fBhdw4s auth\fR, which also generates the secret\. \fBhdw4s enable\fR turns it on for a session it creates, because the firewall filters what arrives from other machines and nothing stands between the session and the other accounts on this one: the streaming server listens on loopback, and any local account can open a loopback port\. The reverse proxy presents the secret and the user never sees it, so there is no login screen either way\. Re\-running \fBhdw4s enable\fR on a session that already exists leaves the setting alone\. Set \fBnone\fR to turn it off\.
 .IP "\[ci]" 4
 \fBHDW4S_SESSION\fR: The desktop to start; defaults to \fBgnome\-session\fR\. Anything that runs on X11 works, and nothing else in a session depends on the choice\. GNOME 50, which Ubuntu 26\.04 ships, removes the X11 session that the current Selkies release needs, whereas Xorg and the lighter desktops have no such plan, so changing this is the whole migration when that matters\.
 .IP "\[ci]" 4
