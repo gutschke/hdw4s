@@ -20,7 +20,7 @@ trap 'rc="$?"
 dst=''
 [ -z "$(systemctl cat hdw4s@.service 2>/dev/null)" ] ||
   dst="$(systemctl cat hdw4s@.service 2>/dev/null |
-         sed -n 's|^ExecStart=\(.*\)/hdw4s .*|\1|p' | head -n1)"
+         sed -n 's|^ExecStart=\(.*\)/hdw4s[^/ ]* .*|\1|p' | head -n1)"
 if [ -z "${dst}" ] || [ ! -d "${dst}" ]; then
   # Fall back to resolving the symlink that install.sh left on the PATH.
   link="$(command -v hdw4s 2>/dev/null || :)"
@@ -59,6 +59,14 @@ rm -f /etc/systemd/system/hdw4s@.service \
       /etc/systemd/system/hdw4s-reaper.service \
       /etc/systemd/system/hdw4s-reaper.timer
 rm -f /etc/systemd/system/multi-user.target.wants/hdw4s@*.service
+
+# Written by "hdw4s firewall --apply" to keep the session ports out of the
+# ephemeral range. Nothing else owns it, and leaving it behind reserves ports
+# for a package that is no longer installed.
+if [ -e /etc/sysctl.d/60-hdw4s.conf ]; then
+  rm -f /etc/sysctl.d/60-hdw4s.conf
+  sysctl -q --system 2>/dev/null || :
+fi
 systemctl daemon-reload
 echo ' done.'
 
@@ -68,6 +76,16 @@ echo -n 'Removing files...'
 # the thing that must never happen is deleting somebody's home directory, and a
 # home directory is not a fixed name.
 unsafe=''
+# 0. Never a path some package owns. Without this the fallback below happily
+#    resolves to the directory the .deb installs into, and rm -rf takes the
+#    package's payload out from under dpkg, which goes on reporting it as
+#    installed. README offers this script and "apt remove" side by side, so
+#    reaching for the wrong one is an ordinary mistake, not an exotic one.
+if command -v dpkg-query >/dev/null 2>&1 &&
+   dpkg-query -S "${dst}" >/dev/null 2>&1; then
+  unsafe="it belongs to the package $(dpkg-query -S "${dst}" 2>/dev/null |
+                                      head -n1 | cut -d: -f1); use apt remove"
+fi
 # 1. Never a directory that holds other things: only ever our own.
 [ "$(basename -- "${dst}")" = 'hdw4s' ] ||
   unsafe="it is not a directory named hdw4s"
@@ -94,6 +112,8 @@ else
 fi
 
 for sys in /usr/local /usr; do
+  # install.sh links into sbin, so bin alone left the real symlink dangling.
+  [ ! -L "${sys}/sbin/hdw4s" ] || rm -f "${sys}/sbin/hdw4s"
   [ ! -L "${sys}/bin/hdw4s" ] || rm -f "${sys}/bin/hdw4s"
   [ ! -e "${sys}/share/man/man8/hdw4s.8.gz" ] ||
     rm -f "${sys}/share/man/man8/hdw4s.8.gz"
@@ -114,7 +134,7 @@ Uninstalled.
 
 Left behind deliberately:
   /etc/hdw4s/            per-session configuration
-  ~/.local/state/hdw4s/  each user's separate desktop profile, if any
+  /var/lib/hdw4s/        each session's separate desktop profile, if any
 
 Remove them by hand if you are sure you want them gone.
 

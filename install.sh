@@ -118,9 +118,23 @@ chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
 # The units are symlinked rather than copied, so the shipped copy under ${dst}
 # stays the single source of truth. That only works if the paths inside them
 # point at wherever the administrator chose to install.
-sed -i "s|/usr/lib/hdw4s|${dst}|g" \
-  "${dst}/hdw4s@.service" "${dst}/hdw4s-firewall.service" \
-  "${dst}/hdw4s-updater.service" "${dst}/hdw4s"
+# Every file that mentions the path, found rather than listed. The list this
+# replaces named four files and missed five, so a checkout installed anywhere
+# but the packaging default produced a system where no session could start:
+# hdw4s-session execs hdw4s-run-session by absolute path, and the proxy, reaper
+# and firewall-restore units do the same. A list is exactly what goes stale
+# when a file is added.
+if [ "${dst}" != '/usr/lib/hdw4s' ]; then
+  grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null | while IFS= read -r f; do
+    sed -i "s|/usr/lib/hdw4s|${dst}|g" -- "${f}"
+  done
+  if grep -rq -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null; then
+    echo >&2
+    echo "hdw4s: could not rewrite the install path in:" >&2
+    grep -rl -- '/usr/lib/hdw4s' "${dst}" 2>/dev/null | sed 's|^|  |' >&2
+    exit 1
+  fi
+fi
 echo ' done.'
 
 echo -n 'Linking...'
