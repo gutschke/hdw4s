@@ -173,10 +173,19 @@ getent hosts "${mhost}" >/dev/null 2>&1 || {
   echo "hdw4s: this host cannot resolve ${mhost}; fix DNS before running." >&2
   exit 1
 }
-echo "Mirror: ${MIRROR}   resolver in the sandbox: ${DNS}"
+# Resolved here, on the host, where DNS demonstrably works. The bootstrap
+# retries with this if the name fails: apt runs host-side against a target
+# that is not yet a system, and on a host using a systemd-resolved stub in
+# /etc/resolv.conf it can end up able to reach neither the stub nor the
+# resolver written into the target. An address removes the question.
+MIRROR_IP=''
+mip="$(getent ahostsv4 "${mhost}" 2>/dev/null | awk '{print $1; exit}')"
+[ -z "${mip}" ] || MIRROR_IP="${MIRROR/${mhost}/${mip}}"
+echo "Mirror: ${MIRROR}${MIRROR_IP:+  (by address: ${MIRROR_IP})}"
+echo "Resolver inside the sandbox: ${DNS}"
 
-echo -n "Bootstrapping ${SUITE}..."
-case "${BOOTSTRAP}" in
+bootstrap_with() {
+  case "${BOOTSTRAP}" in
   *mmdebstrap)
     # universe, because gir1.2-gst-plugins-bad-1.0 and gstreamer1.0-nice are
     # both there and neither is optional.
@@ -193,13 +202,29 @@ case "${BOOTSTRAP}" in
       --aptopt='Dir::Cache::archives "/var/cache/apt/archives"' \
       --aptopt='APT::Sandbox::User "root"' \
       --setup-hook="${dns_hook}" \
-      "${SUITE}" "${ROOT}" "${MIRROR}" > "${BASE}/bootstrap.log" 2>&1 || bootstrap_failed;;
+      "${SUITE}" "${ROOT}" "$1" > "${BASE}/bootstrap.log" 2>&1;;
   *)
     "${BOOTSTRAP}" --variant=minbase --components='main,universe' \
-      "${SUITE}" "${ROOT}" "${MIRROR}" > "${BASE}/bootstrap.log" 2>&1 || bootstrap_failed
-    printf 'deb %s %s main universe\n' "${MIRROR}" "${SUITE}" \
-      > "${ROOT}/etc/apt/sources.list";;
-esac
+      "${SUITE}" "${ROOT}" "$1" > "${BASE}/bootstrap.log" 2>&1;;
+  esac
+}
+
+echo -n "Bootstrapping ${SUITE}..."
+if bootstrap_with "${MIRROR}"; then
+  :
+elif [ -n "${MIRROR_IP}" ] && grep -qi 'could not resolve' "${BASE}/bootstrap.log"; then
+  echo -n ' name lookup failed, retrying by address...'
+  rm -rf "${ROOT}"; mkdir -p "${ROOT}"
+  bootstrap_with "${MIRROR_IP}" || bootstrap_failed
+else
+  bootstrap_failed
+fi
+# Whatever the bootstrap used, the finished system talks to the mirror by
+# name: it has a resolver and a working libc by now, which the half-built
+# target did not.
+printf 'deb %s %s main universe\n' "${MIRROR}" "${SUITE}" \
+  > "${ROOT}/etc/apt/sources.list"
+rm -f "${ROOT}"/etc/apt/sources.list.d/*.sources 2>/dev/null || :
 echo ' done.'
 
 # --- mounts ------------------------------------------------------------------

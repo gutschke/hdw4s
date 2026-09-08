@@ -435,8 +435,59 @@ HTML_EOF
   fi
 fi
 
+# Import what a session imports, and build the two elements whose absence is
+# invisible until a browser connects. This runs on every upgrade, whatever the
+# sessions are doing: it needs no display and no session, and the alternative
+# is what used to happen -- a machine where every desktop was in use discarded
+# its rollback backups and reported success without executing any of the new
+# code.
+smoke_test() {
+  "${PREFIX}/bin/python" - <<'SMOKE' 2>&1
+import gi
+gi.require_version("Gst", "1.0")
+gi.require_version("GstWebRTC", "1.0")
+gi.require_version("GstSdp", "1.0")
+gi.require_version("GstRtp", "1.0")
+from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp
+Gst.init(None)
+import selkies_gstreamer
+import Xlib
+from Xlib.error import XError
+from Xlib.ext.randr import BadRROutputError
+# The distro python-xlib carries the fix the upstream fork exists for. If a
+# copy without it ever lands in the venv it shadows this one, and resizing
+# breaks in a way nothing else here would notice.
+assert issubclass(BadRROutputError, XError), \
+    "python-xlib lacks the randr fix: %s" % Xlib.__file__
+for el in ("webrtcbin", "nicesrc"):
+    assert Gst.ElementFactory.make(el, None) is not None, "missing element: " + el
+SMOKE
+}
+
+restore_backup() {
+  [ ! -d "${PREFIX}.bak" ]  || { rm -rf "${PREFIX}";  mv "${PREFIX}.bak"  "${PREFIX}"; }
+  [ ! -d "${WEBROOT}.bak" ] || { rm -rf "${WEBROOT}"; mv "${WEBROOT}.bak" "${WEBROOT}"; }
+}
+
 # --- VERIFY AND ROLL BACK ---------------------------------------------------
 [ -n "${upgraded}" ] || exit 0
+
+echo -n '  Checking that the new installation loads...'
+if out="$(smoke_test)"; then
+  echo ' done.'
+else
+  echo ' failed.'
+  echo 'CRITICAL: the new installation cannot be loaded.' >&2
+  printf '%s\n' "${out}" | tail -5 >&2
+  if [ -d "${PREFIX}.bak" ] || [ -d "${WEBROOT}.bak" ]; then
+    echo '  Rolling back...' >&2
+    restore_backup
+    echo "  Rolled back to v${current:-none}." >&2
+  else
+    echo '  No previous installation to restore.' >&2
+  fi
+  exit 1
+fi
 
 # No --all. Instances stay loaded but inactive because the proxy unit requires
 # them, and restarting those started a full desktop for somebody who had not
@@ -453,35 +504,9 @@ mapfile -t units < <(systemctl list-units --plain --no-legend --state=active 'hd
 # breaks it in a way nothing else here would notice until a user saw a desktop
 # that never appeared.
 [ "${#units[@]}" -gt 0 ] || {
-  echo -n '  Checking that the new installation loads...'
-  if "${PREFIX}/bin/python" -c '
-import gi
-gi.require_version("Gst", "1.0")
-gi.require_version("GstWebRTC", "1.0")
-from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp
-import selkies_gstreamer' >/dev/null 2>&1; then
-    echo ' done.'
-    echo 'Upgrade complete; no sessions were running.'
-    rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
-    exit 0
-  fi
-  echo ' failed.'
-  echo 'CRITICAL: the new installation cannot be imported.' >&2
-  "${PREFIX}/bin/python" -c '
-import gi
-gi.require_version("Gst", "1.0")
-gi.require_version("GstWebRTC", "1.0")
-from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp
-import selkies_gstreamer' 2>&1 | tail -3 >&2
-  if [ -d "${PREFIX}.bak" ] || [ -d "${WEBROOT}.bak" ]; then
-    echo '  Rolling back...' >&2
-    [ ! -d "${PREFIX}.bak" ]  || { rm -rf "${PREFIX}";  mv "${PREFIX}.bak"  "${PREFIX}"; }
-    [ ! -d "${WEBROOT}.bak" ] || { rm -rf "${WEBROOT}"; mv "${WEBROOT}.bak" "${WEBROOT}"; }
-    echo "  Rolled back to v${current:-none}." >&2
-  else
-    echo '  No previous installation to restore.' >&2
-  fi
-  exit 1
+  echo 'Upgrade complete; no sessions were running.'
+  rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
+  exit 0
 }
 
 # Restart only sessions nobody is using. A daily timer that reboots a desktop
@@ -561,8 +586,7 @@ if [ -d "${PREFIX}.bak" ] || [ -d "${WEBROOT}.bak" ]; then
   # Each side guarded by its own backup. Removing both and restoring one left
   # the half with no backup deleted and unrecoverable, while the script
   # reported that it had rolled back.
-  [ ! -d "${PREFIX}.bak" ]  || { rm -rf "${PREFIX}";  mv "${PREFIX}.bak"  "${PREFIX}"; }
-  [ ! -d "${WEBROOT}.bak" ] || { rm -rf "${WEBROOT}"; mv "${WEBROOT}.bak" "${WEBROOT}"; }
+  restore_backup
   systemctl restart "${units[@]}" || :
   echo "Rolled back to v${current:-none}." >&2
 else
