@@ -1,6 +1,10 @@
 #!/bin/bash -e
 export LC_ALL='C'
-export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+# The wrappers come first, exactly as hdw4s@.service sets it. Pinning PATH here
+# without them silently un-did the redirection for every program that ignores
+# the XDG variables -- Firefox and Thunderbird above all, which is the one case
+# profile isolation cannot handle on its own.
+export PATH='/usr/lib/hdw4s/wrappers:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 set -o nounset -o pipefail
 
 # Runs one desktop session. Invoked only by hdw4s@.service, which has already
@@ -144,6 +148,27 @@ export XAUTHORITY="${XDG_RUNTIME_DIR}/Xauthority"
 export ICEAUTHORITY="${XDG_RUNTIME_DIR}/ICEauthority"
 install -m0600 /dev/null "${XAUTHORITY}"
 
+# The cookie has to be in the file before the server starts, not after it
+# reports a display. An auth file that exists but holds no entry for the display
+# is not partial protection: the server falls back to allowing every local
+# connection, so the session would be readable by any account on the machine.
+# Adding the entry once the server has reported leaves precisely that gap open
+# for as long as the server takes to come up -- and X checks authorization only
+# when a connection is made, so a connection opened inside the gap keeps working
+# for the rest of the session. Sessions restart often enough (on failure, after
+# an idle reap, and once a day behind the updater) for that to be worth winning.
+#
+# -displayfd means the number is not known in advance, so authorise every
+# display the server could take and drop the rest once it says which one it did.
+# The entries go in on stdin: an argument would be visible in
+# /proc/<pid>/cmdline to every account on the machine for as long as xauth runs.
+auth_displays=99
+cookie="$(mcookie)"
+for n in $(seq 0 "${auth_displays}"); do
+  printf 'add :%d MIT-MAGIC-COOKIE-1 %s\n' "${n}" "${cookie}"
+done | xauth -f "${XAUTHORITY}" source -
+unset cookie
+
 # Let the server pick the display. It creates the lock file itself with O_EXCL
 # and retries until it wins, which is the only race-free way to claim one, and
 # it reports the result only once it is accepting connections. Nothing outside
@@ -174,14 +199,28 @@ if ! IFS= read -r -t 30 display_num < "${fifo}"; then
   exit 1
 fi
 rm -f "${fifo}"
+
+case "${display_num}" in
+  ''|*[!0-9]*)
+    echo "hdw4s: the X server reported '${display_num}' as a display number." >&2
+    exit 1;;
+esac
+if [ "${display_num}" -gt "${auth_displays}" ]; then
+  # No entry was pre-authorised for this one, which is the permissive case
+  # described above. Refuse rather than serve a desktop with no access control.
+  echo "hdw4s: the X server took display :${display_num}, beyond the range this" \
+       "session authorised (0-${auth_displays}). Refusing to continue without" \
+       'access control.' >&2
+  exit 1
+fi
+
 export DISPLAY=":${display_num}"
 printf '%s\n' "${display_num}" > "${XDG_RUNTIME_DIR}/display"
 
-# The cookie has to exist before anything connects. An auth file that exists
-# but holds no entry for this display is not partial protection: the server
-# falls back to allowing every local connection, so the session would be
-# readable by any account on the machine.
-xauth -f "${XAUTHORITY}" add "${DISPLAY}" MIT-MAGIC-COOKIE-1 "$(mcookie)"
+# Drop the entries for the displays the server did not take.
+for n in $(seq 0 "${auth_displays}"); do
+  [ "${n}" = "${display_num}" ] || printf 'remove :%d\n' "${n}"
+done | xauth -f "${XAUTHORITY}" source -
 
 # --- session ----------------------------------------------------------------
 

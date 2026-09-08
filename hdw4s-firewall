@@ -64,8 +64,14 @@ generate() {
         chain media {
                 type filter hook input priority filter; policy accept;
 
-                meta l4proto != tcp accept
-                tcp dport != ${elo}-${ehi} accept
+                # Both protocols. The candidate sockets this chain exists to
+                # close are mostly UDP, so matching TCP alone left the chain
+                # doing very little while still reporting success. "th dport"
+                # reads the port from either transport header; the guard above
+                # it keeps everything else -- ICMP above all -- from reaching
+                # the drop, which is what a bare port match would otherwise do.
+                meta l4proto != { tcp, udp } accept
+                th dport != ${elo}-${ehi} accept
                 ct state established,related accept
                 iifname "lo" accept
                 ip  saddr @proxies4 accept
@@ -189,7 +195,12 @@ cmd_check() {
   # where these rules do not apply. A session binds loopback and is fronted by
   # its socket; if one is bound to a real address instead, an override has put
   # it somewhere nothing is filtering.
-  exposed="$(ss -Hltnp 2>/dev/null |
+  # UDP as well as TCP: the candidate sockets are mostly UDP, so a TCP-only
+  # census reported a handful of sockets as the whole picture and called the
+  # range covered on that basis. Two invocations rather than "-tu", because
+  # asking for both at once prepends a Netid column and shifts the address one
+  # field to the right, which silently turns the queue length into a port.
+  exposed="$({ ss -Hltnp; ss -Hlunp; } 2>/dev/null |
     awk -v a="${first}" -v b="${last}" '
       {
         addr = $4
@@ -240,7 +251,7 @@ cmd_check() {
     fi
   fi
 
-  state="$(ss -Hltn 2>/dev/null |
+  state="$({ ss -Hltn; ss -Hlun; } 2>/dev/null |
            awk -v a="${first}" -v b="${last}" \
                '{ n = $4; sub(/.*:/, "", n)
                   if (n + 0 >= a && n + 0 <= b) print n }' |
