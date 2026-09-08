@@ -170,9 +170,14 @@ if [ "${current}" != "${wanted}" ]; then
     "${workdir}/${wheel}" pynput
   # Everything else the wheel asks for, plus pynput's own two. All ordinary
   # PyPI releases, which cannot change under a version once published.
+  # evdev is not here: it ships no wheel and has to be compiled, which needs a
+  # toolchain and kernel headers that a machine running a desktop has no other
+  # reason to carry. The distro package provides it, and pynput is satisfied by
+  # it the same way it is satisfied by the distro python-xlib. Everything left
+  # is a pure-Python wheel.
   "${PREFIX}/bin/pip" install --quiet --upgrade \
     'websockets<14' basicauth gputil prometheus-client msgpack psutil \
-    watchdog Pillow six evdev
+    watchdog Pillow six
 
   # --no-deps means pip no longer notices when upstream adds a dependency, and
   # the failure would be an ImportError in a session rather than an error here.
@@ -180,7 +185,7 @@ if [ "${current}" != "${wanted}" ]; then
   unhandled="$("${PREFIX}/bin/python" - <<'DEPCHECK' 2>/dev/null || :
 import glob, re, sys
 handled = {'websockets','basicauth','gputil','prometheus-client','msgpack',
-           'pynput','psutil','watchdog','pillow','python-xlib'}
+           'pynput','psutil','watchdog','pillow','python-xlib','evdev','six'}
 out = []
 for m in glob.glob('/opt/selkies/lib/python*/site-packages/'
                    'selkies_gstreamer-*.dist-info/METADATA'):
@@ -443,24 +448,41 @@ fi
 # code.
 smoke_test() {
   "${PREFIX}/bin/python" - <<'SMOKE' 2>&1
+import importlib, importlib.util
 import gi
-gi.require_version("Gst", "1.0")
-gi.require_version("GstWebRTC", "1.0")
-gi.require_version("GstSdp", "1.0")
-gi.require_version("GstRtp", "1.0")
-from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp
+for ns in ("Gst", "GstWebRTC", "GstSdp", "GstRtp"):
+    gi.require_version(ns, "1.0")
+from gi.repository import Gst
 Gst.init(None)
-import selkies_gstreamer
+
+# webrtcbin comes from plugins-bad and the ICE agent from gstreamer1.0-nice.
+# A missing plugin is invisible until the element is actually made.
+for el in ("webrtcbin", "nicesrc"):
+    assert Gst.ElementFactory.make(el, None) is not None, "missing element: " + el
+
+# The distro python-xlib carries the fix the upstream fork exists for. A copy
+# without it landing in the venv shadows this one and breaks resizing.
 import Xlib
 from Xlib.error import XError
 from Xlib.ext.randr import BadRROutputError
-# The distro python-xlib carries the fix the upstream fork exists for. If a
-# copy without it ever lands in the venv it shadows this one, and resizing
-# breaks in a way nothing else here would notice.
 assert issubclass(BadRROutputError, XError), \
     "python-xlib lacks the randr fix: %s" % Xlib.__file__
-for el in ("webrtcbin", "nicesrc"):
-    assert Gst.ElementFactory.make(el, None) is not None, "missing element: " + el
+
+# Importing the package proves almost nothing -- its __init__ pulls in only the
+# standard library, so it succeeds against an installation whose dependencies
+# were never installed at all. These are the modules that actually reach
+# websockets, msgpack, basicauth, GPUtil, prometheus_client, psutil, watchdog
+# and Pillow, and they are the ones a session loads.
+for m in ("signalling_web", "webrtc_signalling", "gpu_monitor", "metrics",
+          "system_monitor", "gstwebrtc_app", "resize", "gamepad"):
+    importlib.import_module("selkies_gstreamer." + m)
+
+# webrtc_input and __main__ are deliberately not imported: pynput picks its
+# backend at import time and needs an X connection, which there is no reason
+# to have here. Checking that they can be found proves they are installed
+# without running them.
+for m in ("pynput", "evdev"):
+    assert importlib.util.find_spec(m) is not None, "not installed: " + m
 SMOKE
 }
 

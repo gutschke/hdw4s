@@ -45,6 +45,7 @@ MIRROR="${MIRROR:-http://archive.ubuntu.com/ubuntu}"
 DNS="${HDW4S_TEST_DNS:-1.1.1.1}"
 KEEP=''
 TMPFS=''
+TMPFS_MOUNTED=''
 MARKER='.hdw4s-clean-install-root'   # written into BASE, not ROOT
 
 while [ "$#" -gt 0 ]; do
@@ -127,17 +128,31 @@ cleanup() {
   # left behind would make the rm -rf below eat the host's apt cache.
   local m
   for m in ${mounted}; do umount -l "${ROOT}${m}" 2>/dev/null; done
+  # Our own tmpfs always comes down, on every path out of here. Refusing to
+  # delete files is a safe outcome; leaving a 4G tmpfs mounted is not, and
+  # that is what used to happen whenever the check below said no.
+  drop_tmpfs() {
+    [ -n "${TMPFS_MOUNTED}" ] || return 0
+    umount -l "${BASE}" 2>/dev/null && TMPFS_MOUNTED=''
+  }
+
   # Anything still mounted under ROOT is a reason to stop, not to force it.
   if awk -v r="${ROOT}/" '$2 ~ "^"r {found=1} END{exit !found}' /proc/mounts; then
     echo "hdw4s: mounts remain under ${ROOT}; not removing it." >&2
     awk -v r="${ROOT}/" '$2 ~ "^"r {print "  " $2}' /proc/mounts >&2
     return
   fi
-  [ -z "${KEEP}" ] || { echo "Left in place: ${ROOT}"; return; }
+  [ -z "${KEEP}" ] || {
+    echo "Left in place: ${ROOT}"
+    [ -z "${TMPFS_MOUNTED}" ] ||
+      echo "  (on a tmpfs at ${BASE}; unmounting it discards the contents)"
+    return
+  }
   [ -e "${BASE}/${MARKER}" ] || {
     echo "hdw4s: ${BASE} has no ${MARKER}; refusing to remove ${ROOT}." >&2
     echo "  If it is left over from an interrupted run, remove it with:" >&2
     echo "    rm -rf ${ROOT}" >&2
+    drop_tmpfs
     return
   }
   case "${ROOT}" in
@@ -151,7 +166,7 @@ cleanup() {
   # directory was not empty. The last twenty lines of the log have already
   # been printed if the bootstrap failed, and --keep preserves everything.
   rm -f "${BASE}/${MARKER}" "${BASE}/bootstrap.log"
-  [ -z "${TMPFS}" ] || umount -l "${BASE}" 2>/dev/null
+  drop_tmpfs
   rmdir "${BASE}" 2>/dev/null || :
   if [ -e "${BASE}" ]; then
     echo
@@ -164,20 +179,27 @@ cleanup() {
 trap cleanup INT TERM QUIT HUP EXIT
 
 mkdir -p "${BASE}"
-# Written before anything else, so that a bootstrap which dies half way still
-# leaves a root this script is willing to clean up. It lives beside the root
-# rather than inside it because the bootstrappers want an empty target.
-touch "${BASE}/${MARKER}"
 
-# A stale root from an interrupted run, removed under the same guard.
+# A stale root from an earlier run, removed before anything is mounted over
+# it -- otherwise it stays on the underlying filesystem, invisible and still
+# occupying the disk.
 if [ -d "${ROOT}" ]; then
   echo 'Removing a previous test root...'
   rm -rf "${ROOT}"
 fi
+
 if [ -n "${TMPFS}" ] && ! mountpoint -q "${BASE}"; then
   # 4G is enough for a minimal system plus Selkies and its GStreamer stack.
   mount -t tmpfs -o size=4G,mode=0755 tmpfs "${BASE}"
+  TMPFS_MOUNTED='yes'
 fi
+
+# After the mount, never before: written underneath a tmpfs the marker is
+# hidden the moment it is mounted, and cleanup then refuses to remove a root
+# it created -- and, worse, used to return before unmounting, leaking the
+# mount and every gigabyte of RAM behind it.
+touch "${BASE}/${MARKER}"
+rm -rf "${ROOT}"
 mkdir -p "${ROOT}"
 
 # "$1" here is mmdebstrap's target directory, expanded by mmdebstrap when it
@@ -283,26 +305,81 @@ if ! run apt-get install -y --no-install-recommends "/tmp/$(basename "${deb}")" 
 fi
 echo ' done.'
 
-# --- the check that matters --------------------------------------------------
-# Not "did apt succeed" -- it did, on the release that could never start a
-# desktop. Import what the streaming server imports. A missing typelib or a
-# GStreamer plugin that is not there fails exactly here and nowhere earlier.
+# --- the checks that matter --------------------------------------------------
+# Not "did apt succeed". It did, on the release that could never start a
+# desktop, and it did again on an install where every Python dependency was
+# missing -- the package's own postinst tolerates a failed Selkies fetch,
+# because a machine being installed may legitimately have no network yet, so
+# a broken install and a fine one look identical from the outside.
+#
+# Nor "does the package import". The first version of this checked
+# "import selkies_gstreamer" and passed against exactly that broken install:
+# the package's __init__ pulls in nothing but the standard library, so it
+# succeeds whether or not a single dependency is present.
+#
+# What follows is what actually found the bugs, which was reading the
+# installed system rather than asking it whether it was well.
 rc=0
+fail() { echo "  FAIL: $*" >&2; rc=1; }
+VENV="${ROOT}/opt/selkies/lib/python3.12/site-packages"
+
+echo 'Inspecting the installed system:'
+
+# 1. The updater is allowed to fail quietly during installation. Here it is not.
+if [ -d "${ROOT}/opt/selkies" ] &&
+   find "${VENV}" -maxdepth 1 -name 'selkies_gstreamer-*.dist-info' \
+        -print -quit 2>/dev/null | grep -q .; then
+  echo '  selkies installed                 yes'
+else
+  fail 'Selkies is not installed -- the updater failed and the install went on'
+  grep -iE 'error|failed|could not' "${ROOT}/tmp/install.log" 2>/dev/null |
+    tail -5 | sed 's/^/    /' >&2
+fi
+
+# 2. Nothing may be installed from a git branch. This is the whole reason the
+#    dependency list is explicit: a branch is whatever it says on the day it
+#    is fetched, and its setup.py runs as root.
+if grep -rl 'github\.com\|git+' "${VENV}"/*.dist-info/direct_url.json \
+     >/dev/null 2>&1; then
+  fail 'something in the venv was installed from a git URL:'
+  grep -rl 'github\.com\|git+' "${VENV}"/*.dist-info/direct_url.json 2>/dev/null |
+    sed 's/^/    /' >&2
+else
+  echo '  no git-sourced packages           confirmed'
+fi
+
+# 3. python-xlib must come from the distribution. A copy inside the venv
+#    shadows it, and the one on PyPI lacks the randr fix, so resizing breaks
+#    with nothing to show for it.
+if [ -e "${VENV}/Xlib" ]; then
+  fail 'a python-xlib inside the venv shadows the distro package'
+elif [ -d "${ROOT}/usr/lib/python3/dist-packages/Xlib" ]; then
+  echo '  python-xlib from the distro       yes'
+else
+  fail 'python-xlib is not installed at all'
+fi
+
+# 4. The dependencies that are reached through introspection and plugin
+#    loading, which no amount of reading the scripts can reveal.
+for pkg in gir1.2-gst-plugins-bad-1.0 gstreamer1.0-nice python3-xlib python3-evdev; do
+  if grep -qx "Package: ${pkg}" "${ROOT}/var/lib/dpkg/status" 2>/dev/null &&
+     grep -A3 -x "Package: ${pkg}" "${ROOT}/var/lib/dpkg/status" 2>/dev/null |
+       grep -q '^Status: install ok installed'; then
+    printf '  %-33s installed\n' "${pkg}"
+  else
+    fail "${pkg} is not installed"
+  fi
+done
+
+# 5. Finally, run the shipped smoke test -- the installed one, not a copy, so
+#    that the two can never drift apart. It imports the modules a session
+#    actually loads and builds the elements a stream actually needs.
 echo -n 'Loading what a session loads...'
-if run /opt/selkies/bin/python -c '
-import gi
-gi.require_version("Gst", "1.0")
-gi.require_version("GstWebRTC", "1.0")
-from gi.repository import Gst, GstWebRTC, GstSdp, GstRtp
-Gst.init(None)
-import selkies_gstreamer
-# webrtcbin comes from plugins-bad; the ICE agent it needs comes from
-# gstreamer1.0-nice, and a missing one is only visible when the element is
-# actually made rather than when the module imports.
-assert Gst.ElementFactory.make("webrtcbin", None) is not None, "no webrtcbin"
-assert Gst.ElementFactory.make("nicesrc", None) is not None, "no libnice (gstreamer1.0-nice)"
-print("ok")
-' > "${ROOT}/tmp/smoke.log" 2>&1; then
+if run /bin/bash -c '
+  set -e
+  PREFIX=/opt/selkies
+  eval "$(sed -n "/^smoke_test() {/,/^}/p" /usr/lib/hdw4s/hdw4s-update)"
+  smoke_test' > "${ROOT}/tmp/smoke.log" 2>&1; then
   echo ' done.'
 else
   echo ' FAILED.'
@@ -311,7 +388,7 @@ else
 fi
 
 # The CLI has to work as installed, not just as a file in the source tree.
-run hdw4s --version >/dev/null 2>&1 || { echo 'hdw4s --version failed' >&2; rc=1; }
+run hdw4s --version >/dev/null 2>&1 || fail 'hdw4s --version failed'
 
 if [ "${rc}" -eq 0 ]; then
   echo
@@ -321,5 +398,8 @@ if [ "${rc}" -eq 0 ]; then
 else
   echo
   echo 'FAIL: see the output above.' >&2
+  echo "Re-run with --keep to leave the system at ${ROOT} and look at it" >&2
+  echo '  yourself. Every check above was written after reading that tree by' >&2
+  echo '  hand found something the automated check had passed over.' >&2
 fi
 exit "${rc}"
