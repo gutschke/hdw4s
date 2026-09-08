@@ -300,7 +300,7 @@ machine itself can guarantee.
     worth pairing with something that makes the path itself private, such as a
     point-to-point encrypted tunnel between the proxy and the session's host.
 
-        It is also worth making the address check mean something. Where the
+    It is also worth making the address check mean something. Where the
     network can pin each host to the addresses it was assigned, a neighbour can
     no longer claim to be the proxy, which is otherwise the easy way past an
     address list. Most hypervisors and many switches offer some form of this;
