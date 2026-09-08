@@ -42,7 +42,11 @@ HDW4S_BLOCK_SIZE=64
 HDW4S_PROFILE_DIR='/var/lib/hdw4s'
 
 # shellcheck source=/dev/null
-[ ! -r "${CONF}" ] || . "${CONF}"
+# A configuration file is a list of assignments, but nothing stops one from
+# ending in a conditional that happens to be false. Sourcing then returns
+# non-zero, and under -e that takes the whole program down over a file that is
+# perfectly valid.
+if [ -r "${CONF}" ]; then . "${CONF}" || :; fi
 
 usage() {
   cat <<'EOF'
@@ -144,7 +148,7 @@ slot_of() {
 }
 
 alloc_slot() {
-  local inst="$1" idx used
+  local inst="$1" idx used lock
   idx="$(slot_of "${inst}")"
   [ -z "${idx}" ] || { echo "${idx}"; return 0; }
 
@@ -158,16 +162,25 @@ alloc_slot() {
       > "${SLOTS}"
   }
 
+  # Scanning for a free slot and claiming it have to be one operation. They
+  # were not, so two "hdw4s enable" runs at once -- two administrators, or a
+  # configuration management pass -- read the same table, picked the same
+  # index, and appended both. Every socket unit but one then failed to bind.
+  exec {lock}<>"${SLOTS}"
+  flock "${lock}"
+
   used="$(awk '$1 !~ /^#/ { print $1 }' "${SLOTS}" | sort -n)"
   for ((idx = 0; idx < HDW4S_BLOCK_SIZE; idx++)); do
     grep -qx "${idx}" <<<"${used}" || break
   done
-  [ "${idx}" -lt "${HDW4S_BLOCK_SIZE}" ] || {
+  if [ "${idx}" -ge "${HDW4S_BLOCK_SIZE}" ]; then
+    exec {lock}<&-
     echo "hdw4s: all ${HDW4S_BLOCK_SIZE} session slots are in use." >&2
     echo "  Raise HDW4S_BLOCK_SIZE in ${CONF} and rerun 'hdw4s firewall --apply'." >&2
     return 1
-  }
+  fi
   printf '%s %s\n' "${idx}" "${inst}" >> "${SLOTS}"
+  exec {lock}<&-
   echo "${idx}"
 }
 
@@ -247,7 +260,10 @@ cmd_list() {
 
 cmd_show() {
   local inst="$1" idx port
-  split_instance "${inst}"
+  # Handled here rather than left to -e: an unhandled failure also trips the
+  # ERR trap, so a mistyped name printed its own clear diagnosis and then a
+  # second, vaguer line about the script failing unexpectedly.
+  split_instance "${inst}" || exit 1
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] ||
     die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}'."
@@ -291,7 +307,7 @@ cmd_show() {
 
 cmd_enable() {
   local inst="$1" idx
-  split_instance "${inst}"
+  split_instance "${inst}" || exit 1
   idx="$(alloc_slot "${inst}")"
 
   install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
@@ -318,8 +334,15 @@ cmd_enable() {
   # cannot save anything.
   home="$(getent passwd -- "${user}" | cut -d: -f6)"
   [ -n "${home}" ] || die "hdw4s: ${user} has no home directory"
+  # RequiresMountsFor belongs here too, for the same reason ReadWritePaths does.
+  # The unit used to name /home, which is the one assumption this function
+  # exists to avoid making: on a site with homes under /export the session was
+  # not ordered after that mount and could start against an autofs stub.
   printf '%s\n' \
     '# Written by "hdw4s enable". Re-run it if the home directory moves.' \
+    '[Unit]' \
+    "RequiresMountsFor=${home}" \
+    '' \
     '[Service]' \
     "ReadWritePaths=${home}" \
     > "${DROPIN}/hdw4s@${inst}.service.d/40-home.conf"
@@ -628,7 +651,7 @@ make_credential() {
 }
 
 require_slot() {
-  split_instance "$1"
+  split_instance "$1" || exit 1
   [ -n "$(slot_of "$1")" ] ||
     die "hdw4s: $1 has no slot; run 'hdw4s enable $1' first."
   command -v systemd-creds >/dev/null ||
@@ -637,7 +660,7 @@ require_slot() {
 
 cmd_transport() {
   local inst="$1" mode="$2" idx port group dir
-  split_instance "${inst}"
+  split_instance "${inst}" || exit 1
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
   port="$(port_of "${idx}")"
@@ -765,7 +788,7 @@ cmd_auth() {
 
 cmd_noauth() {
   local inst="$1"
-  split_instance "${inst}"
+  split_instance "${inst}" || exit 1
   [ -r "/etc/hdw4s/${inst}.auth.cred" ] ||
     [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ] || {
       echo "Session ${inst} already has no credential."
@@ -785,7 +808,7 @@ cmd_noauth() {
 
 cmd_proxy() {
   local inst="$1" idx port cred user pw
-  split_instance "${inst}"
+  split_instance "${inst}" || exit 1
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
   port="$(port_of "${idx}")"
@@ -907,14 +930,15 @@ cmd_seed() {
       *)        die "hdw4s: seed: unexpected argument '$1'";;
     esac
   done
-  split_instance "${inst}"
+  split_instance "${inst}" || exit 1
   [ -n "$(slot_of "${inst}")" ] ||
     die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}' first."
 
-  local isolation="${HDW4S_ISOLATION:-none}"
-  [ ! -r "/etc/hdw4s/${inst}.conf" ] ||
-    isolation="$(sed -n "s/^[[:space:]]*HDW4S_ISOLATION=[\"']\{0,1\}\([a-z]*\).*/\1/p" \
-                 "/etc/hdw4s/${inst}.conf" | tail -n1)"
+  # setting_of, not a second copy of it: reading only the instance file meant a
+  # site that set HDW4S_ISOLATION=profile globally was told its sessions were
+  # not isolated, which is the normal way to configure this.
+  local isolation
+  isolation="$(setting_of "${inst}" HDW4S_ISOLATION none)"
   [ "${isolation}" = 'profile' ] ||
     die "hdw4s: ${inst} is not an isolated session; there is nothing to seed into." \
         "  Run 'hdw4s set ${inst} HDW4S_ISOLATION=profile' first."
@@ -1013,7 +1037,7 @@ cmd_keyring() {
 
 cmd_disable() {
   local inst="$1"
-  split_instance "${inst}"
+  split_instance "${inst}" || exit 1
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
   systemctl stop "hdw4s@${inst}.service" 2>/dev/null || :
@@ -1023,7 +1047,11 @@ cmd_disable() {
 
 cmd_release() {
   local inst="$1" tmp
-  split_instance "${inst}"
+  # An account that has since been deleted still holds a slot, and its port
+  # stays open in the firewall. Refusing to release it because the account is
+  # gone leaves editing the table by hand as the only way out -- which its own
+  # header tells the administrator never to do.
+  split_instance "${inst}" || :
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" "hdw4s@${inst}.service" 2>/dev/null || :
   rm -rf "${DROPIN}/hdw4s@${inst}.service.d" \

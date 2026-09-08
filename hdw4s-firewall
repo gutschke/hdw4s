@@ -15,7 +15,7 @@ HDW4S_BASE_PORT=7300
 HDW4S_BLOCK_SIZE=64
 HDW4S_PROXIES=''
 # shellcheck source=/dev/null
-[ ! -r "${CONF}" ] || . "${CONF}"
+if [ -r "${CONF}" ]; then . "${CONF}" || :; fi
 
 first="${HDW4S_BASE_PORT}"
 last=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE - 1 ))
@@ -180,9 +180,10 @@ cmd_restore() {
 }
 
 cmd_check() {
-  local rc=0 exposed='' state
+  local rc=0 exposed='' state have_table='no'
 
   if nft list table inet hdw4s >/dev/null 2>&1; then
+    have_table='yes'
     echo 'table       present'
   else
     echo "table       MISSING -- run 'hdw4s firewall --apply'"
@@ -258,10 +259,41 @@ cmd_check() {
            sort -un | tr '\n' ' ')"
   echo "listening  ${state:- (nothing in the block)}"
 
-  if [ -z "${HDW4S_PROXIES}" ]; then
+  # Read back what is loaded, not what the configuration says. Printing the
+  # configured list meant editing HDW4S_PROXIES and forgetting to re-apply
+  # produced a check that agreed with the file and told the administrator
+  # nothing, while the running set still admitted the address that had just
+  # been removed.
+  local live=''
+  if [ "${have_table}" = 'yes' ]; then
+    live="$(nft -j list table inet hdw4s 2>/dev/null |
+            "${PYTHON:-python3}" -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+out=[]
+for o in d.get("nftables",[]):
+    st=o.get("set")
+    if st and st.get("name") in ("proxies4","proxies6"):
+        for e in st.get("elem",[]) or []:
+            if isinstance(e,dict) and "prefix" in e:
+                p=e["prefix"]; out.append("%s/%s"%(p["addr"],p["len"]))
+            else: out.append(str(e))
+print(" ".join(out))' 2>/dev/null)"
+  fi
+  if [ -z "${live}" ]; then
     echo 'sources     loopback only'
   else
-    echo "sources     ${HDW4S_PROXIES}"
+    echo "sources     ${live}"
+  fi
+  # Say so when the two disagree, rather than reporting either as the truth.
+  local want got
+  want="$(printf '%s' "${HDW4S_PROXIES}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+  got="$(printf '%s' "${live}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+  if [ "${want}" != "${got}" ]; then
+    echo "            CONFIGURED differs: ${HDW4S_PROXIES:-(none)}"
+    echo "            run 'hdw4s firewall --apply' to load it"
+    rc=1
   fi
   return "${rc}"
 }

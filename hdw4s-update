@@ -33,7 +33,7 @@ KNOWN_GOOD='1.6.2'
 # Set SELKIES_VERSION in /etc/hdw4s/hdw4s.conf to pin a specific release and
 # stop tracking upstream entirely.
 # shellcheck source=/dev/null
-[ ! -r /etc/hdw4s/hdw4s.conf ] || . /etc/hdw4s/hdw4s.conf
+if [ -r /etc/hdw4s/hdw4s.conf ]; then . /etc/hdw4s/hdw4s.conf || :; fi
 
 [ "$(id -u)" -eq 0 ] || {
   echo 'This script must be run as "root"' >&2
@@ -51,9 +51,14 @@ trap 'rc="$?"
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
 current=''
-[ ! -x "${PREFIX}/bin/pip" ] ||
+# "pip show" exits non-zero when the package is not installed, which is the
+# normal state after a run that created the environment and then failed. Under
+# -e that turned a recoverable half-install into one the updater could never
+# repair, reporting only that the script had failed unexpectedly.
+if [ -x "${PREFIX}/bin/pip" ]; then
   current="$("${PREFIX}/bin/pip" show selkies-gstreamer 2>/dev/null |
-             sed -n 's/^Version: //p')"
+             sed -n 's/^Version: //p')" || :
+fi
 
 if [ -n "${SELKIES_VERSION:-}" ]; then
   wanted="${SELKIES_VERSION}"
@@ -363,7 +368,11 @@ fi
 # --- VERIFY AND ROLL BACK ---------------------------------------------------
 [ -n "${upgraded}" ] || exit 0
 
-mapfile -t units < <(systemctl list-units --plain --no-legend --all 'hdw4s@*' |
+# No --all. Instances stay loaded but inactive because the proxy unit requires
+# them, and restarting those started a full desktop for somebody who had not
+# asked for one -- undoing both socket activation and the reaper on every
+# upgrade.
+mapfile -t units < <(systemctl list-units --plain --no-legend --state=active 'hdw4s@*' |
                      awk '{print $1}')
 [ "${#units[@]}" -gt 0 ] || {
   echo 'Upgrade complete; no sessions were running.'

@@ -21,9 +21,9 @@ SLOTS='/etc/hdw4s/instances'
 HDW4S_BASE_PORT=7300
 HDW4S_BLOCK_SIZE=64
 # shellcheck source=/dev/null
-[ ! -r "${CONF}" ] || . "${CONF}"
+if [ -r "${CONF}" ]; then . "${CONF}" || :; fi
 # shellcheck source=/dev/null
-[ ! -r "/etc/hdw4s/${instance}.conf" ] || . "/etc/hdw4s/${instance}.conf"
+if [ -r "/etc/hdw4s/${instance}.conf" ]; then . "/etc/hdw4s/${instance}.conf" || :; fi
 
 if [ -n "${HDW4S_PORT:-}" ]; then
   port="${HDW4S_PORT}"

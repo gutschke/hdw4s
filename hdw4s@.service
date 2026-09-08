@@ -10,7 +10,6 @@ Wants=network-online.target
 Requires=hdw4s-firewall.service
 # A home directory that arrives over the network has to be there before a
 # desktop tries to read settings out of it.
-RequiresMountsFor=/home
 
 [Service]
 # There is deliberately no User= here. The instance name is "<user>" or
