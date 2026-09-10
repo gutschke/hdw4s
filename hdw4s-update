@@ -249,6 +249,22 @@ index="${WEBROOT}/index.html"
 if [ -f "${index}" ]; then
   echo -n 'Applying branding patch...'
   sed -i '/<!-- HDW4S_PATCH_START -->/,/<!-- HDW4S_PATCH_END -->/d' "${index}"
+  # Neutralise the static title as well as overriding the property.
+  #
+  # The script below is injected on the line immediately after <title>, which
+  # is as early as it can run -- and still one paint too late. The parser sets
+  # the title element as it reads it, the browser shows it, and only then does
+  # the next line execute. That is the flash of upstream branding on a first
+  # load, when nothing is cached to mask it.
+  #
+  # This cannot write the final title, which depends on the hostname and is
+  # known only in the browser. It does not need to: it only has to be ours, so
+  # that no third-party name is ever painted. The script still refines it to
+  # "Desktop: <host>" a moment later.
+  #
+  # Idempotent, and index.html is a build artifact this script replaces
+  # wholesale on upgrade, so the edit never accumulates.
+  sed -i 's|<title>[^<]*</title>|<title>Desktop</title>|' "${index}"
   if grep -qi '</head>' "${index}"; then
     inject="$(cat <<'HTML_EOF'
 <!-- HDW4S_PATCH_START -->
