@@ -456,6 +456,21 @@ HTML_EOF
   fi
 fi
 
+# The installed-app window shows the MANIFEST name, not the page title. So an
+# installed PWA still carried upstream's branding after the title was fixed --
+# the window frame read "Selkies WebRTC - Desktop: <host>", with the first half
+# coming from here. Same treatment and the same reasoning as the title: this
+# cannot carry the per-session name, which is known only in the browser, it
+# only has to be ours.
+manifest="${WEBROOT}/manifest.json"
+if [ -f "${manifest}" ]; then
+  echo -n 'Applying manifest branding...'
+  sed -i -e 's|"name"[[:space:]]*:[[:space:]]*"[^"]*"|"name": "Desktop"|' \
+         -e 's|"short_name"[[:space:]]*:[[:space:]]*"[^"]*"|"short_name": "Desktop"|' \
+         "${manifest}"
+  echo ' done.'
+fi
+
 # Import what a session imports, and build the two elements whose absence is
 # invisible until a browser connects. This runs on every upgrade, whatever the
 # sessions are doing: it needs no display and no session, and the alternative
