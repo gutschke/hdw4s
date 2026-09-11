@@ -471,6 +471,53 @@ if [ -f "${manifest}" ]; then
   echo ' done.'
 fi
 
+# --- RECONNECT LOOP FIX -----------------------------------------------------
+# The client opens two signalling channels, one for video and one for audio,
+# and each one's disconnect handler tears the other down so that a reconnect
+# restarts both together. A guard is meant to stop that from bouncing back and
+# forth: the side that starts the cascade marks it by setting the status to
+# "checkconnect", and the side it wakes is supposed to notice the mark and stop
+# there.
+#
+# The comparison that reads the mark is written against the bare identifier
+# instead of the string, so it compares the status to a hoisted, still
+# undefined variable. It is therefore always false, the guard never fires, and
+# each channel unconditionally closes the other. One disconnect is then enough
+# to start a ping-pong that never ends: every reconnect is closed by the other
+# side, frequently while its socket is still opening, which is what puts
+# "WebSocket is closed before the connection is established" in the console
+# several times a second.
+#
+# The status is left at "checkconnect" for as long as this runs, so the page
+# also never reaches "connected" and the loading overlay stays up over a
+# desktop that is otherwise usable.
+#
+# A disconnect is rare on a local network and routine over a wide-area one,
+# which is why this only ever showed up for a session reached from outside.
+#
+# Quoting the string restores the intended guard. Idempotent: once the quotes
+# are there the pattern no longer matches, and app.js is a build artifact this
+# script replaces wholesale on upgrade, so the edit never accumulates.
+#
+# The whole block is conditional on finding the unquoted comparison, so it also
+# does the right thing when this stops being our problem. If upstream fixes it
+# -- by quoting the string, by comparing some other way, or by rewriting the
+# handler so that nothing of the sort is left -- the pattern does not match,
+# nothing is edited, and the update is silent. That is deliberate: this must
+# never be the reason an upgrade fails. The failure below fires only when the
+# pattern matched and the substitution then did not, which means the file is
+# not what it appeared to be and rewriting it blindly would be worse.
+appjs="${WEBROOT}/app.js"
+if [ -f "${appjs}" ] && grep -q 'app\.status == checkconnect' "${appjs}"; then
+  echo -n 'Applying reconnect loop fix...'
+  sed -i "s|app\.status == checkconnect;|app.status == 'checkconnect';|g" "${appjs}"
+  if grep -q 'app\.status == checkconnect' "${appjs}"; then
+    echo ' FAILED.' >&2
+    exit 1
+  fi
+  echo ' done.'
+fi
+
 # Import what a session imports, and build the two elements whose absence is
 # invisible until a browser connects. This runs on every upgrade, whatever the
 # sessions are doing: it needs no display and no session, and the alternative
