@@ -3,6 +3,8 @@ hdw4s-session            usr/lib/hdw4s
 hdw4s-run-session        usr/lib/hdw4s
 hdw4s-firewall           usr/lib/hdw4s
 hdw4s-update             usr/lib/hdw4s
+hdw4s-patch-client       usr/lib/hdw4s
+hdw4s_signalling.py      usr/lib/hdw4s
 hdw4s-wait             usr/lib/hdw4s
 hdw4s.xorg.conf          usr/lib/hdw4s
 wrappers/*               usr/lib/hdw4s/wrappers

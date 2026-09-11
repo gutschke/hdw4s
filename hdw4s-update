@@ -518,6 +518,81 @@ if [ -f "${appjs}" ] && grep -q 'app\.status == checkconnect' "${appjs}"; then
   echo ' done.'
 fi
 
+# --- SESSION HAND-OVER, CLIENT HALF -----------------------------------------
+# The peer ids the browser uses are fixed, so a second client can never
+# register. Upstream refuses it in a way the client cannot tell from any other
+# closed socket, so it retries into the refusal for as long as the tab is open.
+# This half teaches the client to recognise the refusal and offer to take the
+# session over; the server half is a wrapper the session starts instead of the
+# stock entry point, and needs no patching.
+#
+# MUST run after the reconnect loop fix above: its anchors are written against
+# the corrected line, so running it first leaves nothing matching and the
+# feature is silently skipped.
+#
+# The patcher decides for itself whether it can apply cleanly, and does nothing
+# if the client has changed underneath. That is safe because the server half
+# looks at the client it is about to serve and stays out of the way when that
+# client cannot ask for a hand-over -- so a skip here leaves the pair behaving
+# as it did before the feature existed, rather than half-enabled.
+patcher='/usr/lib/hdw4s/hdw4s-patch-client'
+if [ -x "${patcher}" ] && [ -d "${WEBROOT}" ]; then
+  echo -n 'Applying session hand-over to the client...'
+  # Nothing this block learns is worth aborting an upgrade for. The script runs
+  # under "set -e" with "pipefail" from a timer, as root, and it aborts here
+  # *before* the smoke test and the rollback below -- so a failure to read a
+  # state would leave a new venv and a new webroot installed, unverified, and
+  # unrollbackable. The state is read from what the patcher prints; its exit
+  # status is for people running it by hand.
+  state="$("${patcher}" --check "${WEBROOT}" 2>/dev/null | head -1)" || :
+  case "${state}" in
+    patched)
+      echo ' already applied.' ;;
+    applicable|partial)
+      if "${patcher}" "${WEBROOT}" >/dev/null 2>&1; then
+        echo ' done.'
+      else
+        echo ' failed; the client is unchanged.' >&2
+      fi ;;
+    '')
+      echo ' skipped: could not read the client state.' >&2 ;;
+    *)
+      echo " skipped: the client no longer matches (${state:-unknown})." ;;
+  esac
+fi
+
+# Say plainly what a session will actually do, because a silently disabled
+# feature is how a regression goes unnoticed for days.
+#
+# This asks the same two questions the server asks itself at startup, in the
+# same order, rather than a proxy for them. An earlier version checked only
+# whether the upstream server was recognised, and so reported "active" for a
+# webroot whose patch had just been skipped -- printing a contradiction two
+# lines below the skip that caused it.
+if [ -r /usr/lib/hdw4s/hdw4s_signalling.py ]; then
+  echo -n 'Checking session hand-over...'
+  handover="$(PYTHONPATH=/usr/lib/hdw4s HDW4S_WEBROOT="${WEBROOT}" \
+              "${PREFIX}/bin/python" - <<'HANDOVER' 2>/dev/null
+import hdw4s_signalling as handover
+from selkies_gstreamer import signalling_web
+if not handover.client_supports_handover():
+    print("client-cannot-ask")
+else:
+    print(handover.upstream_state(signalling_web.WebRTCSimpleServer))
+HANDOVER
+)" || :
+  case "${handover}" in
+    recognised)       echo ' active.' ;;
+    upstream-has-it)  echo ' provided by upstream; ours stands down.' ;;
+    client-cannot-ask)
+      echo ' not offered: the browser client cannot ask for it.' ;;
+    drifted)
+      echo ' DISABLED: the signalling server has changed underneath it.' >&2 ;;
+    *)  echo " could not be checked (${handover:-no answer})." >&2 ;;
+  esac
+fi
+# --- END SESSION HAND-OVER --------------------------------------------------
+
 # Import what a session imports, and build the two elements whose absence is
 # invisible until a browser connects. This runs on every upgrade, whatever the
 # sessions are doing: it needs no display and no session, and the alternative

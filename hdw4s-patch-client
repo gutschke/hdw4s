@@ -1,0 +1,610 @@
+#!/usr/bin/env python3
+"""Teach the browser client that a session can be held elsewhere, and give the
+user a way to take it.
+
+The client is a build artifact with no extension point, so unlike the server
+half this has to be a patch. It therefore follows the rules the other webroot
+patches already follow: idempotent, backed up before it writes, atomic, and
+silent when the source it expects has changed underneath.
+"""
+import os
+import re
+import shutil
+import sys
+import tempfile
+
+MARKER = "HDW4S takeover"
+
+# Bumped whenever the patched client changes behaviour, so that browsers and
+# installed apps holding a cached copy fetch the new one. Without this the
+# patch lands on disk and reaches nobody: index.html pins every script with a
+# frozen ?ts=, and sw.js caches those exact URLs under a frozen cacheVersion.
+PATCH_REVISION = 1
+
+
+# --------------------------------------------------------------- signalling.js
+
+SIG = [
+
+("client identity and hand-over callbacks", '''        this.peer_id = 1;
+
+        /**
+         * @private
+         * @type {WebSocket}
+         */
+        this._ws_conn = null;
+''', '''        this.peer_id = 1;
+
+        /* HDW4S takeover: who this page is. Both channels share it, so the
+         * server sees one client rather than two, and can tell our own
+         * reconnect from a different device. Assigned by the page. */
+        this.client_id = null;
+
+        /* HDW4S takeover: set for exactly one connect() when the user has asked
+         * to take a session over. Cleared as soon as it has been sent, so no
+         * later reconnect can steal silently. */
+        this.takeover = false;
+
+        /**
+         * @event
+         * @type {function}
+         */
+        this.onbusy = null;
+
+        /**
+         * @private
+         * @type {WebSocket}
+         */
+        this._ws_conn = null;
+'''),
+
+("carry identity and intent in HELLO", '''        var meta = {
+            "res": parseInt(currRes[0]) + "x" + parseInt(currRes[1]),
+            "scale": window.devicePixelRatio
+        };
+        this.state = 'connected';
+        this._ws_conn.send(`HELLO ${this.peer_id} ${btoa(JSON.stringify(meta))}`);
+''', '''        var meta = {
+            "res": parseInt(currRes[0]) + "x" + parseInt(currRes[1]),
+            "scale": window.devicePixelRatio
+        };
+        // HDW4S takeover: both ride in the metadata HELLO already carries, so
+        // the wire format is unchanged.
+        if (this.client_id) meta.client = this.client_id;
+        if (this.takeover) meta.takeover = true;
+        this.state = 'connected';
+        this._ws_conn.send(`HELLO ${this.peer_id} ${btoa(JSON.stringify(meta))}`);
+        // One click, one attempt. Clearing this on the server's reply instead
+        // would leave it set through a refusal, where no reply ever comes --
+        // and it would then ride the next reconnect and steal.
+        this.takeover = false;
+'''),
+
+("close the previous socket before opening another", '''        this.state = 'connecting';
+        this._setStatus("Connecting to server.");
+
+        this._ws_conn = new WebSocket(this._server);
+''', '''        this.state = 'connecting';
+        this._setStatus("Connecting to server.");
+
+        // HDW4S takeover: without this the old socket stays open with its
+        // handlers still bound to this object, so its eventual close reports
+        // state about a connection that is no longer ours.
+        if (this._ws_conn !== null) {
+            try { this._ws_conn.close(); } catch (e) { /* already gone */ }
+        }
+        this._ws_conn = new WebSocket(this._server);
+'''),
+
+("recognise the private close codes", '''    _onServerClose() {
+        if (this.state !== 'connecting') {
+            this.state = 'disconnected';
+            this._setError("Server closed connection.");
+            if (this.ondisconnect !== null) this.ondisconnect();
+        }
+    }
+''', '''    _onServerClose(event) {
+        // HDW4S takeover: ignore anything from a socket we have already
+        // replaced. Its close says nothing about the connection we now have.
+        var sock = event ? event.target : null;
+        if (sock !== null && this._ws_conn !== null && sock !== this._ws_conn) {
+            return;
+        }
+        // Three private codes divert; every other close keeps the reconnect
+        // behaviour this has always had. That is what stops a network hiccup
+        // from being mistaken for a second device.
+        var code = event ? event.code : 0;
+        if (code === 4003) {
+            // Displaced by a page using our identity. Reaching this on the
+            // *current* socket means it was not us reconnecting -- most likely
+            // a duplicated tab, which inherits sessionStorage. Saying nothing
+            // would leave this page frozen with no explanation.
+            this.state = 'busy';
+            this._setStatus("This desktop was opened in another window.");
+            if (this.onbusy !== null) this.onbusy(code);
+            return;
+        }
+        if (code === 4001 || code === 4002) {
+            this.state = 'busy';
+            this._setStatus(code === 4002
+                ? "This desktop was taken over by another device."
+                : "This desktop is already open on another device.");
+            if (this.onbusy !== null) this.onbusy(code);
+            return;
+        }
+        if (this.state !== 'connecting') {
+            this.state = 'disconnected';
+            this._setError("Server closed connection.");
+            if (this.ondisconnect !== null) this.ondisconnect();
+        }
+    }
+'''),
+
+("do not retry out of the hand-over screen", '''    _onServerError() {
+''', '''    _onServerError() {
+        // HDW4S takeover: the server has told us the session is held
+        // elsewhere. Retrying here would climb the retry count and eventually
+        // reload the page out from under the button.
+        if (this.state === 'busy') return;
+'''),
+]
+
+# ---------------------------------------------------------------------- app.js
+
+APP = [
+
+("hand-over state in the model", '''            showStart: false,
+''', '''            showStart: false,
+            takenOver: false,
+            handoverReason: 0,
+'''),
+
+("the take-over action", '''        playStream() {
+            webrtc.playStream();
+            audio_webrtc.playStream();
+            this.showStart = false;
+        },
+''', '''        playStream() {
+            webrtc.playStream();
+            audio_webrtc.playStream();
+            this.showStart = false;
+        },
+        takeOver() {
+            // HDW4S takeover: deliberate, and only ever from a click.
+            reconnectBoth(true);
+        },
+'''),
+
+("one identity for both channels", '''var audio_webrtc = new WebRTCDemo(audio_signalling, audioElement, 3);
+''', '''var audio_webrtc = new WebRTCDemo(audio_signalling, audioElement, 3);
+
+// --- HDW4S takeover -------------------------------------------------------
+// Who this page is. sessionStorage gives nearly the right lifetime: a reload is
+// still us, so a page reclaims its own session without asking, while a second
+// tab opened fresh gets its own and is correctly seen as somewhere else.
+//
+// It is not perfect, and the gap is worth knowing: duplicating a tab, and
+// restoring one after a crash, both COPY sessionStorage. Two genuinely separate
+// pages then share an identity, and the server treats the second as the first
+// reconnecting -- so the first is displaced. That is why being displaced by our
+// own identity is reported rather than swallowed.
+var hdw4sClientId = (function () {
+    var key = 'hdw4s-client-id';
+    var id = null;
+    try { id = window.sessionStorage.getItem(key); } catch (e) { id = null; }
+    if (!id) {
+        id = (window.crypto && window.crypto.randomUUID)
+            ? window.crypto.randomUUID()
+            : 'c' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        try { window.sessionStorage.setItem(key, id); } catch (e) { /* per-load */ }
+    }
+    return id;
+})();
+signalling.client_id = hdw4sClientId;
+audio_signalling.client_id = hdw4sClientId;
+'''),
+
+("do not cascade while held elsewhere", '''
+signalling.ondisconnect = () => {
+    var checkconnect = app.status == 'checkconnect';
+''', '''
+signalling.ondisconnect = () => {
+    // HDW4S takeover: a channel parked on the hand-over screen must not drag
+    // its sibling into a reconnect.
+    if (app.status === 'busy') return;
+    var checkconnect = app.status == 'checkconnect';
+'''),
+
+("do not cascade while held elsewhere (audio)", '''
+audio_signalling.ondisconnect = () => {
+    var checkconnect = app.status == 'checkconnect';
+''', '''
+audio_signalling.ondisconnect = () => {
+    // HDW4S takeover: see above.
+    if (app.status === 'busy') return;
+    var checkconnect = app.status == 'checkconnect';
+'''),
+
+("the hand-over screen", '''// Send webrtc status and error messages to logs.
+webrtc.onstatus = (message) => { app.logEntries.push(applyTimestamp("[webrtc] " + message)) };
+''', '''// --- HDW4S takeover -------------------------------------------------------
+// One client holds the session at a time, because the peer ids are fixed.
+// Three situations reach the same screen and the same button:
+//
+//   4001  another device holds it -- ask before taking it
+//   4002  we were taken over -- do not come back on our own
+//   4003  displaced by a page sharing our identity (a duplicated tab)
+//
+// None of them retries. There is nothing to wait out: the server can already
+// tell our own reconnect from a stranger by the identity we send, so a client
+// that arrives here is genuinely looking at another device, and the only thing
+// that should move the session is somebody deciding to.
+var reconnectBoth = (takeover) => {
+    // Tear down before reconnecting. connect() replaces the peer connection
+    // without closing it, so without this each hand-over leaks one per channel
+    // and leaves old handlers bound.
+    [webrtc, audio_webrtc].forEach((w) => {
+        try {
+            if (w._send_channel !== null && w._send_channel.readyState === "open") {
+                w._send_channel.close();
+            }
+        } catch (e) { /* nothing to close */ }
+        try { if (w.peerConnection !== null) w.peerConnection.close(); } catch (e) { }
+    });
+    signalling.takeover = takeover;
+    audio_signalling.takeover = takeover;
+    app.takenOver = false;
+    app.handoverReason = 0;
+    app.status = 'connecting';
+    app.loadingText = takeover ? "Taking over the session." : "Connecting to server.";
+    webrtc.connect();
+    audio_webrtc.connect();
+};
+
+var onBusy = (code) => {
+    // The two channels are refused a few hundred milliseconds apart, so the
+    // second refusal can land after the user has already clicked. That race is
+    // handled where it belongs, in _onServerClose: a close arriving on a socket
+    // we have already replaced is ignored, and clicking replaces both. Guarding
+    // on app.status here as well looked equivalent and was not -- 'connecting'
+    // is also the model's initial value, so it swallowed the very first
+    // refusal and the screen never appeared at all.
+    app.handoverReason = code;
+    app.takenOver = (code === 4002 || code === 4003);
+    app.status = 'busy';
+    app.loadingText = "";
+};
+
+signalling.onbusy = onBusy;
+audio_signalling.onbusy = onBusy;
+
+// Send webrtc status and error messages to logs.
+webrtc.onstatus = (message) => { app.logEntries.push(applyTimestamp("[webrtc] " + message)) };
+'''),
+]
+
+# The media connection notices the eviction seconds later and assigns app.status
+# unconditionally, so without this the hand-over screen is overwritten by
+# "Connection failed" within half a minute -- destroying the only way back, and
+# with it the whole point of a symmetric button.
+APP.append((
+    "keep the hand-over screen when the media notices the eviction",
+    """webrtc.onconnectionstatechange = (state) => {
+    videoConnected = state;
+""",
+    """webrtc.onconnectionstatechange = (state) => {
+    // HDW4S takeover: the session is gone on purpose. Reporting the media
+    // dying would replace the hand-over screen with a dead end.
+    if (app.status === 'busy') { videoConnected = state; return; }
+    videoConnected = state;
+"""))
+
+APP.append((
+    "keep the hand-over screen when the media notices (audio)",
+    """audio_webrtc.onconnectionstatechange = (state) => {
+    audioConnected = state;
+""",
+    """audio_webrtc.onconnectionstatechange = (state) => {
+    // HDW4S takeover: see above.
+    if (app.status === 'busy') { audioConnected = state; return; }
+    audioConnected = state;
+"""))
+
+
+# ------------------------------------------------------------------ index.html
+
+HTML = [
+("the hand-over screen", '''        <div v-if="status === 'failed'">
+          <v-btn v-on:click="location.reload()" color="#E0E0E0">
+            reload</v-btn>
+          <div class="loading-text">Connection failed.</div>
+        </div>
+''', '''        <div v-if="status === 'failed'">
+          <v-btn v-on:click="location.reload()" color="#E0E0E0">
+            reload</v-btn>
+          <div class="loading-text">Connection failed.</div>
+        </div>
+        <!-- HDW4S takeover: one screen for every side of the hand-over, so the
+             device that lost the session is offered the same way back. -->
+        <div v-else-if="status === 'busy'" role="alert" aria-live="assertive">
+          <v-btn v-on:click="takeOver()" color="#E0E0E0">
+            take over</v-btn>
+          <div class="loading-text">
+            {{ handoverReason === 4003
+                 ? 'This desktop was opened in another window of this browser.'
+                 : (handoverReason === 4002
+                     ? 'This desktop was taken over by another device.'
+                     : 'This desktop is already open on another device.') }}
+          </div>
+          <div class="loading-text">
+            Taking it over will disconnect the other one.
+          </div>
+        </div>
+'''),
+]
+
+FILES = [("signalling.js", SIG), ("app.js", APP), ("index.html", HTML)]
+
+
+# ------------------------------------------------------- cache invalidation
+
+TS_RE = re.compile(r"\?ts=([0-9]+)(?:-hdw4s[0-9]+)?")
+CACHEVER_RE = re.compile(r'(cacheVersion\s*=\s*")([0-9]+)(?:-hdw4s[0-9]+)?(")')
+
+
+def _suffix(m, groups):
+    """Rewrite a frozen build token so caches treat the patched files as new."""
+    if groups == "ts":
+        return "?ts=%s-hdw4s%d" % (m.group(1), PATCH_REVISION)
+    return "%s%s-hdw4s%d%s" % (m.group(1), m.group(2), PATCH_REVISION, m.group(3))
+
+
+def retoken(src, name):
+    if name == "sw.js":
+        src = CACHEVER_RE.sub(lambda m: _suffix(m, "ver"), src)
+    return TS_RE.sub(lambda m: _suffix(m, "ts"), src)
+
+
+def _has_token(src, name):
+    """Is there anything here we recognise as a build token?"""
+    if TS_RE.search(src):
+        return True
+    return name == "sw.js" and CACHEVER_RE.search(src) is not None
+
+
+def _needs_retoken(src, name):
+    """Does this file still carry a build token we have not stamped?
+
+    A file with no recognisable token at all is not "already stamped" -- it is a
+    file we no longer understand, and saying otherwise would report the cache
+    bust as done while it had silently done nothing. That is the one drift in
+    this patcher that would not announce itself, so it returns True and lets the
+    caller treat it as a mismatch.
+    """
+    want = "-hdw4s%d" % PATCH_REVISION
+    found = 0
+    for m in TS_RE.finditer(src):
+        found += 1
+        if not m.group(0).endswith(want):
+            return True
+    if name == "sw.js":
+        for m in CACHEVER_RE.finditer(src):
+            found += 1
+            if not m.group(0).rstrip('"').endswith(want):
+                return True
+    # A file with no token at all is caught by _has_token before reaching here.
+    return False
+
+
+# ------------------------------------------------------------------ driving
+
+# app.js is here because line 27 registers the service worker by URL, and a
+# worker is only re-fetched when its registration URL changes. Miss this and an
+# installed app keeps the old worker, and with it the old cached scripts,
+# indefinitely.
+TOKEN_FILES = ("index.html", "sw.js", "app.js")
+BACKUP_SUFFIX = ".pre-handover"
+
+
+def _state_of(root, name, edits):
+    path = os.path.join(root, name)
+    if not os.path.isfile(path):
+        return "missing", None
+    src = _read(path)
+    if name in TOKEN_FILES and not _has_token(src, name):
+        # Nothing here looks like a build token any more. Re-tokening would do
+        # nothing and report success, which would leave the cache bust silently
+        # undone -- and the cache bust is the difference between this patch
+        # landing on disk and reaching a browser at all.
+        return "mismatch", src
+    if edits is None:
+        # A file we only re-token (sw.js): there is no marker to look for, so
+        # the token itself is the evidence.
+        return ("patched" if not _needs_retoken(src, name) else "applicable"), src
+    if MARKER in src:
+        return ("patched" if not _needs_retoken(src, name) else "applicable"), src
+    if any(src.count(old) != 1 for _, old, _ in edits):
+        return "mismatch", src
+    return "applicable", src
+
+
+def analyse(root):
+    """One verdict for the whole client.
+
+    'partial' matters: a tree where one file is patched and another is not is
+    not merely unfinished, it is worse than either end state -- a patched
+    signalling.js against a stock app.js leaves onbusy unset, so a refusal
+    returns without reconnecting and the page hangs with no UI at all.
+    """
+    seen = {}
+    for name, edits in FILES:
+        seen[name] = _state_of(root, name, edits)[0]
+    for name in TOKEN_FILES:
+        if name not in seen:
+            seen[name] = _state_of(root, name, None)[0]
+    values = set(seen.values())
+    if "missing" in values or "mismatch" in values:
+        return "mismatch", seen
+    if values == {"patched"}:
+        return "patched", seen
+    if "patched" in values:
+        return "partial", seen
+    return "applicable", seen
+
+
+def _read(path):
+    """Always UTF-8. The client files carry non-ASCII, and relying on the
+    locale means the updater's own LC_ALL=C decides whether they survive."""
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _write_atomic(path, text):
+    """Write via a temporary file and rename, so an interrupted run never
+    leaves a half-written webroot that the next run would mark as patched."""
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".hdw4s-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except Exception:
+        try: os.unlink(tmp)
+        except OSError: pass
+        raise
+
+
+def _validate(name, text, original):
+    """Cheap integrity floor, before anything is written.
+
+    Pattern presence is not integrity: a truncated file can still hold one copy
+    of each anchor, and the next run would then see its marker and call it
+    patched forever.
+
+    Two properties, both relative to the text we started from. Size, because
+    every edit here adds; and bracket balance for JavaScript, because an
+    unbalanced brace is the mistake a hand-written fragment actually makes.
+    Balance is checked as a *change* rather than as an absolute: a minified or
+    differently-quoted file can be unbalanced by literal braces inside strings,
+    and demanding balance outright would refuse to patch it at all. An HTML
+    clause was tried and dropped -- counting tags caught none of 99 truncations,
+    which is worse than no check because it reads like one.
+    """
+    if len(text) < len(original) * 0.9:
+        return False
+    if name.endswith(".js"):
+        for opener, closer in (("{", "}"), ("(", ")"), ("[", "]")):
+            if (text.count(opener) - text.count(closer)
+                    != original.count(opener) - original.count(closer)):
+                return False
+    return True
+
+
+def patch(root):
+    """Build every file first, then swap them in. Nothing is written until all
+    of them are ready, so an error part way through leaves the tree alone."""
+    staged = {}
+    originals = {}
+    for name, edits in FILES:
+        path = os.path.join(root, name)
+        src = _read(path)
+        originals[name] = src
+        if MARKER not in src:
+            for _, old, new in edits:
+                src = src.replace(old, new)
+        staged[name] = src
+    for name in TOKEN_FILES:
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        src = staged.get(name)
+        if src is None:
+            src = _read(path)
+        originals.setdefault(name, src)
+        staged[name] = retoken(src, name)
+
+    for name, text in staged.items():
+        if not _validate(name, text, originals[name]):
+            print("  refusing to write %s: failed a sanity check" % name)
+            return 1
+
+    for name, text in staged.items():
+        path = os.path.join(root, name)
+        backup = path + BACKUP_SUFFIX
+        if not os.path.exists(backup):
+            shutil.copyfile(path, backup)
+        _write_atomic(path, text)
+        print("  patched %s" % name)
+    return 0
+
+
+def revert(root):
+    """Put back what was there before, and leave nothing behind.
+
+    The backups are removed as they are used: they sit inside a directory that
+    is served to browsers, and a revert that leaves four copies of the client
+    lying there has not put the tree back, however identical the files it did
+    restore.
+    """
+    restored = 0
+    for name in set([n for n, _ in FILES] + list(TOKEN_FILES)):
+        path = os.path.join(root, name)
+        backup = path + BACKUP_SUFFIX
+        if os.path.isfile(backup):
+            shutil.copyfile(backup, path)
+            os.unlink(backup)
+            restored += 1
+            print("  restored %s" % name)
+    if not restored:
+        print("  nothing to revert: no saved originals")
+        return 1
+    return 0
+
+
+USAGE = """usage: hdw4s-patch-client [--check|--revert] WEBROOT
+
+  (no flag)  apply the session hand-over patch, if it applies cleanly
+  --check    print patched / applicable / partial / mismatch and say no more
+  --revert   restore the files saved before the patch was applied
+"""
+
+KNOWN_FLAGS = ("--check", "--revert")
+
+
+def main(argv):
+    # An unknown flag must not fall through to patching. This program's whole
+    # job is not touching things it should not, and a typo'd --chek reaching
+    # the apply path is the opposite of that.
+    unknown = [a for a in argv if a.startswith("--") and a not in KNOWN_FLAGS]
+    paths = [a for a in argv if not a.startswith("--")]
+    if unknown or len(paths) != 1:
+        if unknown:
+            print("unrecognised option: %s" % " ".join(unknown))
+        sys.stdout.write(USAGE)
+        return 2
+    root = paths[0]
+    if not os.path.isdir(root):
+        print("no such webroot: %s" % root)
+        return 2
+    state, detail = analyse(root)
+    if "--check" in argv:
+        print(state)
+        for name in sorted(detail):
+            print("  %-16s %s" % (name, detail[name]))
+        return 0 if state in ("patched", "applicable") else 1
+    if "--revert" in argv:
+        return revert(root)
+    if state == "mismatch":
+        print("  skipping: client source does not match")
+        return 0
+    if state == "patched":
+        print("  already patched; nothing to do")
+        return 0
+    return patch(root)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -183,7 +183,23 @@ export SELKIES_TURN_REST_URI=''
 # An empty value never exists, so the override can never be taken.
 export SELKIES_RTC_CONFIG_JSON=''
 
-/opt/selkies/bin/selkies-gstreamer \
+# Started through a wrapper of ours where one is installed. It adds the ability
+# to hand a session to another device -- the peer ids the browser uses are
+# fixed, so a second client can never register, and without this it retries
+# into that refusal several times a second for as long as the tab is open.
+#
+# The wrapper is a subclass and one rebinding: it changes nothing upstream
+# ships, stands down on its own if upstream has adopted the behaviour or has
+# moved far enough that it no longer recognises it, and falls back here to the
+# stock entry point if it is not installed at all. So the session still starts
+# whatever happens to it.
+stream_env=()
+stream=(/opt/selkies/bin/selkies-gstreamer)
+if [ -r /usr/lib/hdw4s/hdw4s_signalling.py ]; then
+  stream_env=(env "PYTHONPATH=/usr/lib/hdw4s${PYTHONPATH:+:${PYTHONPATH}}")
+  stream=(/opt/selkies/bin/python -m hdw4s_signalling)
+fi
+"${stream_env[@]}" "${stream[@]}" \
   --addr="${HDW4S_ADDR}" \
   --port="${HDW4S_PORT}" \
   "${auth}" \

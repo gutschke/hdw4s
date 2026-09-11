@@ -387,6 +387,14 @@ Two things follow, and both matter:
   * The proxy must be the only path. Terminate TLS there, authenticate there,
     and do not expose a session port by any other route.
 
+Session hand-over sharpens the second point. A desktop can be claimed by one
+client at a time, and a client that asks to take it over is given it -- the
+identity a client presents is its own claim, not something the session checks.
+So where an unauthenticated reach at a session port used to mean a connection
+that was refused, it now means one that can take a running desktop away from
+the person using it. The remedy is the same as it has always been, and it is
+why `HDW4S_PROXIES` exists; this only raises what is lost by getting it wrong.
+
 The package owns one nftables table, `inet hdw4s`. It restricts and does not
 grant. A drop in this table overrides any other table's accept, so the port
 block can be closed reliably. An accept in it is only advisory: if another

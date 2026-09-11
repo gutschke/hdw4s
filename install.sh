@@ -18,6 +18,7 @@ trap 'rc="$?"
 
 src="$(cd "$(dirname "$0")" && pwd)"
 SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait}
+         hdw4s-patch-client hdw4s_signalling.py
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-firewall.service
@@ -173,7 +174,10 @@ if [ "${src}" != "${dst}" ]; then
   cp -f "${src}"/wrappers/* "${dst}/wrappers/"
 fi
 chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
+           "${dst}"/hdw4s-patch-client \
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*
+# Imported, not executed.
+chmod 0644 "${dst}"/hdw4s_signalling.py
 chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
            "${dst}"/*.conf "${dst}"/hdw4s.8*
 
