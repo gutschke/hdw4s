@@ -63,9 +63,12 @@ so the only way to stop the conflict is to stop sharing them.
 * **Seamless in the browser.** No login screen and no connect dialog -- the
   proxy in front has already identified the user. The desktop follows the
   browser window, and audio comes with it.
-* **Ordinary reverse proxying.** One TCP port per session, plain HTTP and
-  WebSocket, no UDP and no second channel. The proxy can live on another
-  machine.
+* **Ordinary reverse proxying.** One TCP port per session, carrying plain HTTP
+  and a WebSocket. That is the whole path: there is no second channel to route,
+  and in the default configuration nothing has to open a UDP path to the host,
+  so the proxy can live on another machine and needs to understand nothing
+  beyond HTTP. (A browser that reaches a session with no proxy in between does
+  need one; that is what `HDW4S_MEDIA_PORTS=direct` is for.)
 * **Move between devices without losing the desktop.** A session belongs to one
   browser at a time. Open it somewhere else and that window is told the desktop
   is already in use, with a button to take it over; the device that had it is

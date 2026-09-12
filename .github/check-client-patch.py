@@ -106,6 +106,37 @@ def parsed(patcher, webroot):
     return problems
 
 
+def prepared(webroot):
+    """A copy of the client in the state the patch is actually applied to.
+
+    The updater repairs an upstream defect before it patches: the client
+    compares against a bare identifier, `app.status == checkconnect`, which is
+    hoisted and undefined, and the updater quotes it. The hand-over patch is
+    written against the repaired text, because that is the only text it ever
+    sees on a running machine.
+
+    Checking against the pristine tarball therefore reported that the patch no
+    longer matched the client, about a patch that applies cleanly everywhere it
+    is used. Reproduce the repair here so the check tests the tree the patch is
+    applied to, and say so when there was nothing to repair -- if upstream ever
+    quotes it themselves, the substitution stops firing and this check must not
+    quietly keep passing on the strength of a rewrite that did nothing.
+    """
+    tmp = tempfile.mkdtemp(prefix="hdw4s-client-")
+    dest = os.path.join(tmp, "gst-web")
+    shutil.copytree(webroot, dest)
+    appjs = os.path.join(dest, "app.js")
+    repaired = False
+    if os.path.isfile(appjs):
+        text = open(appjs).read()
+        fixed = text.replace("app.status == checkconnect;",
+                             "app.status == 'checkconnect';")
+        if fixed != text:
+            open(appjs, "w").write(fixed)
+            repaired = True
+    return tmp, dest, repaired
+
+
 def main():
     patcher = load_patcher()
     problems = balanced(patcher)
@@ -113,15 +144,23 @@ def main():
 
     webroot = os.environ.get("HDW4S_GST_WEB", "/opt/gst-web")
     have_node = shutil.which("node") is not None
+    tmp = None
     if os.path.isdir(webroot) and have_node:
-        state, _ = patcher.analyse(webroot)
+        tmp, prep, repaired = prepared(webroot)
+        state, _ = patcher.analyse(prep)
         if state == "applicable":
-            mode = "full parse against %s" % webroot
-            problems += parsed(patcher, webroot)
+            mode = "full parse against %s%s" % (
+                webroot, "" if repaired else " (unrepaired)")
+            problems += parsed(patcher, prep)
         elif state == "mismatch":
             # The one answer worth failing on: the client this patch is written
             # against has changed, so it would silently install nothing.
             problems.append("%s no longer matches what the patch expects" % webroot)
+            if not repaired:
+                problems.append(
+                    "  and the reconnect-loop repair found nothing to change, "
+                    "so the patch may simply be anchored to text upstream has "
+                    "since altered")
         else:
             mode += " (%s is %s, not a stock client)" % (webroot, state)
     elif not have_node:
@@ -129,6 +168,8 @@ def main():
     else:
         mode += " (no client at %s)" % webroot
 
+    if tmp is not None:
+        shutil.rmtree(tmp, ignore_errors=True)
     print("mode: %s" % mode)
     for p in problems:
         print("  %s" % p)
