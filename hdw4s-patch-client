@@ -460,6 +460,13 @@ def _needs_retoken(src, name):
 TOKEN_FILES = ("index.html", "sw.js", "app.js")
 BACKUP_SUFFIX = ".pre-handover"
 
+# Written by --revert, and honoured by the updater. Without it a rollback lasts
+# until the updater next runs, which is at most a day: the files go back, the
+# tree reads as applicable again, and the patch is re-applied. Somebody reverting
+# at two in the morning would find it back by breakfast with nothing to say why.
+# Kept outside the webroot because the webroot is replaced wholesale on upgrade.
+DISABLE_MARKER = os.environ.get("HDW4S_HANDOVER_OFF", "/etc/hdw4s/handover.off")
+
 
 def _state_of(root, name, edits):
     path = os.path.join(root, name)
@@ -686,6 +693,12 @@ def patch(root):
     for name, text in staged.items():
         _write_atomic(os.path.join(root, name), text)
         print("  patched %s" % name)
+    # Applying deliberately overrides an earlier rollback; leaving the marker
+    # would say hand-over is off while it is plainly on.
+    try:
+        os.unlink(DISABLE_MARKER)
+    except OSError:
+        pass
     return 0
 
 
@@ -730,6 +743,18 @@ def revert(root):
     if not restored:
         print("  nothing to revert: no saved originals")
         return 1
+    try:
+        os.makedirs(os.path.dirname(DISABLE_MARKER), exist_ok=True)
+        with open(DISABLE_MARKER, "w", encoding="utf-8") as fh:
+            fh.write("Session hand-over was rolled back by hdw4s-patch-client.\n"
+                     "Delete this file to let the updater apply it again.\n")
+        print("  session hand-over will stay off; delete %s to allow it again"
+              % DISABLE_MARKER)
+    except OSError as exc:
+        print("  WARNING: could not record that this was rolled back (%s)." % exc)
+        print("  The updater will apply it again within a day unless %s exists."
+              % DISABLE_MARKER)
+        return 1
     return 0
 
 
@@ -764,6 +789,15 @@ def main(argv):
     if not os.path.isdir(root):
         print("no such webroot: %s" % root)
         return 2
+    if os.path.exists(DISABLE_MARKER) and "--revert" not in argv:
+        # Reported through --check as well, so the updater sees it the same way
+        # a person does.
+        print("disabled")
+        if "--check" in argv:
+            return 0
+        print("  session hand-over was rolled back; delete %s to allow it again"
+              % DISABLE_MARKER)
+        return 0
     state, detail = analyse(root)
     if "--check" in argv:
         print(state)

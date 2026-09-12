@@ -113,6 +113,10 @@ def main():
         if state == "applicable":
             mode = "full parse against %s" % webroot
             problems += parsed(patcher, webroot)
+        elif state == "mismatch":
+            # The one answer worth failing on: the client this patch is written
+            # against has changed, so it would silently install nothing.
+            problems.append("%s no longer matches what the patch expects" % webroot)
         else:
             mode += " (%s is %s, not a stock client)" % (webroot, state)
     elif not have_node:

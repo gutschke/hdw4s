@@ -560,6 +560,9 @@ if [ -x "${patcher}" ] && [ -d "${WEBROOT}" ]; then
       fi ;;
     '')
       echo ' skipped: could not read the client state.' >&2 ;;
+    disabled)
+      echo ' not applied: it was rolled back. Delete /etc/hdw4s/handover.off'
+      echo '  to allow it again.' ;;
     *)
       echo " skipped: the client no longer matches (${state:-unknown})." ;;
   esac

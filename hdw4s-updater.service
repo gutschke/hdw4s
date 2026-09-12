@@ -5,6 +5,15 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# A child that never returns -- a stalled download, a patcher waiting on a lock
+# -- would otherwise hold this unit active for ever, and Persistent=yes on the
+# timer will not re-trigger a unit that is still running. The updater would stop
+# happening, silently, with nothing in its own log to say so.
+#
+# TimeoutStartSec rather than RuntimeMaxSec: for a oneshot service the whole of
+# its life is its start job, and RuntimeMaxSec is ignored there. Generous enough
+# that a slow download on a slow link is not cut short.
+TimeoutStartSec=30min
 ExecStart=/usr/lib/hdw4s/hdw4s-update
 # The script downloads into its own mktemp directory, but a private /tmp means
 # a crashed run cannot leave anything behind for the next one to trip over.

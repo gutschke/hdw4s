@@ -32,7 +32,7 @@ import time
 logger = logging.getLogger("hdw4s.signalling")
 
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-9"
+BUILD = "handover-10"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -91,6 +91,14 @@ TAKEOVER_MIN_INTERVAL = 2.0
 # cached client loops several times a second and a healthy session already
 # emits tens of thousands of lines a day.
 REFUSAL_SUMMARY_INTERVAL = 60.0
+
+# How often to look again at whether the served client can ask for a hand-over.
+# The answer is taken once at startup to decide whether to install at all, and
+# that decision cannot be revisited without restarting -- but the webroot can
+# change underneath a running session, in both directions, and an operator who
+# has just rolled the client back has no way to tell from the server that the
+# two halves no longer agree. Looking again costs two small reads.
+CLIENT_RECHECK_INTERVAL = 60.0
 
 # sha256 of the upstream method bodies this subclass was written against. Used
 # to tell "upstream moved" from "upstream is what we expect".
@@ -198,6 +206,8 @@ class HandoverMixin:
         # an unreferenced task can be collected before it has run. Keeping them
         # here until they finish is free and removes the hazard.
         self._evictions = set()
+        self._client_ok = None
+        self._client_checked = 0.0
 
     # -- helpers ---------------------------------------------------------
 
@@ -213,6 +223,31 @@ class HandoverMixin:
     def _wants_takeover(meta):
         return bool(isinstance(meta, dict) and meta.get("takeover"))
 
+    def _client_can_ask(self):
+        """Can the client being served still ask for a hand-over?
+
+        Cached briefly, because it is asked on a path a misbehaving client can
+        drive several times a second.
+        """
+        now = time.monotonic()
+        if self._client_ok is None or now - self._client_checked > CLIENT_RECHECK_INTERVAL:
+            ok = client_supports_handover()
+            if self._client_ok is not None and ok != self._client_ok:
+                if ok:
+                    logger.warning(
+                        "the client in %s now supports session hand-over; "
+                        "sessions started before it was updated are still "
+                        "serving the old behaviour and need restarting", WEBROOT)
+                else:
+                    logger.warning(
+                        "the client in %s no longer supports session hand-over, "
+                        "so a second device is being refused in a way it cannot "
+                        "recognise and will retry. Restart this session, or put "
+                        "the patched client back", WEBROOT)
+            self._client_ok = ok
+            self._client_checked = now
+        return self._client_ok
+
     def _note_refusal(self, uid, raddr, incoming):
         """Log the first refusal per peer, then one summary a minute.
 
@@ -227,8 +262,10 @@ class HandoverMixin:
         if last is None or now - last >= REFUSAL_SUMMARY_INTERVAL:
             logger.warning(
                 "Refusing peer %r from %r: session in use "
-                "(client_identified=%s, refusals=%d since last report)",
-                uid, raddr, incoming is not None, self._refusal_count[uid])
+                "(client_identified=%s, client_can_ask=%s, "
+                "refusals=%d since last report)",
+                uid, raddr, incoming is not None, self._client_can_ask(),
+                self._refusal_count[uid])
             self._refusal_logged_at[uid] = now
             self._refusal_count[uid] = 0
 

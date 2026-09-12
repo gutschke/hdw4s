@@ -171,16 +171,30 @@ fi
 
 # Two Python programs ship in this package and neither was compiled by
 # anything here.
+# A missing file used to be skipped here and then reported as parsing, so
+# deleting the server module outright was a passing run.
 pyfail=''
-for f in hdw4s_signalling.py hdw4s-patch-client .github/check-client-patch.py; do
-  [ -e "${f}" ] || continue
-  python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "${f}" 2>/dev/null ||
+for f in hdw4s_signalling.py hdw4s-patch-client .github/check-client-patch.py \
+         .github/test-handover.py; do
+  if [ ! -e "${f}" ]; then
+    pyfail="${pyfail} ${f}(missing)"
+  elif ! python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "${f}" 2>/dev/null; then
     pyfail="${pyfail} ${f}"
+  fi
 done
 if [ -z "${pyfail}" ]; then
   note 'python syntax' 'parses'
 else
   bad 'python syntax' "does not parse:${pyfail}"
+fi
+
+# Properties the feature would lose if a piece of it were removed or renamed.
+# Everything here runs with nothing installed.
+if out="$(python3 "$(dirname "$0")/test-handover.py" 2>&1)"; then
+  note 'session hand-over' "$(printf '%s' "${out}" | tail -1 | sed 's/^ *//')"
+else
+  printf '%s\n' "${out}" | grep FAIL | head -6
+  bad 'session hand-over' 'a property it relies on is gone'
 fi
 
 echo
