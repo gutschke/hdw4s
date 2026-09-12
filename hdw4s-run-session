@@ -263,6 +263,13 @@ lockdown=(
                                       # appears
   --webrtc-ice-lite='true|locked'     # and nothing to hand out if one ever did
   --file-transfers=none               # no upload, no download, no file manager
+  # ...and nowhere for them to land. This is not a second switch for the same
+  # thing: the directory is created when the module is imported, before any
+  # flag is consulted, so --file-transfers=none refuses the transfers but still
+  # leaves a "Desktop" folder in the account's home -- on a shared home, on
+  # every machine, for a feature that is off. Pointing it at the runtime
+  # directory puts it somewhere that disappears when the session stops.
+  --file-manager-path="${XDG_RUNTIME_DIR}/hdw4s-files"
   --enable-binary-clipboard='false|locked'
   --microphone-enabled='false|locked'
   --webcam-enabled='false|locked'

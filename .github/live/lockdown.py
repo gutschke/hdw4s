@@ -2,6 +2,7 @@
 """Prove the session's feature lockdown is still in force, against a live one.
 
   .github/live/lockdown.py [http://host:port] [--unit hdw4s@INSTANCE]
+                           [--home DIR]
 
 The package hands a browser a desktop that is already logged in as a real
 account. Everything the streaming server offers beyond pixels, sound and input
@@ -129,6 +130,27 @@ def check_refusals(base):
             bad(f"GET {path}", f"expected {expect}, got {code}")
 
 
+def check_home(home):
+    """No feature that is switched off may still leave something in the home.
+
+    The upload directory is made when the module is imported, before any flag
+    is read, so `--file-transfers=none` refuses the transfers and creates the
+    folder anyway. There is no settings entry to assert on -- the path is one
+    of the ones the server never publishes -- so this looks at the home.
+    """
+    if not home:
+        print("  skip ~/Desktop (pass --home DIR: the session's own home, "
+              "which is not this script's)")
+        return
+    import os.path
+    target = os.path.join(home, "Desktop")
+    if os.path.exists(target):
+        bad("~/Desktop", f"{target} exists: the upload directory is still "
+                         "pointed at the account's home")
+    else:
+        ok("no upload directory in the home")
+
+
 def check_defeat(base, unit):
     """Try to turn a control back on the way a connected page could.
 
@@ -186,10 +208,16 @@ def check_defeat(base, unit):
 def main():
     argv = sys.argv[1:]
     unit = None
-    if "--unit" in argv:
-        i = argv.index("--unit")
-        unit = argv[i + 1]
-        del argv[i:i + 2]
+    home = None
+    for flag in ("--unit", "--home"):
+        if flag in argv:
+            i = argv.index(flag)
+            value = argv[i + 1]
+            del argv[i:i + 2]
+            if flag == "--unit":
+                unit = value
+            else:
+                home = value
     base = argv[0] if argv else "http://127.0.0.1:7303"
     print(f"lockdown: {base}")
     try:
@@ -199,6 +227,7 @@ def main():
         settings = {}
     check_refusals(base)
     check_defeat(base, unit)
+    check_home(home)
 
     # Not an assertion: a setting the server never heard of is already caught
     # above by "overridden". This only names the likely cause when it happens.
