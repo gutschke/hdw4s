@@ -56,6 +56,23 @@ if [ "$1" = 'configure' ]; then
     fi
   fi
 
+  # A compiled copy of a module that no longer exists.
+  #
+  # Versions before the 2.0 port shipped hdw4s_signalling.py into this
+  # directory, and running it left __pycache__/hdw4s_signalling.cpython-3*.pyc
+  # beside it. dpkg removes the .py it owns on upgrade and knows nothing about
+  # the .pyc, so the stale bytecode stays -- in the package's own directory,
+  # with no owner, for ever. Nothing imports it today, which is exactly why it
+  # would go unnoticed until somebody asked whether the installed tree is what
+  # was shipped and could not answer.
+  #
+  # The whole directory goes, not one file: this package ships no Python into
+  # /usr/lib/hdw4s and never has, so anything CPython wrote there is a
+  # by-product of a module that has since been deleted.
+  if [ -n "$2" ] && [ -d /usr/lib/hdw4s/__pycache__ ]; then
+    rm -rf /usr/lib/hdw4s/__pycache__
+  fi
+
   # Fetching Selkies, which cannot be done from here.
   #
   # It used to be: the updater built a virtualenv and ran pip, and a maintainer

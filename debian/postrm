@@ -4,6 +4,13 @@ set -e
 # The port reservation is ours and is meaningless once the package is gone, so
 # it goes on plain remove rather than waiting for a purge that may never come.
 if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
+  # Bytecode left by a module an older version shipped here. dpkg has removed
+  # its own files by the time this runs, so without this the directory survives
+  # the removal and keeps /usr/lib/hdw4s alive around it. See the longer note
+  # in postinst.
+  rm -rf /usr/lib/hdw4s/__pycache__
+  rmdir --ignore-fail-on-non-empty /usr/lib/hdw4s 2>/dev/null || true
+
   if [ -e /etc/sysctl.d/60-hdw4s.conf ]; then
     rm -f /etc/sysctl.d/60-hdw4s.conf
     sysctl -q --system 2>/dev/null || :

@@ -6,7 +6,8 @@ set -o pipefail
 # shellcheck disable=SC2154  # rc is assigned inside the trap itself
 trap 'rc="$?"
       trap "" INT TERM QUIT HUP EXIT ERR
-      [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
+      [ "${rc}" -eq 0 ] || [ -n "${refused:-}" ] ||
+        echo "Script ${0} failed unexpectedly" >&2
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
 # Upstream moved from "selkies-gstreamer" to "selkies" and the old API path now
@@ -81,14 +82,29 @@ if [ -r /etc/hdw4s/hdw4s.conf ]; then
     echo 'hdw4s: /etc/hdw4s/hdw4s.conf has a syntax error (above); refusing' >&2
     echo '  to run on a configuration that would be applied only as far as' >&2
     echo '  the error. Edit it by hand.' >&2
-    exit 1
+    die
   }
   . /etc/hdw4s/hdw4s.conf || :
 fi
 
+# Every non-zero exit below is a decision: a configuration that cannot be
+# satisfied, a hash that did not match, a package state this must not build on.
+# The trap above exists for the other kind -- a command that failed where
+# nothing anticipated it -- and "Script ... failed unexpectedly" printed after a
+# message that carefully explained the problem sends the reader looking for a
+# second fault that is not there. Worse, a refusal that reaches the trap looks
+# identical in the journal to a crash, and the two want different responses.
+#
+# The status stays 1. A pin that can never be satisfied, or a dpkg state nobody
+# has repaired, is a condition that will not fix itself overnight, and a timer
+# that quietly exits 0 on it is how a machine stops updating without anyone
+# noticing. The unit is meant to show as failed; it is meant to say why.
+refused=''
+die() { refused='yes'; exit 1; }
+
 [ "$(id -u)" -eq 0 ] || {
   echo 'This script must be run as "root"' >&2
-  exit 1
+  die
 }
 
 # Held for the whole run, including the download. Non-blocking: the timer fires
@@ -106,7 +122,8 @@ workdir="$(mktemp -d -t hdw4s-update.XXXXXXXX)"
 trap 'rc="$?"
       trap "" INT TERM QUIT HUP EXIT ERR
       rm -rf "${workdir}"
-      [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
+      [ "${rc}" -eq 0 ] || [ -n "${refused:-}" ] ||
+        echo "Script ${0} failed unexpectedly" >&2
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
 # --- VERSION STRINGS --------------------------------------------------------
@@ -207,12 +224,20 @@ asset_for_platform() {
     debian) platform="${VERSION_CODENAME:-}" ;;
   esac
   [ -n "${platform}" ] || return 0
-  tr -d ' \t\n' < "${release}" |
-    sed 's/.*"assets":\[//' |
-    grep -o '"name":"[^"]*"' |
-    sed 's/^"name":"//; s/"$//' |
-    grep -E "^selkies_.*\.${platform}_${arch}\.deb\$" |
-    head -n1
+  # "|| :" around the whole pipeline, not decoration. A release that publishes
+  # no package for this platform is an ordinary answer to an ordinary question,
+  # and the caller below is written to handle it -- but grep exits 1 on no
+  # match, pipefail turns that into a failed pipeline, and a failed command
+  # substitution under errexit ends the script through the ERR trap before the
+  # caller is ever reached. A pin to 1.6.2, which predates upstream's
+  # distribution packages, did exactly that: "Script ... failed unexpectedly"
+  # and a timer in permanent failure, with none of the explanation below shown.
+  { tr -d ' \t\n' < "${release}" |
+      sed 's/.*"assets":\[//' |
+      grep -o '"name":"[^"]*"' |
+      sed 's/^"name":"//; s/"$//' |
+      grep -E "^selkies_.*\.${platform}_${arch}\.deb\$" |
+      head -n1; } || :
 }
 
 # Fetch one release document. "latest" or a tag; empty output is the caller's
@@ -527,7 +552,7 @@ if ! wait_for_dpkg; then
   exit 0
 fi
 
-preflight || exit 1
+preflight || die
 
 status="$(pkg_status "${PKG}")"
 current=''
@@ -535,14 +560,21 @@ current=''
   current="$(version_from_package "$(pkg_version "${PKG}")")"
 
 release="${workdir}/release.json"
+pinned=''
 if [ -n "${SELKIES_VERSION:-}" ]; then
   wanted="$(version_from_tag "${SELKIES_VERSION}")"
+  pinned='yes'
   echo "Selkies pinned to v${wanted} by /etc/hdw4s/hdw4s.conf."
 else
   echo -n 'Checking for Selkies updates...'
-  fetch_release latest "${release}" || {
+  # curl's own diagnosis is worth keeping -- "could not resolve" and "connection
+  # refused" send somebody to different places -- but it goes to stderr the
+  # moment it happens, which lands it in the middle of the line above. Held
+  # back and printed under the explanation instead.
+  why="$(fetch_release latest "${release}" 2>&1)" || {
     echo ' failed.'
     echo 'Could not reach the GitHub release API; leaving the installation alone.' >&2
+    [ -z "${why}" ] || printf '  %s\n' "${why}" >&2
     exit 0
   }
   wanted="$(version_from_tag "$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
@@ -588,12 +620,33 @@ if [ ! -s "${release}" ] ||
   # Both spellings, because upstream has tagged releases "v2.0.0rc0" and
   # "1.6.2". The first of the two is expected to fail half the time, so neither
   # is allowed to print curl's own 404 on the way past.
+  frc=0
   fetch_release "tags/v${wanted}" "${release}" 2>/dev/null ||
-    fetch_release "tags/${wanted}" "${release}" 2>/dev/null || {
-      echo "Could not read upstream's release v${wanted}; leaving the" >&2
-      echo '  installation alone.' >&2
-      exit 0
-    }
+    fetch_release "tags/${wanted}" "${release}" 2>/dev/null || frc="$?"
+  if [ "${frc}" -ne 0 ]; then
+    # 22 is curl's status for an HTTP error under --fail, which here means
+    # there is no such release. Anything else -- a timeout, no route, a name
+    # that would not resolve -- is the network, and the network is not a
+    # reason to do anything but try again tomorrow.
+    #
+    # The two are separated because the consequences differ. An unreachable
+    # GitHub fixes itself; a pin naming a release that does not exist does not,
+    # and exiting 0 on it would leave a machine that has silently stopped
+    # updating and a timer that says everything is fine. This is the same
+    # decision as the unsatisfiable pin further down and it has to agree with
+    # it.
+    if [ "${frc}" -eq 22 ] && [ -n "${pinned}" ]; then
+      echo "hdw4s: upstream publishes no release v${wanted}." >&2
+      echo "  SELKIES_VERSION=${SELKIES_VERSION} in /etc/hdw4s/hdw4s.conf names a" >&2
+      echo '  release that does not exist, so nothing will ever be installed' >&2
+      echo '  while it stands. Correct it, or remove it to follow upstream.' >&2
+      echo '  Nothing has been changed.' >&2
+      die
+    fi
+    echo "Could not read upstream's release v${wanted}; leaving the" >&2
+    echo '  installation alone.' >&2
+    exit 0
+  fi
 fi
 
 # Whether the right version is installed is one question; whether the files are
@@ -622,7 +675,7 @@ if [ "${current}" = "${wanted}" ]; then
     echo 'CRITICAL: Selkies is installed and does not work.' >&2
     printf '%s\n' "${out}" | tail -10 | sed 's/^/  /' >&2
     echo '  Nothing was changed, because nothing here would repair it.' >&2
-    exit 1
+    die
   fi
   echo "Selkies v${wanted} is installed but has been modified since:" >&2
   printf '%s\n' "${damage}" | head -10 | sed 's/^/  /' >&2
@@ -631,11 +684,25 @@ fi
 
 asset="$(asset_for_platform)"
 [ -n "${asset}" ] || {
-  echo "hdw4s: upstream's v${wanted} publishes no package for this system" >&2
   # shellcheck source=/dev/null
-  echo "  ($(. /etc/os-release; echo "${ID}-${VERSION_ID}") $(dpkg --print-architecture))." >&2
+  this="$(. /etc/os-release; echo "${ID}-${VERSION_ID}") $(dpkg --print-architecture)"
+  echo "hdw4s: upstream's v${wanted} publishes no package for this system" >&2
+  echo "  (${this})." >&2
+  if [ -n "${pinned}" ]; then
+    # Worth separating from a release that simply skipped one platform,
+    # because this one can never come right on its own. Every release before
+    # 2.0 shipped a Python wheel and a browser bundle and no .deb at all, so a
+    # pin to any of them asks for something that does not exist and will not
+    # start existing; the timer would otherwise report the same failure every
+    # night for ever.
+    echo "  SELKIES_VERSION=${SELKIES_VERSION} in /etc/hdw4s/hdw4s.conf asks for" >&2
+    echo '  a release this cannot install. Releases before v2.0.0rc0 shipped a' >&2
+    echo '  Python wheel rather than a distribution package, and this hdw4s' >&2
+    echo '  installs only the package. Remove the pin to follow upstream, or' >&2
+    echo '  pin a release that publishes a .deb for this system.' >&2
+  fi
   echo '  Nothing has been changed.' >&2
-  exit 1
+  die
 }
 
 echo "Upgrading Selkies from v${current:-none} to v${wanted} (${asset})..."
@@ -663,7 +730,7 @@ url="$(tr -d ' \t\n' < "${release}" |
 [ -n "${url}" ] || {
   echo ' failed.'
   echo "Upstream lists ${asset} with no download URL; aborting." >&2
-  exit 1
+  die
 }
 curl -fsSL --proto '=https' --proto-redir '=https' --max-time 900 --retry 3 \
      -o "${workdir}/${asset}" "${url}"
@@ -672,7 +739,7 @@ echo ' done.'
 echo -n '  Verifying...'
 sum="$(sha256sum "${workdir}/${asset}" | cut -d' ' -f1)"
 if [ "${asset}" = "${KNOWN_GOOD_ASSET}" ] && [ "${wanted}" = "${KNOWN_GOOD}" ]; then
-  verify_sha256 "${workdir}/${asset}" "${KNOWN_GOOD_SHA256_DEB}" 'package' || exit 1
+  verify_sha256 "${workdir}/${asset}" "${KNOWN_GOOD_SHA256_DEB}" 'package' || die
   checked='the hash recorded in hdw4s'
 else
   published="$(asset_digest "${asset}")"
@@ -682,9 +749,9 @@ else
     echo '  and GitHub publishes no digest for it either, so what was' >&2
     echo '  downloaded cannot be checked against anything. Refusing to' >&2
     echo '  install it. Nothing has been changed.' >&2
-    exit 1
+    die
   }
-  verify_sha256 "${workdir}/${asset}" "${published}" 'package' || exit 1
+  verify_sha256 "${workdir}/${asset}" "${published}" 'package' || die
   checked="the digest GitHub publishes for ${asset}"
 fi
 
@@ -701,7 +768,7 @@ if [ "${got_pkg}" != "${PKG}" ] || [ "${got_ver}" != "${wanted}" ] ||
   echo ' failed.'
   echo "Downloaded ${asset} is ${got_pkg} ${got_ver} (${got_arch}), not" >&2
   echo "  ${PKG} ${wanted} ($(dpkg --print-architecture)); aborting." >&2
-  exit 1
+  die
 fi
 echo " done, against ${checked}."
 
@@ -712,7 +779,7 @@ missing="$(unmet_depends "${workdir}/${asset}" | tr '\n' ' ')"
   echo '  dpkg would unpack it over the working copy and then refuse to' >&2
   echo '  configure it, so this stops here instead. Install them, or upgrade' >&2
   echo '  hdw4s -- its own dependencies are what put them there.' >&2
-  exit 1
+  die
 }
 
 # --- THE 1.6 PREFIX ---------------------------------------------------------
@@ -735,8 +802,8 @@ fi
 echo -n '  Installing...'
 if ! install_deb "${workdir}/${asset}"; then
   echo 'CRITICAL: dpkg could not install the new package.' >&2
-  rollback "${previous}" || exit 1
-  exit 1
+  rollback "${previous}" || die
+  die
 fi
 echo ' done.'
 
@@ -747,8 +814,8 @@ else
   echo ' failed.'
   echo 'CRITICAL: the new installation does not work.' >&2
   printf '%s\n' "${out}" | tail -10 | sed 's/^/  /' >&2
-  rollback "${previous}" || exit 1
-  exit 1
+  rollback "${previous}" || die
+  die
 fi
 
 # Only now, with a package that installs and loads, are the bytes worth
@@ -898,4 +965,4 @@ echo 'CRITICAL: sessions did not come back up. Rolling back...' >&2
 if rollback "${previous}"; then
   systemctl restart "${units[@]}" || :
 fi
-exit 1
+die
