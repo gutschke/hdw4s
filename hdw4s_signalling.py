@@ -57,7 +57,7 @@ if not logger.handlers:
 logger.setLevel(os.environ.get("HDW4S_LOG_LEVEL", "INFO").upper())
 
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-23"
+BUILD = "handover-24"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -66,6 +66,14 @@ BUILD = "handover-23"
 CLOSE_SESSION_IN_USE = 4001   # held by another client; ask before taking it
 CLOSE_TAKEN_OVER = 4002       # you were taken over; do not come back on your own
 CLOSE_SUPERSEDED = 4003       # superseded by your own newer socket; go quietly
+
+# What the desktop's own peers are closed with, which is deliberately NOT one of
+# the codes above. Those are read by a browser that was taught to recognise
+# them. The application was not: it reads its socket with `async for`, which
+# ends cleanly for 1000 and 1001 and raises for everything else -- and what it
+# raises reaches a bare `except Exception` that stops the whole process. A
+# normal close is the only kind this end can be told about safely.
+CLOSE_APP_SUPERSEDED = 1000
 
 # If this change is ever taken upstream, the PR carries this attribute, and its
 # presence is how we notice we are no longer needed. We cannot detect a merge of
@@ -115,10 +123,16 @@ CLIENT_PEER_IDS = ("1", "3")
 # has not finished unwinding in time, peer 0 needs it too. Refusing it there
 # would turn a harmless race into a video leg that fails to register.
 #
-# What made the narrower rule look attractive was a claim that a client could
-# destroy the desktop this way. It cannot: `async for` ends cleanly on every
-# close code -- measured, 1000 and 4003 alike -- and what was actually fatal is
-# a send from inside the loop body, which harden_signalling_client now contains.
+# A reviewer argued for narrowing this to peer 2, on the grounds that a client
+# could otherwise destroy the desktop by making its video leg reconnect. That
+# was right, and it was dismissed here on the strength of a broken measurement:
+# a probe that took the close code from the request path, against a websockets
+# version that no longer passes one, and so closed with 1000 six times and read
+# six identical results as agreement. `async for` ends cleanly ONLY for 1000
+# and 1001; 1011, 1006 and every application code come straight out of it.
+#
+# So the displaced application peer must not be closed with a code its own read
+# loop treats as an error, which is why CLOSE_APP_SUPERSEDED exists below.
 APP_VIDEO_PEER, APP_AUDIO_PEER = "0", "2"
 
 # Backpressure on a client that keeps being refused. A client that understands
@@ -621,7 +635,7 @@ class HandoverMixin:
             displaced_app = self.peers[uid]
             self.peers[uid] = [ws, raddr, None, meta]
             self._owner_task[uid] = asyncio.current_task()
-            self._evict(displaced_app, CLOSE_SUPERSEDED, "superseded")
+            self._evict(displaced_app, CLOSE_APP_SUPERSEDED, "superseded")
             try:
                 await ws.send("HELLO")
             except Exception:

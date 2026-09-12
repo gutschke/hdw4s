@@ -319,11 +319,21 @@ def test_server_behaviour():
         # that reconnect as a duplicate is what left a viewer with a picture,
         # no sound, and a spinner that never cleared.
         srv7 = server()
+        displaced_app = {}
         for uid in ("0", "2"):
-            await srv7.hello_peer(FakeSocket(hello(uid)))
+            sock = FakeSocket(hello(uid))
+            displaced_app[uid] = sock
+            await srv7.hello_peer(sock)
         again = FakeSocket(hello("2"))
         out["app_rereg"] = await srv7.hello_peer(again)
         out["app_rereg_sent"] = list(again.sent)
+        await asyncio.sleep(0.05)          # the eviction is a task
+        # What code the displaced socket is told. This is not cosmetic: the
+        # application reads its socket with `async for`, which ends cleanly for
+        # 1000 and 1001 and RAISES for everything else, and what it raises
+        # reaches a bare `except Exception` that stops the whole process. The
+        # private codes are for a browser that was taught to read them.
+        out["app_close_code"] = displaced_app["2"].closed
         # ... and it is still only the application that may do this. The same
         # id, claimed with an identity or with a request to take over, is a
         # stranger and is refused. An earlier fix left this out and handed the
@@ -404,6 +414,10 @@ def test_server_behaviour():
     check("  and the attempt is refused, not granted",
           r["app_peer_closed"] == (h.CLOSE_SESSION_IN_USE, "session in use"),
           str(r["app_peer_closed"]))
+    check("the displaced desktop socket is closed with a normal code",
+          r["app_close_code"] is not None and r["app_close_code"][0] == 1000,
+          "%r -- anything but 1000/1001 raises out of the application's read "
+          "loop and stops the process" % (r["app_close_code"],))
     check("the application can re-register a peer it already holds",
           r["app_rereg"][0] == "2", str(r["app_rereg"]))
     check("  and is told so, so its audio session starts",

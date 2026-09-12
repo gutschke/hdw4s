@@ -2,9 +2,10 @@
 
 This is the fault that destroyed a user's session: the application's read loop
 runs its callbacks inside the loop body, and those callbacks send on the same
-socket. The iterator survives any close code -- measured, 1000 and 4003 alike --
-but a send does not, and the application wraps its whole main loop in a bare
-`except Exception` followed by `sys.exit`. The process then stops with status 0,
+socket. Two ways in, not one: the iterator itself raises for every close code
+except 1000 and 1001, and a send from inside a callback raises whatever the
+code was. Either reaches the application's bare `except Exception` followed by
+`sys.exit`. The process then stops with status 0,
 so `Restart=on-failure` does not bring it back, and GNOME and every window the
 user had open go with it.
 
