@@ -354,6 +354,27 @@ cmd_list() {
 # can be true without the other: a package upgrade replaces the client, and a
 # changed upstream makes the server stand down. Every report about this feature
 # has started by someone working out which of the three was false.
+# Whether the session that is running right now actually loaded the hand-over
+# module, as opposed to the module merely being installed. Reads the unit's own
+# cgroup rather than guessing from process names, so it cannot be confused by
+# another instance, and needs no privilege.
+session_runs_mixin() {
+  local cg f pid
+  cg="$(systemctl show "hdw4s@$1.service" -p ControlGroup --value 2>/dev/null)"
+  [ -n "${cg}" ] || { echo 'unknown'; return 0; }
+  f="/sys/fs/cgroup${cg}/cgroup.procs"
+  [ -r "${f}" ] || { echo 'unknown'; return 0; }
+  while read -r pid; do
+    case "${pid}" in ''|*[!0-9]*) continue;; esac
+    if tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null |
+       grep -q 'hdw4s_signalling'; then
+      echo 'yes'
+      return 0
+    fi
+  done < "${f}"
+  echo 'no'
+}
+
 handover_report() {
   local inst="$1" port="$2" root mixin build state disabled clients
   # Ask the unit, not the configuration files. The tree a session serves can be
@@ -372,6 +393,20 @@ handover_report() {
   if [ -r "${mixin}" ]; then
     build="$(sed -n 's/^BUILD = "\(.*\)"/\1/p' "${mixin}" | head -n1)"
     echo "              server    ${mixin} (${build:-no build marker})"
+    # What is installed and what is running are different questions, and
+    # reporting only the first said "handover-23" about a session that had been
+    # running since before any of it existed. A session picks the module up
+    # when it starts; until then the file on disk says nothing about it.
+    case "$(session_runs_mixin "${inst}")" in
+      yes) ;;
+      no)  echo '                        NOT loaded by the running session, which'
+           echo '                        started before it was installed. The client'
+           echo '                        it serves may already offer a button this'
+           echo '                        session cannot answer. Restart it:'
+           echo "                          systemctl restart hdw4s@${inst}";;
+      *)   echo '                        (cannot tell whether the running session'
+           echo '                        loaded it)';;
+    esac
   else
     echo "              server    MISSING -- ${mixin} is not installed, so the"
     echo '                        session runs unmodified and a second device is'
