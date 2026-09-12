@@ -32,8 +32,32 @@ import time
 
 logger = logging.getLogger("hdw4s.signalling")
 
+# Our own handler, rather than relying on the root logger.
+#
+# The application configures logging from inside its main(), which runs after
+# this module has already decided whether to install itself and said so. Left to
+# the root logger, that decision went to the default last-resort handler, which
+# prints nothing below a warning -- so the one line telling an operator whether
+# hand-over is active was invisible in a real session, while being perfectly
+# visible in a test harness that had configured logging itself. Attaching a
+# handler here and not propagating keeps our output independent of when, or
+# whether, anything else sets logging up, and cannot change what the application
+# chooses for its own.
+if not logger.handlers:
+    # Guarded, because this module can be imported twice: the package puts its
+    # own directory on sys.path, so importing it by both names gives two module
+    # objects, and a second unguarded handler prints every line twice.
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    logger.addHandler(_handler)
+    logger.propagate = False
+# Not hardcoded. Detaching from the root logger also detaches from whatever the
+# application does with --debug, so without this there is no way to turn this
+# module up when diagnosing it or down when it is noisy.
+logger.setLevel(os.environ.get("HDW4S_LOG_LEVEL", "INFO").upper())
+
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-15"
+BUILD = "handover-17"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -101,6 +125,10 @@ REFUSAL_FORGET = 300.0
 # and giving it a counter of its own is what let it grow the bookkeeping and the
 # log by one entry per attempt. Pruning alone did not bound a burst.
 OTHER_PEERS = "other"
+
+# Its own bucket, so a flood of unparseable messages neither drowns the refusal
+# counts nor grows anything.
+MALFORMED = "malformed"
 
 
 def _book(uid):
@@ -220,7 +248,11 @@ class HandoverMixin:
     So the base is whatever the module we are installing into actually holds.
     """
 
-    SUPPORTS_SESSION_HANDOVER = True
+    # Deliberately NOT set here. It marks a server that provides hand-over
+    # *upstream*, and setting it on the mixin means a second install_into()
+    # against an already-extended module reads it back off our own class and
+    # concludes upstream has the feature -- a false negative in the one gate
+    # that protects against drift. It is set on the produced class instead.
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -339,6 +371,34 @@ class HandoverMixin:
                 return True
         return False
 
+    async def _note_malformed(self, ws, raddr, exc):
+        """Turn one away, and do not write a line for every one of them.
+
+        Something sending unparseable HELLOs can send them as fast as the
+        network allows, so this gets the same treatment as a refusal: a summary
+        rather than a line each, and an answer that arrives more slowly the more
+        it is asked for. Logging each one was a storm of its own.
+        """
+        now = time.monotonic()
+        streak, last = self._refusal_streak.get(MALFORMED, (0, 0.0))
+        if now - last > REFUSAL_STREAK_RESET:
+            streak = 0
+        streak += 1
+        self._refusal_streak[MALFORMED] = (streak, now)
+        self._refusal_seen[MALFORMED] = now
+        self._refusal_count[MALFORMED] = self._refusal_count.get(MALFORMED, 0) + 1
+        when = self._refusal_logged_at.get(MALFORMED)
+        if when is None or now - when >= REFUSAL_SUMMARY_INTERVAL:
+            logger.warning("Malformed HELLO from %r: %s (%d since last report)",
+                           raddr, exc, self._refusal_count[MALFORMED])
+            self._refusal_logged_at[MALFORMED] = now
+            self._refusal_count[MALFORMED] = 0
+        try:
+            await asyncio.sleep(min(REFUSAL_DELAY_MAX, REFUSAL_DELAY_STEP * streak))
+            await ws.close(code=1002, reason="invalid protocol")
+        except Exception:
+            pass
+
     async def _refuse(self, ws, uid, raddr, incoming):
         """Say no, and say it more slowly the more it is being asked.
 
@@ -423,6 +483,16 @@ class HandoverMixin:
         # not only the one we set out to fix.
         try:
             hello = await ws.recv()
+        except Exception as exc:
+            # The client went away before saying anything. This is the ordinary
+            # end of a tab closed while connecting -- a clean close, code 1000 --
+            # and calling it malformed was both untrue and unbounded: one line
+            # per occurrence, several hundred a second, from the change that
+            # exists to stop a log storm.
+            logger.debug("Connection from %r ended before HELLO: %s", raddr, exc)
+            return (None, None)
+
+        try:
             toks = hello.split(maxsplit=2)
             metab64str = None
             if len(toks) > 2:
@@ -448,11 +518,7 @@ class HandoverMixin:
                 if not isinstance(meta, dict):
                     raise ValueError("metadata is not an object")
         except Exception as exc:
-            logger.info("Malformed HELLO from %r: %s", raddr, exc)
-            try:
-                await ws.close(code=1002, reason="invalid protocol")
-            except Exception:
-                pass
+            await self._note_malformed(ws, raddr, exc)
             return (None, None)
 
         incoming = self._identity(meta)
@@ -602,7 +668,8 @@ class HandoverMixin:
 
 def make_server_class(base):
     """Build the hand-over server on top of whichever class was handed to us."""
-    return type("HDW4SServer", (HandoverMixin, base), {})
+    return type("HDW4SServer", (HandoverMixin, base),
+                {UPSTREAM_CAPABILITY: True})
 
 
 def install_into(module):
