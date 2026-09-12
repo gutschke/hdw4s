@@ -619,6 +619,52 @@ if [ -f "${appjs}" ] && grep -q 'app\.status == checkconnect' "${appjs}"; then
   fi
 fi
 
+# Two more defects in the streaming server itself, repaired the same way and for
+# the same reason: there is no seam to extend, the file is replaced wholesale by
+# the next upgrade so nothing accumulates, and each edit is conditional on
+# finding the exact text it replaces, so it goes quiet if upstream fixes it.
+#
+# Not sent upstream: they released a major rewrite in which neither defect
+# survives, and the line these run against is not where their attention is.
+#
+#   * Both signalling error handlers are coroutines that call time.sleep(2).
+#     That stops the whole event loop, not just the handler, and the handler
+#     runs whenever a peer is not registered yet -- which for an idle desktop is
+#     every two seconds, forever. A browser arriving during one of those waits
+#     is not answered until it ends.
+#
+#   * main() sets exit status 1 when it catches a fatal error, and then its
+#     finally block runs sys.exit(0) unconditionally. A SystemExit raised in a
+#     finally replaces the one in flight, so the process always reports success.
+#     Restart=on-failure therefore never fires: the desktop is gone and nothing
+#     brings it back.
+smain="${PREFIX}/lib/python3.12/site-packages/selkies_gstreamer/__main__.py"
+if [ -f "${smain}" ]; then
+  if grep -q '^ *time\.sleep(2)$' "${smain}"; then
+    echo -n 'Applying event loop fix...'
+    sed -i 's|^\( *\)time\.sleep(2)$|\1await asyncio.sleep(2)|' "${smain}"
+    if grep -q '^ *time\.sleep(2)$' "${smain}"; then
+      echo ' FAILED; the event loop keeps blocking.' >&2
+    else
+      echo ' done.'
+    fi
+  fi
+  # Matched as a pair, because sys.exit(0) on its own appears in plenty of
+  # programs legitimately; it is only wrong here because a finally runs it after
+  # the handler has already chosen a status.
+  if grep -q '^ *sys\.exit(1)$' "${smain}" && grep -q '^ *sys\.exit(0)$' "${smain}"; then
+    echo -n 'Applying exit status fix...'
+    sed -i -e 's|^\( *\)sys\.exit(1)$|\1_hdw4s_status = 1|' \
+           -e 's|^\( *\)sys\.exit(0)$|\1sys.exit(locals().get("_hdw4s_status", 0))|' \
+           "${smain}"
+    if grep -q '^ *sys\.exit(1)$' "${smain}"; then
+      echo ' FAILED; a crash still reports success.' >&2
+    else
+      echo ' done.'
+    fi
+  fi
+fi
+
 # --- SESSION HAND-OVER, CLIENT HALF -----------------------------------------
 # The peer ids the browser uses are fixed, so a second client can never
 # register. Upstream refuses it in a way the client cannot tell from any other
