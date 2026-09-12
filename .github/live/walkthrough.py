@@ -75,12 +75,18 @@ def tone(instance):
     session's sound server -- or it goes to whatever the caller's own audio
     happens to be and the test measures nothing. That needs the privilege to
     become the session user, which is why this is opt-in rather than always on.
+
+    It runs in the background, and for longer than seems necessary, because
+    the level it is checked against is an instantaneous reading rather than a
+    total. A single short tone raced the sampling and lost as soon as there
+    was a reverse proxy in the path -- which looked exactly like an audio
+    fault and was not one. The tone has to span the whole sampling window.
     """
-    return subprocess.run(
+    return subprocess.Popen(
         ["sudo", "-n", "-u", instance, "env",
          "XDG_RUNTIME_DIR=/run/hdw4s/" + instance,
-         "speaker-test", "-t", "sine", "-f", "440", "-l", "1"],
-        capture_output=True, timeout=40)
+         "speaker-test", "-t", "sine", "-f", "440", "-l", "4"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def picture(br, label):
@@ -174,11 +180,18 @@ def main():
         print("\n  --- sound ---")
         audio_before = first.wire.get(AUDIO, 0)
         level = 0
-        if want_tone:
-            tone(want_tone)
-        for _ in range(6):
-            level = max(level, first.eval(LEVEL) or 0)
-            first.pump(1.0)
+        noise = tone(want_tone) if want_tone else None
+        try:
+            for _ in range(16):
+                level = max(level, first.eval(LEVEL) or 0)
+                first.pump(0.5)
+        finally:
+            if noise is not None:
+                noise.terminate()
+                try:
+                    noise.wait(timeout=10)
+                except Exception:
+                    noise.kill()
         audio = first.wire.get(AUDIO, 0) - audio_before
         check("audio is arriving", audio > 0, "+%d audio frames on the wire" % audio)
         if want_tone:
