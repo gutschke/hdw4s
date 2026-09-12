@@ -18,6 +18,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 # which of them is started.
 : "${HDW4S_SESSION:=gnome-session}"
 : "${HDW4S_FRAMERATE:=30}"
+: "${HDW4S_DPI:=follow}"
 : "${HDW4S_ENCODER:=h264enc}"
 
 # The streaming server now defaults this to true and implements resizing itself,
@@ -248,6 +249,22 @@ esac
 # default, so every switch has to carry a literal false. And the microphone and
 # webcam gates only refuse when a setting is *locked* off, so "false|locked" is
 # the form that actually keeps them shut.
+# The streaming server applies a client's display density to the desktop, and
+# applying it means writing ~/.Xresources and ~/.xsettingsd -- top-level
+# dotfiles that no XDG variable has ever covered, so profile isolation does not
+# move them and a shared home sees them on every machine the account touches.
+# ~/.Xresources keeps the user's own lines and loses only their Xft.dpi;
+# ~/.xsettingsd is rewritten whole. Pinning the density here makes the server
+# ignore what a client asks for, and pinning it to 96 means it writes nothing
+# at all.
+#
+# Left following by default, because the alternative is worse for most people:
+# every HiDPI screen and every zoomed window would get an unscaled desktop,
+# permanently and visibly, to prevent one line and a file that nothing on a
+# GNOME system reads.
+dpi=()
+[ "${HDW4S_DPI}" = 'follow' ] || dpi=(--scaling-dpi="${HDW4S_DPI}")
+
 lockdown=(
   # Every boolean below carries "|locked". Without it the value is only a
   # default: a bool the server reads back out of a client's SETTINGS frame is
@@ -303,7 +320,7 @@ lockdown=(
   --enable-resize="${HDW4S_RESIZE}" \
   --encoder="${HDW4S_ENCODER}" \
   --framerate="${framerate}" \
-  "${lockdown[@]}" &
+  "${dpi[@]}" "${lockdown[@]}" &
 children+=($!)
 stream_pid="$!"
 

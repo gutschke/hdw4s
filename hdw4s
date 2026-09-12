@@ -598,6 +598,7 @@ SESSION_SETTINGS=(
   'HDW4S_ENCODER:h264enc'
   'HDW4S_FRAMERATE:30'
   'HDW4S_RESIZE:true'
+  'HDW4S_DPI:follow'
   'HDW4S_IDLE_DAYS:7'
   'HDW4S_PROFILE_DIR:/var/lib/hdw4s'
 )
@@ -621,6 +622,7 @@ declare -A SETTABLE=(
   [HDW4S_SESSION]='any'
   [HDW4S_FRAMERATE]='number'
   [HDW4S_RESIZE]='true|false'
+  [HDW4S_DPI]='dpi'
   [HDW4S_LANG]='any'
   [HDW4S_IDLE_DAYS]='number'
   [HDW4S_MEDIA_PORTS]='proxied|direct'
@@ -633,6 +635,8 @@ check_value() {
   case "${rule}" in
     number) case "${value}" in ''|*[!0-9]*)
               die "hdw4s: ${key} takes a number, not '${value}'";; esac;;
+    dpi)    case "${value}" in follow) :;; ''|*[!0-9]*)
+              die "hdw4s: ${key} takes 'follow' or a number, not '${value}'";; esac;;
     path)   case "${value}" in /*) :;;
               *) die "hdw4s: ${key} takes an absolute path, not '${value}'";; esac;;
     any)    :;;

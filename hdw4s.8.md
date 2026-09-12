@@ -260,6 +260,15 @@ belongs to the copy of the streaming server, of which there is one.
     Passed through to the streaming server. Leave them alone unless the picture
     is visibly wrong; the defaults suit a machine with no graphics card.
 
+  * `HDW4S_DPI`:
+    Whether the desktop's display density follows the browser's, which is what
+    makes text the right size on a HiDPI screen or in a zoomed window. Defaults
+    to `follow`. Set a number to pin it, which makes the server refuse the
+    density a client asks for and so stops it rewriting `~/.Xresources` and
+    `~/.xsettingsd` again and again; see SHARED HOME DIRECTORIES. A pinned
+    number other than 96 is still applied once when the session starts, so
+    both files are written that once. Pinning 96 writes neither, ever.
+
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 
@@ -274,8 +283,9 @@ use memory-mapped and journalled files that are documented not to work over NFS
 at all.
 
 Setting `HDW4S_ISOLATION=profile` keeps the shared home for the user's files but
-moves the session's settings, state and cache to a private directory on local
-disk. Concretely, the session gets its own `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+moves most of the session's settings, state and cache to a private directory on
+local disk -- most, because the streaming server writes three paths it builds
+from the home directory itself, which no XDG variable reaches. Concretely, the session gets its own `XDG_DATA_HOME`, `XDG_STATE_HOME`,
 `XDG_CACHE_HOME` and dconf profile, its own X authority cookie, its own audio
 server socket, and wrappers that give Firefox and Thunderbird their own
 profiles.
@@ -284,14 +294,36 @@ All four XDG base directories move together: config, data, state and cache.
 Leaving the config home shared and redirecting dconf on its own was tried and
 abandoned, because it needs a service that has to answer before any setting can
 be read, and it leaves a lock beside its database that a killed session does not
-clean up. What this does not cover is a program that hardcodes `~/.config`
-regardless of the variable, which in practice means some input-method
-configuration.
+clean up. What this does not cover is a path a program builds from
+the home directory rather than from these variables. Some input-method
+configuration hardcodes `~/.config` that way, and so does the streaming
+server.
 
 What stays shared:
 
     Documents, Desktop, Downloads, Pictures, Music, Videos
     everything else in the home directory, including ~/.ssh
+
+That last line covers files the software writes as well as the user's own, and
+three of them come from the streaming server rather than from the desktop:
+
+    ~/.Xresources   written when a client reports its display density.
+                    The user's own lines survive; their Xft.dpi is replaced.
+    ~/.xsettingsd   written on the same trigger, and rewritten whole, so
+                    anything already in it is lost. Nothing on a GNOME
+                    system reads it, and the daemon that would is not part
+                    of this package.
+    ~/Desktop       would be created at startup as the destination for file
+                    transfers, which this package does not enable. Pointed
+                    at the session's runtime directory instead, so it is
+                    not created here at all.
+
+The first two are what `HDW4S_DPI` set to a number stops -- `96` stops them
+outright, another number still applies itself once at startup and writes them
+that once -- at the cost of a desktop that no longer scales to a HiDPI or
+zoomed browser. It is left following by default
+because that cost falls on everyone who opens a session, while these two files
+matter only to an account that keeps something in them.
 
 Existing settings can be carried across once with `hdw4s seed`, which is the
 only supported way to populate a profile from a home directory and does not run

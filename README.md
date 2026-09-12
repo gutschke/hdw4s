@@ -49,7 +49,9 @@ metadata stores -- none of which are safe to share, and several of which use
 memory-mapped or journalled files that do not work over NFS at all.
 
 `HDW4S_ISOLATION=profile` keeps the shared home for the user's *files* and moves
-the session's settings, state and cache to local disk. Documents, Desktop and
+most of the session's settings, state and cache to local disk -- most, because
+the streaming server writes two dotfiles that no XDG variable reaches; see
+`hdw4s(8)`, SHARED HOME DIRECTORIES, and `HDW4S_DPI`. Documents, Desktop and
 Downloads still point at the real shared directories. Desktop appearance, saved
 passwords and the browser profile become per-session.
 

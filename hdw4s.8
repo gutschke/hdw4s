@@ -166,14 +166,16 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_FRAMERATE\fR, \fBHDW4S_ENCODER\fR: Passed through to the streaming server\. Leave them alone unless the picture is visibly wrong; the defaults suit a machine with no graphics card\.
 .IP "\[ci]" 4
+\fBHDW4S_DPI\fR: Whether the desktop's display density follows the browser's, which is what makes text the right size on a HiDPI screen or in a zoomed window\. Defaults to \fBfollow\fR\. Set a number to pin it, which makes the server refuse the density a client asks for and so stops it rewriting \fB~/\.Xresources\fR and \fB~/\.xsettingsd\fR again and again; see SHARED HOME DIRECTORIES\. A pinned number other than 96 is still applied once when the session starts, so both files are written that once\. Pinning 96 writes neither, ever\.
+.IP "\[ci]" 4
 \fBSELKIES_VERSION\fR: Pin a Selkies release and stop following upstream\.
 .IP "" 0
 .SH "SHARED HOME DIRECTORIES"
 A GNOME session assumes it is the only one using its home directory\. That assumption breaks when the same home is mounted on more than one machine, or when another desktop is already logged in against it\. Two sessions then write the same settings database, the same keyring and the same metadata stores\. None of those are safe to share, and the settings database and the metadata stores use memory\-mapped and journalled files that are documented not to work over NFS at all\.
 .P
-Setting \fBHDW4S_ISOLATION=profile\fR keeps the shared home for the user's files but moves the session's settings, state and cache to a private directory on local disk\. Concretely, the session gets its own \fBXDG_DATA_HOME\fR, \fBXDG_STATE_HOME\fR, \fBXDG_CACHE_HOME\fR and dconf profile, its own X authority cookie, its own audio server socket, and wrappers that give Firefox and Thunderbird their own profiles\.
+Setting \fBHDW4S_ISOLATION=profile\fR keeps the shared home for the user's files but moves most of the session's settings, state and cache to a private directory on local disk \-\- most, because the streaming server writes three paths it builds from the home directory itself, which no XDG variable reaches\. Concretely, the session gets its own \fBXDG_DATA_HOME\fR, \fBXDG_STATE_HOME\fR, \fBXDG_CACHE_HOME\fR and dconf profile, its own X authority cookie, its own audio server socket, and wrappers that give Firefox and Thunderbird their own profiles\.
 .P
-All four XDG base directories move together: config, data, state and cache\. Leaving the config home shared and redirecting dconf on its own was tried and abandoned, because it needs a service that has to answer before any setting can be read, and it leaves a lock beside its database that a killed session does not clean up\. What this does not cover is a program that hardcodes \fB~/\.config\fR regardless of the variable, which in practice means some input\-method configuration\.
+All four XDG base directories move together: config, data, state and cache\. Leaving the config home shared and redirecting dconf on its own was tried and abandoned, because it needs a service that has to answer before any setting can be read, and it leaves a lock beside its database that a killed session does not clean up\. What this does not cover is a path a program builds from the home directory rather than from these variables\. Some input\-method configuration hardcodes \fB~/\.config\fR that way, and so does the streaming server\.
 .P
 What stays shared:
 .IP "" 4
@@ -182,6 +184,24 @@ Documents, Desktop, Downloads, Pictures, Music, Videos
 everything else in the home directory, including ~/\.ssh
 .fi
 .IP "" 0
+.P
+That last line covers files the software writes as well as the user's own, and three of them come from the streaming server rather than from the desktop:
+.IP "" 4
+.nf
+~/\.Xresources   written when a client reports its display density\.
+                The user's own lines survive; their Xft\.dpi is replaced\.
+~/\.xsettingsd   written on the same trigger, and rewritten whole, so
+                anything already in it is lost\. Nothing on a GNOME
+                system reads it, and the daemon that would is not part
+                of this package\.
+~/Desktop       would be created at startup as the destination for file
+                transfers, which this package does not enable\. Pointed
+                at the session's runtime directory instead, so it is
+                not created here at all\.
+.fi
+.IP "" 0
+.P
+The first two are what \fBHDW4S_DPI\fR set to a number stops \-\- \fB96\fR stops them outright, another number still applies itself once at startup and writes them that once \-\- at the cost of a desktop that no longer scales to a HiDPI or zoomed browser\. It is left following by default because that cost falls on everyone who opens a session, while these two files matter only to an account that keeps something in them\.
 .P
 Existing settings can be carried across once with \fBhdw4s seed\fR, which is the only supported way to populate a profile from a home directory and does not run by itself\.
 .P

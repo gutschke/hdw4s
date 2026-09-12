@@ -165,9 +165,15 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   # Trading a documented filesystem limitation for a new startup dependency is
   # not an improvement.
   #
-  # What this does not cover: applications that hardcode ~/.config regardless
-  # of the variable, which for practical purposes means some Qt input-method
-  # configuration. Those stay shared.
+  # What this does not cover: paths a program builds from the home directory
+  # itself rather than from these variables. The streaming server is the one
+  # that matters, because it is the one program guaranteed to be running: when
+  # a client reports its display density, the server writes ~/.Xresources and
+  # ~/.xsettingsd, and neither is under ~/.config, so no XDG variable has ever
+  # moved them. ~/.Xresources keeps the user's own lines and loses only their
+  # Xft.dpi; ~/.xsettingsd is rewritten whole. HDW4S_DPI pins the density and
+  # stops both. Some Qt input-method configuration hardcodes ~/.config and
+  # stays shared too.
 
   # No CHROME_USER_DATA_DIR here. Chrome's search order ends at
   # XDG_CONFIG_HOME, which is redirected above, so it lands in the profile with
