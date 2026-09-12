@@ -930,6 +930,52 @@ cmd_transport() {
   esac
 }
 
+# Say something the journal should keep.
+#
+# hdw4s-reaper.service filters itself at warning, so that running every few
+# minutes does not write three lines a time about having done nothing. systemd
+# reads a "<N>" prefix as a syslog priority, so anything that should survive
+# that filter says so. Only when there is a journal to say it to: run by hand,
+# the prefix would be rubbish on a terminal.
+reap_say() {
+  if [ -n "${JOURNAL_STREAM:-}" ]; then
+    printf '<4>%s\n' "$*"
+  else
+    printf '%s\n' "$*"
+  fi
+}
+
+# How many clients are attached to a session.
+#
+# Not "established connections on the session's port", which is what this used
+# to count. The streaming process is both the signalling server and two of its
+# own peers, so it connects to that port twice itself and the count is never
+# zero. Every session has therefore looked permanently in use -- which is why
+# the reaper had never once fired, and why the updater never restarted a
+# session to check that an upgrade actually worked.
+#
+# What marks a real client is the socket proxy: it holds one loopback
+# connection to the session for each connection it is relaying, whichever
+# transport its own front door uses. So count the connections that belong to
+# the proxy, and nothing else.
+clients_of() {
+  local inst="$1" port="$2" pid out
+  pid="$(systemctl show "hdw4s-proxy@${inst}.service" -p MainPID --value 2>/dev/null || echo 0)"
+  # No proxy, no clients: nothing can reach the session without going through
+  # it.
+  case "${pid}" in ''|0|*[!0-9]*) echo 0; return 0;; esac
+  out="$(ss -Htnp state established "dport = :${port}" 2>/dev/null || :)"
+  # ss names the owning process only for sockets we have the privilege to see.
+  # Counting nothing because we cannot look is not the same as counting nothing
+  # because nobody is there, and the difference decides whether a desktop in
+  # use gets stopped. Say so rather than guess.
+  if [ -n "${out}" ] && ! printf '%s\n' "${out}" | grep -q 'pid='; then
+    echo 'unknown'
+    return 0
+  fi
+  printf '%s\n' "${out}" | grep -c "pid=${pid}," || :
+}
+
 # Stop desktops nobody has connected to for a long time.
 #
 # Safe to do because the socket stays listening: a stopped session is not gone,
@@ -956,14 +1002,19 @@ cmd_reap() {
     days="$(setting_of "${inst}" HDW4S_IDLE_DAYS 7)"
     case "${days}" in ''|*[!0-9]*) days=7;; esac
     [ "${days}" -gt 0 ] || continue
-    # The internal port, not the one the socket unit binds. systemd-socket-proxyd
-    # holds one loopback connection to it per client, so this counts real users
-    # on either transport -- whereas the external port has no connections at all
-    # when the session is on a filesystem socket, which made the reaper stop
-    # desktops that were in constant use.
+    # The internal port, not the one the socket unit binds: the external port
+    # has no connections at all when the session is on a filesystem socket,
+    # which once made the reaper stop desktops that were in constant use.
     port="$(internal_port_of "${idx}")"
-    established="$(ss -Htn state established "sport = :${port}" 2>/dev/null | wc -l)"
+    established="$(clients_of "${inst}" "${port}")"
 
+    # /run is a tmpfs, so noticing a connection costs a one-line write to
+    # memory and nothing to the disk -- which is what makes it reasonable to
+    # ask this every few minutes rather than once a day. There is no cheaper
+    # event to hang this on: the proxy socket is Accept=no, so systemd counts
+    # no connections for it, and the only other record is the session's own log,
+    # which is upstream's prose and would be read by nobody but a parser.
+    #
     # Not /run/hdw4s/<inst>: that is the session's RuntimeDirectory, owned by
     # the session user at mode 0700, so the user can replace this file with a
     # symlink and have the reaper -- which runs as root -- truncate whatever it
@@ -974,7 +1025,9 @@ cmd_reap() {
     install -d -m0700 -o root -g root "${stampdir}" 2>/dev/null || :
     [ -d "/run/hdw4s/${inst}" ] || continue
     local stamp="${stampdir}/${inst}"
-    if [ "${established}" -gt 0 ]; then
+    # "unknown" first: it is not a number, and treating it as one would be an
+    # arithmetic error rather than the cautious answer it is meant to be.
+    if [ "${established}" = 'unknown' ] || [ "${established}" -gt 0 ]; then
       printf '%s\n' "${now}" > "${stamp}" 2>/dev/null || :
       continue
     fi
@@ -990,14 +1043,14 @@ cmd_reap() {
     age=$(( (now - last) / 86400 ))
     [ "${age}" -ge "${days}" ] || continue
 
-    echo "hdw4s: stopping ${inst}; nothing has connected for ${age} days."
-    echo '  Its files and settings are untouched, and the next connection'
-    echo '  starts it again.'
+    reap_say "hdw4s: stopping ${inst}; nothing has connected for ${age} days."
+    reap_say '  Its files and settings are untouched, and the next connection'
+    reap_say '  starts it again.'
     systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
     systemctl stop "hdw4s@${inst}.service" 2>/dev/null || :
     stopped=$(( stopped + 1 ))
   done < "${SLOTS}"
-  [ "${stopped}" -eq 0 ] || echo "Stopped ${stopped} idle session(s)."
+  [ "${stopped}" -eq 0 ] || reap_say "Stopped ${stopped} idle session(s)."
 }
 
 cmd_auth() {

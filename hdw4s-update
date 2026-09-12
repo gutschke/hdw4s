@@ -727,8 +727,33 @@ for unit in "${units[@]}"; do
     [ -z "${idx}" ] ||
       port=$(( ${HDW4S_BASE_PORT:-7300} + ${HDW4S_BLOCK_SIZE:-64} + idx ))
   fi
-  if [ -n "${port}" ] &&
-     ss -Htn state established "sport = :${port}" 2>/dev/null | grep -q .; then
+  # Count only what the socket proxy is relaying. The streaming process is both
+  # the signalling server and two of its own peers, so it connects to this port
+  # twice itself and a plain count of established connections is never zero.
+  # That is how every running session was classified "in use" -- so no session
+  # was ever restarted, the check below that a restarted session comes up
+  # healthy was never reached, and the backups it would have rolled back to were
+  # deleted on the way out.
+  #
+  # This has to stay in step with clients_of() in hdw4s, which answers the same
+  # question for the reaper and had the same bug.
+  attached='0'
+  proxy_pid="$(systemctl show "hdw4s-proxy@${inst}.service" -p MainPID --value \
+               2>/dev/null || echo 0)"
+  case "${proxy_pid}" in
+    ''|0|*[!0-9]*) ;;
+    *)
+      conns="$(ss -Htnp state established "dport = :${port}" 2>/dev/null || :)"
+      if [ -n "${conns}" ] && ! printf '%s\n' "${conns}" | grep -q 'pid='; then
+        # Connections exist but we cannot see who owns them, so we cannot tell
+        # a user from the session talking to itself. Restarting a desktop
+        # somebody is working in is the one outcome worth avoiding here.
+        attached='1'
+      else
+        attached="$(printf '%s\n' "${conns}" | grep -c "pid=${proxy_pid}," || :)"
+      fi ;;
+  esac
+  if [ -n "${port}" ] && [ "${attached:-0}" -gt 0 ]; then
     busy+=("${unit}")
   else
     idle+=("${unit}")

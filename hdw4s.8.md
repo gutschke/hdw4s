@@ -235,7 +235,10 @@ belongs to the copy of the streaming server, of which there is one.
   * `HDW4S_IDLE_DAYS`:
     How long a session may go with nobody connected before `reap` stops it.
     Defaults to 7. Measured by connections rather than by typing, so work left
-    running is not mistaken for an idle desktop. Set it to 0 to never reap.
+    running is not mistaken for an idle desktop. Connections are looked for
+    every few minutes rather than once a day, because a desktop used only
+    during working hours has nobody connected to it at any moment a nightly
+    check would happen to look. Set it to 0 to never reap.
 
   * `HDW4S_MEDIA_PORTS`:
     Either `proxied`, the default, or `direct`. The streaming server scatters

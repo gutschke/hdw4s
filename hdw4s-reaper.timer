@@ -1,13 +1,25 @@
 [Unit]
-Description=Look for idle HDW4S desktops daily
+Description=Notice who is using an HDW4S desktop, and stop the ones nobody is
 Documentation=man:hdw4s(8)
 
 [Timer]
-# Once a day is often enough for a threshold measured in days, and it means a
-# desktop is never stopped within a day of the limit being reached.
-OnCalendar=daily
-RandomizedDelaySec=1h
-Persistent=true
+# Often, not daily -- because this unit does two jobs and only one of them is
+# measured in days. It decides whether to stop a desktop, which can wait; but it
+# is also the only thing that ever notices somebody was connected, and that
+# cannot. Sampled once a night, a desktop used every weekday looks untouched,
+# because nobody is ever connected at the moment the sample is taken, and it
+# would be stopped with the message "nothing has connected for 7 days" -- which
+# would not be true.
+#
+# The cost of asking is one ss call and one systemctl query per session, so the
+# rate is set by how coarse a record of "last used" is acceptable rather than by
+# what it costs.
+OnBootSec=5min
+OnUnitActiveSec=5min
+# Nothing here is synchronised across machines and nothing downstream cares
+# about the exact minute, so this only avoids every session being polled on the
+# same tick.
+RandomizedDelaySec=30s
 
 [Install]
 WantedBy=timers.target

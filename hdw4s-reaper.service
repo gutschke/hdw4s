@@ -5,3 +5,19 @@ Documentation=man:hdw4s(8)
 [Service]
 ExecStart=/usr/lib/hdw4s/hdw4s reap
 Type=oneshot
+# This runs every few minutes, because noticing that somebody is connected
+# cannot wait for a nightly sample. Left alone, systemd would write three lines
+# each time it did -- started, deactivated, finished -- which is several hundred
+# a day saying nothing happened, in front of anyone reading the journal for an
+# unrelated reason.
+#
+# Filtering at warning drops those, and the command's ordinary output with them,
+# because both are logged as info. What matters opts back in: systemd reads a
+# "<N>" prefix on a line as a priority, and "hdw4s reap" writes the few messages
+# worth keeping -- that a desktop was stopped, and why -- at warning.
+#
+# The cost is that an unexpected error from the shell itself is logged as info
+# and therefore dropped too. A failing run is still reported, because systemd
+# logs the failure of a unit above this threshold; what is lost is the text, and
+# running "hdw4s reap" by hand prints it.
+LogLevelMax=warning
