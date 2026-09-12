@@ -271,8 +271,16 @@ profile_dir_of() {
 }
 
 # Whether a session has a credential of its own that a proxy must present.
+#
+# Existence, not readability. The credential is root-only, so asking whether we
+# can read it answered "no credential" for every unprivileged caller -- and
+# "list" then counted the session as unprotected and printed the warning about
+# the firewall being the only thing in the way, about a session that was in fact
+# authenticated. A security report that depends on who is reading it is worse
+# than none. Anything that needs the value itself, rather than the fact, checks
+# readability where it reads.
 has_auth() {
-  [ -r "${ETCDIR}/$1.auth.cred" ] &&
+  [ -e "${ETCDIR}/$1.auth.cred" ] &&
   [ "$(setting_of "$1" HDW4S_AUTH none)" = 'basic' ]
 }
 
@@ -1120,6 +1128,11 @@ cmd_proxy() {
   fi
 
   pw=''
+  if [ -e "${cred}" ] && [ ! -r "${cred}" ]; then
+    die "hdw4s: ${cred} exists but is not readable by $(id -un).
+  It holds the credential this block has to carry, so the block would be
+  wrong rather than merely incomplete. Run this as root."
+  fi
   if [ -r "${cred}" ]; then
     pw="$(systemd-creds decrypt --name=hdw4s-auth "${cred}" - 2>/dev/null)" || {
       echo "# Could not decrypt ${cred}; is this the machine that wrote it?" >&2
