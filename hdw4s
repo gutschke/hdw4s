@@ -24,6 +24,12 @@ die() {
 # them somewhere disposable. Without that the tests read -- and would sooner or
 # later write -- the real configuration of the machine they run on.
 ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
+# Where this package's own helpers live, and the two paths the session
+# hand-over feature is configured by. Named here so "show" and the updater
+# cannot drift apart about them.
+PKGLIBDIR="${HDW4S_LIBDIR:-/usr/lib/hdw4s}"
+HDW4S_CLIENT_ROOT="${HDW4S_CLIENT_ROOT:-/opt/gst-web}"
+HANDOVER_OFF="${HDW4S_HANDOVER_OFF:-/etc/hdw4s/handover.off}"
 CONF="${ETCDIR}/hdw4s.conf"
 SLOTS="${ETCDIR}/instances"
 DROPIN='/etc/systemd/system'
@@ -341,6 +347,61 @@ cmd_list() {
   }
 }
 
+# What "hdw4s show" says about session hand-over.
+#
+# Three separate facts, deliberately not collapsed into one word. The feature
+# needs a patched browser client AND a server that mixed itself in, and either
+# can be true without the other: a package upgrade replaces the client, and a
+# changed upstream makes the server stand down. Every report about this feature
+# has started by someone working out which of the three was false.
+handover_report() {
+  local inst="$1" port="$2" root mixin build state disabled clients
+  # Ask the unit, not the configuration files. The tree a session serves can be
+  # set by a drop-in -- which is how one session is given a different client to
+  # try a change on without changing what anybody else sees -- and reading only
+  # the conf files reported the shared tree's state for a session that was
+  # serving its own. It said "not patched" about a session where hand-over was
+  # demonstrably working, which is the same shape of lie as a security report
+  # that depends on who is asking.
+  root="$(systemctl show "hdw4s@${inst}.service" -p Environment --value 2>/dev/null |
+          tr ' ' '\n' | sed -n 's/^HDW4S_WEBROOT=//p' | tail -n1)"
+  [ -n "${root}" ] || root="$(setting_of "${inst}" HDW4S_WEBROOT "${HDW4S_CLIENT_ROOT}")"
+  mixin="${PKGLIBDIR}/hdw4s_signalling.py"
+
+  echo 'hand-over     one device at a time; a second is offered a way to take it'
+  if [ -r "${mixin}" ]; then
+    build="$(sed -n 's/^BUILD = "\(.*\)"/\1/p' "${mixin}" | head -n1)"
+    echo "              server    ${mixin} (${build:-no build marker})"
+  else
+    echo "              server    MISSING -- ${mixin} is not installed, so the"
+    echo '                        session runs unmodified and a second device is'
+    echo '                        refused in a way it cannot recognise'
+  fi
+
+  if [ ! -d "${root}" ]; then
+    echo "              client    no webroot at ${root}"
+  elif [ -x "${PKGLIBDIR}/hdw4s-patch-client" ]; then
+    state="$("${PKGLIBDIR}/hdw4s-patch-client" --check "${root}" 2>/dev/null | head -n1)"
+    disabled="$("${PKGLIBDIR}/hdw4s-patch-client" --check "${root}" 2>/dev/null |
+                sed -n '2p')"
+    case "${state}" in
+      patched) echo "              client    patched (${root})"
+               [ "${root}" = "${HDW4S_CLIENT_ROOT}" ] ||
+                 echo "                        its own tree, not the shared ${HDW4S_CLIENT_ROOT}";;
+      '')      echo "              client    could not be read (${root})";;
+      *)       echo "              client    ${state} -- NOT patched (${root}), so no"
+               echo '                        device is ever offered the take-over button';;
+    esac
+    [ "${disabled}" != 'disabled' ] ||
+      echo "              off       switched off by ${HANDOVER_OFF}"
+  fi
+
+  clients="$(clients_of "${inst}" "${port}")"
+  echo "              connected ${clients} client(s) right now"
+  echo '              codes     4001 held elsewhere, 4002 taken over,'
+  echo '                        4003 superseded by your own newer connection'
+}
+
 cmd_show() {
   local inst="$1" idx port
   # Handled here rather than left to -e: an unhandled failure also trips the
@@ -382,6 +443,7 @@ cmd_show() {
     echo 'auth          NONE -- anything that can reach the port gets this'
     echo "              desktop. Add one with 'hdw4s auth ${inst}'."
   fi
+  handover_report "${inst}" "${port}"
   local sk skey sdef sval ssrc
   echo 'settings      effective value, and where it came from'
   for sk in "${SESSION_SETTINGS[@]}"; do

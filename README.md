@@ -66,6 +66,11 @@ so the only way to stop the conflict is to stop sharing them.
 * **Ordinary reverse proxying.** One TCP port per session, plain HTTP and
   WebSocket, no UDP and no second channel. The proxy can live on another
   machine.
+* **Move between devices without losing the desktop.** A session belongs to one
+  browser at a time. Open it somewhere else and that window is told the desktop
+  is already in use, with a button to take it over; the device that had it is
+  told it was taken over and is offered the same way back. See
+  [Session hand-over](#session-hand-over).
 * **Coexists with a desktop that is already running**, on this machine or on
   another one sharing the same home directory over the network.
 * **Firewalled by construction.** The package owns one nftables table covering
@@ -172,6 +177,40 @@ screen.
 `hdw4s proxy alice` prints an nginx configuration matching whichever of these
 the session is set up for, including the WebSocket and timeout settings a
 desktop needs.
+
+## Session hand-over
+
+The streaming protocol fixes the peer identifiers a browser uses, so two
+browsers cannot hold one desktop at the same time. Rather than let the second
+one fight the first, a session hands over on request:
+
+* The second window is told the desktop is open elsewhere, and shows a button.
+* Pressing it moves both the video and the audio leg together, and the first
+  window is told it was taken over -- it does not reconnect on its own, and is
+  offered the same button back.
+* Reloading a page, or a connection that drops and returns, is recognised as
+  the same window coming back rather than as a second device, so it reclaims
+  its session without asking anyone.
+
+A window that is turned away is told why, using the private WebSocket close
+codes reserved for applications:
+
+| Code | Meaning |
+| ---- | ------- |
+| 4001 | The desktop is open on another device. Ask before taking it. |
+| 4002 | You were taken over. Do not come back on your own. |
+| 4003 | Superseded by a newer connection of your own, such as a reload. |
+
+`hdw4s show <instance>` reports whether the feature is actually in effect. It
+needs two halves -- a browser client that knows how to ask, and a server that
+knows how to answer -- and either can be missing without the other: an upgrade
+replaces the client, and a signalling server whose internals have changed makes
+the server half stand down rather than guess. The report names both, so a
+session that cannot hand over says which half is absent.
+
+To switch it off, create `/etc/hdw4s/handover.off`. The next update rolls the
+browser client back to stock; a second device is then refused the way it was
+before, without a button.
 
 ## Security
 

@@ -57,7 +57,7 @@ if not logger.handlers:
 logger.setLevel(os.environ.get("HDW4S_LOG_LEVEL", "INFO").upper())
 
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-21"
+BUILD = "handover-22"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -348,10 +348,11 @@ class HandoverMixin:
         last = self._refusal_logged_at.get(key)
         if last is None or now - last >= REFUSAL_SUMMARY_INTERVAL:
             logger.warning(
-                "Refusing peer %r from %r: session in use "
+                "Refusing peer %r from %r: session in use, closing with %d "
                 "(client_identified=%s, client_can_ask=%s, "
                 "refusals=%d since last report)",
-                uid, raddr, incoming is not None, self._client_can_ask(),
+                uid, raddr, CLOSE_SESSION_IN_USE,
+                incoming is not None, self._client_can_ask(),
                 self._refusal_count[key])
             self._refusal_logged_at[key] = now
             self._refusal_count[key] = 0
@@ -646,7 +647,9 @@ class HandoverMixin:
                 # server has not noticed it died. This is the case that must not
                 # be mistaken for a second device: it is an ordinary reconnect.
                 displaced, code, reason = held_entry, CLOSE_SUPERSEDED, "superseded"
-                logger.info("Peer %r reconnecting as the same client", uid)
+                logger.info("Peer %r reconnecting as the same client; the "
+                            "older socket is closed with %d",
+                            uid, CLOSE_SUPERSEDED)
             elif takeover \
                     and (time.monotonic()
                          - self._last_takeover.get((uid, incoming),
@@ -668,7 +671,8 @@ class HandoverMixin:
                 # not in CLIENT_PEER_IDS, checked above; that is the real
                 # distinction and it does not depend on what a client sent.
                 displaced, code, reason = held_entry, CLOSE_TAKEN_OVER, "taken over"
-                logger.info("Peer %r taken over by %r", uid, raddr)
+                logger.info("Peer %r taken over by %r; the other device is "
+                            "told %d", uid, raddr, CLOSE_TAKEN_OVER)
             else:
                 await self._refuse(ws, uid, raddr, incoming)
                 return (None, None)
@@ -804,7 +808,11 @@ def install_into(module):
             "overrides against the installed version.")
         return state
     module.WebRTCSimpleServer = make_server_class(base)
-    logger.info("session hand-over enabled")
+    # Name the build. Every report about this feature so far has had to begin
+    # by working out which version was actually running, and twice the answer
+    # turned out to be "not the one being tested".
+    logger.info("session hand-over enabled (build %s, client in %s)",
+                BUILD, WEBROOT)
     return state
 
 
