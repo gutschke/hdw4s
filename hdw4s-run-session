@@ -267,6 +267,16 @@ lockdown=(
                                   # default cannot quietly hand out a shell
   --enable-metrics-http=false
   --second-screen=false
+  # Branding, partially. This names the sidebar heading and nothing else.
+  #
+  # The browser TAB still reads "Selkies", because the client sets its title
+  # from the web manifest, and the manifest now lives inside the package rather
+  # than in a tree we patch. Recovering it means serving a patched copy of the
+  # packaged client through --web-root, which is the supported seam and is not
+  # done here yet. The per-session "Desktop: <host>" form is gone either way: the
+  # old script computed it in the browser, where the hostname is known, and
+  # neither a setting nor a manifest can do that.
+  --ui-title=Desktop
 )
 "${stream[@]}" \
   --addr="${HDW4S_ADDR}" \
