@@ -32,7 +32,7 @@ import time
 logger = logging.getLogger("hdw4s.signalling")
 
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-8"
+BUILD = "handover-9"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -309,19 +309,24 @@ class HandoverMixin:
         tracebacks.
         """
         raddr = ws.remote_address
-        hello = await ws.recv()
 
-        # Everything from here to the end of the parse is hostile input. The
-        # whole point of this change is that a connection we turn away must not
-        # raise out through the websockets handler -- that is what logged a
-        # traceback per attempt and let one stuck client write 17858 of them in
-        # two days. Upstream raises for a malformed HELLO and unpacks the token
-        # list without checking its length, so a one-word HELLO, a truncated
-        # base64 blob, or a payload that is not JSON each ends the connection
-        # with a 1011 the client reads as an ordinary failure -- and it comes
-        # straight back. Refusing these the same way we refuse a duplicate
-        # closes that loop for every input, not just the one we set out to fix.
+        # Everything from here to the end of the parse is hostile input, the
+        # receive included -- and that is the case a browser reaches most
+        # often: a tab closed while connecting, a connection reset, or a frame
+        # larger than the server will accept all raise here. An earlier version
+        # of this guard began one line too late and let all three through.
+        #
+        # A connection we turn away must not raise out through the websockets
+        # handler. That is what logged a traceback per attempt and let one
+        # stuck client write 17858 of them in two days: the client sees the
+        # resulting close as an ordinary failure and comes straight back.
+        # Upstream raises for a malformed HELLO and unpacks the token list
+        # without checking its length, so a one-word HELLO, a truncated base64
+        # blob, or a payload that is not JSON each end the same way. Refusing
+        # all of them as we refuse a duplicate closes the loop for every input,
+        # not only the one we set out to fix.
         try:
+            hello = await ws.recv()
             toks = hello.split(maxsplit=2)
             metab64str = None
             if len(toks) > 2:
@@ -337,8 +342,15 @@ class HandoverMixin:
             meta = None
             if metab64str:
                 meta = json.loads(base64.b64decode(metab64str))
-            if meta is not None and not isinstance(meta, dict):
-                raise ValueError("metadata is not an object")
+                # A client that sends metadata must send an object. JSON null
+                # decodes to None, which is indistinguishable from having sent
+                # no metadata at all -- and "sent no metadata" is precisely how
+                # the desktop's own peers are recognised below, the peers that
+                # may never be handed over. Without this, one line of input
+                # claims a peer id that no take-over can then reclaim, and the
+                # session is wedged for good.
+                if not isinstance(meta, dict):
+                    raise ValueError("metadata is not an object")
         except Exception as exc:
             logger.info("Malformed HELLO from %r: %s", raddr, exc)
             try:
