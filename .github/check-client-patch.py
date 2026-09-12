@@ -84,6 +84,11 @@ def parsed(patcher, webroot):
     try:
         work = os.path.join(tmp, "gst-web")
         shutil.copytree(webroot, work)
+        # Keep everything inside the temporary tree: a check has no business
+        # writing backups under /var/lib or a switch under /etc, and as an
+        # ordinary user it could not anyway.
+        patcher.BACKUP_DIR = os.path.join(tmp, "backups")
+        patcher.DISABLE_MARKER = os.path.join(tmp, "handover.off")
         rc = patcher.main([work])
         if rc != 0:
             return ["patcher exited %d" % rc]

@@ -81,6 +81,23 @@ def test_shipped():
     check("  and does so after the reconnect loop fix",
           update.index("# --- RECONNECT LOOP FIX")
           < update.index("# --- SESSION HAND-OVER, CLIENT HALF"))
+    # The two substitutions that keep an unattended, root-run updater from
+    # aborting on any answer but the two good ones. The comment above them is
+    # currently the only thing defending them from being tidied away, and a
+    # comment is not a check.
+    block = update[update.index("# --- SESSION HAND-OVER, CLIENT HALF"):
+                   update.index("# --- END SESSION HAND-OVER")]
+    for what in ('"${patcher}" --check "${WEBROOT}" 2>/dev/null | head -1)" || :',
+                 "HANDOVER\n)\" || :"):
+        check("the updater cannot abort on %s" % ("--check" if "patcher" in what else "the state query"),
+              what in block,
+              "without the trailing || : this kills the whole updater under set -e")
+
+    # It has no shebang, so without this dpkg would ship it executable and
+    # lintian would object.
+    check("the module is installed unexecutable",
+          'chmod 0644 "${dst}"/hdw4s_signalling.py' in open(os.path.join(REPO, "install.sh")).read())
+
     session = open(os.path.join(REPO, "hdw4s-run-session")).read()
     check("a session can still start without the wrapper",
           "selkies-gstreamer" in session and "hdw4s_signalling" in session)
@@ -88,6 +105,12 @@ def test_shipped():
           "import hdw4s_signalling" in session)
     check("  with the working directory kept off the module path",
           "PYTHONSAFEPATH=1" in session)
+    check("  and cannot block session start for ever",
+          "timeout 15 env PYTHONSAFEPATH=1" in session,
+          "the file test it replaced could not block; this can")
+    check("  and says so when it falls back",
+          "session hand-over is not available" in session,
+          "otherwise a session runs without it for its whole life, silently")
 
 
 # ------------------------------------------------------------ server module

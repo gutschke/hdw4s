@@ -460,6 +460,14 @@ def _needs_retoken(src, name):
 TOKEN_FILES = ("index.html", "sw.js", "app.js")
 BACKUP_SUFFIX = ".pre-handover"
 
+# Kept outside the webroot. Left inside it, every applied patch parked a
+# world-readable copy of the stock client in a directory served to browsers,
+# and only --revert ever cleared them. Outside, they also survive the webroot
+# being replaced wholesale on upgrade -- which is safe because the digest the
+# patched file records is what decides whether a backup may be used, not where
+# it came from.
+BACKUP_DIR = os.environ.get("HDW4S_HANDOVER_BACKUPS", "/var/lib/hdw4s/handover")
+
 # Written by --revert, and honoured by the updater. Without it a rollback lasts
 # until the updater next runs, which is at most a day: the files go back, the
 # tree reads as applicable again, and the patch is re-applied. Somebody reverting
@@ -485,7 +493,13 @@ def _state_of(root, name, edits):
         if rev != PATCH_REVISION or not _evidence_present(src, name):
             # Either an older revision of this patch, or a file stamped as
             # patched that does not actually contain the patch. Both need the
-            # stock file back before anything is applied to it.
+            # stock file back before anything is applied to it -- so this is
+            # only repairable if there is a usable original to start from.
+            # Without one it is not stale, it is a tree we cannot work with,
+            # and saying so stops the updater retrying it every day and
+            # reporting a reason that is not the real one.
+            if stock_from_backup(root, name)[0] is None:
+                return "mismatch", src
             return "stale", src
         return ("patched" if not _needs_retoken(src, name) else "applicable"), src
 
@@ -496,6 +510,31 @@ def _state_of(root, name, edits):
     return "applicable", src
 
 
+def _is_backup_source(src, name):
+    """Is this file safe to save as the way back?
+
+    Being unstamped is not enough. A patched file that has lost its stamp is
+    unstamped too, and saving that over a good backup replaces the way back
+    with a copy of the thing being reverted -- silently, because the digest the
+    patched file records would then match the damaged backup and the rollback
+    would report success.
+
+    A genuinely untouched file still carries its original build token, so a file
+    that has already been re-tokenised is not one to save. Files with edits are
+    covered by their anchors, which a patched file no longer matches.
+    """
+    if _installed_revision(src) is not None:
+        return False
+    if name in TOKEN_FILES and not _needs_retoken(src, name):
+        return False
+    return True
+
+
+def _backup_path(root, name):
+    del root                      # kept for symmetry with the callers
+    return os.path.join(BACKUP_DIR, name + BACKUP_SUFFIX)
+
+
 def stock_from_backup(root, name):
     """The saved original for a file, if there is one that can be trusted.
 
@@ -504,7 +543,7 @@ def stock_from_backup(root, name):
     twice is how one of them ends up trusting a backup the other would refuse.
     """
     path = os.path.join(root, name)
-    backup = path + BACKUP_SUFFIX
+    backup = _backup_path(root, name)
     if not os.path.isfile(backup):
         return None, "no saved original"
     stock = _read(backup)
@@ -641,7 +680,7 @@ def patch(root):
             continue
         stock, why = stock_from_backup(root, name)
         if stock is None:
-            print("  cannot refresh %s: %s" % (name, why))
+            print("  cannot refresh %s: %s" % (name, why), file=sys.stderr)
             return 1
         _write_atomic(path, stock)
         print("  restored %s to stock before re-applying" % name)
@@ -672,23 +711,31 @@ def patch(root):
 
     for name, text in staged.items():
         if not _validate(name, text, originals[name]):
-            print("  refusing to write %s: failed a sanity check" % name)
+            print("  refusing to write %s: failed a sanity check" % name,
+                  file=sys.stderr)
             return 1
         if not _evidence_present(text, name):
             # The stamp would otherwise say patched over a file the edits did
             # not reach, which reads as healthy for ever.
-            print("  refusing to write %s: the edits did not take" % name)
+            print("  refusing to write %s: the edits did not take" % name,
+                  file=sys.stderr)
             return 1
 
     # Backups before contents, and only ever taken from a stock file: a backup
     # written from an already-patched one is not a way back. Atomically, because
     # a truncated backup is worse than none -- it reports success and then
     # installs a broken client when it is used.
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+    except OSError as exc:
+        # Without somewhere to put the way back, applying would leave a tree
+        # that cannot be rolled back. Refusing is the safer half of that choice.
+        print("  cannot write backups to %s (%s); nothing was changed."
+              % (BACKUP_DIR, exc), file=sys.stderr)
+        return 1
     for name in staged:
-        path = os.path.join(root, name)
-        backup = path + BACKUP_SUFFIX
-        if _installed_revision(originals[name]) is None:
-            _write_atomic(backup, originals[name])
+        if _is_backup_source(originals[name], name):
+            _write_atomic(_backup_path(root, name), originals[name])
 
     for name, text in staged.items():
         _write_atomic(os.path.join(root, name), text)
@@ -705,44 +752,33 @@ def patch(root):
 def revert(root):
     """Put back what was there before, and leave nothing behind.
 
-    The backups are removed as they are used: they sit in a directory served to
-    browsers, and a revert that leaves four copies of the client there has not
-    put the tree back, however identical the files it did restore.
+    Backups are removed as they are used, and the switch that keeps the updater
+    from re-applying is written last -- so a rollback that could not be made to
+    stick is reported as a failure rather than as a success that quietly comes
+    undone at the next timer run.
     """
-    restored = 0
+    restored = []
     for name in sorted(set([n for n, _ in FILES] + list(TOKEN_FILES))):
-        path = os.path.join(root, name)
-        backup = path + BACKUP_SUFFIX
-        if not os.path.isfile(backup):
+        if not os.path.isfile(_backup_path(root, name)):
             continue
-        stock = _read(backup)
-        # A backup is only useful if it is what it claims to be. One that still
-        # carries the stamp is a copy of a patched file, and one that is far
-        # smaller than what it replaces was truncated when it was written.
-        if _installed_revision(stock) is not None:
-            print("  refusing %s: it is a copy of a patched file" % (name + BACKUP_SUFFIX))
+        stock, why = stock_from_backup(root, name)
+        if stock is None:
+            print("  refusing %s: %s" % (name, why), file=sys.stderr)
+            print("  nothing was changed.", file=sys.stderr)
             return 1
-        recorded = _recorded_original(_read(path)) if os.path.isfile(path) else None
-        if recorded is not None:
-            actual = hashlib.sha256(stock.encode("utf-8")).hexdigest()
-            if actual != recorded:
-                # The patched file recorded what it replaced. A backup that no
-                # longer matches was damaged after it was written, and putting
-                # it back would install a broken client while reporting a
-                # successful rollback.
-                print("  refusing %s: it is not the file that was replaced"
-                      % (name + BACKUP_SUFFIX))
-                return 1
-        elif not _is_stock(stock, name):
-            print("  refusing %s: it is not intact" % (name + BACKUP_SUFFIX))
-            return 1
-        _write_atomic(path, stock)
-        os.unlink(backup)
-        restored += 1
-        print("  restored %s" % name)
+        restored.append((name, stock))
+
     if not restored:
         print("  nothing to revert: no saved originals")
         return 1
+
+    # Every file is checked before any of them is written, so a bad backup
+    # among them leaves the tree as it was rather than half rolled back.
+    for name, stock in restored:
+        _write_atomic(os.path.join(root, name), stock)
+        os.unlink(_backup_path(root, name))
+        print("  restored %s" % name)
+
     try:
         os.makedirs(os.path.dirname(DISABLE_MARKER), exist_ok=True)
         with open(DISABLE_MARKER, "w", encoding="utf-8") as fh:
@@ -751,9 +787,13 @@ def revert(root):
         print("  session hand-over will stay off; delete %s to allow it again"
               % DISABLE_MARKER)
     except OSError as exc:
-        print("  WARNING: could not record that this was rolled back (%s)." % exc)
-        print("  The updater will apply it again within a day unless %s exists."
-              % DISABLE_MARKER)
+        # The files are back, which is the part that mattered. Say plainly that
+        # only the switch failed, rather than reporting the whole rollback as a
+        # failure over a tree that is already stock.
+        print("  the client is rolled back, but %s could not be written (%s)."
+              % (DISABLE_MARKER, exc))
+        print("  The updater will apply it again within a day unless that file"
+              " exists.")
         return 1
     return 0
 
@@ -789,23 +829,31 @@ def main(argv):
     if not os.path.isdir(root):
         print("no such webroot: %s" % root)
         return 2
-    if os.path.exists(DISABLE_MARKER) and "--revert" not in argv:
-        # Reported through --check as well, so the updater sees it the same way
-        # a person does.
-        print("disabled")
-        if "--check" in argv:
-            return 0
-        print("  session hand-over was rolled back; delete %s to allow it again"
-              % DISABLE_MARKER)
-        return 0
     state, detail = analyse(root)
+    disabled = os.path.exists(DISABLE_MARKER)
     if "--check" in argv:
+        # Two separate facts. Reporting only the marker said "disabled" over a
+        # tree that was fully patched and being served, which is the same shape
+        # of contradiction as claiming hand-over active for a client that could
+        # not ask for it.
         print(state)
+        if disabled:
+            print("disabled")
         for name in sorted(detail):
             print("  %-16s %s" % (name, detail[name]))
-        return 0 if state in ("patched", "applicable") else 1
+        return 0 if state in ("patched", "applicable", "partial", "stale") else 1
     if "--revert" in argv:
         return revert(root)
+    if disabled:
+        # The marker means hand-over should not be installed. A patched tree
+        # with the marker present is not "off", so make it so -- otherwise
+        # creating the file by hand, which is what its own message invites,
+        # would turn nothing off.
+        if state in ("patched", "partial", "stale"):
+            print("  hand-over is switched off; rolling the client back")
+            return revert(root)
+        print("  hand-over is switched off by %s; nothing to do" % DISABLE_MARKER)
+        return 0
     if state == "mismatch":
         print("  skipping: client source does not match")
         return 0

@@ -553,18 +553,27 @@ if [ -x "${patcher}" ] && [ -d "${WEBROOT}" ]; then
     patched)
       echo ' already applied.' ;;
     applicable|partial|stale)
-      if "${patcher}" "${WEBROOT}" >/dev/null 2>&1; then
+      if why="$("${patcher}" "${WEBROOT}" 2>&1 >/dev/null)"; then
         echo ' done.'
       else
         echo ' failed; the client is unchanged.' >&2
+        # The one line that says why was previously thrown away, so a tree that
+        # could not be repaired reported the same thing every day for ever with
+        # no way to find out what was wrong.
+        [ -z "${why}" ] || printf '  %s\n' "${why}" >&2
       fi ;;
     '')
       echo ' skipped: could not read the client state.' >&2 ;;
     disabled)
       echo ' not applied: it was rolled back. Delete /etc/hdw4s/handover.off'
       echo '  to allow it again.' ;;
+    mismatch)
+      echo ' skipped: the client is not what this patch was written for.' ;;
     *)
-      echo " skipped: the client no longer matches (${state:-unknown})." ;;
+      # Anything else means the patcher did not answer properly -- it crashed,
+      # or printed something we do not know. That is not the same as the client
+      # having changed, and saying so sends someone to the wrong place.
+      echo " skipped: could not read the client state (${state:0:40})." >&2 ;;
   esac
 fi
 

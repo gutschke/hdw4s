@@ -206,14 +206,29 @@ export SELKIES_RTC_CONFIG_JSON=''
 # with the user's home as their working directory, and "python -m" would
 # otherwise look there first -- so a file left in a home directory, on shared
 # storage that several machines mount, would be imported in place of this one.
+# Bounded, because unlike the file test this replaces, this one can block. The
+# interpreter it runs lives in a tree the updater rebuilds daily, and reading
+# from a half-written venv or a stalled mount would hold the whole session start
+# here -- where there is already an X server, a bus and a desktop waiting behind
+# a two-minute limit. Fifteen seconds is far longer than the tenth of a second
+# it takes when nothing is wrong.
 stream_env=()
 stream=(/opt/selkies/bin/selkies-gstreamer)
-if [ -r /usr/lib/hdw4s/hdw4s_signalling.py ] &&
-   env PYTHONSAFEPATH=1 PYTHONPATH=/usr/lib/hdw4s /opt/selkies/bin/python -c \
-     'import hdw4s_signalling as h, selkies_gstreamer
-assert callable(getattr(h, "main", None))' >/dev/null 2>&1; then
-  stream_env=(env PYTHONSAFEPATH=1 "PYTHONPATH=/usr/lib/hdw4s${PYTHONPATH:+:${PYTHONPATH}}")
-  stream=(/opt/selkies/bin/python -m hdw4s_signalling)
+probe_err=''
+if [ -r /usr/lib/hdw4s/hdw4s_signalling.py ]; then
+  if probe_err="$(timeout 15 env PYTHONSAFEPATH=1 PYTHONPATH=/usr/lib/hdw4s \
+                  /opt/selkies/bin/python -c \
+                    'import hdw4s_signalling as h, selkies_gstreamer
+assert callable(getattr(h, "main", None))' 2>&1)"; then
+    stream_env=(env PYTHONSAFEPATH=1 "PYTHONPATH=/usr/lib/hdw4s${PYTHONPATH:+:${PYTHONPATH}}")
+    stream=(/opt/selkies/bin/python -m hdw4s_signalling)
+  else
+    # Falling back is the safe outcome, but a session that quietly runs without
+    # hand-over for its whole life and says nothing is how a regression goes
+    # unnoticed for days. Say which, and why.
+    echo "hdw4s: session hand-over is not available; starting without it." >&2
+    printf 'hdw4s:   %s\n' "${probe_err##*$'\n'}" >&2
+  fi
 fi
 "${stream_env[@]}" "${stream[@]}" \
   --addr="${HDW4S_ADDR}" \

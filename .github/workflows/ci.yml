@@ -42,6 +42,27 @@ jobs:
             sleep 5
           done
 
+      # The client patch is checked properly only when there is a client to
+      # apply it to; without one the check falls back to counting brackets,
+      # which passes JavaScript that is balanced and still invalid. A runner has
+      # no installed client, so fetch the pinned one. Failing to fetch is not
+      # fatal -- the weaker check still runs and says which mode it used -- but
+      # it should be the exception rather than the normal state of CI.
+      - name: Fetch the client the patch is written against
+        continue-on-error: true
+        run: |
+          version="$(sed -n "s/^KNOWN_GOOD='\([^']*\)'.*/\1/p" hdw4s-update)"
+          url="https://github.com/selkies-project/selkies/releases/download"
+          url="${url}/v${version}/selkies-gstreamer-web_v${version}.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/client"
+          curl -fsSL --proto '=https' --max-time 300 --retry 3 -o "${RUNNER_TEMP}/web.tgz" "${url}"
+          tar -xzf "${RUNNER_TEMP}/web.tgz" -C "${RUNNER_TEMP}/client"
+          # The tarball unpacks into one top-level directory whose name has
+          # changed between releases, so find it rather than assume it.
+          root="$(find "${RUNNER_TEMP}/client" -name app.js -printf '%h\n' | head -1)"
+          [ -n "${root}" ] || { echo 'no app.js in the tarball'; exit 1; }
+          echo "HDW4S_GST_WEB=${root}" >> "${GITHUB_ENV}"
+
       # Exactly what .github/checks.sh runs locally, so a green run here tells
       # a maintainer nothing they could not already have known before pushing.
       - name: Checks
