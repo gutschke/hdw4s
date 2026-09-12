@@ -165,7 +165,19 @@ done
 mandb -q 2>/dev/null || :
 
 echo -n 'Removing Selkies...'
-rm -rf /opt/selkies /opt/selkies.bak /opt/gst-web /opt/gst-web.bak
+# /opt/selkies belongs to the "selkies" package now, not to us: upstream ships
+# a distribution package and dpkg owns every file under that prefix. Removing it
+# with rm would leave dpkg believing the package is installed while its files are
+# gone, which breaks the next upgrade and is invisible until then.
+#
+# So the streaming server is removed the way it was installed, and only if it is
+# actually there. /opt/gst-web has no owner and no successor; it is a leftover
+# from the version before this one and is still worth clearing.
+if command -v dpkg-query >/dev/null 2>&1 &&
+   dpkg-query -W -f='${Status}' selkies 2>/dev/null | grep -q 'install ok installed'; then
+  dpkg -P selkies >/dev/null 2>&1 || :
+fi
+rm -rf /opt/gst-web /opt/gst-web.bak /opt/selkies.bak
 echo ' done.'
 
 # Per-session settings and the profile directories under each home are left in

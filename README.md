@@ -69,9 +69,11 @@ so the only way to stop the conflict is to stop sharing them.
   so the proxy can live on another machine and needs to understand nothing
   beyond HTTP. (A browser that reaches a session with no proxy in between does
   need one; that is what `HDW4S_MEDIA_PORTS=direct` is for.)
-* **Several people can watch one desktop**, or one person can move between
-  devices: the streaming server assigns connections itself and the newest one
-  takes over, so opening the same desktop somewhere else simply works.
+* **One browser at a time, and moving between them just works.** Open the same
+  desktop somewhere else and the new window takes it; the old one is told the
+  connection was superseded. There is no prompt and no way back from the losing
+  side, and the several-viewers and shared-control features the streaming server
+  offers are deliberately switched off here -- see [Security](#security) for why.
 * **Coexists with a desktop that is already running**, on this machine or on
   another one sharing the same home directory over the network.
 * **Firewalled by construction.** The package owns one nftables table covering
