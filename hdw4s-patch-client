@@ -7,6 +7,7 @@ half this has to be a patch. It therefore follows the rules the other webroot
 patches already follow: idempotent, backed up before it writes, atomic, and
 silent when the source it expects has changed underneath.
 """
+import hashlib
 import os
 import re
 import shutil
@@ -14,6 +15,30 @@ import sys
 import tempfile
 
 MARKER = "HDW4S takeover"
+
+# Stamped into every file this touches, and the only thing trusted to mean
+# "already patched".
+#
+# Two things went wrong with testing for MARKER instead. A future upstream that
+# happens to contain that phrase -- likely on the day upstream adopts this --
+# reads as already patched, so the edits are skipped while the file is still
+# re-tokenised, and the tree sits half-patched forever while reporting itself
+# healthy. And a bump of PATCH_REVISION shipped new URLs pointing at old code,
+# because a file carrying the marker was never edited again: every browser
+# refetched, and got the previous version back.
+VERSION_TAG = "HDW4S-PATCH"
+VERSION_RE = re.compile(r"HDW4S-PATCH v([0-9]+)(?: orig:([0-9a-f]{64}))?")
+
+# What must be present for a file to count as patched, beyond the stamp. The
+# stamp says an attempt was made; these say it took effect. Checking that the
+# anchors are gone would not work -- several edits keep their anchor and add
+# around it -- so each file names something only the patched version contains.
+EVIDENCE = {
+    "signalling.js": ("this.client_id", "this.onbusy", "4003"),
+    "app.js": ("hdw4sClientId", "takeOver()", "reconnectBoth"),
+    "index.html": ("status === 'busy'", "takeOver()"),
+    "sw.js": (),
+}
 
 # Bumped whenever the patched client changes behaviour, so that browsers and
 # installed apps holding a cached copy fetch the new one. Without this the
@@ -365,6 +390,36 @@ def retoken(src, name):
     return TS_RE.sub(lambda m: _suffix(m, "ts"), src)
 
 
+def _installed_revision(src):
+    """Which revision of this patch the file carries, if any."""
+    m = VERSION_RE.search(src)
+    return int(m.group(1)) if m else None
+
+
+def _recorded_original(src):
+    """The digest of the file this one replaced, as recorded when it was
+    patched."""
+    m = VERSION_RE.search(src)
+    return m.group(2) if m else None
+
+
+def _evidence_present(src, name):
+    return all(token in src for token in EVIDENCE.get(name, ()))
+
+
+def _version_marker(name, original):
+    """The stamp, carrying the digest of the file it replaced.
+
+    Recording it here rather than beside the backup is what makes a damaged
+    backup detectable. Nothing else can tell: a copy that stopped part way
+    through is a plausible file with a plausible size, and every anchor this
+    patch looks for sits in the first half of it.
+    """
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    tag = "%s v%d orig:%s" % (VERSION_TAG, PATCH_REVISION, digest)
+    return ("<!-- %s -->\n" % tag) if name.endswith(".html") else ("// %s\n" % tag)
+
+
 def _has_token(src, name):
     """Is there anything here we recognise as a build token?"""
     if TS_RE.search(src):
@@ -417,15 +472,68 @@ def _state_of(root, name, edits):
         # undone -- and the cache bust is the difference between this patch
         # landing on disk and reaching a browser at all.
         return "mismatch", src
+
+    rev = _installed_revision(src)
+    if rev is not None:
+        if rev != PATCH_REVISION or not _evidence_present(src, name):
+            # Either an older revision of this patch, or a file stamped as
+            # patched that does not actually contain the patch. Both need the
+            # stock file back before anything is applied to it.
+            return "stale", src
+        return ("patched" if not _needs_retoken(src, name) else "applicable"), src
+
     if edits is None:
-        # A file we only re-token (sw.js): there is no marker to look for, so
-        # the token itself is the evidence.
-        return ("patched" if not _needs_retoken(src, name) else "applicable"), src
-    if MARKER in src:
-        return ("patched" if not _needs_retoken(src, name) else "applicable"), src
+        return "applicable", src
     if any(src.count(old) != 1 for _, old, _ in edits):
         return "mismatch", src
     return "applicable", src
+
+
+def stock_from_backup(root, name):
+    """The saved original for a file, if there is one that can be trusted.
+
+    Returns (content, None) or (None, reason). Both the repair path and the
+    rollback path go through here: they ask the same question, and answering it
+    twice is how one of them ends up trusting a backup the other would refuse.
+    """
+    path = os.path.join(root, name)
+    backup = path + BACKUP_SUFFIX
+    if not os.path.isfile(backup):
+        return None, "no saved original"
+    stock = _read(backup)
+    if _installed_revision(stock) is not None:
+        return None, "it is a copy of a patched file"
+    recorded = _recorded_original(_read(path)) if os.path.isfile(path) else None
+    if recorded is not None:
+        if hashlib.sha256(stock.encode("utf-8")).hexdigest() != recorded:
+            return None, "it is not the file that was replaced"
+    elif not _is_stock(stock, name):
+        return None, "it is not intact"
+    return stock, None
+
+
+def _is_stock(src, name):
+    """Is this the unpatched file the patch expects, whole?
+
+    Checked by content rather than by size, because the damage that matters is
+    a copy that stopped part way: the tail is missing, the head looks perfectly
+    ordinary, and every anchor after the cut is gone with it.
+    """
+    edits = dict(FILES).get(name)
+    if edits is not None:
+        return all(src.count(old) == 1 for _, old, _ in edits)
+    return _has_token(src, name)
+
+
+def _all_files():
+    """Every file this touches, with the edits for it if it has any.
+
+    sw.js is only re-tokenised, so it appears with no edits -- but it still
+    needs a stamp and a backup like the rest, and leaving it out of one of the
+    three loops that walk this list is how it ended up ungated.
+    """
+    named = dict(FILES)
+    return list(FILES) + [(n, None) for n in TOKEN_FILES if n not in named]
 
 
 def analyse(root):
@@ -437,14 +545,13 @@ def analyse(root):
     returns without reconnecting and the page hangs with no UI at all.
     """
     seen = {}
-    for name, edits in FILES:
+    for name, edits in _all_files():
         seen[name] = _state_of(root, name, edits)[0]
-    for name in TOKEN_FILES:
-        if name not in seen:
-            seen[name] = _state_of(root, name, None)[0]
     values = set(seen.values())
     if "missing" in values or "mismatch" in values:
         return "mismatch", seen
+    if "stale" in values:
+        return "stale", seen
     if values == {"patched"}:
         return "patched", seen
     if "patched" in values:
@@ -468,8 +575,13 @@ def _write_atomic(path, text):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
             fh.flush()
+            # The rename below is atomic, but only orders against data that has
+            # reached the disk. Without this a crash can leave the new name
+            # pointing at an empty file -- which for a backup means the rollback
+            # installs nothing.
             os.fsync(fh.fileno())
-        shutil.copymode(path, tmp)
+        if os.path.exists(path):
+            shutil.copymode(path, tmp)
         os.replace(tmp, path)
     except Exception:
         try: os.unlink(tmp)
@@ -504,17 +616,38 @@ def _validate(name, text, original):
 
 
 def patch(root):
-    """Build every file first, then swap them in. Nothing is written until all
-    of them are ready, so an error part way through leaves the tree alone."""
+    """Build every file first, then swap them in.
+
+    Nothing is written until all of them are ready, so an error part way
+    through leaves the tree as it was.
+    """
+    # A file carrying an older revision, or stamped as patched without actually
+    # containing the patch, has to go back to stock before anything is applied
+    # to it. Editing on top would layer one revision over another; skipping it
+    # is what shipped new URLs pointing at old code.
+    for name, edits in _all_files():
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        state, _src = _state_of(root, name, edits)
+        if state != "stale":
+            continue
+        stock, why = stock_from_backup(root, name)
+        if stock is None:
+            print("  cannot refresh %s: %s" % (name, why))
+            return 1
+        _write_atomic(path, stock)
+        print("  restored %s to stock before re-applying" % name)
+
     staged = {}
     originals = {}
     for name, edits in FILES:
         path = os.path.join(root, name)
         src = _read(path)
         originals[name] = src
-        if MARKER not in src:
-            for _, old, new in edits:
-                src = src.replace(old, new)
+        if _installed_revision(src) is None:
+            for _, old, new_text in edits:
+                src = src.replace(old, new_text)
         staged[name] = src
     for name in TOKEN_FILES:
         path = os.path.join(root, name)
@@ -526,17 +659,32 @@ def patch(root):
         originals.setdefault(name, src)
         staged[name] = retoken(src, name)
 
+    for name in list(staged):
+        if _installed_revision(staged[name]) is None:
+            staged[name] = staged[name] + _version_marker(name, originals[name])
+
     for name, text in staged.items():
         if not _validate(name, text, originals[name]):
             print("  refusing to write %s: failed a sanity check" % name)
             return 1
+        if not _evidence_present(text, name):
+            # The stamp would otherwise say patched over a file the edits did
+            # not reach, which reads as healthy for ever.
+            print("  refusing to write %s: the edits did not take" % name)
+            return 1
 
-    for name, text in staged.items():
+    # Backups before contents, and only ever taken from a stock file: a backup
+    # written from an already-patched one is not a way back. Atomically, because
+    # a truncated backup is worse than none -- it reports success and then
+    # installs a broken client when it is used.
+    for name in staged:
         path = os.path.join(root, name)
         backup = path + BACKUP_SUFFIX
-        if not os.path.exists(backup):
-            shutil.copyfile(path, backup)
-        _write_atomic(path, text)
+        if _installed_revision(originals[name]) is None:
+            _write_atomic(backup, originals[name])
+
+    for name, text in staged.items():
+        _write_atomic(os.path.join(root, name), text)
         print("  patched %s" % name)
     return 0
 
@@ -544,20 +692,41 @@ def patch(root):
 def revert(root):
     """Put back what was there before, and leave nothing behind.
 
-    The backups are removed as they are used: they sit inside a directory that
-    is served to browsers, and a revert that leaves four copies of the client
-    lying there has not put the tree back, however identical the files it did
-    restore.
+    The backups are removed as they are used: they sit in a directory served to
+    browsers, and a revert that leaves four copies of the client there has not
+    put the tree back, however identical the files it did restore.
     """
     restored = 0
-    for name in set([n for n, _ in FILES] + list(TOKEN_FILES)):
+    for name in sorted(set([n for n, _ in FILES] + list(TOKEN_FILES))):
         path = os.path.join(root, name)
         backup = path + BACKUP_SUFFIX
-        if os.path.isfile(backup):
-            shutil.copyfile(backup, path)
-            os.unlink(backup)
-            restored += 1
-            print("  restored %s" % name)
+        if not os.path.isfile(backup):
+            continue
+        stock = _read(backup)
+        # A backup is only useful if it is what it claims to be. One that still
+        # carries the stamp is a copy of a patched file, and one that is far
+        # smaller than what it replaces was truncated when it was written.
+        if _installed_revision(stock) is not None:
+            print("  refusing %s: it is a copy of a patched file" % (name + BACKUP_SUFFIX))
+            return 1
+        recorded = _recorded_original(_read(path)) if os.path.isfile(path) else None
+        if recorded is not None:
+            actual = hashlib.sha256(stock.encode("utf-8")).hexdigest()
+            if actual != recorded:
+                # The patched file recorded what it replaced. A backup that no
+                # longer matches was damaged after it was written, and putting
+                # it back would install a broken client while reporting a
+                # successful rollback.
+                print("  refusing %s: it is not the file that was replaced"
+                      % (name + BACKUP_SUFFIX))
+                return 1
+        elif not _is_stock(stock, name):
+            print("  refusing %s: it is not intact" % (name + BACKUP_SUFFIX))
+            return 1
+        _write_atomic(path, stock)
+        os.unlink(backup)
+        restored += 1
+        print("  restored %s" % name)
     if not restored:
         print("  nothing to revert: no saved originals")
         return 1
@@ -567,7 +736,13 @@ def revert(root):
 USAGE = """usage: hdw4s-patch-client [--check|--revert] WEBROOT
 
   (no flag)  apply the session hand-over patch, if it applies cleanly
-  --check    print patched / applicable / partial / mismatch and say no more
+  --check    print the tree's state and say no more:
+               patched     the current revision is installed
+               applicable  it can be installed
+               partial     some files are patched and some are not
+               stale       an older revision, or a stamp over files the edits
+                           did not reach; re-applying repairs it
+               mismatch    the client is not what this patch was written for
   --revert   restore the files saved before the patch was applied
 """
 

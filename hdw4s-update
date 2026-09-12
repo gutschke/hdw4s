@@ -545,10 +545,14 @@ if [ -x "${patcher}" ] && [ -d "${WEBROOT}" ]; then
   # unrollbackable. The state is read from what the patcher prints; its exit
   # status is for people running it by hand.
   state="$("${patcher}" --check "${WEBROOT}" 2>/dev/null | head -1)" || :
+  # "stale" means an older revision of this patch, or a stamp over files the
+  # edits did not reach. Both are repaired by applying, which puts the saved
+  # originals back first -- so it belongs with the states worth acting on, not
+  # with the ones worth skipping.
   case "${state}" in
     patched)
       echo ' already applied.' ;;
-    applicable|partial)
+    applicable|partial|stale)
       if "${patcher}" "${WEBROOT}" >/dev/null 2>&1; then
         echo ' done.'
       else
@@ -571,7 +575,7 @@ fi
 # lines below the skip that caused it.
 if [ -r /usr/lib/hdw4s/hdw4s_signalling.py ]; then
   echo -n 'Checking session hand-over...'
-  handover="$(PYTHONPATH=/usr/lib/hdw4s HDW4S_WEBROOT="${WEBROOT}" \
+  handover="$(PYTHONSAFEPATH=1 PYTHONPATH=/usr/lib/hdw4s HDW4S_WEBROOT="${WEBROOT}" \
               "${PREFIX}/bin/python" - <<'HANDOVER' 2>/dev/null
 import hdw4s_signalling as handover
 from selkies_gstreamer import signalling_web
