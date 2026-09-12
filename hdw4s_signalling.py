@@ -32,7 +32,7 @@ import time
 logger = logging.getLogger("hdw4s.signalling")
 
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-10"
+BUILD = "handover-12"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -79,6 +79,10 @@ CLIENT_PEER_IDS = ("1", "3")
 REFUSAL_DELAY_STEP = 0.25
 REFUSAL_DELAY_MAX = 2.0
 
+# A quiet spell clears the ramp, so a device that comes back tomorrow is
+# answered as promptly as one that has never been refused.
+REFUSAL_STREAK_RESET = 30.0
+
 # A client that takes the same session over again and again within a couple of
 # seconds is a loop, not a person. Scoped to one client reclaiming the same peer
 # repeatedly, so that two *different* devices trading a session are not slowed
@@ -93,11 +97,12 @@ TAKEOVER_MIN_INTERVAL = 2.0
 REFUSAL_SUMMARY_INTERVAL = 60.0
 
 # How often to look again at whether the served client can ask for a hand-over.
-# The answer is taken once at startup to decide whether to install at all, and
-# that decision cannot be revisited without restarting -- but the webroot can
-# change underneath a running session, in both directions, and an operator who
-# has just rolled the client back has no way to tell from the server that the
-# two halves no longer agree. Looking again costs two small reads.
+#
+# This is not a monitor. It is consulted where a refusal is logged, so on a
+# session nobody is contending for it is never consulted at all, and the warning
+# it can produce appears the first time a second device shows up rather than
+# when the webroot changed. That is the moment it matters: the answer only
+# changes what an operator should do once somebody is being refused.
 CLIENT_RECHECK_INTERVAL = 60.0
 
 # sha256 of the upstream method bodies this subclass was written against. Used
@@ -293,15 +298,26 @@ class HandoverMixin:
         return False
 
     async def _refuse(self, ws, uid, raddr, incoming):
-        """Say no, and say it a little more slowly to whoever keeps asking.
+        """Say no, and say it more slowly the more it is being asked.
 
-        Counted per client rather than per peer id, so a client that does not
-        understand the refusal and spins on it slows itself down without making
-        a real second device wait for its button.
+        Counted per peer id, deliberately, after an attempt to count it per
+        client made things worse: a client that mints a fresh identity on every
+        page load -- which is exactly what a page whose storage is unavailable
+        does -- never advanced its own counter and so was never slowed at all,
+        while the dict grew an entry per attempt for the life of the session.
+
+        The cost of counting per peer id is that a genuine second device can
+        wait up to REFUSAL_DELAY_MAX for its button while something else is
+        spinning on the same session. That only happens while a storm is
+        actually in progress, which is the case worth protecting, and one entry
+        per peer id cannot grow.
         """
-        who = (uid, incoming or (raddr[0] if raddr else "?"))
-        streak = self._refusal_streak.get(who, 0) + 1
-        self._refusal_streak[who] = streak
+        now = time.monotonic()
+        streak, last = self._refusal_streak.get(uid, (0, 0.0))
+        if now - last > REFUSAL_STREAK_RESET:
+            streak = 0
+        streak += 1
+        self._refusal_streak[uid] = (streak, now)
         self._note_refusal(uid, raddr, incoming)
         delay = min(REFUSAL_DELAY_MAX, REFUSAL_DELAY_STEP * streak)
         try:
@@ -453,7 +469,9 @@ class HandoverMixin:
                 # Identities are minted per page load, so without pruning this
                 # gains an entry for every hand-over for the life of the
                 # session -- weeks. Anything older than the interval can no
-                # longer affect a decision.
+                # longer affect a decision. What is left is bounded by the rate
+                # of hand-overs over one interval rather than absolutely, which
+                # is fine for something a person has to click.
                 for key, when in list(self._last_takeover.items()):
                     if now - when > TAKEOVER_MIN_INTERVAL:
                         del self._last_takeover[key]
@@ -473,17 +491,23 @@ class HandoverMixin:
             await ws.close(code=CLOSE_TAKEN_OVER, reason="taken over")
             return (None, None)
 
-        self._refusal_streak.pop((uid, incoming or "?"), None)
+        self._refusal_streak.pop(uid, None)
 
+        # From here the slot is claimed but the caller has not been told about
+        # it yet, so nothing else will release it. Anything that stops us
+        # between the two -- an error, or the connection being cancelled -- would
+        # otherwise leave the id held by a task that has finished, and every
+        # later client refused for a session nobody is in. BaseException on
+        # purpose: cancellation is the case this exists for.
         try:
             await ws.send("HELLO")
-        except Exception:
-            # The client vanished mid-handshake; do not leave the slot claimed.
+        except BaseException:
             if self._owner_task.get(uid) is asyncio.current_task():
                 self.peers.pop(uid, None)
                 self._owner_task.pop(uid, None)
             raise
         return uid, meta
+
 
     async def connection_handler(self, ws, uid, meta=None):
         if uid is None:
