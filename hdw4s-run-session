@@ -18,13 +18,14 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 # which of them is started.
 : "${HDW4S_SESSION:=gnome-session}"
 : "${HDW4S_FRAMERATE:=30}"
-: "${HDW4S_ENCODER:=x264enc}"
+: "${HDW4S_ENCODER:=h264enc}"
 
-# The streaming server defaults this to false, and with it off it does not even
-# attach its resize handler -- it simply tells the client that resizing is
-# unavailable and ignores any request. Without it the desktop stays at whatever
-# size the X server started at and the browser letterboxes it. No amount of
-# work in the browser can compensate: the handler is not there to call.
+# The streaming server now defaults this to true and implements resizing itself,
+# so this is no longer a workaround for anything -- it is kept as an explicit
+# statement of intent, because a desktop that does not follow the browser window
+# is the single most noticeable way this product feels wrong.
+#
+# It governs the primary display only; any second display follows its own page.
 : "${HDW4S_RESIZE:=true}"
 
 # hdw4s-session already chose the session locale and cleared LC_ALL before
@@ -212,31 +213,69 @@ export SELKIES_RTC_CONFIG_JSON=''
 # here -- where there is already an X server, a bus and a desktop waiting behind
 # a two-minute limit. Fifteen seconds is far longer than the tenth of a second
 # it takes when nothing is wrong.
-stream_env=()
-stream=(/opt/selkies/bin/selkies-gstreamer)
-probe_err=''
-if [ -r /usr/lib/hdw4s/hdw4s_signalling.py ]; then
-  if probe_err="$(timeout 15 env PYTHONSAFEPATH=1 PYTHONPATH=/usr/lib/hdw4s \
-                  /opt/selkies/bin/python -c \
-                    'import hdw4s_signalling as h, selkies_gstreamer
-assert callable(getattr(h, "main", None))' 2>&1)"; then
-    stream_env=(env PYTHONSAFEPATH=1 "PYTHONPATH=/usr/lib/hdw4s${PYTHONPATH:+:${PYTHONPATH}}")
-    stream=(/opt/selkies/bin/python -m hdw4s_signalling)
-  else
-    # Falling back is the safe outcome, but a session that quietly runs without
-    # hand-over for its whole life and says nothing is how a regression goes
-    # unnoticed for days. Say which, and why.
-    echo "hdw4s: session hand-over is not available; starting without it." >&2
-    printf 'hdw4s:   %s\n' "${probe_err##*$'\n'}" >&2
-  fi
-fi
-"${stream_env[@]}" "${stream[@]}" \
+stream=(/opt/selkies/bin/selkies)
+
+# HDW4S_FRAMERATE has always meant a ceiling: this machine hosts several
+# desktops and the setting exists to bound what any one of them costs. The
+# streaming server changed that meaning underneath us. It now reads a range, and
+# a bare number sets only the *initial* value while leaving the span at its
+# default of 8 to 240, so a client could raise itself to 240 from the sidebar
+# and the setting would look like it had been honoured.
+#
+# Passed as "N,8-N" instead: start at N, and refuse anything above it, while
+# still letting a client drop lower on a bad link. A value that already names a
+# range is passed through untouched, so this cannot fight an explicit one.
+case "${HDW4S_FRAMERATE}" in
+  *[!0-9]*) framerate="${HDW4S_FRAMERATE}" ;;
+  *)        framerate="${HDW4S_FRAMERATE},8-${HDW4S_FRAMERATE}" ;;
+esac
+
+# What the streaming server is told to switch off.
+#
+# The security contract of this package is that a session authenticates nobody,
+# because the proxy in front already did, and that the only thing it offers is a
+# desktop. The streaming server no longer agrees with the second half of that by
+# default: out of the box it also serves a file manager over the user's Desktop
+# directory, accepts uploads into it, lets any caller restart the media stack in
+# WebRTC mode, and admits extra viewers and gamepad players to a live session.
+#
+# None of that is wrong for its own audience. It is wrong for a session whose
+# front door is an address on a list. So everything that widens the surface is
+# named here and turned off, rather than left to a default that may change.
+#
+# Two of these read oddly and are deliberate. An empty value no longer means
+# "off": the server treats an empty override as absent and restores its own
+# default, so every switch has to carry a literal false. And the microphone and
+# webcam gates only refuse when a setting is *locked* off, so "false|locked" is
+# the form that actually keeps them shut.
+lockdown=(
+  --enable-dual-mode=false        # no client-initiated switch to WebRTC, so no
+                                  # ICE, STUN, TURN or mDNS sockets ever appear
+  --webrtc-ice-lite=true          # and nothing to hand out if one ever did
+  --file-transfers=none           # no upload, no download, no file manager
+  --enable-binary-clipboard=false
+  --microphone-enabled='false|locked'
+  --webcam-enabled='false|locked'
+  --gamepad-enabled=false
+  --enable-sharing=false
+  --enable-shared=false
+  --enable-collab=false
+  --enable-player2=false
+  --enable-player3=false
+  --enable-player4=false
+  --command-enabled=false         # already the default; pinned so a change of
+                                  # default cannot quietly hand out a shell
+  --enable-metrics-http=false
+  --second-screen=false
+)
+"${stream[@]}" \
   --addr="${HDW4S_ADDR}" \
   --port="${HDW4S_PORT}" \
   "${auth}" \
-  --enable_resize="${HDW4S_RESIZE}" \
+  --enable-resize="${HDW4S_RESIZE}" \
   --encoder="${HDW4S_ENCODER}" \
-  --framerate="${HDW4S_FRAMERATE}" &
+  --framerate="${framerate}" \
+  "${lockdown[@]}" &
 children+=($!)
 stream_pid="$!"
 

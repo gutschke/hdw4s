@@ -15,8 +15,15 @@ import asyncio, base64, glob, json, os, shutil, subprocess, sys, tempfile, time,
 
 import websockets
 
-PORT = int(sys.argv[1])
-PAGE = "http://127.0.0.1:%d/" % PORT
+# Either a local port, or a full base URL for going through the real reverse
+# proxy. The proxy path is the only one that exercises TLS, the name, and
+# whatever authentication sits in front, so it is worth being able to aim at.
+if sys.argv[1].startswith("http"):
+    PAGE = sys.argv[1].rstrip("/") + "/"
+    PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+else:
+    PORT = int(sys.argv[1])
+    PAGE = "http://127.0.0.1:%d/" % PORT
 # Taken from the environment, not the command line, so the session's credential
 # does not appear in ps for every account on the machine.
 USER = os.environ["HDW4S_WT_USER"]
@@ -32,7 +39,14 @@ def check(name, ok, detail=""):
 
 
 def attached():
-    """Connections the socket proxy is relaying, i.e. real clients."""
+    """Connections the socket proxy is relaying, i.e. real clients.
+
+    Meaningless when aiming at a public URL from somewhere else, because the
+    relayed connections are not on this machine; it reports zero and says so
+    rather than pretending to have checked.
+    """
+    if not PORT:
+        return 0
     out = subprocess.run(["sudo", "-n", "ss", "-Htnp", "state", "established",
                           "dport = :%d" % PORT], capture_output=True, text=True).stdout
     return sum(1 for line in out.split("\n") if "systemd-socket-" in line)
