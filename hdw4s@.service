@@ -78,6 +78,19 @@ ReadWritePaths=/var/lib/hdw4s
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+# A soak of fifty browser reconnects against one session left the streaming
+# server holding 645 descriptors, from 14 at the start: roughly thirteen per
+# reconnect that are never returned, mostly /proc handles and eventfds belonging
+# to monitor threads it starts again each time. The default soft limit is 1024,
+# so a long-lived session that has been reconnected to often enough runs out and
+# starts failing in ways that look like anything but a descriptor limit.
+#
+# Raising the soft limit is a mitigation, not a fix; the accumulation is in the
+# streaming server and is not ours to repair on this line. The hard limit was
+# already 524288, so this only stops the process tripping over a default that
+# was never chosen for it.
+LimitNOFILE=65536
+
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=hdw4s/%i
