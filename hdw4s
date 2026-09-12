@@ -460,7 +460,10 @@ cmd_show() {
   printf '              %-20s %-22s %s\n' 'HDW4S_LANG' \
     "${sval:-(from /etc/default/locale)}" "${ssrc:-built-in default}"
 
-  [ ! -r "${ETCDIR}/${inst}.keyring.cred" ] ||
+  # Existence, not readability -- the same distinction as has_auth. The file is
+  # root-only, so asking whether we can read it answered "no keyring" for every
+  # unprivileged caller, about sessions that have one.
+  [ ! -e "${ETCDIR}/${inst}.keyring.cred" ] ||
     echo 'keyring       its own, unlocked at start'
   echo "display       $(cat "/run/hdw4s/${inst}/display" 2>/dev/null ||
                         echo 'not running (assigned at start)')"
@@ -1147,7 +1150,9 @@ cmd_auth() {
 cmd_noauth() {
   local inst="$1"
   split_instance "${inst}" || exit 1
-  [ -r "${ETCDIR}/${inst}.auth.cred" ] ||
+  # Existence, not readability: see has_auth. Asking whether we can read a
+  # root-only file makes the answer depend on who is asking.
+  [ -e "${ETCDIR}/${inst}.auth.cred" ] ||
     [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ] || {
       echo "Session ${inst} already has no credential."
       return 0

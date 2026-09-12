@@ -180,37 +180,23 @@ desktop needs.
 
 ## Session hand-over
 
-The streaming protocol fixes the peer identifiers a browser uses, so two
-browsers cannot hold one desktop at the same time. Rather than let the second
-one fight the first, a session hands over on request:
+A desktop belongs to one browser at a time. Open it somewhere else and that
+window is told the desktop is already in use and offers a button to take it
+over; the device that had it is told it was taken over, does not reconnect on
+its own, and is offered the same way back. A reload or a dropped connection is
+recognised as the same window coming back, so it reclaims its session without
+asking anyone.
 
-* The second window is told the desktop is open elsewhere, and shows a button.
-* Pressing it moves both the video and the audio leg together, and the first
-  window is told it was taken over -- it does not reconnect on its own, and is
-  offered the same button back.
-* Reloading a page, or a connection that drops and returns, is recognised as
-  the same window coming back rather than as a second device, so it reclaims
-  its session without asking anyone.
-
-A window that is turned away is told why, using the private WebSocket close
-codes reserved for applications:
-
-| Code | Meaning |
-| ---- | ------- |
-| 4001 | The desktop is open on another device. Ask before taking it. |
-| 4002 | You were taken over. Do not come back on your own. |
-| 4003 | Superseded by a newer connection of your own, such as a reload. |
-
-`hdw4s show <instance>` reports whether the feature is actually in effect. It
-needs two halves -- a browser client that knows how to ask, and a server that
-knows how to answer -- and either can be missing without the other: an upgrade
+The feature needs a patched browser client and a signalling server that knows
+how to answer, and either can be missing without the other -- an upgrade
 replaces the client, and a signalling server whose internals have changed makes
-the server half stand down rather than guess. The report names both, so a
-session that cannot hand over says which half is absent.
+the server half stand down rather than guess.
 
-To switch it off, create `/etc/hdw4s/handover.off`. The next update rolls the
-browser client back to stock; a second device is then refused the way it was
-before, without a button.
+    hdw4s show <instance>
+
+reports both halves, which client tree is being served, and how many clients
+are connected. `hdw4s(8)` has the close codes a window is turned away with, and
+how to switch the feature off.
 
 ## Security
 

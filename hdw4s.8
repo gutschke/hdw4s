@@ -47,7 +47,7 @@ Sessions are expected to sit behind a reverse proxy that terminates TLS and iden
 Print every configured session with its user, port, whether it has a credential of its own, whether it keeps its settings apart from the home directory, its transport, its unit state and its current display\.
 .TP
 \fBshow\fR \fIinstance\fR
-Print one session's settings and, for each of them, which file it came from\.
+Print one session's settings and, for each of them, which file it came from, followed by whether session hand\-over is in effect for it\. See SESSION HAND\-OVER below for how to read that part\.
 .TP
 \fBenable\fR \fIinstance\fR
 Allocate a slot for a session and open its front door\. The desktop is not started here and is not started at boot: the socket listens, and the first connection to arrive starts the session behind it\. Safe to re\-run\.
@@ -168,6 +168,32 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBSELKIES_VERSION\fR: Pin a Selkies release and stop following upstream\.
 .IP "" 0
+.SH "SESSION HAND\-OVER"
+The streaming protocol fixes the peer identifiers a browser uses, so two browsers cannot hold one desktop at the same time\. A session therefore belongs to one browser at a time and moves between them on request: a second window is told the desktop is open elsewhere and shows a button, pressing it moves the session, and the window that had it is told it was taken over and offered the same button back\. A reload, or a connection that drops and returns, is recognised as the same window rather than a second device and reclaims its session without asking\.
+.P
+The feature has two halves, and either can be absent without the other:
+.IP "\[ci]" 4
+The browser client has to know how to ask\. It is patched in place by the updater, which reapplies it after every upstream release, so a client installed by other means is the stock one and offers no button\.
+.IP "\[ci]" 4
+The signalling server has to know how to answer\. It is extended at run time rather than modified on disk, and it checks the upstream code it is extending first\. If upstream has changed in a way it does not recognise, it stands down and says so in the journal rather than guessing \-\- the session then behaves as it did before the feature existed\.
+.IP "" 0
+.P
+\fBhdw4s show\fR \fIinstance\fR reports both halves, the client tree actually being served, how many clients are connected, and the close codes\. A session that cannot hand over says which half is missing\.
+.P
+A window that is turned away is told why, using the private WebSocket close codes reserved for applications\. These appear in the journal alongside the decision that caused them:
+.TP
+\fB4001\fR
+The desktop is open on another device\. The window shows the take\-over button and waits; it does not reconnect by itself\.
+.TP
+\fB4002\fR
+You were taken over\. The window is offered the way back and does not reconnect by itself, so two devices cannot fight over one desktop\.
+.TP
+\fB4003\fR
+Superseded by a newer connection of your own, such as a reload or a duplicated tab\.
+.P
+To switch the feature off, create \fB/etc/hdw4s/handover\.off\fR and let the updater run, or run the client patcher by hand; the browser client is rolled back to stock and a second device is refused as it was before, without a button\.
+.P
+Note that the identity a browser presents is its own claim, not something the session verifies \-\- see REVERSE PROXY AND SECURITY\.
 .SH "SHARED HOME DIRECTORIES"
 A GNOME session assumes it is the only one using its home directory\. That assumption breaks when the same home is mounted on more than one machine, or when another desktop is already logged in against it\. Two sessions then write the same settings database, the same keyring and the same metadata stores\. None of those are safe to share, and the settings database and the metadata stores use memory\-mapped and journalled files that are documented not to work over NFS at all\.
 .P
@@ -262,7 +288,7 @@ The credential the reverse proxy has to present, encrypted to this machine\. Cre
 The session keyring's password, encrypted to this machine\. Created by \fBhdw4s keyring\fR, removed by \fBhdw4s release\fR\.
 .TP
 \fB/etc/hdw4s/handover\.off\fR
-Present only if session hand\-over has been rolled back\. The updater applies the client half every time it runs, so without this a rollback would last until the next run and no longer\. Created by rolling back, removed by applying again, and safe to delete by hand to let the updater apply it\.
+Present only if session hand\-over has been rolled back, or created by hand to switch it off\. The updater applies the client half every time it runs, so without this a rollback would last until the next run and no longer\. Created by rolling back, removed by applying again, and safe to delete by hand to let the updater apply it\. See SESSION HAND\-OVER\.
 .TP
 \fB/etc/hdw4s/nftables\.conf\fR
 Generated ruleset\. Regenerated by \fBhdw4s firewall \-\-apply\fR\.
