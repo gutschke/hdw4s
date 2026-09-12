@@ -25,6 +25,7 @@ import sys
 import hashlib
 import inspect
 import os
+import re
 import json
 import logging
 import time
@@ -32,7 +33,7 @@ import time
 logger = logging.getLogger("hdw4s.signalling")
 
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-12"
+BUILD = "handover-15"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -57,7 +58,15 @@ UPSTREAM_CAPABILITY = "SUPPORTS_SESSION_HANDOVER"
 # Rather than trust a flag some other program remembered to write, look at the
 # client that will actually be served. It is the thing being asserted.
 WEBROOT = os.environ.get("HDW4S_WEBROOT", "/opt/gst-web")
-CLIENT_MARKER = "HDW4S takeover"
+# The stamp the client patch leaves, not the prose it also leaves. Looking for a
+# phrase meant that a comment mentioning it -- which upstream would plausibly
+# write on the day it adopts any of this -- convinced a server that a completely
+# stock client could ask for a hand-over. It would then refuse a second device
+# with a close code that client does not understand, and be reconnected to
+# several times a second: the exact loop all of this exists to stop. A pair of
+# digests is not something prose contains by accident.
+CLIENT_MARKER = re.compile(
+    r"HDW4S-PATCH v[0-9]+ orig:[0-9a-f]{64} body:[0-9a-f]{64}")
 # index.html is in this list because the button lives there and nowhere else.
 # Leaving it out let the server enable hand-over for a tree whose app.js and
 # signalling.js were patched but whose markup was not -- the client then reaches
@@ -83,6 +92,20 @@ REFUSAL_DELAY_MAX = 2.0
 # answered as promptly as one that has never been refused.
 REFUSAL_STREAK_RESET = 30.0
 
+# How long a peer id nobody has mentioned is worth remembering anything about.
+REFUSAL_FORGET = 300.0
+
+# Everything counted about refusals is filed under one of these. The peer ids a
+# browser uses get one each; everything else shares a bucket, because a client
+# colliding on ids no browser ever claims is not a user waiting for a button,
+# and giving it a counter of its own is what let it grow the bookkeeping and the
+# log by one entry per attempt. Pruning alone did not bound a burst.
+OTHER_PEERS = "other"
+
+
+def _book(uid):
+    return uid if uid in CLIENT_PEER_IDS else OTHER_PEERS
+
 # A client that takes the same session over again and again within a couple of
 # seconds is a loop, not a person. Scoped to one client reclaiming the same peer
 # repeatedly, so that two *different* devices trading a session are not slowed
@@ -90,6 +113,9 @@ REFUSAL_STREAK_RESET = 30.0
 # session twice inside the interval, which a determined pair of users clicking
 # at each other can reach; they see a refusal and clicking again works.
 TAKEOVER_MIN_INTERVAL = 2.0
+
+# Applies whoever is asking. A person cannot click this fast; a loop can.
+TAKEOVER_MIN_FLOOR = 0.4
 
 # Refusals are logged once per peer, then summarised, because an unpatched or
 # cached client loops several times a second and a healthy session already
@@ -140,7 +166,7 @@ def client_supports_handover(webroot=None):
         path = os.path.join(root, name)
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                if CLIENT_MARKER not in fh.read():
+                if CLIENT_MARKER.search(fh.read()) is None:
                     return False
         except OSError:
             return False
@@ -206,6 +232,7 @@ class HandoverMixin:
         self._refusal_count = {}
         self._refusal_logged_at = {}
         self._refusal_streak = {}
+        self._refusal_seen = {}
         self._last_takeover = {}
         # ensure_future returns a task nothing else holds a reference to, and
         # an unreferenced task can be collected before it has run. Keeping them
@@ -228,6 +255,12 @@ class HandoverMixin:
     def _wants_takeover(meta):
         return bool(isinstance(meta, dict) and meta.get("takeover"))
 
+    def _release(self, uid):
+        """Give up a slot we claimed but never handed to anyone."""
+        if self._owner_task.get(uid) is asyncio.current_task():
+            self.peers.pop(uid, None)
+            self._owner_task.pop(uid, None)
+
     def _client_can_ask(self):
         """Can the client being served still ask for a hand-over?
 
@@ -237,18 +270,17 @@ class HandoverMixin:
         now = time.monotonic()
         if self._client_ok is None or now - self._client_checked > CLIENT_RECHECK_INTERVAL:
             ok = client_supports_handover()
-            if self._client_ok is not None and ok != self._client_ok:
-                if ok:
-                    logger.warning(
-                        "the client in %s now supports session hand-over; "
-                        "sessions started before it was updated are still "
-                        "serving the old behaviour and need restarting", WEBROOT)
-                else:
-                    logger.warning(
-                        "the client in %s no longer supports session hand-over, "
-                        "so a second device is being refused in a way it cannot "
-                        "recognise and will retry. Restart this session, or put "
-                        "the patched client back", WEBROOT)
+            # Only one direction is reachable from here. Whether to mix in at
+            # all is decided before any of this exists, so a session serving a
+            # stock client has no instance to notice the client being updated;
+            # that case needs a restart and is reported by the updater, not by
+            # us. What we can see is the client being taken away underneath us.
+            if self._client_ok and not ok:
+                logger.warning(
+                    "the client in %s no longer supports session hand-over, so "
+                    "a second device is being refused in a way it cannot "
+                    "recognise and will retry. Restart this session, or put the "
+                    "patched client back", WEBROOT)
             self._client_ok = ok
             self._client_checked = now
         return self._client_ok
@@ -262,17 +294,27 @@ class HandoverMixin:
         protocol, looping, which means a deployment went wrong.
         """
         now = time.monotonic()
-        self._refusal_count[uid] = self._refusal_count.get(uid, 0) + 1
-        last = self._refusal_logged_at.get(uid)
+        key = _book(uid)
+        # Old entries still go, so a quiet machine does not carry yesterday's
+        # counts; the bucket above is what stops a burst growing them.
+        for store in (self._refusal_count, self._refusal_logged_at,
+                      self._refusal_streak):
+            for k in [k for k in store
+                      if now - self._refusal_seen.get(k, now) > REFUSAL_FORGET]:
+                store.pop(k, None)
+                self._refusal_seen.pop(k, None)
+        self._refusal_seen[key] = now
+        self._refusal_count[key] = self._refusal_count.get(key, 0) + 1
+        last = self._refusal_logged_at.get(key)
         if last is None or now - last >= REFUSAL_SUMMARY_INTERVAL:
             logger.warning(
                 "Refusing peer %r from %r: session in use "
                 "(client_identified=%s, client_can_ask=%s, "
                 "refusals=%d since last report)",
                 uid, raddr, incoming is not None, self._client_can_ask(),
-                self._refusal_count[uid])
-            self._refusal_logged_at[uid] = now
-            self._refusal_count[uid] = 0
+                self._refusal_count[key])
+            self._refusal_logged_at[key] = now
+            self._refusal_count[key] = 0
 
     def _other_leg_held_elsewhere(self, uid, incoming):
         """Is the client's other leg already held by somebody else?
@@ -313,11 +355,12 @@ class HandoverMixin:
         per peer id cannot grow.
         """
         now = time.monotonic()
-        streak, last = self._refusal_streak.get(uid, (0, 0.0))
+        key = _book(uid)
+        streak, last = self._refusal_streak.get(key, (0, 0.0))
         if now - last > REFUSAL_STREAK_RESET:
             streak = 0
         streak += 1
-        self._refusal_streak[uid] = (streak, now)
+        self._refusal_streak[key] = (streak, now)
         self._note_refusal(uid, raddr, incoming)
         delay = min(REFUSAL_DELAY_MAX, REFUSAL_DELAY_STEP * streak)
         try:
@@ -440,15 +483,26 @@ class HandoverMixin:
                 # be mistaken for a second device: it is an ordinary reconnect.
                 displaced, code, reason = held_entry, CLOSE_SUPERSEDED, "superseded"
                 logger.info("Peer %r reconnecting as the same client", uid)
-            elif takeover and held_meta is not None \
+            elif takeover \
                     and (time.monotonic()
                          - self._last_takeover.get((uid, incoming),
                                                    float("-inf"))
-                         > TAKEOVER_MIN_INTERVAL):
+                         > TAKEOVER_MIN_INTERVAL) \
+                    and (time.monotonic()
+                         - self._last_takeover.get(uid, float("-inf"))
+                         > TAKEOVER_MIN_FLOOR):
                 # held_meta is None only for the peers the desktop's own app
                 # registers (it says a bare HELLO). Those are not a device
                 # anyone is sitting at, and letting a client evict them would
                 # kick the desktop off its own signalling.
+                # No test on the held metadata here. It used to require that
+                # the incumbent had sent some, as a way of recognising the
+                # desktop's own peers -- but that let anything claim a browser
+                # slot with a bare HELLO and hold it against every attempt to
+                # take it back, because "sent nothing" was read as "is the
+                # desktop". What protects the desktop's peers is that they are
+                # not in CLIENT_PEER_IDS, checked above; that is the real
+                # distinction and it does not depend on what a client sent.
                 displaced, code, reason = held_entry, CLOSE_TAKEN_OVER, "taken over"
                 logger.info("Peer %r taken over by %r", uid, raddr)
             else:
@@ -476,6 +530,13 @@ class HandoverMixin:
                     if now - when > TAKEOVER_MIN_INTERVAL:
                         del self._last_takeover[key]
                 self._last_takeover[(uid, incoming)] = now
+                # A second, much shorter floor that does not depend on who is
+                # asking. The per-client interval stops one client reclaiming a
+                # session in a loop, but a client that presents a new identity
+                # every time is not one client as far as that test can tell --
+                # and hundreds of hand-overs a second is not two people taking
+                # turns. Short enough that a person clicking never meets it.
+                self._last_takeover[uid] = now
             await self.cleanup_session(uid)
             # cleanup_session may have removed the entry we just claimed --
             # but only restore it if nobody has taken the slot in the meantime.
@@ -491,7 +552,7 @@ class HandoverMixin:
             await ws.close(code=CLOSE_TAKEN_OVER, reason="taken over")
             return (None, None)
 
-        self._refusal_streak.pop(uid, None)
+        self._refusal_streak.pop(_book(uid), None)
 
         # From here the slot is claimed but the caller has not been told about
         # it yet, so nothing else will release it. Anything that stops us
@@ -501,11 +562,18 @@ class HandoverMixin:
         # purpose: cancellation is the case this exists for.
         try:
             await ws.send("HELLO")
-        except BaseException:
-            if self._owner_task.get(uid) is asyncio.current_task():
-                self.peers.pop(uid, None)
-                self._owner_task.pop(uid, None)
+        except asyncio.CancelledError:
+            self._release(uid)
             raise
+        except Exception as exc:
+            # The same "closed while connecting" family as the receive above,
+            # one round trip later: the client is gone before it hears that it
+            # was accepted. Re-raising put the traceback back that all of this
+            # exists to remove.
+            logger.info("Client for peer %r went away before it was told: %s",
+                        uid, exc)
+            self._release(uid)
+            return (None, None)
         return uid, meta
 
 

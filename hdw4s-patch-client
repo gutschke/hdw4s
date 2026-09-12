@@ -27,7 +27,12 @@ MARKER = "HDW4S takeover"
 # because a file carrying the marker was never edited again: every browser
 # refetched, and got the previous version back.
 VERSION_TAG = "HDW4S-PATCH"
-VERSION_RE = re.compile(r"HDW4S-PATCH v([0-9]+)(?: orig:([0-9a-f]{64}))?")
+# Both digests are required. Making orig optional left a legacy-stamp shape
+# that skipped the backup check entirely, and without the body digest "patched"
+# was a substring test that four decoy comments could satisfy over a completely
+# stock tree.
+VERSION_RE = re.compile(
+    r"HDW4S-PATCH v([0-9]+) orig:([0-9a-f]{64}) body:([0-9a-f]{64})")
 
 # What must be present for a file to count as patched, beyond the stamp. The
 # stamp says an attempt was made; these say it took effect. Checking that the
@@ -403,21 +408,89 @@ def _recorded_original(src):
     return m.group(2) if m else None
 
 
-def _evidence_present(src, name):
-    return all(token in src for token in EVIDENCE.get(name, ()))
+def _sentinels(name):
+    """One distinctive line from each edit, so every edit is accounted for.
 
-
-def _version_marker(name, original):
-    """The stamp, carrying the digest of the file it replaced.
-
-    Recording it here rather than beside the backup is what makes a damaged
-    backup detectable. Nothing else can tell: a copy that stopped part way
-    through is a plausible file with a plausible size, and every anchor this
-    patch looks for sits in the first half of it.
+    The hand-written EVIDENCE below is per *file*, and several edits to the same
+    file contribute overlapping words -- so deleting a whole replacement left
+    every listed token still present, and the file still read as patched. These
+    are derived from the edits themselves, so they cannot drift out of step with
+    them, and an edit that is removed takes its own evidence with it.
     """
-    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
-    tag = "%s v%d orig:%s" % (VERSION_TAG, PATCH_REVISION, digest)
-    return ("<!-- %s -->\n" % tag) if name.endswith(".html") else ("// %s\n" % tag)
+    edits = dict(FILES).get(name) or ()
+    # All the lines each edit adds, longest first so the most distinctive is
+    # preferred.
+    candidates = []
+    for _label, old_text, new_text in edits:
+        old_lines = set(old_text.split("\n"))
+        added = [l.strip() for l in new_text.split("\n")
+                 if len(l.strip()) > 12 and l not in old_lines]
+        candidates.append(sorted(added, key=len, reverse=True))
+    # Assign each edit a line no other edit also adds. Several edits here say
+    # the same short thing -- "see above", a section banner -- and picking one
+    # of those would let a deleted edit go unnoticed, because a sibling still
+    # supplies the token.
+    shared = set()
+    seen = set()
+    for added in candidates:
+        for line in added:
+            if line in seen:
+                shared.add(line)
+            seen.add(line)
+    found, used = [], set()
+    for added in candidates:
+        pick = next((l for l in added if l not in shared and l not in used), None)
+        if pick is None:
+            pick = next((l for l in added if l not in used), None)
+        if pick is None:
+            pick = added[0] if added else None
+        if pick is not None:
+            used.add(pick)
+            found.append(pick)
+    return found
+
+
+def _evidence_present(src, name):
+    if not all(token in src for token in EVIDENCE.get(name, ())):
+        return False
+    return all(token in src for token in _sentinels(name))
+
+
+def _stamp(name, body, original):
+    """Append the stamp, naming both what was replaced and what this now is."""
+    orig = hashlib.sha256(original.encode("utf-8")).hexdigest()
+    stamped = body.rstrip("\n").rstrip() + "\n"
+    mine = hashlib.sha256(stamped.encode("utf-8")).hexdigest()
+    tag = "%s v%d orig:%s body:%s" % (VERSION_TAG, PATCH_REVISION, orig, mine)
+    line = ("<!-- %s -->\n" % tag) if name.endswith(".html") else ("// %s\n" % tag)
+    return stamped + line
+
+
+def _strip_marker(src):
+    """The file without its stamp, which is what the stamp is a digest of.
+
+    Whole lines, not just the matched text: removing only the match left the
+    comment syntax around it behind, so the file never hashed back to what was
+    recorded and every patched tree read as damaged.
+    """
+    kept = [line for line in src.split("\n") if VERSION_TAG not in line]
+    return "\n".join(kept).rstrip("\n").rstrip() + "\n"
+
+
+def _body_matches(src):
+    """Is this file exactly what we would have produced?
+
+    The evidence tokens say the right words appear somewhere; this says the
+    bytes are ours. It is the difference between a tree that looks patched and
+    one that is, and it is what makes an accidental collision with upstream
+    text impossible rather than merely unlikely.
+    """
+    m = VERSION_RE.search(src)
+    if m is None:
+        return False
+    return hashlib.sha256(_strip_marker(src).encode("utf-8")).hexdigest() == m.group(3)
+
+
 
 
 def _has_token(src, name):
@@ -501,6 +574,13 @@ def _state_of(root, name, edits):
             if stock_from_backup(root, name)[0] is None:
                 return "mismatch", src
             return "stale", src
+        if not _body_matches(src):
+            # Stamped, current revision, right words present -- and not the
+            # bytes we produce. Something edited it afterwards, or the stamp was
+            # copied onto something else.
+            if stock_from_backup(root, name)[0] is None:
+                return "mismatch", src
+            return "stale", src
         return ("patched" if not _needs_retoken(src, name) else "applicable"), src
 
     if edits is None:
@@ -553,22 +633,15 @@ def stock_from_backup(root, name):
     if recorded is not None:
         if hashlib.sha256(stock.encode("utf-8")).hexdigest() != recorded:
             return None, "it is not the file that was replaced"
-    elif not _is_stock(stock, name):
-        return None, "it is not intact"
+    else:
+        # No digest to check against means the patched file is gone or damaged.
+        # The anchor check that used to stand in here accepts the exact
+        # truncation it was added to catch, because every anchor sits in the
+        # first two thirds of the file.
+        return None, "there is no record of what it should be"
     return stock, None
 
 
-def _is_stock(src, name):
-    """Is this the unpatched file the patch expects, whole?
-
-    Checked by content rather than by size, because the damage that matters is
-    a copy that stopped part way: the tail is missing, the head looks perfectly
-    ordinary, and every anchor after the cut is gone with it.
-    """
-    edits = dict(FILES).get(name)
-    if edits is not None:
-        return all(src.count(old) == 1 for _, old, _ in edits)
-    return _has_token(src, name)
 
 
 def _all_files():
@@ -707,7 +780,7 @@ def patch(root):
 
     for name in list(staged):
         if _installed_revision(staged[name]) is None:
-            staged[name] = staged[name] + _version_marker(name, originals[name])
+            staged[name] = _stamp(name, staged[name], originals[name])
 
     for name, text in staged.items():
         if not _validate(name, text, originals[name]):
@@ -759,7 +832,16 @@ def revert(root):
     """
     restored = []
     for name in sorted(set([n for n, _ in FILES] + list(TOKEN_FILES))):
+        path = os.path.join(root, name)
+        patched = os.path.isfile(path) and _installed_revision(_read(path)) is not None
         if not os.path.isfile(_backup_path(root, name)):
+            if patched:
+                # Skipping this left three files restored and one still patched
+                # -- a client with no working screen -- and reported success.
+                print("  refusing: %s is patched and has no saved original."
+                      % name, file=sys.stderr)
+                print("  nothing was changed.", file=sys.stderr)
+                return 1
             continue
         stock, why = stock_from_backup(root, name)
         if stock is None:
