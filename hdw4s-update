@@ -784,19 +784,40 @@ for unit in "${units[@]}"; do
   attached='0'
   proxy_pid="$(systemctl show "hdw4s-proxy@${inst}.service" -p MainPID --value \
                2>/dev/null || echo 0)"
+  # Looked at more than once, a few seconds apart. A browser that reconnects --
+  # after a network blip, or when a stream is renegotiated -- is genuinely
+  # disconnected for several seconds at a time, and one instant's sample taken
+  # inside that gap reads zero while somebody is at the keyboard. Restarting
+  # then costs them their desktop and anything unsaved in it, which is the one
+  # outcome worth real effort to avoid; a few seconds' delay costs nothing.
   case "${proxy_pid}" in
     ''|0|*[!0-9]*) ;;
     *)
-      conns="$(ss -Htnp state established "dport = :${port}" 2>/dev/null || :)"
-      if [ -n "${conns}" ] && ! printf '%s\n' "${conns}" | grep -q 'pid='; then
-        # Connections exist but we cannot see who owns them, so we cannot tell
-        # a user from the session talking to itself. Restarting a desktop
-        # somebody is working in is the one outcome worth avoiding here.
-        attached='1'
-      else
-        attached="$(printf '%s\n' "${conns}" | grep -c "pid=${proxy_pid}," || :)"
-      fi ;;
+      for _sample in 1 2 3; do
+        conns="$(ss -Htnp state established "dport = :${port}" 2>/dev/null || :)"
+        if [ -n "${conns}" ] && ! printf '%s\n' "${conns}" | grep -q 'pid='; then
+          # Connections exist but we cannot see who owns them, so we cannot tell
+          # a user from the session talking to itself.
+          attached='1'
+        else
+          attached="$(printf '%s\n' "${conns}" | grep -c "pid=${proxy_pid}," || :)"
+        fi
+        [ "${attached:-0}" -eq 0 ] || break
+        [ "${_sample}" -eq 3 ] || sleep 4
+      done ;;
   esac
+  # The reaper writes a stamp whenever it sees a client, every few minutes. A
+  # recent one means somebody was here even if all three samples above happened
+  # to land in a gap, so treat it as in use and let the session pick the new
+  # version up when it next stops on its own.
+  stamp="/run/hdw4s-reap/${inst}"
+  if [ "${attached:-0}" -eq 0 ] && [ -r "${stamp}" ]; then
+    last="$(cat "${stamp}" 2>/dev/null || echo 0)"
+    case "${last}" in
+      ''|*[!0-9]*) ;;
+      *) [ "$(( $(date +%s) - last ))" -gt 900 ] || attached='1' ;;
+    esac
+  fi
   if [ -n "${port}" ] && [ "${attached:-0}" -gt 0 ]; then
     busy+=("${unit}")
   else

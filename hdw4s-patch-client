@@ -270,6 +270,10 @@ webrtc.onstatus = (message) => { app.logEntries.push(applyTimestamp("[webrtc] " 
 // that arrives here is genuinely looking at another device, and the only thing
 // that should move the session is somebody deciding to.
 var reconnectBoth = (takeover) => {
+    if (typeof busyRetry !== 'undefined' && busyRetry !== null) {
+        clearTimeout(busyRetry);
+        busyRetry = null;
+    }
     // Tear down before reconnecting. connect() replaces the peer connection
     // without closing it, so without this each hand-over leaks one per channel
     // and leaves old handlers bound.
@@ -291,6 +295,8 @@ var reconnectBoth = (takeover) => {
     audio_webrtc.connect();
 };
 
+var busyRetry = null;
+
 var onBusy = (code) => {
     // The two channels are refused a few hundred milliseconds apart, so the
     // second refusal can land after the user has already clicked. That race is
@@ -303,6 +309,29 @@ var onBusy = (code) => {
     app.takenOver = (code === 4002 || code === 4003);
     app.status = 'busy';
     app.loadingText = "";
+
+    // Ask again now and then, but only for 4001.
+    //
+    // 4001 means somebody else holds it. They may simply close their tab, and
+    // then this screen is telling the user something untrue -- that the desktop
+    // is open elsewhere, and that taking it over will disconnect someone --
+    // with the only way out being a button that now disconnects nobody. A plain
+    // reconnect, which never takes anything from anyone, turns the commonest
+    // case of all into the session just appearing.
+    //
+    // Deliberately not for 4002 or 4003: there, coming back on our own is the
+    // tug of war this design exists to avoid. And deliberately slow: the server
+    // already answers a repeated refusal more slowly each time, so this must
+    // not be the thing that makes that necessary.
+    if (busyRetry !== null) { clearTimeout(busyRetry); busyRetry = null; }
+    if (code === 4001) {
+        busyRetry = setTimeout(() => {
+            busyRetry = null;
+            if (app.status === 'busy' && app.handoverReason === 4001) {
+                reconnectBoth(false);
+            }
+        }, 12000);
+    }
 };
 
 signalling.onbusy = onBusy;
