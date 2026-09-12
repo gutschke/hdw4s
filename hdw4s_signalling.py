@@ -57,7 +57,7 @@ if not logger.handlers:
 logger.setLevel(os.environ.get("HDW4S_LOG_LEVEL", "INFO").upper())
 
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-22"
+BUILD = "handover-23"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -103,6 +103,23 @@ CLIENT_FILES = ("app.js", "signalling.js", "index.html")
 # app uses the even ones. Only these may ever be handed over -- letting a client
 # take peer 0 or 2 would kick the desktop off its own signalling.
 CLIENT_PEER_IDS = ("1", "3")
+
+# The desktop application's own two peers.
+#
+# Both may re-register a slot they still hold, not just the audio one. It is
+# tempting to narrow this to peer 2, because that is the only id ever seen
+# doing it in a journal -- but the reason is a race, not an invariant: the
+# application rebuilds when its VIDEO socket closes, so peer 0's entry is
+# usually gone by the time the replacement arrives, and peer 2's abandoned
+# socket is not closed at all and always lingers. When the old video handler
+# has not finished unwinding in time, peer 0 needs it too. Refusing it there
+# would turn a harmless race into a video leg that fails to register.
+#
+# What made the narrower rule look attractive was a claim that a client could
+# destroy the desktop this way. It cannot: `async for` ends cleanly on every
+# close code -- measured, 1000 and 4003 alike -- and what was actually fatal is
+# a send from inside the loop body, which harden_signalling_client now contains.
+APP_VIDEO_PEER, APP_AUDIO_PEER = "0", "2"
 
 # Backpressure on a client that keeps being refused. A client that understands
 # the refusal shows a button and stops; one that does not understand it
@@ -633,7 +650,15 @@ class HandoverMixin:
         # rebuilds the pair -- was tried and is much worse. Upstream treats a
         # server-initiated close of its video leg as fatal and exits the whole
         # process, which takes the user's desktop and every window in it.
-        if takeover and incoming is not None and uid in self.peers:
+        # Not conditional on the slot being taken. A device can be holding one
+        # leg and not the other -- its video socket dropped on a blip, or it is
+        # still connecting -- and then the incoming leg for the free slot would
+        # be admitted at once while its sibling waited for a partner that never
+        # joined. The sibling's timeout would then evict alone, close the
+        # application peer paired with it, and leave the application's other
+        # leg untouched and never rebuilt: audio gone for the life of the
+        # session, which is the fault this rendezvous exists to prevent.
+        if takeover and incoming is not None:
             await self._await_sibling_leg(uid, incoming)
 
         displaced = None
@@ -816,9 +841,81 @@ def install_into(module):
     return state
 
 
+HARDENED_FLAG = "HDW4S_CLOSE_IS_NOT_FATAL"
+
+
+def harden_signalling_client(module=None):
+    """Stop a closed signalling socket from taking the desktop down with it.
+
+    The application's read loop is
+
+        async for message in self.conn:
+            if message == 'HELLO':   await self.on_connect()      # sends
+            elif message.startswith('ERROR'): await self.on_error(...)  # sends
+
+    -- the callbacks run inside the loop body and send on the same socket.
+    `async for` itself ends cleanly on any close code, measured, 1000 and 4003
+    alike. A send does not: if the socket is closed between the message
+    arriving and the callback answering it, the send raises ConnectionClosed,
+    which escapes `start()`, escapes `run_until_complete`, and lands in the
+    application's
+
+        except Exception as e: ... sys.exit(1)
+        finally: ... sys.exit(0)
+
+    which stops the process -- with status 0, so Restart=on-failure does not
+    bring it back. GNOME goes with it and every window the user had open goes
+    with GNOME.
+
+    The window is not small. The retry path for a peer that is not yet
+    registered does a BLOCKING sleep of two seconds before its send, and that
+    is exactly the path a hand-over puts the application on. And the close is
+    not ours to avoid: upstream's own cleanup_session closes the peer paired
+    with a leg that moved, which is what makes the application rebuild at all.
+    Every hand-over therefore runs this risk, with or without this feature.
+
+    So a closed socket ends `start()` instead of raising out of it. That is
+    what the caller already does on a clean end: turn its loop over, reconnect
+    both legs, and carry on.
+    """
+    from selkies_gstreamer import webrtc_signalling as sig
+    from websockets.exceptions import ConnectionClosed
+
+    cls = getattr(sig, "WebRTCSignalling", None)
+    if cls is None:
+        logger.error("no WebRTCSignalling to harden; a closed socket can still "
+                     "stop the session")
+        return "missing"
+    if getattr(cls, HARDENED_FLAG, False):
+        return "already"
+
+    original = cls.start
+
+    async def start(self):
+        try:
+            return await original(self)
+        except ConnectionClosed as exc:
+            # Not an error. The peer id is worth having: which leg went tells
+            # you whether the application is about to rebuild both (video) or
+            # quietly lose one (audio).
+            logger.info("signalling leg for peer %r closed (%s); ending the "
+                        "read loop so the application rebuilds it rather than "
+                        "stopping", getattr(self, "peer_id", "?"), exc)
+            return None
+
+    cls.start = start
+    setattr(cls, HARDENED_FLAG, True)
+    return "hardened"
+
+
 def install():
     """Install into the application, which is the only place that matters."""
     from selkies_gstreamer import __main__ as selkies_main
+    # First, and regardless of whether hand-over itself goes in: this guards a
+    # close the application does to itself on every hand-over, and a session
+    # that stands down from hand-over still runs the code that performs it.
+    logger.info("signalling client close handling: %s",
+                harden_signalling_client())
     return install_into(selkies_main)
 
 

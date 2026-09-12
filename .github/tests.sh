@@ -325,6 +325,61 @@ echo '== a setting is pointed at the action that applies it =='
         "${out}" 'systemctl restart hdw4s@alice'
 )
 
+echo '== the updater checks what it downloaded =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  eval "$(sed -n '/^verify_sha256() {/,/^}/p;/^asset_digest() {/,/^}/p' \
+          "${ROOT}/hdw4s-update")"
+
+  printf 'payload' > "${SB}/f"
+  good="$(sha256sum "${SB}/f" | cut -d' ' -f1)"
+  bad="$(printf '%064d' 0)"
+
+  verify_sha256 "${SB}/f" "${good}" thing >/dev/null 2>&1
+  is 'a matching checksum passes' "$?" '0'
+  verify_sha256 "${SB}/f" "${bad}" thing >/dev/null 2>&1
+  is 'a mismatched checksum fails' "$?" '1'
+  out="$(verify_sha256 "${SB}/f" "${bad}" thing 2>&1)"
+  has 'and says what it expected' "${out}" "${bad}"
+  has 'and what it got'           "${out}" "${good}"
+  has 'and that nothing changed'  "${out}" 'Nothing has been changed'
+
+  # Both shapes of the same response: the API is served compact to one client
+  # and pretty-printed to another, and a parser that only handled one reported
+  # "no digest published" for an asset that had one.
+  d='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
+  cat > "${SB}/compact.json" <<EOF
+{"tag_name":"v9","assets":[{"name":"none.tgz","uploader":{"login":"x"},"digest":null},{"name":"has.whl","uploader":{"login":"x"},"digest":"sha256:${d}"}]}
+EOF
+  cat > "${SB}/pretty.json" <<EOF
+{
+  "tag_name": "v9",
+  "assets": [
+    { "name": "none.tgz", "uploader": { "login": "x" }, "digest": null },
+    { "name": "has.whl",  "uploader": { "login": "x" }, "digest": "sha256:${d}" }
+  ]
+}
+EOF
+  release="${SB}/compact.json"
+  is 'a published digest is found in compact JSON' "$(asset_digest 'has.whl')" "${d}"
+  # The asset embeds an uploader object, so splitting the array on braces puts
+  # the name and the digest in different pieces. This is that regression.
+  release="${SB}/pretty.json"
+  is 'and in pretty-printed JSON'                 "$(asset_digest 'has.whl')" "${d}"
+  # Without an upper bound on the span, an asset with a null digest borrows the
+  # digest of whichever asset comes next -- a wrong answer, not a missing one.
+  is 'an asset with no digest reports none'       "$(asset_digest 'none.tgz')" ''
+  is 'an unknown asset reports none'              "$(asset_digest 'nope.whl')" ''
+  release="${SB}/does-not-exist"
+  is 'a missing release file reports none'        "$(asset_digest 'has.whl')" ''
+
+  # The pins themselves. A release that bumps KNOWN_GOOD without recording its
+  # hashes would otherwise install an unchecked download.
+  w="$(sed -n "s/^KNOWN_GOOD_SHA256_WHEEL='\([0-9a-f]*\)'.*/\1/p" "${ROOT}/hdw4s-update")"
+  b="$(sed -n "s/^KNOWN_GOOD_SHA256_WEB='\([0-9a-f]*\)'.*/\1/p" "${ROOT}/hdw4s-update")"
+  is 'the wheel hash is recorded, 64 hex digits' "${#w}" '64'
+  is 'the web bundle hash is recorded'           "${#b}" '64'
+)
+
 echo '== firewall ruleset shape =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s-firewall" > "${SB}/fw.sh"
@@ -507,7 +562,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=96   # update when tests are added; a wrong number is the point
+EXPECTED=108   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

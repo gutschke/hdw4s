@@ -51,6 +51,19 @@ Both `pairing_race.py` and `audio_race.py` talk to `ws://127.0.0.1:8790/` by
 default. Point them elsewhere with `HDW4S_SIGNALLING_PORT`, or
 `HDW4S_SIGNALLING_URI` for a path that is not the usual one.
 
+## `fatal_close.py` -- does a closed socket stop the desktop
+
+Runs the real installed `WebRTCSignalling` against a server that answers and
+then closes while the client is still replying. The application's callbacks run
+inside its read loop and send on the same socket: the iterator survives any
+close code, a send does not, and what escapes reaches a bare `except Exception`
+followed by `sys.exit`. The process stops with status 0, so `Restart=on-failure`
+does not bring it back, and GNOME and every open window go with it.
+
+This is the fault that destroyed a live session. It needs no hand-over to
+trigger -- upstream closes the paired peer itself -- so it is worth running
+after any change to the signalling client, not only to this feature.
+
 ## `audio_race.py` -- re-registration during a hand-over
 
 Forces the order in which the application re-registers a peer it still holds,

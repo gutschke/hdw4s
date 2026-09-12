@@ -30,6 +30,24 @@ WEBROOT='/opt/gst-web'
 # handles the new layout.
 KNOWN_GOOD='1.6.2'
 
+# What the two artifacts of KNOWN_GOOD must hash to.
+#
+# Upstream publishes no signatures, and the digest GitHub records for a release
+# asset is populated only for recent uploads -- of the four most recent releases
+# only one wheel carries one, and no web bundle does. So "the download completed
+# and unpacks" was the only integrity check, on a root daily timer.
+#
+# Because the updater already refuses to move past KNOWN_GOOD on its own, the
+# version it fetches is fixed and known, and its hashes can simply be recorded
+# here. Whoever raises KNOWN_GOOD records them in the same commit.
+#
+# Be clear about what this is worth: it pins the bytes to what the maintainer
+# saw, so an asset replaced under an existing tag is caught. It is not a
+# signature and it does not establish that upstream's release was honest when
+# it was made.
+KNOWN_GOOD_SHA256_WHEEL='f426ae093853492ecf857609efd4c9bd2141b24c619118561e42220927554eee'
+KNOWN_GOOD_SHA256_WEB='71fcc35d59f8d8a6c6b72472c20a45af207ab56a0d0553af34b731a2e966d0c6'
+
 # Set SELKIES_VERSION in /etc/hdw4s/hdw4s.conf to pin a specific release and
 # stop tracking upstream entirely.
 # shellcheck source=/dev/null
@@ -67,6 +85,46 @@ if [ -x "${PREFIX}/bin/pip" ]; then
   current="$("${PREFIX}/bin/pip" show selkies-gstreamer 2>/dev/null |
              sed -n 's/^Version: //p')" || :
 fi
+
+# Compare a file against an expected sha256, and say which is which on failure.
+# A mismatch is never a transient fault, so this aborts rather than retrying.
+verify_sha256() {
+  local path="$1" want="$2" what="$3" got
+  got="$(sha256sum "${path}" | cut -d' ' -f1)"
+  [ "${got}" = "${want}" ] && return 0
+  echo ' failed.'
+  echo "Downloaded ${what} does not match the expected checksum; aborting." >&2
+  echo "  expected ${want}" >&2
+  echo "  got      ${got}" >&2
+  echo '  Nothing has been changed. If upstream re-published this release, the' >&2
+  echo '  hash in hdw4s-update has to be updated deliberately.' >&2
+  return 1
+}
+
+# The sha256 GitHub records for a release asset, or empty if it records none.
+#
+# Whitespace is stripped and the text split into one record per asset, because
+# the same endpoint is served pretty-printed to one client and compact to
+# another, and a parser that assumed a space after the colon found nothing and
+# reported "no digest published" for an asset that had one -- a check that
+# silently does not run. Only the assets array is considered, so nothing a
+# release body happens to contain can be read as an asset.
+asset_digest() {
+  [ -r "${release:-}" ] || return 0
+  local span
+  # Bounded to the span between this asset's name and the next asset's name.
+  # Splitting the array on braces does not work: each asset embeds an uploader
+  # object, so the name and the digest land in different pieces. And without
+  # the upper bound, an asset whose digest is null silently borrows the next
+  # asset's -- which is worse than reporting none.
+  span="$(tr -d ' \t\n' < "${release}" |
+          sed 's/.*"assets":\[//' |
+          sed "s|.*\"name\":\"$1\"||" |
+          sed 's/"name":".*//')"
+  printf '%s' "${span}" |
+    sed -n 's/.*"digest":"sha256:\([0-9a-f]\{64\}\)".*/\1/p' |
+    head -n1
+}
 
 if [ -n "${SELKIES_VERSION:-}" ]; then
   wanted="${SELKIES_VERSION}"
@@ -121,7 +179,29 @@ if [ "${current}" != "${wanted}" ]; then
   curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o "${workdir}/${web}"   "${DL}/v${wanted}/${web}"
   echo ' done.'
 
+  # Hashes first: an archive that unpacks is not the same as the archive we
+  # meant to install, and checking the cheap structural test first would report
+  # "not a valid archive" for something that is a perfectly valid archive of
+  # somebody else's choosing.
   echo -n '  Verifying...'
+  if [ "${wanted}" = "${KNOWN_GOOD}" ]; then
+    verify_sha256 "${workdir}/${wheel}" "${KNOWN_GOOD_SHA256_WHEEL}" 'wheel' || exit 1
+    verify_sha256 "${workdir}/${web}"   "${KNOWN_GOOD_SHA256_WEB}"   'web bundle' || exit 1
+  else
+    # A version somebody pinned by hand. There is no recorded hash for it, so
+    # fall back to the digest GitHub publishes for the asset when it has one,
+    # and say plainly when it has none rather than implying a check happened.
+    published="$(asset_digest "${wheel}")"
+    if [ -n "${published}" ]; then
+      verify_sha256 "${workdir}/${wheel}" "${published}" 'wheel' || exit 1
+    else
+      echo
+      echo "  NOTE: v${wanted} is not the release this hdw4s records hashes for," >&2
+      echo '    and GitHub publishes no digest for its assets. What was' >&2
+      echo '    downloaded cannot be checked against anything.' >&2
+      echo -n '  Verifying...'
+    fi
+  fi
   python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).testzip()' \
     "${workdir}/${wheel}" >/dev/null 2>&1 || {
     echo ' failed.'
