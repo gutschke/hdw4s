@@ -136,9 +136,19 @@ if [ "${current}" != "${wanted}" ]; then
   echo ' done.'
 
   echo -n '  Backing up the current installation...'
-  rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
-  [ ! -d "${PREFIX}" ]  || cp -a "${PREFIX}"  "${PREFIX}.bak"
-  [ ! -d "${WEBROOT}" ] || cp -a "${WEBROOT}" "${WEBROOT}.bak"
+  # Build the new copies beside the old ones and swap at the end. Removing the
+  # previous backups first meant an interrupt during the copy -- or a disk that
+  # filled up part way through it -- left neither a usable backup nor the one
+  # that had been there before, at the exact moment before the installation is
+  # overwritten.
+  rm -rf "${PREFIX}.bak.new" "${WEBROOT}.bak.new"
+  [ ! -d "${PREFIX}" ]  || cp -a "${PREFIX}"  "${PREFIX}.bak.new"
+  [ ! -d "${WEBROOT}" ] || cp -a "${WEBROOT}" "${WEBROOT}.bak.new"
+  for d in "${PREFIX}" "${WEBROOT}"; do
+    [ -d "${d}.bak.new" ] || continue
+    rm -rf "${d}.bak"
+    mv "${d}.bak.new" "${d}.bak"
+  done
   echo ' done.'
 
   echo -n '  Installing...'
@@ -230,8 +240,15 @@ DEPCHECK
   else
     mv "${workdir}"/web/* "${WEBROOT}.new/"
   fi
-  rm -rf "${WEBROOT}"
+  # Move the old one aside rather than deleting it first. An interrupt between
+  # the two renames leaves the previous webroot under .prev to recover from,
+  # where deleting first left the version recorded as installed with no webroot
+  # at all -- and the next run takes the "already installed" branch and never
+  # rebuilds it.
+  rm -rf "${WEBROOT}.prev"
+  [ ! -d "${WEBROOT}" ] || mv "${WEBROOT}" "${WEBROOT}.prev"
   mv "${WEBROOT}.new" "${WEBROOT}"
+  rm -rf "${WEBROOT}.prev"
   echo ' done.'
   upgraded='yes'
 else
@@ -512,10 +529,14 @@ if [ -f "${appjs}" ] && grep -q 'app\.status == checkconnect' "${appjs}"; then
   echo -n 'Applying reconnect loop fix...'
   sed -i "s|app\.status == checkconnect;|app.status == 'checkconnect';|g" "${appjs}"
   if grep -q 'app\.status == checkconnect' "${appjs}"; then
-    echo ' FAILED.' >&2
-    exit 1
+    # Not exit. This runs before the smoke test and the rollback below, so an
+    # unattended run that stops here installs a new version, verifies nothing,
+    # and rolls nothing back. The hand-over block further down had the identical
+    # defect and was fixed; this is the same reasoning.
+    echo ' FAILED; the client keeps the old behaviour.' >&2
+  else
+    echo ' done.'
   fi
-  echo ' done.'
 fi
 
 # --- SESSION HAND-OVER, CLIENT HALF -----------------------------------------
@@ -544,7 +565,14 @@ if [ -x "${patcher}" ] && [ -d "${WEBROOT}" ]; then
   # state would leave a new venv and a new webroot installed, unverified, and
   # unrollbackable. The state is read from what the patcher prints; its exit
   # status is for people running it by hand.
-  state="$("${patcher}" --check "${WEBROOT}" 2>/dev/null | head -1)" || :
+  # Two lines can come back: the state of the tree, and "disabled" if hand-over
+  # has been switched off. Reading only the first made the disabled branch below
+  # unreachable, so a rollback lasted exactly until this next ran.
+  answer="$("${patcher}" --check "${WEBROOT}" 2>/dev/null)" || :
+  state="$(printf '%s\n' "${answer}" | head -1)"
+  if printf '%s\n' "${answer}" | grep -qx 'disabled'; then
+    state='disabled'
+  fi
   # "stale" means an older revision of this patch, or a stamp over files the
   # edits did not reach. Both are repaired by applying, which puts the saved
   # originals back first -- so it belongs with the states worth acting on, not

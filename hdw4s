@@ -1034,9 +1034,13 @@ cmd_reap() {
     if [ -r "${stamp}" ]; then
       last="$(cat "${stamp}" 2>/dev/null)"
     else
-      # Never seen a connection since it started; measure from then.
-      last="$(date -d "$(systemctl show -p ActiveEnterTimestamp --value \
-              "hdw4s@${inst}.service")" +%s 2>/dev/null || echo "${now}")"
+      # No record yet, so start the clock now rather than at the session's
+      # start. Backdating would mean the first run after this is installed --
+      # or after a reboot clears /run -- could stop a desktop that has been up
+      # for months, immediately, with no warning to the person using it. All we
+      # actually know is that nobody has connected since we began looking, and
+      # measuring from that is the claim the message makes.
+      last="${now}"
       printf '%s\n' "${last}" > "${stamp}" 2>/dev/null || :
     fi
     case "${last}" in ''|*[!0-9]*) continue;; esac

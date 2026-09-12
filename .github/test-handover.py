@@ -24,6 +24,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS = []
 
 
+# What the client patch stamps into each file it touches. The server looks for
+# this shape rather than for prose, so a fixture has to carry it.
+STAMP = "HDW4S-PATCH v1 orig:%s body:%s" % ("a" * 64, "b" * 64)
+
+
 def check(name, ok, detail=""):
     RESULTS.append((name, ok))
     print("  %-4s %-52s %s" % ("PASS" if ok else "FAIL", name, detail))
@@ -87,11 +92,13 @@ def test_shipped():
     # comment is not a check.
     block = update[update.index("# --- SESSION HAND-OVER, CLIENT HALF"):
                    update.index("# --- END SESSION HAND-OVER")]
-    for what in ('"${patcher}" --check "${WEBROOT}" 2>/dev/null | head -1)" || :',
-                 "HANDOVER\n)\" || :"):
-        check("the updater cannot abort on %s" % ("--check" if "patcher" in what else "the state query"),
-              what in block,
-              "without the trailing || : this kills the whole updater under set -e")
+    # The substitutions that keep an unattended, root-run updater from aborting
+    # on any answer but the two good ones. Asserted on the "|| :" alone: an
+    # earlier version of this pinned the whole line including a "| head -1" that
+    # was itself a bug, so the check was holding the defect in place.
+    check("the updater cannot abort reading the client state",
+          block.count("|| :") >= 2,
+          "without the trailing || : this kills the whole updater under set -e")
 
     # It has no shebang, so without this dpkg would ship it executable and
     # lintian would object.
@@ -108,6 +115,10 @@ def test_shipped():
     check("  and cannot block session start for ever",
           "timeout 15 env PYTHONSAFEPATH=1" in session,
           "the file test it replaced could not block; this can")
+    check("  and actually selects the wrapper when it works",
+          "-m hdw4s_signalling)" in session,
+          "every other assertion here matches text inside the probe, so "
+          "deleting this line leaves them all green and the wrapper unused")
     check("  and says so when it falls back",
           "session hand-over is not available" in session,
           "otherwise a session runs without it for its whole life, silently")
@@ -149,7 +160,7 @@ def test_server_module():
 
     with tempfile.TemporaryDirectory() as root:
         for f in ("app.js", "signalling.js", "index.html"):
-            open(os.path.join(root, f), "w").write("HDW4S takeover\n")
+            open(os.path.join(root, f), "w").write("// %s\n" % STAMP)
         h.WEBROOT = root
         state = h.install_into(module)
         check("install_into recognises a known server", state == "recognised", state)
@@ -185,12 +196,159 @@ def test_server_module():
         check("a stock client is seen as unable to ask",
               h.client_supports_handover(root) is False)
         for f in ("app.js", "signalling.js"):
-            open(os.path.join(root, f), "w").write("HDW4S takeover\n")
+            open(os.path.join(root, f), "w").write("// %s\n" % STAMP)
         check("  and so is one missing the markup that holds the button",
               h.client_supports_handover(root) is False,
               "the button exists only in index.html")
+        # Prose alone must not satisfy it: an upstream comment mentioning this
+        # feature would otherwise convince the server a stock client can ask.
         open(os.path.join(root, "index.html"), "w").write("HDW4S takeover\n")
+        check("  and prose alone does not convince it",
+              h.client_supports_handover(root) is False,
+              "a phrase is something upstream could write; a digest is not")
+        open(os.path.join(root, "index.html"), "w").write("<!-- %s -->\n" % STAMP)
         check("  a fully patched one can", h.client_supports_handover(root) is True)
+
+
+# ------------------------------------------------- server behaviour, offline
+
+class FakeSocket:
+    """Enough of a websocket to drive hello_peer without a network."""
+
+    def __init__(self, message):
+        self.remote_address = ("127.0.0.1", 4242)
+        self._message = message
+        self.sent = []
+        self.closed = None
+
+    async def recv(self):
+        if self._message is None:
+            raise ConnectionError("client went away")
+        return self._message
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def close(self, code=None, reason=None):
+        self.closed = (code, reason)
+
+
+def test_server_behaviour():
+    """Drive the decisions rather than reading them.
+
+    Everything else here checks that names exist. Breaking the metadata parse,
+    or never closing a refused connection, or letting a client claim the peer
+    ids the desktop itself uses, changes no name at all -- and each of those has
+    been a real defect in this feature.
+    """
+    import asyncio
+    import base64 as b64
+    import json as js
+
+    h = load(os.path.join(REPO, "hdw4s_signalling.py"), "hdw4s_signalling_b")
+
+    class Base:
+        def __init__(self):
+            self.peers = {}
+            self.sessions = {}
+            self.rooms = {}
+        async def cleanup_session(self, uid): pass
+        async def remove_peer(self, uid): self.peers.pop(uid, None)
+        async def connection_handler(self, ws, uid, meta=None): pass
+
+    def server():
+        cls = h.make_server_class(Base)
+        srv = cls()
+        srv._owner_task = {}
+        srv._refusal_count = {}
+        srv._refusal_logged_at = {}
+        srv._refusal_streak = {}
+        srv._refusal_seen = {}
+        srv._last_takeover = {}
+        srv._evictions = set()
+        srv._client_ok = True
+        srv._client_checked = float("inf")
+        return srv
+
+    def hello(uid, meta=None):
+        if meta is None:
+            return "HELLO %s" % uid
+        return "HELLO %s %s" % (uid, b64.b64encode(js.dumps(meta).encode()).decode())
+
+    async def run():
+        h.REFUSAL_DELAY_STEP = 0.0
+        out = {}
+
+        srv = server()
+        ws = FakeSocket(hello("1", {"client": "a"}))
+        out["first"] = await srv.hello_peer(ws)
+        out["first_sent"] = list(ws.sent)
+
+        other = FakeSocket(hello("1", {"client": "b"}))
+        out["dup"] = await srv.hello_peer(other)
+        out["dup_closed"] = other.closed
+
+        taker = FakeSocket(hello("1", {"client": "b", "takeover": True}))
+        out["takeover"] = await srv.hello_peer(taker)
+
+        srv2 = server()
+        bad = FakeSocket("HELLO")
+        out["malformed"] = await srv2.hello_peer(bad)
+        out["malformed_closed"] = bad.closed
+
+        srv3 = server()
+        nul = FakeSocket(hello("1", None))
+        await srv3.hello_peer(nul)
+        thief = FakeSocket(hello("1", {"client": "z", "takeover": True}))
+        out["bare_reclaimable"] = await srv3.hello_peer(thief)
+
+        srv4 = server()
+        app = FakeSocket(hello("0"))
+        await srv4.hello_peer(app)
+        evil = FakeSocket(hello("0", {"client": "evil", "takeover": True}))
+        out["app_peer"] = await srv4.hello_peer(evil)
+        out["app_peer_closed"] = evil.closed
+
+        srv6 = server()
+        nul = FakeSocket("HELLO 1 " + b64.b64encode(b"null").decode())
+        out["json_null"] = await srv6.hello_peer(nul)
+        out["json_null_closed"] = nul.closed
+
+        srv5 = server()
+        gone = FakeSocket(None)
+        out["no_hello"] = await srv5.hello_peer(gone)
+        return out
+
+    r = asyncio.new_event_loop().run_until_complete(run())
+
+    check("a first client is registered", r["first"][0] == "1",
+          "got %r" % (r["first"],))
+    check("  and is told so", r["first_sent"] == ["HELLO"], str(r["first_sent"]))
+    check("a duplicate is refused", r["dup"] == (None, None), str(r["dup"]))
+    check("  with the code a client keys on",
+          r["dup_closed"] == (h.CLOSE_SESSION_IN_USE, "session in use"),
+          str(r["dup_closed"]))
+    check("  and the socket is actually closed", r["dup_closed"] is not None)
+    check("asking to take over is granted", r["takeover"][0] == "1",
+          str(r["takeover"]))
+    check("a malformed HELLO is refused, not raised", r["malformed"] == (None, None),
+          str(r["malformed"]))
+    check("  with a protocol error", r["malformed_closed"] == (1002, "invalid protocol"),
+          str(r["malformed_closed"]))
+    check("a slot claimed with no metadata can still be taken back",
+          r["bare_reclaimable"][0] == "1", str(r["bare_reclaimable"]))
+    check("the desktop's own peers cannot be taken over",
+          r["app_peer"] == (None, None), str(r["app_peer"]))
+    check("  and the attempt is refused, not granted",
+          r["app_peer_closed"] == (h.CLOSE_SESSION_IN_USE, "session in use"),
+          str(r["app_peer_closed"]))
+    check("a client that never says HELLO is handled", r["no_hello"] == (None, None),
+          str(r["no_hello"]))
+    check("metadata that is not an object is refused",
+          r["json_null"] == (None, None), str(r["json_null"]))
+    check("  because null would look like the desktop's own peer",
+          r["json_null_closed"] == (1002, "invalid protocol"),
+          str(r["json_null_closed"]))
 
 
 # ---------------------------------------------------------------- patcher
@@ -205,6 +363,54 @@ def test_patcher():
     for name, _ in p.FILES:
         check("%s has evidence defined" % name, name in p.EVIDENCE,
               "without it a stamp alone counts as patched")
+
+    # Backups and patched files are written by rename, not in place. A plain
+    # write leaves a truncated file where an interrupt lands, which for a backup
+    # is the difference between a rollback that works and one that installs a
+    # broken client.
+    patcher_src = open(os.path.join(REPO, "hdw4s-patch-client")).read()
+    for where in ("_write_atomic(_backup_path(root, name), originals[name])",
+                  "_write_atomic(os.path.join(root, name), text)"):
+        check("writes go through the atomic path: %s" % where.split("(")[0],
+              where in patcher_src)
+    # What the client patch is supposed to consist of, recorded here rather than
+    # derived from the patch itself. Every other check in this file is
+    # self-consistent, so deleting a whole replacement left them all green: the
+    # file simply had one fewer edit and one fewer piece of evidence, and agreed
+    # with itself. Changing this list is meant to be a deliberate act.
+    expected_edits = {
+    "signalling.js": (
+        "client identity and hand-over callbacks",
+        "carry identity and intent in HELLO",
+        "close the previous socket before opening another",
+        "recognise the private close codes",
+        "do not retry out of the hand-over screen",
+    ),
+    "app.js": (
+        "hand-over state in the model",
+        "the take-over action",
+        "one identity for both channels",
+        "do not cascade while held elsewhere",
+        "do not cascade while held elsewhere (audio)",
+        "the hand-over screen",
+        "keep the hand-over screen when the media notices the eviction",
+        "keep the hand-over screen when the media notices (audio)",
+    ),
+    "index.html": (
+        "the hand-over screen",
+    ),
+    }
+    for name, edits in p.FILES:
+        got = tuple(label for label, _o, _n in edits)
+        want = expected_edits.get(name, ())
+        check("%s has exactly the edits it should" % name, got == want,
+              "expected %d, found %d -- update this list if the change is intended"
+              % (len(want), len(got)))
+
+    check("every edit contributes its own evidence",
+          all(len(p._sentinels(n)) == len(dict(p.FILES)[n])
+              for n, _ in p.FILES),
+          "otherwise deleting a whole replacement leaves the file reading patched")
 
     # Replacements must not change how many brackets are open.
     bad = []
@@ -224,6 +430,12 @@ def test_patcher():
     with tempfile.TemporaryDirectory() as tmp:
         work = os.path.join(tmp, "gst-web")
         shutil.copytree(webroot, work)
+        # Everything the patcher writes has to stay in here. Left at its
+        # defaults this test wrote to /var/lib and /etc -- which fails as an
+        # ordinary user, and as root deleted an operator's rollback switch,
+        # because applying clears it. A check must not be able to do that.
+        p.BACKUP_DIR = os.path.join(tmp, "backups")
+        p.DISABLE_MARKER = os.path.join(tmp, "handover.off")
         before = {f: open(os.path.join(work, f), "rb").read()
                   for f, _ in p.FILES}
         if p.analyse(work)[0] != "applicable":
@@ -248,6 +460,7 @@ def test_patcher():
 def main():
     test_shipped()
     test_server_module()
+    test_server_behaviour()
     test_patcher()
     bad = [n for n, ok in RESULTS if not ok]
     print("\n  %d passed, %d failed" % (len(RESULTS) - len(bad), len(bad)))
