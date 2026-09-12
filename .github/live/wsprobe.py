@@ -38,41 +38,94 @@ def connect(base_url, path="/api/websockets", timeout=20):
     return sock, rest
 
 
-def _recv(sock, n, buf):
-    while len(buf) < n:
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise RuntimeError("connection closed mid-frame")
-        buf += chunk
-    return buf[:n], buf[n:]
+def _parse(buf):
+    """One frame out of the buffer, or None if it is not all there yet.
+
+    Returns (opcode, final, payload, remainder). Parsing from a buffer rather
+    than reading exactly-so-many bytes is what makes a read timeout harmless:
+    a partially arrived frame stays in the buffer and is finished on the next
+    attempt. The obvious version, which recv's each field in turn, loses
+    whatever it had already read when a timeout fires in the middle -- and
+    since it lived inside a generator, the timeout ended the generator too and
+    every later read returned nothing. It took three false failures in one run
+    to notice, because a dead reader and a silent server look identical.
+    """
+    if len(buf) < 2:
+        return None
+    fin_op, mask_len = buf[0], buf[1]
+    at = 2
+    length = mask_len & 0x7F
+    if length == 126:
+        if len(buf) < at + 2:
+            return None
+        length = struct.unpack(">H", buf[at:at + 2])[0]
+        at += 2
+    elif length == 127:
+        if len(buf) < at + 8:
+            return None
+        length = struct.unpack(">Q", buf[at:at + 8])[0]
+        at += 8
+    masked = bool(mask_len & 0x80)
+    if masked:
+        if len(buf) < at + 4:
+            return None
+        key = buf[at:at + 4]
+        at += 4
+    if len(buf) < at + length:
+        return None
+    payload = buf[at:at + length]
+    if masked:  # a server must not mask, but decode rather than lie about it
+        payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+    return fin_op & 0x0F, bool(fin_op & 0x80), payload, buf[at + length:]
 
 
 def frames(sock, rest=b""):
-    """Yield decoded text payloads. Control frames are answered, not yielded."""
+    """Yield decoded text payloads, and None whenever a read timed out.
+
+    The None is not noise: it hands control back to a caller that wants to stop
+    waiting, without abandoning a frame that is halfway through arriving.
+
+    Control frames are answered rather than yielded, and a fragmented message
+    is reassembled before it is. Fragmentation is not hypothetical -- this same
+    client drives Chrome's debugging protocol, where a screenshot arrives in
+    pieces, and a reader that ignored the continuations would hand back a
+    truncated one that still base64-decodes into something almost right.
+    """
     buf = rest
+    pending = None
     while True:
-        hdr, buf = _recv(sock, 2, buf)
-        fin_op, mask_len = hdr[0], hdr[1]
-        opcode = fin_op & 0x0F
-        length = mask_len & 0x7F
-        if length == 126:
-            ext, buf = _recv(sock, 2, buf)
-            length = struct.unpack(">H", ext)[0]
-        elif length == 127:
-            ext, buf = _recv(sock, 8, buf)
-            length = struct.unpack(">Q", ext)[0]
-        if mask_len & 0x80:  # a server must not mask, but decode rather than lie
-            mkey, buf = _recv(sock, 4, buf)
-        payload, buf = _recv(sock, length, buf)
-        if mask_len & 0x80:
-            payload = bytes(b ^ mkey[i % 4] for i, b in enumerate(payload))
+        parsed = _parse(buf)
+        if parsed is None:
+            try:
+                chunk = sock.recv(65536)
+            except socket.timeout:
+                yield None
+                continue
+            except OSError:
+                return
+            if not chunk:
+                return
+            buf += chunk
+            continue
+        opcode, final, payload, buf = parsed
         if opcode == 0x8:      # close
             return
         if opcode == 0x9:      # ping
             send(sock, payload, opcode=0xA)
             continue
-        if opcode in (0x1, 0x2):
-            yield payload.decode("utf-8", "replace")
+        if opcode == 0xA:      # pong, to a ping we never sent
+            continue
+        if opcode == 0x0:      # continuation of the message before it
+            if pending is None:
+                continue
+            pending += payload
+        elif opcode in (0x1, 0x2):
+            pending = payload
+        else:
+            continue
+        if final:
+            whole, pending = pending, None
+            yield whole.decode("utf-8", "replace")
 
 
 def send(sock, data, opcode=0x1):
@@ -95,6 +148,8 @@ def server_settings(base_url, limit=40):
     sock, rest = connect(base_url)
     try:
         for i, text in enumerate(frames(sock, rest)):
+            if text is None:
+                continue
             if text.startswith("{"):
                 try:
                     msg = json.loads(text)
