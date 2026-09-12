@@ -2,7 +2,7 @@
 """Prove the session's feature lockdown is still in force, against a live one.
 
   .github/live/lockdown.py [http://host:port] [--unit hdw4s@INSTANCE]
-                           [--home DIR]
+                           [--home DIR] [--framerate N]
 
 The package hands a browser a desktop that is already logged in as a real
 account. Everything the streaming server offers beyond pixels, sound and input
@@ -113,6 +113,43 @@ def check_settings(base):
     return settings
 
 
+def check_ceilings(settings, framerate):
+    """Two controls that are a ceiling rather than a switch.
+
+    A range setting publishes the bounds a client may move inside, so these
+    are the only assertions that show a ceiling reached the server at all --
+    the value alone looks the same whether the client may raise it or not.
+
+    The framerate the operator configures is a *maximum*: this machine hosts
+    several sessions off one CPU, and a client that could set its own rate
+    would take the whole budget. The ceiling has to be passed in rather than
+    read out of the range being checked -- deriving it from the payload made
+    the check agree with whatever the server said, and it passed against a
+    session whose ceiling had become 240. The encoder list is published as the menu the
+    sidebar offers, so withdrawing every entry but one is what stops a client
+    switching to something this build cannot do in software.
+    """
+    fr = settings.get("framerate")
+    if not fr:
+        bad("framerate", "the server publishes no framerate range")
+    elif not fr.get("overridden"):
+        bad("framerate", "the range is upstream's default, not ours")
+    elif fr.get("value") != [8, framerate]:
+        bad("framerate", f"expected [8, {framerate}], server reports "
+                         f"{json.dumps(fr, sort_keys=True)}")
+    else:
+        ok(f"framerate is a ceiling: 8-{framerate}, not a client's choice")
+
+    enc = settings.get("encoder")
+    if not enc:
+        bad("encoder", "the server publishes no encoder setting")
+    elif enc.get("allowed") != [enc.get("value")]:
+        bad("encoder", f"the client may still choose from "
+                       f"{enc.get('allowed')!r}")
+    else:
+        ok(f"encoder menu withdrawn to {enc.get('value')!r}")
+
+
 def check_refusals(base):
     """The lockdown as behaviour rather than as self-description."""
     for path, expect in (("/api/files/", 403),):
@@ -209,15 +246,18 @@ def main():
     argv = sys.argv[1:]
     unit = None
     home = None
-    for flag in ("--unit", "--home"):
+    framerate = 30
+    for flag in ("--unit", "--home", "--framerate"):
         if flag in argv:
             i = argv.index(flag)
             value = argv[i + 1]
             del argv[i:i + 2]
             if flag == "--unit":
                 unit = value
-            else:
+            elif flag == "--home":
                 home = value
+            else:
+                framerate = int(value)
     base = argv[0] if argv else "http://127.0.0.1:7303"
     print(f"lockdown: {base}")
     try:
@@ -225,6 +265,8 @@ def main():
     except Exception as exc:                       # noqa: BLE001 -- report, don't trace
         bad("server_settings", f"{type(exc).__name__}: {exc}")
         settings = {}
+    if settings:
+        check_ceilings(settings, framerate)
     check_refusals(base)
     check_defeat(base, unit)
     check_home(home)
