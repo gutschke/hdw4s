@@ -336,6 +336,26 @@ else
   upgraded=''
 fi
 
+# --- COSMETIC AND REPAIR PATCHES --------------------------------------------
+# Everything from here to the hand-over block runs AFTER the new version is
+# installed and BEFORE the smoke test and the rollback below, so none of it may
+# abort the run: an unattended failure here leaves a new version installed,
+# verified by nothing and rolled back from nothing. That reasoning is written
+# out for the reconnect-loop and hand-over blocks already; it was never applied
+# to the branding ones, and on 12 September the branding patch failed with
+# "mv: cannot stat index.html.tmp" and took the whole update down with it. The
+# cause was transient and does not reproduce; that it could stop the run at all
+# is the defect.
+#
+# Each block therefore runs in a subshell joined by "||", which suppresses both
+# errexit and the ERR trap, and a failure is reported and stepped over.
+cosmetic_failed() {
+  echo " FAILED."
+  echo "hdw4s-update: ${1} did not apply; continuing, so the update is still" >&2
+  echo "  verified and can still be rolled back. The session keeps whatever" >&2
+  echo "  that patch would have changed." >&2
+}
+
 # --- BRANDING PATCH ---------------------------------------------------------
 # The stock client puts the upstream project name in the browser tab. Rewriting
 # the shipped index.html is unavoidable because the page is a build artifact
@@ -343,9 +363,9 @@ fi
 # removed and re-added every run, so it stays idempotent and leaves no trace
 # once the file is replaced by an upgrade.
 index="${WEBROOT}/index.html"
-if [ -f "${index}" ]; then
+if [ -f "${index}" ]; then ( set -e
   echo -n 'Applying branding patch...'
-  sed -i '/<!-- HDW4S_PATCH_START -->/,/<!-- HDW4S_PATCH_END -->/d' "${index}"
+  sed -i '/<!-- HDW4S_PATCH_START -->/,/<!-- HDW4S_PATCH_END -->/d' "${index}" || exit 1
   # Neutralise the static title as well as overriding the property.
   #
   # The script below is injected on the line immediately after <title>, which
@@ -361,7 +381,7 @@ if [ -f "${index}" ]; then
   #
   # Idempotent, and index.html is a build artifact this script replaces
   # wholesale on upgrade, so the edit never accumulates.
-  sed -i 's|<title>[^<]*</title>|<title>Desktop</title>|' "${index}"
+  sed -i 's|<title>[^<]*</title>|<title>Desktop</title>|' "${index}" || exit 1
   if grep -qi '</head>' "${index}"; then
     inject="$(cat <<'HTML_EOF'
 <!-- HDW4S_PATCH_START -->
@@ -545,13 +565,13 @@ HTML_EOF
     export inject
     awk 'BEGIN { done = 0 }
          !done && tolower($0) ~ /<\/head>/ { print ENVIRON["inject"]; done = 1 }
-         { print }' "${index}" > "${index}.tmp"
-    mv "${index}.tmp" "${index}"
+         { print }' "${index}" > "${index}.tmp" || exit 1
+    mv "${index}.tmp" "${index}" || exit 1
     echo ' done.'
   else
     echo ' skipped (no </head> found).'
   fi
-fi
+) || cosmetic_failed 'the branding patch'; fi
 
 # The installed-app window shows the MANIFEST name, not the page title. So an
 # installed PWA still carried upstream's branding after the title was fixed --
@@ -560,13 +580,13 @@ fi
 # cannot carry the per-session name, which is known only in the browser, it
 # only has to be ours.
 manifest="${WEBROOT}/manifest.json"
-if [ -f "${manifest}" ]; then
+if [ -f "${manifest}" ]; then ( set -e
   echo -n 'Applying manifest branding...'
   sed -i -e 's|"name"[[:space:]]*:[[:space:]]*"[^"]*"|"name": "Desktop"|' \
          -e 's|"short_name"[[:space:]]*:[[:space:]]*"[^"]*"|"short_name": "Desktop"|' \
-         "${manifest}"
+         "${manifest}" || exit 1
   echo ' done.'
-fi
+) || cosmetic_failed 'the manifest branding'; fi
 
 # --- RECONNECT LOOP FIX -----------------------------------------------------
 # The client opens two signalling channels, one for video and one for audio,
