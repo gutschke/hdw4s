@@ -220,6 +220,7 @@ class FakeSocket:
         self._message = message
         self.sent = []
         self.closed = None
+        self.on_close = None
 
     async def recv(self):
         if self._message is None:
@@ -231,6 +232,8 @@ class FakeSocket:
 
     async def close(self, code=None, reason=None):
         self.closed = (code, reason)
+        if self.on_close is not None:
+            self.on_close()
 
 
 def test_server_behaviour():
@@ -309,6 +312,65 @@ def test_server_behaviour():
         out["app_peer"] = await srv4.hello_peer(evil)
         out["app_peer_closed"] = evil.closed
 
+        # The hand-over race that broke audio. Taking a browser leg closes the
+        # application peer paired with it, and the application reconnects both
+        # of its legs -- while the peer paired with the other leg is still
+        # registered, because that leg has not been handed over yet. Refusing
+        # that reconnect as a duplicate is what left a viewer with a picture,
+        # no sound, and a spinner that never cleared.
+        srv7 = server()
+        for uid in ("0", "2"):
+            await srv7.hello_peer(FakeSocket(hello(uid)))
+        again = FakeSocket(hello("2"))
+        out["app_rereg"] = await srv7.hello_peer(again)
+        out["app_rereg_sent"] = list(again.sent)
+        # ... and it is still only the application that may do this. The same
+        # id, claimed with an identity or with a request to take over, is a
+        # stranger and is refused. An earlier fix left this out and handed the
+        # desktop's own signalling to anything that asked.
+        srv8 = server()
+        await srv8.hello_peer(FakeSocket(hello("2")))
+        named = FakeSocket(hello("2", {"client": "evil"}))
+        out["app_named"] = await srv8.hello_peer(named)
+        out["app_named_closed"] = named.closed
+
+        # A device's two legs must be admitted together. Taking one tears down
+        # the session it was in, which closes the desktop's paired peer, and the
+        # desktop then reconnects and asks for a session on each leg -- so if
+        # the other leg has not moved yet, it is handed the outgoing device's
+        # socket, which dies a moment later. What is checked here is the
+        # ordering that prevents it: by the time anything is evicted, both new
+        # sockets are already registered.
+        srv11 = server()
+        old1 = FakeSocket(hello("1", {"client": "Y"}))
+        await srv11.hello_peer(old1)
+        old3 = FakeSocket(hello("3", {"client": "Y"}))
+        await srv11.hello_peer(old3)
+        h.HANDOVER_PAIR_WAIT = 5.0
+        new1 = FakeSocket(hello("1", {"client": "X", "takeover": True}))
+        first = asyncio.ensure_future(srv11.hello_peer(new1))
+        await asyncio.sleep(0.3)
+        # The observable property: one leg on its own does not get in. Without
+        # it the leg is admitted at once, the eviction it causes reaches the
+        # desktop, and the desktop asks for a session on a leg that has not
+        # moved yet.
+        out["one_leg_waits"] = first.done()
+        new3 = FakeSocket(hello("3", {"client": "X", "takeover": True}))
+        got3 = await srv11.hello_peer(new3)
+        got1 = await asyncio.wait_for(first, 2.0)
+        out["pair_admitted"] = (got1[0], got3[0])
+
+        # A client that only ever brings one leg is let in by the timeout,
+        # rather than hanging on a sibling that is never coming.
+        h.HANDOVER_PAIR_WAIT = 0.3
+        srv12 = server()
+        await srv12.hello_peer(FakeSocket(hello("1", {"client": "Y"})))
+        started = asyncio.get_event_loop().time()
+        lone = await srv12.hello_peer(
+            FakeSocket(hello("1", {"client": "Z", "takeover": True})))
+        out["lone_leg"] = (lone[0], asyncio.get_event_loop().time() - started)
+        h.HANDOVER_PAIR_WAIT = 1.5
+
         srv6 = server()
         nul = FakeSocket("HELLO 1 " + b64.b64encode(b"null").decode())
         out["json_null"] = await srv6.hello_peer(nul)
@@ -342,6 +404,23 @@ def test_server_behaviour():
     check("  and the attempt is refused, not granted",
           r["app_peer_closed"] == (h.CLOSE_SESSION_IN_USE, "session in use"),
           str(r["app_peer_closed"]))
+    check("the application can re-register a peer it already holds",
+          r["app_rereg"][0] == "2", str(r["app_rereg"]))
+    check("  and is told so, so its audio session starts",
+          r["app_rereg_sent"] == ["HELLO"], str(r["app_rereg_sent"]))
+    check("  while a stranger claiming the same id is still refused",
+          r["app_named"] == (None, None), str(r["app_named"]))
+    check("  and told the session is in use",
+          r["app_named_closed"] == (h.CLOSE_SESSION_IN_USE, "session in use"),
+          str(r["app_named_closed"]))
+    check("one leg of a hand-over waits for the other",
+          r["one_leg_waits"] is False,
+          "admitted alone, so the desktop can pair with the leg still leaving")
+    check("  and both are admitted once the second arrives",
+          r["pair_admitted"] == ("1", "3"), str(r["pair_admitted"]))
+    check("a client with only one leg is let in by the timeout",
+          r["lone_leg"][0] == "1" and r["lone_leg"][1] < 2.0,
+          "granted=%r after %.2fs" % r["lone_leg"])
     check("a client that never says HELLO is handled", r["no_hello"] == (None, None),
           str(r["no_hello"]))
     check("metadata that is not an object is refused",

@@ -57,7 +57,7 @@ if not logger.handlers:
 logger.setLevel(os.environ.get("HDW4S_LOG_LEVEL", "INFO").upper())
 
 # Bumped by hand so a running server can be identified beyond doubt.
-BUILD = "handover-17"
+BUILD = "handover-21"
 
 # Close codes, from RFC 6455's private range. A client has to tell a refusal
 # apart from every other reason a socket closes: it must keep reconnecting
@@ -144,6 +144,11 @@ TAKEOVER_MIN_INTERVAL = 2.0
 
 # Applies whoever is asking. A person cannot click this fast; a loop can.
 TAKEOVER_MIN_FLOOR = 0.4
+
+# How long the first leg of a hand-over waits for the second. A browser opens
+# its two legs back to back, so this is normally over in milliseconds; the
+# timeout only matters for a client that has just the one.
+HANDOVER_PAIR_WAIT = 1.5
 
 # Refusals are logged once per peer, then summarised, because an unpatched or
 # cached client loops several times a second and a healthy session already
@@ -272,6 +277,9 @@ class HandoverMixin:
         self._evictions = set()
         self._client_ok = None
         self._client_checked = 0.0
+        # Take-overs in progress, by client identity, so a device's two legs
+        # can be admitted together. See _await_sibling_leg.
+        self._handover_party = {}
 
     # -- helpers ---------------------------------------------------------
 
@@ -398,6 +406,34 @@ class HandoverMixin:
             await ws.close(code=1002, reason="invalid protocol")
         except Exception:
             pass
+
+    async def _await_sibling_leg(self, uid, incoming):
+        """Wait for the same client's other leg to reach this point too.
+
+        A rendezvous, not a lock: whoever arrives last releases everyone, and a
+        client that only ever brings one leg is released by the timeout. No
+        peer id is held while waiting, so a wait that times out leaves nothing
+        behind and the decision below is taken on the state as it is then.
+        """
+        party = self._handover_party.get(incoming)
+        if party is None:
+            party = {"legs": set(), "ready": asyncio.Event()}
+            self._handover_party[incoming] = party
+        party["legs"].add(uid)
+        if len(party["legs"]) >= len(CLIENT_PEER_IDS):
+            party["ready"].set()
+        try:
+            await asyncio.wait_for(party["ready"].wait(), HANDOVER_PAIR_WAIT)
+        except asyncio.TimeoutError:
+            logger.info(
+                "Peer %r handed over without its other leg; the client brought "
+                "only one within %.1fs", uid, HANDOVER_PAIR_WAIT)
+        except Exception:
+            pass
+        finally:
+            party["legs"].discard(uid)
+            if not party["legs"] and self._handover_party.get(incoming) is party:
+                del self._handover_party[incoming]
 
     async def _refuse(self, ws, uid, raddr, incoming):
         """Say no, and say it more slowly the more it is being asked.
@@ -536,6 +572,68 @@ class HandoverMixin:
                 and self._other_leg_held_elsewhere(uid, incoming):
             await self._refuse(ws, uid, raddr, incoming)
             return (None, None)
+
+        if uid in self.peers and uid not in CLIENT_PEER_IDS \
+                and not self._wants_takeover(meta) \
+                and self._identity(meta) is None:
+            # A peer id no browser uses, being claimed again. Only the desktop's
+            # own application registers these, and it re-registers both of them
+            # whenever either is closed -- which a hand-over does, because
+            # handing a browser leg over closes the application leg paired with
+            # it. Its other leg was never closed and is still registered, so the
+            # reconnect arrives here as a duplicate.
+            #
+            # Refusing that broke audio after every hand-over: the application
+            # could not re-register the leg carrying sound, never started an
+            # audio session, and the viewer sat behind a spinner correctly
+            # reporting that audio had never connected. Let the newer
+            # registration displace the older one.
+            #
+            # The cost, stated plainly: anything that can already reach this
+            # socket can make the desktop's own connection reconnect by claiming
+            # one of these ids. It cannot take a session that way -- an explicit
+            # takeover on these ids is refused -- and reaching the socket
+            # means passing the proxy's authentication. Against audio being
+            # reliably broken for every user after every hand-over, this is the
+            # better failure.
+            # Only a bare HELLO reaches here: a claim carrying an identity or
+            # asking to take over is not how the application registers, and
+            # falls through to be refused like any other stranger.
+            logger.info("Peer %r re-registered by the desktop's own client", uid)
+            displaced_app = self.peers[uid]
+            self.peers[uid] = [ws, raddr, None, meta]
+            self._owner_task[uid] = asyncio.current_task()
+            self._evict(displaced_app, CLOSE_SUPERSEDED, "superseded")
+            try:
+                await ws.send("HELLO")
+            except Exception:
+                self._release(uid)
+                return (None, None)
+            return uid, meta
+
+        # Admit a device's two legs together, or the desktop pairs with one of
+        # them and the other is still the device that is losing the session.
+        #
+        # Taking one leg tears down the session it was in, which closes the
+        # application peer paired with it, and the application then reconnects
+        # BOTH of its legs and asks for a session on each. The browser's two
+        # legs arrive a few milliseconds apart, so that reconnect lands in the
+        # middle: the application asks for a session with the leg that has not
+        # been taken over yet, is given the outgoing device's socket, and that
+        # socket dies a moment later. The application only rebuilds its legs
+        # together and nothing closes the surviving one, so the desktop is left
+        # with no sound for the rest of its life.
+        #
+        # Holding the first leg until the second arrives closes the window: by
+        # the time anything is evicted, both new sockets are registered, and
+        # there is no stale peer for the application to be paired with.
+        #
+        # The alternative -- closing the application's surviving leg so it
+        # rebuilds the pair -- was tried and is much worse. Upstream treats a
+        # server-initiated close of its video leg as fatal and exits the whole
+        # process, which takes the user's desktop and every window in it.
+        if takeover and incoming is not None and uid in self.peers:
+            await self._await_sibling_leg(uid, incoming)
 
         displaced = None
         if uid in self.peers:
