@@ -150,6 +150,27 @@ def main():
               "%d distinct colours, against %d on a page that cannot stream"
               % (lit, blank))
 
+        print("\n  --- the desktop follows the window ---")
+        # The size the stream actually arrives at, which is the desktop's own
+        # size: asking the client what it requested would prove nothing.
+        size = ("(()=>{const v=document.getElementById('videoStream')||"
+                "document.getElementById('videoCanvas')||{};"
+                "return (v.videoWidth||v.width||0)+'x'+(v.videoHeight||v.height||0)})()")
+        was = first.eval(size)
+        first.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1024, "height": 768, "deviceScaleFactor": 1, "mobile": False})
+        now = first.wait_for(size, lambda v: v and v != was, timeout=45)
+        check("resizing the window resizes the desktop", bool(now and now != was),
+              "%s -> %s" % (was, now))
+        # Wide enough to be unmistakable, and back to something ordinary.
+        first.call("Emulation.setDeviceMetricsOverride", {
+            "width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False})
+        again = first.wait_for(size, lambda v: v and v != now, timeout=45)
+        check("and again, to a different size", bool(again and again != now),
+              "%s -> %s" % (now, again))
+        first.call("Emulation.clearDeviceMetricsOverride")
+        time.sleep(3)
+
         print("\n  --- sound ---")
         audio_before = first.wire.get(AUDIO, 0)
         level = 0
