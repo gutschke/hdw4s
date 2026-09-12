@@ -1,3 +1,28 @@
+hdw4s (1.1) unstable; urgency=medium
+
+  * A desktop can now be moved between devices. It belongs to one browser at a
+    time; a second is told it is open elsewhere and offered a button to take it
+    over, and the device that had it is told so and offered the same way back.
+    A reload or a dropped connection is recognised as the same window returning
+    rather than as a second device.
+  * Turning a second client away no longer writes a traceback per attempt. A
+    client that could not recognise the refusal reconnected several times a
+    second; one stuck browser logged 17858 of them in two days.
+  * A closed signalling socket can no longer stop a session. The desktop's read
+    loop ran its callbacks inline and they sent on the same socket, so a close
+    arriving mid-callback escaped into a bare exception handler and exited the
+    process -- taking the desktop and every window open in it.
+  * The updater checks what it downloaded against a recorded checksum, and says
+    so plainly when it has nothing to check a hand-pinned version against.
+  * The idle reaper counts the clients attached to a session rather than the
+    session's own connections, so a desktop in use is no longer stopped.
+  * "hdw4s show" reports whether session hand-over is in effect, which of its
+    two halves is present, and the close codes a browser is turned away with.
+  * "hdw4s list" and "hdw4s show" no longer report an authenticated session as
+    unprotected when the caller cannot read its credential.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sat, 12 Sep 2026 00:00:00 -0700
+
 hdw4s (1.0) unstable; urgency=medium
 
   * Initial release.

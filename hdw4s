@@ -12,7 +12,7 @@ trap 'rc="$?"
 # Exit with an explanation rather than the trap's generic complaint. The trap
 # is for faults nobody anticipated; anything diagnosed here has already been
 # described to the user and does not need a second, vaguer line after it.
-HDW4S_VERSION='1.0'
+HDW4S_VERSION='1.1'
 
 die() {
   trap '' INT TERM QUIT HUP EXIT ERR
