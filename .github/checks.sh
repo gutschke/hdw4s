@@ -154,47 +154,25 @@ else
   skip 'injected javascript' 'node is not installed'
 fi
 
-# The client patcher carries several more kilobytes of JavaScript in string
-# constants, and that code reaches a browser too. The check above only reads
-# hdw4s-update, so none of it was ever parsed by anything.
-#
-# The helper parses the real patched output where a stock client is available
-# to patch, and falls back to checking that no replacement changes how many
-# brackets are open. It prints which of the two it did, so a weak run is never
-# mistaken for a strong one.
-if out="$("$(dirname "$0")/check-client-patch.py" 2>&1)"; then
-  note 'client patch javascript' "$(printf '%s' "${out}" | sed -n 's/^mode: //p')"
-else
-  printf '%s\n' "${out}" | head -6
-  bad 'client patch javascript' 'does not check out'
-fi
-
-# Two Python programs ship in this package and neither was compiled by
-# anything here.
-# A missing file used to be skipped here and then reported as parsing, so
-# deleting the server module outright was a passing run.
+# Whatever Python ships in this package, parsed. The list is derived rather
+# than written out: a named list went stale the moment the server module was
+# deleted, and a missing file used to be skipped here and then reported as
+# parsing, so deleting one outright was a passing run.
 pyfail=''
-for f in hdw4s_signalling.py hdw4s-patch-client .github/check-client-patch.py \
-         .github/test-handover.py; do
-  if [ ! -e "${f}" ]; then
-    pyfail="${pyfail} ${f}(missing)"
-  elif ! python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "${f}" 2>/dev/null; then
-    pyfail="${pyfail} ${f}"
+pyfiles="$(git -C "$(dirname "$0")/.." ls-files '*.py' 2>/dev/null)"
+if [ -z "${pyfiles}" ]; then
+  note 'python syntax' 'no python in this package'
+else
+  for f in ${pyfiles}; do
+    if ! python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "${f}" 2>/dev/null; then
+      pyfail="${pyfail} ${f}"
+    fi
+  done
+  if [ -z "${pyfail}" ]; then
+    note 'python syntax' "$(printf '%s\n' "${pyfiles}" | wc -l) file(s) parse"
+  else
+    bad 'python syntax' "does not parse:${pyfail}"
   fi
-done
-if [ -z "${pyfail}" ]; then
-  note 'python syntax' 'parses'
-else
-  bad 'python syntax' "does not parse:${pyfail}"
-fi
-
-# Properties the feature would lose if a piece of it were removed or renamed.
-# Everything here runs with nothing installed.
-if out="$(python3 "$(dirname "$0")/test-handover.py" 2>&1)"; then
-  note 'session hand-over' "$(printf '%s' "${out}" | tail -1 | sed 's/^ *//')"
-else
-  printf '%s\n' "${out}" | grep FAIL | head -6
-  bad 'session hand-over' 'a property it relies on is gone'
 fi
 
 echo

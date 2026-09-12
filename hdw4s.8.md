@@ -45,9 +45,7 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     directory, its transport, its unit state and its current display.
 
   * `show` <instance>:
-    Print one session's settings and, for each of them, which file it came from,
-    followed by whether session hand-over is in effect for it. See
-    SESSION HAND-OVER below for how to read that part.
+    Print one session's settings and, for each of them, which file it came from.
 
   * `enable` <instance>:
     Allocate a slot for a session and open its front door. The desktop is not
@@ -265,56 +263,6 @@ belongs to the copy of the streaming server, of which there is one.
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 
-## SESSION HAND-OVER
-
-The streaming protocol fixes the peer identifiers a browser uses, so two
-browsers cannot hold one desktop at the same time. A session therefore belongs
-to one browser at a time and moves between them on request: a second window is
-told the desktop is open elsewhere and shows a button, pressing it moves the
-session, and the window that had it is told it was taken over and offered the
-same button back. A reload, or a connection that drops and returns, is
-recognised as the same window rather than a second device and reclaims its
-session without asking.
-
-The feature has two halves, and either can be absent without the other:
-
-  * The browser client has to know how to ask. It is patched in place by the
-    updater, which reapplies it after every upstream release, so a client
-    installed by other means is the stock one and offers no button.
-
-  * The signalling server has to know how to answer. It is extended at run
-    time rather than modified on disk, and it checks the upstream code it is
-    extending first. If upstream has changed in a way it does not recognise, it
-    stands down and says so in the journal rather than guessing -- the session
-    then behaves as it did before the feature existed.
-
-`hdw4s show` <instance> reports both halves, the client tree actually being
-served, how many clients are connected, and the close codes. A session that
-cannot hand over says which half is missing.
-
-A window that is turned away is told why, using the private WebSocket close
-codes reserved for applications. These appear in the journal alongside the
-decision that caused them:
-
-  * `4001`:
-    The desktop is open on another device. The window shows the take-over
-    button and waits; it does not reconnect by itself.
-
-  * `4002`:
-    You were taken over. The window is offered the way back and does not
-    reconnect by itself, so two devices cannot fight over one desktop.
-
-  * `4003`:
-    Superseded by a newer connection of your own, such as a reload or a
-    duplicated tab.
-
-To switch the feature off, create `/etc/hdw4s/handover.off` and let the updater
-run, or run the client patcher by hand; the browser client is rolled back to
-stock and a second device is refused as it was before, without a button.
-
-Note that the identity a browser presents is its own claim, not something the
-session verifies -- see REVERSE PROXY AND SECURITY.
-
 ## SHARED HOME DIRECTORIES
 
 A GNOME session assumes it is the only one using its home directory. That
@@ -442,13 +390,25 @@ Two things follow, and both matter:
   * The proxy must be the only path. Terminate TLS there, authenticate there,
     and do not expose a session port by any other route.
 
-Session hand-over sharpens the second point. A desktop can be claimed by one
-client at a time, and a client that asks to take it over is given it -- the
-identity a client presents is its own claim, not something the session checks.
-So where an unauthenticated reach at a session port used to mean a connection
-that was refused, it now means one that can take a running desktop away from
-the person using it. The remedy is the same as it has always been, and it is
-why `HDW4S_PROXIES` exists; this only raises what is lost by getting it wrong.
+Two things sharpen the second point.
+
+The newest connection wins. A client that opens a desktop somebody else is using
+takes it, and the identity a client presents is its own claim rather than
+something the session checks. So where an unauthenticated reach at a session
+port once meant a connection that was refused, it now means one that can take a
+running desktop away from the person at it.
+
+And the streaming server offers more than a desktop unless it is told not to.
+Its own defaults serve a file manager over the user's `Desktop` directory,
+accept uploads into it, let any caller restart the media stack in WebRTC mode,
+and admit extra viewers and gamepad players to a live session. hdw4s turns each
+of those off at the server, by name rather than by relying on a default, because
+they share a URL prefix with the stream and a proxy cannot separate them. Two
+endpoints, `/api/status` and `/api/health`, answer before any authentication
+runs and always will.
+
+The remedy for all of it is the same as it has always been, and it is why
+`HDW4S_PROXIES` exists; this only raises what is lost by getting it wrong.
 
 The package owns one nftables table, `inet hdw4s`. It restricts and does not
 grant. A drop in this table overrides any other table's accept, so the port
@@ -503,13 +463,6 @@ unreachable, and nothing reports it.
   * `/etc/hdw4s/<instance>.keyring.cred`:
     The session keyring's password, encrypted to this machine. Created by
     `hdw4s keyring`, removed by `hdw4s release`.
-
-  * `/etc/hdw4s/handover.off`:
-    Present only if session hand-over has been rolled back, or created by hand
-    to switch it off. The updater applies the client half every time it runs, so
-    without this a rollback would last until the next run and no longer. Created
-    by rolling back, removed by applying again, and safe to delete by hand to
-    let the updater apply it. See SESSION HAND-OVER.
 
   * `/etc/hdw4s/nftables.conf`:
     Generated ruleset. Regenerated by `hdw4s firewall --apply`.

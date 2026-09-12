@@ -69,11 +69,9 @@ so the only way to stop the conflict is to stop sharing them.
   so the proxy can live on another machine and needs to understand nothing
   beyond HTTP. (A browser that reaches a session with no proxy in between does
   need one; that is what `HDW4S_MEDIA_PORTS=direct` is for.)
-* **Move between devices without losing the desktop.** A session belongs to one
-  browser at a time. Open it somewhere else and that window is told the desktop
-  is already in use, with a button to take it over; the device that had it is
-  told it was taken over and is offered the same way back. See
-  [Session hand-over](#session-hand-over).
+* **Several people can watch one desktop**, or one person can move between
+  devices: the streaming server assigns connections itself and the newest one
+  takes over, so opening the same desktop somewhere else simply works.
 * **Coexists with a desktop that is already running**, on this machine or on
   another one sharing the same home directory over the network.
 * **Firewalled by construction.** The package owns one nftables table covering
@@ -181,32 +179,27 @@ screen.
 the session is set up for, including the WebSocket and timeout settings a
 desktop needs.
 
-## Session hand-over
-
-A desktop belongs to one browser at a time. Open it somewhere else and that
-window is told the desktop is already in use and offers a button to take it
-over; the device that had it is told it was taken over, does not reconnect on
-its own, and is offered the same way back. A reload or a dropped connection is
-recognised as the same window coming back, so it reclaims its session without
-asking anyone.
-
-The feature needs a patched browser client and a signalling server that knows
-how to answer, and either can be missing without the other -- an upgrade
-replaces the client, and a signalling server whose internals have changed makes
-the server half stand down rather than guess.
-
-    hdw4s show <instance>
-
-reports both halves, which client tree is being served, and how many clients
-are connected. `hdw4s(8)` has the close codes a window is turned away with, and
-how to switch the feature off.
-
 ## Security
 
 **A session performs no authentication of its own.** That is deliberate -- it
 exists to sit behind a proxy that has already identified the user, so that
 reaching the desktop takes no second login. It also means anything that can open
-a connection to a session port gets that user's desktop.
+a connection to a session port gets an interactive desktop as that account: it
+can type, click, read and write the clipboard, resize the screen, and take the
+desktop away from whoever is using it.
+
+Two endpoints, `/api/status` and `/api/health`, answer before any authentication
+runs and always will. A proxy credential hides who is connected, not that a
+session exists.
+
+The streaming server offers more than a desktop if you let it. Out of the box it
+also serves a file manager over the user's `Desktop` directory, accepts uploads
+into it, lets any caller restart the media stack in WebRTC mode, and admits
+extra viewers and gamepad players to a live session. hdw4s turns all of that off
+at the server, by name, rather than relying on a default -- and not at the proxy,
+because those routes share a prefix with the stream and cannot be separated
+there. If you re-enable any of them, the sentence above stops being the whole
+story.
 
 So `HDW4S_PROXIES` is not a convenience setting. It is the only thing between a
 session and everything that can route to the machine. Terminate TLS at the

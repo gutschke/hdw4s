@@ -112,7 +112,7 @@ export HDW4S_ISOLATION
 # while somebody is using it.
 : "${HDW4S_ADDR:=127.0.0.1}"
 : "${HDW4S_FRAMERATE:=30}"
-: "${HDW4S_ENCODER:=x264enc}"
+: "${HDW4S_ENCODER:=h264enc}"
 
 profile="${HDW4S_PROFILE_DIR}/${instance}"
 
