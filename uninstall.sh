@@ -164,20 +164,36 @@ for sys in /usr/local /usr "${own}"; do
 done
 mandb -q 2>/dev/null || :
 
-echo -n 'Removing Selkies...'
+echo 'Removing Selkies...'
 # /opt/selkies belongs to the "selkies" package now, not to us: upstream ships
 # a distribution package and dpkg owns every file under that prefix. Removing it
 # with rm would leave dpkg believing the package is installed while its files are
 # gone, which breaks the next upgrade and is invisible until then.
 #
 # So the streaming server is removed the way it was installed, and only if it is
-# actually there. /opt/gst-web has no owner and no successor; it is a leftover
-# from the version before this one and is still worth clearing.
+# actually there. This script runs on its own, not from inside a maintainer
+# script, so it may call dpkg -- which is precisely why debian/postrm cannot,
+# and prints an instruction instead.
+#
+# Not "|| :". A removal that fails and says nothing is how the package survived
+# every purge before this: the message below is what tells somebody that
+# 153MB of streaming server is still installed.
 if command -v dpkg-query >/dev/null 2>&1 &&
    dpkg-query -W -f='${Status}' selkies 2>/dev/null | grep -q 'install ok installed'; then
-  dpkg -P selkies >/dev/null 2>&1 || :
+  if dpkg -P selkies; then
+    echo '  Removed the selkies package.'
+  else
+    echo '  Could not remove the selkies package; it is still installed.' >&2
+    echo '  Remove it with "apt-get purge selkies".' >&2
+  fi
+else
+  echo '  The selkies package is not installed.'
 fi
-rm -rf /opt/gst-web /opt/gst-web.bak /opt/selkies.bak
+# Ours, with no other owner: the pre-2.0 browser client, the virtualenv the
+# updater moved aside during the migration, and the cached .deb it kept so an
+# upgrade had something to roll back to.
+rm -rf /opt/gst-web /opt/gst-web.bak /opt/selkies.bak /opt/selkies.pre-2.0
+rm -rf /var/lib/hdw4s/selkies
 echo ' done.'
 
 # Per-session settings and the profile directories under each home are left in

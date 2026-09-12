@@ -372,12 +372,37 @@ EOF
   release="${SB}/does-not-exist"
   is 'a missing release file reports none'        "$(asset_digest 'has.whl')" ''
 
-  # The pins themselves. A release that bumps KNOWN_GOOD without recording its
-  # hashes would otherwise install an unchecked download.
-  w="$(sed -n "s/^KNOWN_GOOD_SHA256_WHEEL='\([0-9a-f]*\)'.*/\1/p" "${ROOT}/hdw4s-update")"
-  b="$(sed -n "s/^KNOWN_GOOD_SHA256_WEB='\([0-9a-f]*\)'.*/\1/p" "${ROOT}/hdw4s-update")"
-  is 'the wheel hash is recorded, 64 hex digits' "${#w}" '64'
-  is 'the web bundle hash is recorded'           "${#b}" '64'
+  # The pins themselves. A release that bumps KNOWN_GOOD without recording the
+  # hash of the package it now points at would install an unchecked download.
+  deb_sum="$(sed -n "s/^KNOWN_GOOD_SHA256_DEB='\([0-9a-f]*\)'.*/\1/p" \
+             "${ROOT}/hdw4s-update")"
+  deb_asset="$(sed -n "s/^KNOWN_GOOD_ASSET='\([^']*\)'.*/\1/p" \
+               "${ROOT}/hdw4s-update")"
+  is 'the package hash is recorded, 64 hex digits' "${#deb_sum}" '64'
+  # The hash is only reachable when the asset it belongs to is named: the
+  # updater compares the downloaded filename against this before using it.
+  is 'the asset it belongs to is named' \
+     "$([ -n "${deb_asset}" ] && echo yes || echo no)" 'yes'
+  is 'and it is a .deb'                 "${deb_asset##*.}" 'deb'
+)
+
+echo '== the four spellings of one release =='
+# The tag, the package version and what "selkies --version" prints are three
+# different strings for the same release. Compare the wrong pair and the
+# updater either reinstalls every night, because they never match, or -- with a
+# comparison loose enough to stop that -- never installs anything again.
+( set +e
+  eval "$(sed -n '/^version_from_package() {/,/^}/p;/^version_from_tag() /p' \
+          "${ROOT}/hdw4s-update")"
+
+  is 'a package version loses its revision and tildes' \
+     "$(version_from_package '2.0.0~rc0-1~ubuntu24.04')" '2.0.0rc0'
+  # Nothing to strip: a bare upstream version has to survive unchanged, or the
+  # pre-2.0 installed version would never compare equal to anything.
+  is 'a plain version is left alone' "$(version_from_package '1.6.2')" '1.6.2'
+  is 'a tag loses its "v"'           "$(version_from_tag 'v2.0.0rc0')" '2.0.0rc0'
+  # Upstream tagged without the prefix before 2.0, so it is optional.
+  is 'an unprefixed tag is left alone' "$(version_from_tag '1.6.2')" '1.6.2'
 )
 
 echo '== firewall ruleset shape =='
@@ -562,7 +587,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=108   # update when tests are added; a wrong number is the point
+EXPECTED=113   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

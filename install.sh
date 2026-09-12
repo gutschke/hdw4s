@@ -49,57 +49,39 @@ for path in "${!NEEDS[@]}"; do
   [ -e "${path}" ] || missing="${missing} ${NEEDS[${path}]}"
 done
 
-# The venv module is a separate package on Debian and Ubuntu, and its absence is
-# the single most common reason a Python install fails here.
-python3 -c 'import venv' >&/dev/null || missing="${missing} python3-venv"
+# What the streaming server needs, which since Selkies 2.0 is not Python at
+# all. It ships as a distribution package carrying its own interpreter, its own
+# Xlib and its own encoders, so the whole GStreamer and PyGObject list that used
+# to live here went with the virtualenv. What is left is the shared libraries
+# its extension modules link against and the two programs it forks.
+#
+# The libraries are checked through the package manager rather than by looking
+# for a file, because a missing one does not stop Selkies starting: it logs a
+# single line about striped encoding being unavailable and then serves a desktop
+# that cannot encode. libva-x11-2 is the one that actually goes missing on a
+# server install.
+for pkg in libpulse0 libxcb1 libxkbcommon0 libx11-xcb1 libva2 libva-drm2 \
+           libva-x11-2 libdrm2 libgbm1 libegl1 libwayland-server0 \
+           libpixman-1-0 libxcb-render0 libxcb-shm0 libxcb-dri3-0 libxfixes3 \
+           libxext6 libice6 libsm6; do
+  [ "$(dpkg-query -W -f='${db:Status-Status}' "${pkg}" 2>/dev/null)" = 'installed' ] ||
+    missing="${missing} ${pkg}"
+done
 
-# Selkies 1.6.x renders through GStreamer and reaches it through the system
-# PyGObject bindings, which are not installable from PyPI.
-python3 -c 'import gi' >&/dev/null || missing="${missing} python3-gi"
-[ -e /usr/lib/x86_64-linux-gnu/girepository-1.0/Gst-1.0.typelib ] ||
-  [ -e /usr/lib/girepository-1.0/Gst-1.0.typelib ] ||
-  missing="${missing} gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0
-           gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-           gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-           gstreamer1.0-x"
-
-# Selkies reaches these two through GObject introspection and GStreamer plugin
-# loading, not through any command, so nothing above notices them missing. Both
-# are checked separately because both fail late and quietly: without the first,
-# the session dies at "import GstWebRTC" after every layer has reported
-# success; without the second, webrtcbin builds a pipeline that can never
-# gather a candidate. Both live in Ubuntu's universe component.
-ls /usr/lib/*/girepository-1.0/GstWebRTC-1.0.typelib >&/dev/null ||
-  [ -e /usr/lib/girepository-1.0/GstWebRTC-1.0.typelib ] ||
-  missing="${missing} gir1.2-gst-plugins-bad-1.0"
-ls /usr/lib/*/gstreamer-1.0/libgstnice.so >&/dev/null ||
-  [ -e /usr/lib/gstreamer-1.0/libgstnice.so ] ||
-  missing="${missing} gstreamer1.0-nice"
-
-# Selkies asks for python-xlib from a git branch. The updater installs the
-# distro package instead and never fetches that branch, so the package has to
-# be here -- see the comment in hdw4s-update for why the distro one is right.
-python3 -c 'import Xlib' >&/dev/null || missing="${missing} python3-xlib"
-
-# GPUtil, which Selkies imports to look for a GPU it will not find, still does
-# "from distutils import spawn". Python 3.12 removed distutils; setuptools
-# ships the replacement and a .pth that puts it back on the import path. So a
-# session that never touches a GPU cannot start without it.
-python3 -c 'import distutils' >&/dev/null || missing="${missing} python3-setuptools"
-
-# PyGObject's Gst overrides -- Gst.Fraction and friends -- are a separate
-# package from the typelib. Without them the import succeeds, elements can
-# still be made, and the first thing Selkies does with a framerate dies with
-# "Fraction() takes no arguments".
-python3 -c 'import gi; gi.require_version("Gst","1.0")
-from gi.repository import Gst; Gst.init(None); Gst.Fraction(30,1)' >&/dev/null ||
-  missing="${missing} python3-gst-1.0"
-
-# Two binaries the streaming server shells out to at runtime. No import test
-# can see these, which is why they were missed: the clipboard reaches for xsel
-# on every copy and paste, and resizing -- on by default -- drives xrandr.
-command -v xsel    >/dev/null || missing="${missing} xsel"
+# Three programs the streaming server forks, which no library check can see.
+# xdotool is the fallback for every keysym XTEST cannot inject directly, and
+# xset and xrandr are read and driven by the input and resize paths. xsel is
+# gone: the clipboard is handled in-process now.
+command -v xdotool >/dev/null || missing="${missing} xdotool"
 command -v xrandr  >/dev/null || missing="${missing} x11-xserver-utils"
+command -v xset    >/dev/null || missing="${missing} x11-xserver-utils"
+
+# Not fatal, so not in the list above: Selkies drives the sound server through
+# its own bundled bindings and only falls back to forking pactl when those
+# cannot connect.
+command -v pactl >/dev/null ||
+  echo 'Note: pulseaudio-utils is not installed. Selkies will not be able to
+      fall back to "pactl" if its own sound-server bindings fail.'
 
 [ -z "${missing}" ] || {
   echo 'Error: required packages are missing. Install them with:'

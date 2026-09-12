@@ -25,20 +25,31 @@ if [ "$1" = 'purge' ]; then
          /etc/systemd/system/hdw4s-proxy@*.socket.d
   rm -f /etc/systemd/system/sockets.target.wants/hdw4s-proxy@*.socket
   rmdir --ignore-fail-on-non-empty /etc/hdw4s 2>/dev/null || true
-  # postinst fetches these; nothing else owns them.
-  # /opt/selkies belongs to the "selkies" package now, not to us: upstream ships
-  # a distribution package and dpkg owns every file under that prefix. Removing it
-  # with rm would leave dpkg believing the package is installed while its files are
-  # gone, which breaks the next upgrade and is invisible until then.
+  # The streaming server is a separate package now, and this cannot remove it.
   #
-  # So the streaming server is removed the way it was installed, and only if it is
-  # actually there. /opt/gst-web has no owner and no successor; it is a leftover
-  # from the version before this one and is still worth clearing.
+  # A maintainer script runs inside dpkg, which is holding both of its own
+  # locks, so a nested "dpkg -P selkies" cannot run: it exits 2 with "dpkg
+  # frontend lock was locked by another process". The version of this file that
+  # tried it wrote "|| :" after the call, so purging hdw4s reported success,
+  # said nothing, and left the package exactly where it was -- a removal that
+  # silently did not happen, which is worse than one that never claimed to.
+  #
+  # Removing /opt/selkies with rm is not the alternative. dpkg owns every file
+  # under that prefix and would go on believing 153MB of them were present.
+  # So say what is left and who has to remove it.
   if command -v dpkg-query >/dev/null 2>&1 &&
-     dpkg-query -W -f='${Status}' selkies 2>/dev/null | grep -q 'install ok installed'; then
-    dpkg -P selkies >/dev/null 2>&1 || :
+     dpkg-query -W -f='${Status}' selkies 2>/dev/null |
+       grep -q 'install ok installed'; then
+    echo 'hdw4s: the Selkies streaming server is a separate package and is'
+    echo '       still installed. Remove it with "apt-get purge selkies".'
   fi
-  rm -rf /opt/gst-web /opt/gst-web.bak /opt/selkies.bak
+
+  # These are ours. /opt/gst-web is the browser client an hdw4s before 2.0
+  # unpacked, /opt/selkies.pre-2.0 is a virtualenv the updater moved aside
+  # during the migration, and /var/lib/hdw4s/selkies is the .deb it keeps so an
+  # upgrade has something to roll back to. None of them has another owner.
+  rm -rf /opt/gst-web /opt/gst-web.bak /opt/selkies.bak /opt/selkies.pre-2.0
+  rm -rf /var/lib/hdw4s/selkies
   echo 'hdw4s: /var/lib/hdw4s still holds each session profile; remove it by'
   echo '       hand if those desktops are not wanted again.'
 fi

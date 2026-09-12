@@ -36,13 +36,17 @@ never the first. The nftables rules also close the connection candidates the
 streaming server scatters across every address the machine has -- see the note
 on the media chain below for how, and for what that does and does not cover.
 
-**The updater installs an unsigned upstream wheel as root.** `hdw4s-update`
-fetches the streaming server from its upstream GitHub releases over TLS and
-installs it into a system-wide virtual environment. There is no signature and no
-recorded hash to verify, so whoever can serve those URLs gets root on every
-machine running the updater -- a Python wheel can ship a `.pth` file that runs
-on every interpreter start. Pin a version, or turn the timer off, if
-that trade is not acceptable.
+**The updater installs an unsigned upstream package as root.** `hdw4s-update`
+fetches the streaming server's `.deb` from its upstream GitHub releases over TLS
+and installs it with `dpkg`. What is downloaded is checked against a sha256 --
+the one recorded in `hdw4s-update` for the release and platform the maintainer
+tested, otherwise the digest GitHub publishes for that asset -- and the download
+is refused outright if neither is available, so no install happens with nothing
+checked. That pins the bytes to what somebody saw; it is not a signature, and it
+says nothing about whether upstream's release was honest when it was made.
+Upstream publishes no signatures. So whoever can serve those URLs *and* choose
+what the release contains gets root on every machine running the updater. Pin a
+version, or turn the timer off, if that trade is not acceptable.
 
 ## Known weaknesses not yet fixed
 

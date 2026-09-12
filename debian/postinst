@@ -56,11 +56,38 @@ if [ "$1" = 'configure' ]; then
     fi
   fi
 
-  # Fetching Selkies needs the network, which an installer cannot assume it
-  # has, and must not wait on indefinitely if it does not. The timer retries.
-  if ! timeout 600 /usr/lib/hdw4s/hdw4s-update; then
-    echo 'hdw4s: could not fetch Selkies now; the daily timer will retry.' >&2
-    echo '       Run "/usr/lib/hdw4s/hdw4s-update" once the network is up.' >&2
+  # Fetching Selkies, which cannot be done from here.
+  #
+  # It used to be: the updater built a virtualenv and ran pip, and a maintainer
+  # script is allowed to do that. Selkies 2.0 is a .deb, and installing a .deb
+  # from inside a maintainer script is not possible -- dpkg is holding both of
+  # its own locks for the transaction this script is part of, and a nested dpkg
+  # exits 2 with "dpkg frontend lock was locked by another process". Written
+  # with "|| :" after it, as the removal in postrm once was, that reads as a
+  # success and installs nothing.
+  #
+  # So the updater is handed to systemd instead, which starts it outside this
+  # transaction. It waits for dpkg to let go and then installs. --no-block
+  # because the service cannot finish while this script is still running, and
+  # daemon-reload first because on a first install the unit has been unpacked
+  # but debhelper's own snippet, which reloads systemd, has not run yet.
+  #
+  # That token is described rather than written out on purpose: dh_installdeb
+  # substitutes it wherever it appears, comments included, and the first draft
+  # of this comment became the debhelper block followed by four loose words,
+  # which dpkg ran and which failed the install with "has: not found".
+  if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+    if systemctl start --no-block hdw4s-updater.service; then
+      echo 'hdw4s: fetching the Selkies streaming server in the background.'
+      echo '       Watch it with "journalctl -fu hdw4s-updater.service".'
+    else
+      echo 'hdw4s: could not start the Selkies updater; the daily timer will' >&2
+      echo '       retry. Run "/usr/lib/hdw4s/hdw4s-update" to do it now.' >&2
+    fi
+  else
+    echo 'hdw4s: no systemd here, so Selkies was not fetched. Run'
+    echo '       "/usr/lib/hdw4s/hdw4s-update" once the network is up.'
   fi
 fi
 

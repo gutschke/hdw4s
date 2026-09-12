@@ -358,8 +358,8 @@ echo ' done.'
 # because a machine being installed may legitimately have no network yet, so
 # a broken install and a fine one look identical from the outside.
 #
-# Nor "does the package import". The first version of this checked
-# "import selkies_gstreamer" and passed against exactly that broken install:
+# Nor "does the package import". An earlier version of this checked that the
+# top-level module imported and passed against exactly that broken install:
 # the package's __init__ pulls in nothing but the standard library, so it
 # succeeds whether or not a single dependency is present.
 #
@@ -367,60 +367,59 @@ echo ' done.'
 # installed system rather than asking it whether it was well.
 rc=0
 fail() { echo "  FAIL: $*" >&2; rc=1; }
-VENV="${ROOT}/opt/selkies/lib/python3.12/site-packages"
+
+# Everything below asks dpkg, not the filesystem. Selkies 2.0 is a package that
+# owns /opt/selkies outright, so "is the directory there" is the question that
+# used to pass on the broken install: an interrupted unpack leaves the tree
+# looking complete while dpkg has the package marked half-installed.
+# Named by field rather than by format string, so the braces that are dpkg's
+# substitution syntax never have to be written in a shell quote that looks like
+# the shell's own.
+dpkg_field() { run dpkg-query -W -f="\${$1}" "$2" 2>/dev/null || :; }
 
 echo 'Inspecting the installed system:'
 
-# 1. The updater is allowed to fail quietly during installation. Here it is not.
-if [ -d "${ROOT}/opt/selkies" ] &&
-   find "${VENV}" -maxdepth 1 -name 'selkies_gstreamer-*.dist-info' \
-        -print -quit 2>/dev/null | grep -q .; then
+# 1. The updater is allowed to fail quietly during installation. Here it is not,
+#    and "installed" is dpkg's own word for unpacked *and* configured -- which
+#    is what separates a finished install from one that stopped halfway.
+selkies_status="$(dpkg_field 'db:Status-Status' selkies)"
+if [ "${selkies_status}" = 'installed' ]; then
   echo '  selkies installed                 yes'
 else
-  fail 'Selkies is not installed -- the updater failed and the install went on'
+  fail "selkies is '${selkies_status:-not installed}', not installed and configured"
   grep -iE 'error|failed|could not' "${ROOT}/tmp/install.log" 2>/dev/null |
     tail -5 | sed 's/^/    /' >&2
 fi
 
-# 2. Nothing may be installed from a git branch. This is the whole reason the
-#    dependency list is explicit: a branch is whatever it says on the day it
-#    is fetched, and its setup.py runs as root.
-if grep -rl 'github\.com\|git+' "${VENV}"/*.dist-info/direct_url.json \
-     >/dev/null 2>&1; then
-  fail 'something in the venv was installed from a git URL:'
-  grep -rl 'github\.com\|git+' "${VENV}"/*.dist-info/direct_url.json 2>/dev/null |
-    sed 's/^/    /' >&2
+# 2. And the files are still the ones dpkg put there. The package ships no
+#    maintainer scripts, so its md5sums are the only record of what it laid
+#    down; anything that edited the prefix afterwards -- hdw4s included, if it
+#    ever grows a patch again -- shows up here and nowhere else.
+verify="$(run dpkg --verify selkies 2>&1 || :)"
+if [ -z "${verify}" ]; then
+  echo '  dpkg --verify selkies             clean'
 else
-  echo '  no git-sourced packages           confirmed'
+  fail 'dpkg --verify selkies reports files that no longer match:'
+  printf '%s\n' "${verify}" | head -10 | sed 's/^/    /' >&2
 fi
 
-# 3. python-xlib must come from the distribution. A copy inside the venv
-#    shadows it, and the one on PyPI lacks the randr fix, so resizing breaks
-#    with nothing to show for it.
-if [ -e "${VENV}/Xlib" ]; then
-  fail 'a python-xlib inside the venv shadows the distro package'
-elif [ -d "${ROOT}/usr/lib/python3/dist-packages/Xlib" ]; then
-  echo '  python-xlib from the distro       yes'
-else
-  fail 'python-xlib is not installed at all'
-fi
-
-# 4. The dependencies that are reached through introspection and plugin
-#    loading, which no amount of reading the scripts can reveal.
-for pkg in gir1.2-gst-plugins-bad-1.0 gstreamer1.0-nice python3-gst-1.0 \
-           python3-xlib python3-evdev python3-setuptools xsel x11-xserver-utils; do
-  if grep -qx "Package: ${pkg}" "${ROOT}/var/lib/dpkg/status" 2>/dev/null &&
-     grep -A3 -x "Package: ${pkg}" "${ROOT}/var/lib/dpkg/status" 2>/dev/null |
-       grep -q '^Status: install ok installed'; then
+# 3. The libraries the encoders are linked against and the programs the input
+#    path forks, which no amount of reading the scripts can reveal: a missing
+#    libva-x11-2 does not stop the server starting, it logs one line and then
+#    serves a desktop that cannot encode.
+for pkg in libva-x11-2 libva-drm2 libdrm2 libpulse0 libgbm1 libegl1 \
+           xdotool x11-xserver-utils; do
+  if [ "$(dpkg_field 'db:Status-Status' "${pkg}")" = 'installed' ]; then
     printf '  %-33s installed\n' "${pkg}"
   else
     fail "${pkg} is not installed"
   fi
 done
 
-# 5. Finally, run the shipped smoke test -- the installed one, not a copy, so
-#    that the two can never drift apart. It imports the modules a session
-#    actually loads and builds the elements a stream actually needs.
+# 4. Finally, run the shipped smoke test -- the installed one, not a copy, so
+#    that the two can never drift apart. It imports the extension modules that
+#    carry the encoders, which is what turns a missing shared library from a
+#    logged line into a failure.
 echo -n 'Loading what a session loads...'
 if run /bin/bash -c '
   set -e
@@ -440,50 +439,35 @@ run hdw4s --version >/dev/null 2>&1 || fail 'hdw4s --version failed'
 # --- what is actually there ---------------------------------------------------
 # Filtered on purpose. A full dpkg listing or apt log is thousands of lines and
 # nobody reads it, so what gets printed is the handful of facts that have
-# actually mattered: versions, what pip put in the venv, whether the elements a
-# stream needs exist, and any complaint the install made. Someone checking this
-# run should be able to see whether it is healthy without trusting one word.
+# actually mattered: versions, how much dpkg believes it laid down, the
+# programs the server forks, and any complaint the install made. Someone
+# checking this run should be able to see whether it is healthy without
+# trusting one word.
 echo
 echo '--- installed system -------------------------------------------------'
 printf '  %-24s %s\n' 'hdw4s' \
   "$(awk '/^Package: hdw4s$/{f=1; next} f&&/^Version:/{print $2; exit} /^$/{f=0}' \
      "${ROOT}/var/lib/dpkg/status" 2>/dev/null)"
 printf '  %-24s %s\n' 'selkies' \
-  "$(find "${VENV}" -maxdepth 1 -name 'selkies_gstreamer-*.dist-info' \
-     -printf '%f\n' 2>/dev/null | sed 's/^selkies_gstreamer-//;s/\.dist-info$//')"
+  "$(dpkg_field Version selkies)"
 printf '  %-24s %s\n' 'debs installed' \
   "$(grep -c '^Status: install ok installed' "${ROOT}/var/lib/dpkg/status" 2>/dev/null)"
 printf '  %-24s %s\n' 'size on disk' "$(du -sh "${ROOT}" 2>/dev/null | cut -f1)"
 
-echo '  packages pip put in the venv:'
-find "${VENV}" -maxdepth 1 -name '*.dist-info' -printf '%f\n' 2>/dev/null |
-  sed 's/\.dist-info$//' | sort | sed 's/^/    /'
-
-echo '  GStreamer elements a stream needs:'
-run /opt/selkies/bin/python -c '
-import gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
-Gst.init(None)
-for el in ("webrtcbin","nicesrc","nicesink","x264enc","vp8enc","opusenc",
-           "ximagesrc","videoconvert","audioconvert","capsfilter","queue",
-           "rtph264pay","rtpopuspay","pulsesrc"):
-    print("    %-16s %s" % (el, "ok" if Gst.ElementFactory.make(el, None) else "MISSING"))
-' 2>/dev/null || echo '    (could not be listed)'
+# The package's own file list, which is the only record it leaves: it ships no
+# maintainer scripts, so there is nothing else to read back.
+printf '  %-24s %s\n' 'files in selkies' \
+  "$(dpkg_field Installed-Size selkies) kB, $(wc -l \
+     < "${ROOT}/var/lib/dpkg/info/selkies.list" 2>/dev/null || echo '?') paths"
 
 echo '  programs the server shells out to:'
-for prog in xsel xrandr; do
+for prog in xdotool xset xrandr; do
   if run sh -c "command -v ${prog} >/dev/null"; then
     printf '    %-16s ok\n' "${prog}"
   else
     printf '    %-16s MISSING\n' "${prog}"
   fi
 done
-
-echo '  typelibs Selkies reaches by introspection:'
-find "${ROOT}"/usr/lib -name 'Gst*.typelib' -printf '%f\n' 2>/dev/null |
-  sort | tr '\n' ' ' | fold -s -w 66 | sed 's/^/    /'
-echo
 
 # Only complaints. dpkg is verbose and almost all of it is noise; these are the
 # lines that have ever meant anything here.

@@ -14,39 +14,64 @@ trap 'rc="$?"
 # unauthenticated here and therefore rate limited; one call a day stays well
 # inside the limit.
 API='https://api.github.com/repos/selkies-project/selkies'
-DL='https://github.com/selkies-project/selkies/releases/download'
 
-# Where the release is unpacked. /opt/selkies is a virtualenv holding the
-# Python package; /opt/gst-web is the browser client that goes with it.
+# Selkies 2.0 is a distribution package. Until 1.6.2 it was a wheel this script
+# installed into a virtualenv it built here, and everything about the old
+# updater followed from that: it created the venv, worked around a dependency
+# that came from a moving git branch, unpacked a separate browser client into
+# /opt/gst-web, patched that client on disk, and rolled back by renaming
+# directories. None of that survives. Upstream now ships a .deb that owns
+# /opt/selkies outright, with no maintainer scripts, so dpkg's only record of
+# it is its file list -- which is exactly why nothing here may move, copy or
+# delete anything under that prefix. Every change to it goes through dpkg.
 PREFIX='/opt/selkies'
-WEBROOT='/opt/gst-web'
+PKG='selkies'
 
-# The last release whose asset layout this script understands. Upstream has
-# published nothing since v1.6.2 (August 2024) while landing hundreds of commits
-# on a rewrite that renames the wheel, drops the separate web bundle and renames
-# the executable. When that lands, every assumption below stops holding, so the
-# script refuses to install a release it does not recognise rather than
-# half-upgrading a working machine. Raise this only together with the code that
-# handles the new layout.
-KNOWN_GOOD='1.6.2'
+# The previous .deb, kept so a failed upgrade has something to go back to.
+# Renaming the prefix aside is no longer available: dpkg would still believe
+# its files were in place, and the next upgrade would act on that belief. The
+# bytes have to be on disk before the new ones are unpacked, because a release
+# asset can be withdrawn, and GitHub is not a rollback plan.
+CACHE='/var/lib/hdw4s/selkies'
 
-# What the two artifacts of KNOWN_GOOD must hash to.
+# Two updaters, or an updater and a hand-run apt, must not interleave. dpkg has
+# its own lock and will refuse the second caller, but by then this script has
+# already downloaded, decided and possibly removed the pre-2.0 tree; the useful
+# place to stop is before any of that.
+LOCKFILE='/run/lock/hdw4s-update.lock'
+
+# Where a 1.6-era installation is moved before dpkg is allowed near the prefix.
+# Installing the .deb straight over the old virtualenv is not a clean upgrade
+# and not a clean failure either: it deletes nothing, so the venv's own files
+# stay behind unowned, but it overwrites pyvenv.cfg and flips
+# include-system-site-packages to false, which breaks the old installation
+# without removing a file. Removing the package afterwards then deletes the
+# interpreter symlinks dpkg has since taken ownership of, so what is left is
+# neither version. Moving it aside first is the only order in which both
+# outcomes are recoverable.
+LEGACY="${PREFIX}.pre-2.0"
+
+# The last release whose packaging this script understands, as upstream's own
+# version string -- what "selkies --version" prints. Raise it only together
+# with the code, and record the hash below in the same commit.
+KNOWN_GOOD='2.0.0rc0'
+
+# What the release asset must hash to, and which asset that is.
 #
-# Upstream publishes no signatures, and the digest GitHub records for a release
-# asset is populated only for recent uploads -- of the four most recent releases
-# only one wheel carries one, and no web bundle does. So "the download completed
-# and unpacks" was the only integrity check, on a root daily timer.
-#
-# Because the updater already refuses to move past KNOWN_GOOD on its own, the
-# version it fetches is fixed and known, and its hashes can simply be recorded
-# here. Whoever raises KNOWN_GOOD records them in the same commit.
+# One hash, for one platform: the package is built per distribution and per
+# architecture, and the maintainer can only have seen the bytes of the one that
+# was actually tested. On any other platform the recorded hash does not apply
+# and the digest GitHub publishes for the asset is used instead -- for this
+# release GitHub publishes one for every asset. If neither is available the
+# download is refused rather than installed with nothing checked, because an
+# integrity check that quietly does not run is worse than none.
 #
 # Be clear about what this is worth: it pins the bytes to what the maintainer
 # saw, so an asset replaced under an existing tag is caught. It is not a
 # signature and it does not establish that upstream's release was honest when
 # it was made.
-KNOWN_GOOD_SHA256_WHEEL='f426ae093853492ecf857609efd4c9bd2141b24c619118561e42220927554eee'
-KNOWN_GOOD_SHA256_WEB='71fcc35d59f8d8a6c6b72472c20a45af207ab56a0d0553af34b731a2e966d0c6'
+KNOWN_GOOD_ASSET='selkies_2.0.0.rc0-1.ubuntu24.04_amd64.deb'
+KNOWN_GOOD_SHA256_DEB='5d4ce06caa9ba251747384207da4450f33e4c2fd2b214846dba8cb946fadeaca'
 
 # Set SELKIES_VERSION in /etc/hdw4s/hdw4s.conf to pin a specific release and
 # stop tracking upstream entirely.
@@ -66,6 +91,14 @@ fi
   exit 1
 }
 
+# Held for the whole run, including the download. Non-blocking: the timer fires
+# daily and a second run has nothing to add to the one already in progress.
+exec 9>"${LOCKFILE}"
+flock -n 9 || {
+  echo 'hdw4s: another hdw4s-update is already running; leaving it to finish.'
+  exit 0
+}
+
 # Everything is downloaded into a private directory that is removed on the way
 # out. A systemd oneshot service has no working directory of its own, so a bare
 # "curl -O" would otherwise litter the root filesystem.
@@ -76,15 +109,49 @@ trap 'rc="$?"
       [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
-current=''
-# "pip show" exits non-zero when the package is not installed, which is the
-# normal state after a run that created the environment and then failed. Under
-# -e that turned a recoverable half-install into one the updater could never
-# repair, reporting only that the script had failed unexpectedly.
-if [ -x "${PREFIX}/bin/pip" ]; then
-  current="$("${PREFIX}/bin/pip" show selkies-gstreamer 2>/dev/null |
-             sed -n 's/^Version: //p')" || :
-fi
+# --- VERSION STRINGS --------------------------------------------------------
+# The same release is named four different ways and no two of them are equal:
+#
+#   git tag            v2.0.0rc0
+#   package version    2.0.0~rc0-1~ubuntu24.04
+#   asset filename     selkies_2.0.0.rc0-1.ubuntu24.04_amd64.deb
+#   selkies --version  2.0.0rc0
+#
+# Compare the tag with the package version as they stand and the updater either
+# reinstalls every night -- because they never match -- or, with a comparison
+# loose enough to stop that, never installs anything again. So everything is
+# reduced to the one form upstream itself prints, and the asset filename is
+# never constructed at all: it is picked out of the release GitHub published,
+# by platform and architecture, which is the only place that spelling is
+# authoritative.
+
+# The upstream version behind a Debian package version: drop the Debian
+# revision, which is everything after the last hyphen when what follows starts
+# with a digit, then drop the tildes that make a release candidate sort before
+# its final. "2.0.0~rc0-1~ubuntu24.04" -> "2.0.0rc0".
+version_from_package() {
+  local v="$1"
+  case "${v}" in *-[0-9]*) v="${v%-*}";; esac
+  printf '%s' "${v//\~/}"
+}
+
+# The upstream version behind a git tag. Upstream has used both "v2.0.0rc0" and
+# a bare "1.6.2" over the years, so the prefix is optional.
+version_from_tag() { printf '%s' "${1#v}"; }
+
+# --- PACKAGE STATE ----------------------------------------------------------
+
+# "not-installed", or dpkg's own word for the state: installed, unpacked,
+# half-installed, half-configured, config-files, triggers-pending...
+pkg_status() {
+  local s
+  s="$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" || s=''
+  printf '%s' "${s:-not-installed}"
+}
+
+pkg_version() {
+  dpkg-query -W -f='${Version}' "$1" 2>/dev/null || :
+}
 
 # Compare a file against an expected sha256, and say which is which on failure.
 # A mismatch is never a transient fault, so this aborts rather than retrying.
@@ -126,19 +193,360 @@ asset_digest() {
     head -n1
 }
 
+# The .deb built for this machine, named out of the release rather than guessed
+# from the version. Upstream spells the same release "2.0.0rc0" in the tag and
+# "2.0.0.rc0-1.ubuntu24.04" in the filename, and no rule turns one into the
+# other without knowing where the release-candidate suffix begins.
+asset_for_platform() {
+  local platform='' arch
+  arch="$(dpkg --print-architecture)"
+  # shellcheck source=/dev/null disable=SC1091
+  . /etc/os-release
+  case "${ID:-}" in
+    ubuntu) platform="ubuntu${VERSION_ID:-}" ;;
+    debian) platform="${VERSION_CODENAME:-}" ;;
+  esac
+  [ -n "${platform}" ] || return 0
+  tr -d ' \t\n' < "${release}" |
+    sed 's/.*"assets":\[//' |
+    grep -o '"name":"[^"]*"' |
+    sed 's/^"name":"//; s/"$//' |
+    grep -E "^selkies_.*\.${platform}_${arch}\.deb\$" |
+    head -n1
+}
+
+# Fetch one release document. "latest" or a tag; empty output is the caller's
+# signal that upstream could not be reached, which is never fatal here -- the
+# machine keeps what it has and the timer tries again tomorrow.
+fetch_release() {
+  curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 \
+       -o "$2" "${API}/releases/$1"
+}
+
+# --- WHAT THE INSTALLED COPY MUST BE ABLE TO DO -----------------------------
+# Extracted and run by .github/clean-install-test.sh, which sets PREFIX and
+# nothing else, so this must stand on its own.
+#
+# What it asserts is deliberately not "the program starts": an interrupted
+# unpack leaves "selkies --version" answering perfectly while dpkg has the
+# package marked half-installed, so the binary running proves nothing about the
+# installation. Package state, file integrity and the extension modules are
+# three independent signals and all three are checked.
+smoke_test() {
+  local status version home rc=0
+  status="$(dpkg-query -W -f='${db:Status-Status}' selkies 2>/dev/null || :)"
+  if [ "${status}" != 'installed' ]; then
+    echo "selkies is ${status:-not installed}, not installed and configured"
+    return 1
+  fi
+  # dpkg's own md5sums, which is the alarm for anything that edited the prefix
+  # behind its back -- this updater included, if it ever grows a patch again.
+  # Costs under a second for the 5000-odd files in the package.
+  local verify
+  verify="$(dpkg --verify selkies 2>&1)" || :
+  if [ -n "${verify}" ]; then
+    echo 'dpkg --verify selkies reports files that no longer match:'
+    printf '%s\n' "${verify}" | head -10
+    return 1
+  fi
+  version="$("${PREFIX}/bin/selkies" --version 2>&1)" || {
+    echo "selkies --version failed: ${version}"
+    return 1
+  }
+  # The two extension modules carry the encoders, and both are linked against
+  # libraries that live outside the package. A missing libva-x11-2 does not
+  # stop the server starting: it logs one line about striped encoding being
+  # unavailable and serves a desktop that cannot encode. Importing them is how
+  # that becomes an error instead of a log line.
+  #
+  # HOME is redirected because importing the selkies package creates
+  # $HOME/Desktop as an upload directory at import time, and a check has no
+  # business writing into anybody's home. "selkies --version" exits before that
+  # happens; the import does not.
+  #
+  # Both streams are captured. The package logs three INFO lines to stderr on
+  # import -- including the one naming the upload directory, which is how the
+  # HOME redirect above is seen to work -- and they belong in the report a
+  # failure prints, not in the output of a run that succeeded.
+  local log
+  home="$(mktemp -d -t hdw4s-smoke.XXXXXXXX)"
+  log="$(HOME="${home}" "${PREFIX}/bin/python" - 2>&1 <<'SMOKE'
+import sys
+import pixelflux        # video encoders; links libva-x11, libva-drm, libdrm
+import pcmflux          # audio capture and playback; links libpulse
+import selkies
+import selkies.input_handler, selkies.stream_server, selkies.signaling_server
+import selkies.webrtc_signaling, selkies.audio_control, selkies.display_utils
+
+# Shelled out to at runtime, so nothing above notices them missing. xdotool is
+# the fallback for every keysym XTEST cannot inject directly, and xset and
+# xrandr are read and driven by the input and resize paths.
+import shutil
+missing = [p for p in ("xdotool", "xset", "xrandr")
+           if shutil.which(p) is None]
+if missing:
+    sys.exit("missing programs: " + " ".join(missing))
+SMOKE
+)" || rc=1
+  rm -rf "${home}"
+  [ "${rc}" -eq 0 ] || {
+    echo 'the installed package does not load:'
+    printf '%s\n' "${log}" | sed 's/^/  /'
+    return 1
+  }
+  printf 'selkies %s, dpkg clean\n' "${version#selkies }"
+  return 0
+}
+
+# --- REFUSING TO START ON A MESS --------------------------------------------
+# An updater that installs over a broken dpkg state does not produce one
+# failure, it produces two, and the second hides the first. "dpkg --audit"
+# names every package that is unpacked but not configured, half-installed, or
+# otherwise mid-operation. It exits 0 whatever it finds, so it is the output
+# that has to be tested, not the status.
+#
+# Foreign dirt is refused outright: repairing somebody else's package is not
+# this script's business, and the desktop is not the reason it is broken.
+# Selkies' own dirt is the one case this can do something about, and it is a
+# state this script can produce itself -- a machine powered off during an
+# unpack leaves exactly that -- so it is repaired, from the cached .deb, with
+# bytes whose hash was recorded when they were installed.
+preflight() {
+  local audit dirty
+  audit="$(dpkg --audit 2>&1)" || :
+  [ -n "${audit}" ] || return 0
+
+  # The package names in an audit report are the lines that start with a space.
+  dirty="$(printf '%s\n' "${audit}" | sed -n 's/^ \([^ ]*\) .*/\1/p' | sort -u)"
+  if [ -n "$(printf '%s\n' "${dirty}" | grep -vx "${PKG}" || :)" ]; then
+    echo 'hdw4s: dpkg has packages in a broken state, and not only ours:' >&2
+    printf '%s\n' "${dirty}" | sed 's/^/  /' >&2
+    echo '  Refusing to install anything on top of that. Fix it with' >&2
+    echo '    dpkg --configure -a' >&2
+    echo '    apt-get -f install' >&2
+    echo '  and this will carry on by itself at the next daily run.' >&2
+    return 1
+  fi
+
+  echo "NOTICE: ${PKG} is in dpkg state '$(pkg_status "${PKG}")'." >&2
+  echo '  An interrupted install leaves the streaming server present enough' >&2
+  echo '  to answer --version and not present enough to work. Repairing it' >&2
+  echo '  from the recorded copy before doing anything else.' >&2
+  local cached
+  cached="$(cached_deb_for "$(version_from_package "$(pkg_version "${PKG}")")")"
+  if [ -z "${cached}" ]; then
+    echo '  There is no recorded copy of that version under' >&2
+    echo "    ${CACHE}" >&2
+    echo '  so this cannot repair it without guessing. Run' >&2
+    echo "    apt-get -f install" >&2
+    echo '  or reinstall the package by hand.' >&2
+    return 1
+  fi
+  install_deb "${cached}" || return 1
+  # If it is still not clean the repair did not work, and going on would layer
+  # the upgrade on top of the state that defeated it.
+  audit="$(dpkg --audit 2>&1)" || :
+  [ -z "${audit}" ] || {
+    echo 'hdw4s: the repair did not take; dpkg still reports:' >&2
+    printf '%s\n' "${audit}" | sed 's/^/  /' >&2
+    return 1
+  }
+  echo '  Repaired.' >&2
+  return 0
+}
+
+# dpkg's frontend lock is an fcntl lock, which flock(1) cannot see, so this
+# asks the same way dpkg does. Acquired and released immediately: the point is
+# only to find out whether somebody is in the middle of an apt run.
+dpkg_busy() {
+  [ -e /var/lib/dpkg/lock-frontend ] || return 1
+  python3 - <<'LOCK' 2>/dev/null && return 1 || return 0
+import fcntl, sys
+with open("/var/lib/dpkg/lock-frontend", "r+") as f:
+    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+LOCK
+}
+
+# Wait a while rather than giving up at once. The usual caller is the timer, for
+# which an apt run in progress means "not now"; but the package's own postinst
+# starts this service the moment it is installed, and at that moment dpkg is
+# still finishing the very transaction that started it. Giving up there means a
+# fresh install has no streaming server until the timer happens to fire, which
+# on a machine installed at noon is most of a day.
+#
+# Bounded, because the unit allows thirty minutes in total and the download has
+# to fit in what is left, and because an apt run that is still going after five
+# minutes is a big one that this should stay out of.
+wait_for_dpkg() {
+  local waited=0
+  while dpkg_busy; do
+    [ "${waited}" -lt 300 ] || return 1
+    [ "${waited}" -gt 0 ] || echo -n 'Waiting for apt or dpkg to finish...'
+    sleep 5
+    waited=$(( waited + 5 ))
+  done
+  [ "${waited}" -eq 0 ] || echo " done (${waited}s)."
+  return 0
+}
+
+# --- THE CACHE --------------------------------------------------------------
+# One .deb per upstream version, with the hash it was verified against beside
+# it. The hash is written after the file, and read back before the file is
+# used, so a cache entry truncated by a full disk or a power cut is caught
+# rather than installed.
+cached_deb_for() {
+  local v="$1" f
+  [ -n "${v}" ] || return 0
+  f="${CACHE}/${v}/$(cat "${CACHE}/${v}/asset" 2>/dev/null || :)"
+  [ -f "${f}" ] || return 0
+  [ -s "${CACHE}/${v}/sha256" ] || return 0
+  verify_sha256 "${f}" "$(cat "${CACHE}/${v}/sha256")" "the cached v${v} package" \
+    >/dev/null 2>&1 || return 0
+  printf '%s' "${f}"
+}
+
+cache_deb() {
+  local new="$1" path="$2" sum="$3" prev="$4" d="${CACHE}/$1" base old name
+  base="$(basename "${path}")"
+  mkdir -p "${d}"
+  cp -f "${path}" "${d}/${base}"
+  printf '%s' "${base}" > "${d}/asset"
+  printf '%s' "${sum}" > "${d}/sha256"
+  # Two versions are worth keeping: the one just installed and the one it
+  # replaced. Anything older is a version this machine can no longer be asked
+  # to return to, and each of these is 54MB.
+  for old in "${CACHE}"/*/; do
+    [ -d "${old}" ] || continue
+    name="$(basename "${old}")"
+    [ "${name}" != "${new}" ] || continue
+    [ -z "${prev}" ] || [ "${name}" != "${prev}" ] || continue
+    rm -rf "${old}"
+  done
+}
+
+# --- INSTALLING -------------------------------------------------------------
+# dpkg, not apt. The dependencies are declared by hdw4s itself, so there is
+# nothing for a solver to work out, and asking apt to install a local file
+# hands it permission to remove whatever it decides is in the way -- on a
+# machine whose whole job is to keep three desktops running.
+#
+# What dpkg does on failure is the reason the caller needs a rollback at all:
+# a dependency it cannot satisfy leaves the package unpacked, which means the
+# files are already on disk and the old ones are already gone.
+install_deb() {
+  local deb="$1" out rc=0
+  out="$(dpkg -i "${deb}" 2>&1)" || rc="$?"
+  if [ "${rc}" -ne 0 ]; then
+    printf '%s\n' "${out}" | sed 's/^/  /' >&2
+    return 1
+  fi
+  return 0
+}
+
+# Everything the .deb declares that is not installed. Run before the download,
+# because the first thing dpkg does with an unsatisfiable package is unpack it
+# anyway -- so "it will fail cleanly" is not true and the check has to happen
+# while failing is still free.
+#
+# Version constraints are not evaluated: upstream declares none today, and a
+# wrong answer here would be worse than no answer, so a constrained dependency
+# counts as satisfied and is left to dpkg. Virtual packages are: upstream
+# depends on libglib2.0-0, which on Ubuntu 24.04 nothing installs -- the real
+# package is libglib2.0-0t64 and it Provides the old name. A check that reads
+# only ${db:Status-Status} calls that missing and refuses every install on
+# every machine, which is what the first version of this did.
+installed_names() {
+  dpkg-query -W -f='${db:Status-Status}\t${Package}\t${Provides}\n' 2>/dev/null |
+    awk -F'\t' '$1 == "installed" {
+                   print $2
+                   p = $3
+                   gsub(/\([^)]*\)/, "", p)
+                   gsub(/,/, " ", p)
+                   n = split(p, a, " ")
+                   for (i = 1; i <= n; i++) if (a[i] != "") print a[i]
+                 }' | sort -u
+}
+
+unmet_depends() {
+  local deb="$1" have dep alt name ok
+  have="$(installed_names)"
+  dpkg-deb -f "${deb}" Depends | tr ',' '\n' | while read -r dep; do
+    [ -n "${dep}" ] || continue
+    ok=''
+    # "a | b" is satisfied by either, so every alternative has to be asked.
+    for alt in ${dep//|/ }; do
+      case "${alt}" in '('*|*')') continue;; esac
+      name="${alt%%:*}"
+      printf '%s\n' "${have}" | grep -qxF -- "${name}" || continue
+      ok='yes'
+      break
+    done
+    [ -n "${ok}" ] || printf '%s\n' "$(printf '%s' "${dep}" | sed 's/^ *//; s/ *$//')"
+  done
+}
+
+# --- ROLLING BACK -----------------------------------------------------------
+# Three cases, and the third is the one that is easy to get wrong.
+#
+#   * There was a package here before: install its .deb back over the new one.
+#     dpkg downgrades without complaint; apt would refuse without
+#     --allow-downgrades, which is one more reason not to involve it.
+#   * There was nothing here before: remove the package. Leaving a broken
+#     install in place because "there is nothing to go back to" leaves the
+#     machine one state worse than it started.
+#   * There was a 1.6-era virtualenv here, moved aside rather than deleted for
+#     exactly this moment. Put it back.
+rollback() {
+  local to_deb="$1"
+  if [ -n "${to_deb}" ]; then
+    echo "  Rolling back to v${current:-none}..." >&2
+    install_deb "${to_deb}" || {
+      echo '  The rollback itself failed. The machine is left with a package' >&2
+      echo '  dpkg cannot configure; fix it with "apt-get -f install".' >&2
+      return 1
+    }
+    echo "  Rolled back to v${current:-none}." >&2
+    return 0
+  fi
+  echo '  No previous package to restore; removing the one just installed.' >&2
+  dpkg -P "${PKG}" >/dev/null 2>&1 || {
+    echo "  Removing ${PKG} failed as well." >&2
+    return 1
+  }
+  if [ -d "${LEGACY}" ]; then
+    mv "${LEGACY}" "${PREFIX}"
+    echo "  Put the pre-2.0 installation back at ${PREFIX}." >&2
+  fi
+  return 0
+}
+
+# --- WHAT IS INSTALLED, AND WHAT SHOULD BE ----------------------------------
+if ! wait_for_dpkg; then
+  echo
+  echo 'hdw4s: apt or dpkg is still busy; leaving this run to the next one.'
+  exit 0
+fi
+
+preflight || exit 1
+
+status="$(pkg_status "${PKG}")"
+current=''
+[ "${status}" != 'installed' ] ||
+  current="$(version_from_package "$(pkg_version "${PKG}")")"
+
+release="${workdir}/release.json"
 if [ -n "${SELKIES_VERSION:-}" ]; then
-  wanted="${SELKIES_VERSION}"
+  wanted="$(version_from_tag "${SELKIES_VERSION}")"
   echo "Selkies pinned to v${wanted} by /etc/hdw4s/hdw4s.conf."
 else
   echo -n 'Checking for Selkies updates...'
-  release="${workdir}/release.json"
-  curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o "${release}" "${API}/releases/latest" || {
+  fetch_release latest "${release}" || {
     echo ' failed.'
     echo 'Could not reach the GitHub release API; leaving the installation alone.' >&2
     exit 0
   }
-  wanted="$(sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' "${release}" |
-            head -n1)"
+  wanted="$(version_from_tag "$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
+            "${release}" | head -n1)")"
   echo ' done.'
 
   # jq prints the literal string "null" for a missing key, so an empty test on
@@ -151,727 +559,208 @@ else
       ;;
   esac
 
-  # Refuse to follow upstream past the layout this script was written against.
-  # Failing loudly here turns a future breaking release into a log entry rather
-  # than a fleet of desktops that no longer start.
+  # Refuse to follow upstream past the packaging this script was written
+  # against. Failing loudly here turns a future breaking release into a log
+  # entry rather than a fleet of desktops that no longer start.
+  #
+  # Note what this does NOT do: it does not ask whether the release is newer.
+  # "releases/latest" today answers v2.0.0rc0 with prerelease false, so a gate
+  # that skipped pre-releases would never install the only 2.0 there is, and a
+  # gate that compared version numbers would have to order "2.0.0rc0" against
+  # "2.0.0" -- which it would get wrong in the direction that matters. The
+  # question worth asking is the narrow one: is this the release whose layout
+  # was tested?
   if [ "${wanted}" != "${KNOWN_GOOD}" ]; then
     printf '%s\n' \
-      "NOTICE: upstream release v${wanted} is newer than v${KNOWN_GOOD}, the last" \
-      "  release whose layout this version of hdw4s understands. Staying on" \
-      "  v${KNOWN_GOOD}. Upgrade hdw4s, or set SELKIES_VERSION=${wanted} in" \
+      "NOTICE: upstream now offers v${wanted}, which is not v${KNOWN_GOOD}, the" \
+      "  release this version of hdw4s was built and tested against. Staying" \
+      "  on v${KNOWN_GOOD}. Upgrade hdw4s, or set SELKIES_VERSION=${wanted} in" \
       "  /etc/hdw4s/hdw4s.conf to install it anyway." >&2
     wanted="${KNOWN_GOOD}"
   fi
 fi
 
-wheel="selkies_gstreamer-${wanted}-py3-none-any.whl"
-web="selkies-gstreamer-web_v${wanted}.tar.gz"
+# The release document for whatever version was settled on, which is where both
+# the asset name and its published digest come from. For the unpinned path
+# above it has already been fetched, unless the gate moved the target back.
+if [ ! -s "${release}" ] ||
+   ! grep -q "\"tag_name\": *\"v\{0,1\}${wanted}\"" "${release}"; then
+  # Both spellings, because upstream has tagged releases "v2.0.0rc0" and
+  # "1.6.2". The first of the two is expected to fail half the time, so neither
+  # is allowed to print curl's own 404 on the way past.
+  fetch_release "tags/v${wanted}" "${release}" 2>/dev/null ||
+    fetch_release "tags/${wanted}" "${release}" 2>/dev/null || {
+      echo "Could not read upstream's release v${wanted}; leaving the" >&2
+      echo '  installation alone.' >&2
+      exit 0
+    }
+fi
 
-if [ "${current}" != "${wanted}" ]; then
-  echo "Upgrading Selkies from v${current:-none} to v${wanted}..."
-
-  # Fetch both artifacts before touching the installed copy. Upstream publishes
-  # no checksums or signatures for release assets, so "the download completed
-  # and is a plausible file" is the only integrity check available; do at least
-  # that much before overwriting anything.
-  echo -n '  Downloading...'
-  curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o "${workdir}/${wheel}" "${DL}/v${wanted}/${wheel}"
-  curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o "${workdir}/${web}"   "${DL}/v${wanted}/${web}"
-  echo ' done.'
-
-  # Hashes first: an archive that unpacks is not the same as the archive we
-  # meant to install, and checking the cheap structural test first would report
-  # "not a valid archive" for something that is a perfectly valid archive of
-  # somebody else's choosing.
-  echo -n '  Verifying...'
-  if [ "${wanted}" = "${KNOWN_GOOD}" ]; then
-    verify_sha256 "${workdir}/${wheel}" "${KNOWN_GOOD_SHA256_WHEEL}" 'wheel' || exit 1
-    verify_sha256 "${workdir}/${web}"   "${KNOWN_GOOD_SHA256_WEB}"   'web bundle' || exit 1
-  else
-    # A version somebody pinned by hand. There is no recorded hash for it, so
-    # fall back to the digest GitHub publishes for the asset when it has one,
-    # and say plainly when it has none rather than implying a check happened.
-    published="$(asset_digest "${wheel}")"
-    if [ -n "${published}" ]; then
-      verify_sha256 "${workdir}/${wheel}" "${published}" 'wheel' || exit 1
-    else
-      echo
-      echo "  NOTE: v${wanted} is not the release this hdw4s records hashes for," >&2
-      echo '    and GitHub publishes no digest for its assets. What was' >&2
-      echo '    downloaded cannot be checked against anything.' >&2
-      echo -n '  Verifying...'
+# Whether the right version is installed is one question; whether the files are
+# still the ones dpkg put there is another, and a session that fails because
+# somebody edited the prefix reports neither. Ask both, and reinstall on either
+# answer.
+if [ "${current}" = "${wanted}" ]; then
+  damage="$(dpkg --verify "${PKG}" 2>&1)" || :
+  if [ -z "${damage}" ]; then
+    echo -n "Selkies v${wanted} is already installed; checking it still loads..."
+    # The nightly run is the only thing that looks at this machine every day,
+    # and nearly every night it has nothing to install. Checking anyway is what
+    # turns "a library was removed three weeks ago" into a failed timer that
+    # night instead of a desktop that will not start whenever somebody next
+    # asks for one.
+    #
+    # Nothing is rolled back here: nothing was changed, so there is nothing to
+    # go back to, and reinstalling a package dpkg still verifies would not
+    # repair whatever was taken away from around it. Failing loudly is the
+    # whole contribution.
+    if out="$(smoke_test)"; then
+      echo " yes (${out})."
+      exit 0
     fi
-  fi
-  python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).testzip()' \
-    "${workdir}/${wheel}" >/dev/null 2>&1 || {
-    echo ' failed.'
-    echo "Downloaded wheel is not a valid archive; aborting." >&2
+    echo ' no.'
+    echo 'CRITICAL: Selkies is installed and does not work.' >&2
+    printf '%s\n' "${out}" | tail -10 | sed 's/^/  /' >&2
+    echo '  Nothing was changed, because nothing here would repair it.' >&2
     exit 1
-  }
-  tar -tzf "${workdir}/${web}" >/dev/null 2>&1 || {
-    echo ' failed.'
-    echo "Downloaded web bundle is not a valid archive; aborting." >&2
-    exit 1
-  }
-  echo ' done.'
-
-  echo -n '  Backing up the current installation...'
-  # Build the new copies beside the old ones and swap at the end. Removing the
-  # previous backups first meant an interrupt during the copy -- or a disk that
-  # filled up part way through it -- left neither a usable backup nor the one
-  # that had been there before, at the exact moment before the installation is
-  # overwritten.
-  rm -rf "${PREFIX}.bak.new" "${WEBROOT}.bak.new"
-  [ ! -d "${PREFIX}" ]  || cp -a "${PREFIX}"  "${PREFIX}.bak.new"
-  [ ! -d "${WEBROOT}" ] || cp -a "${WEBROOT}" "${WEBROOT}.bak.new"
-  for d in "${PREFIX}" "${WEBROOT}"; do
-    [ -d "${d}.bak.new" ] || continue
-    rm -rf "${d}.bak"
-    mv "${d}.bak.new" "${d}.bak"
-  done
-  echo ' done.'
-
-  echo -n '  Installing...'
-  # --system-site-packages lets the venv see the apt-installed GStreamer and
-  # PyGObject bindings, which are not on PyPI and cannot be installed into a
-  # sealed virtualenv. It is also what lets python-xlib come from the distro.
-  [ -x "${PREFIX}/bin/pip" ] ||
-    python3 -m venv --system-site-packages "${PREFIX}"
-
-  # The wheel asks for python-xlib from a GitHub *branch*, not a release:
-  # "python-xlib@ .../selkies-project/python-xlib/archive/master.zip". Whatever
-  # that branch says on the day this runs is what executes here, as root, and
-  # pinning SELKIES_VERSION does not cover it. The fork exists for one
-  # three-line change in Xlib/ext/randr.py -- making the BadRR* classes inherit
-  # XError rather than Exception -- and Debian's python3-xlib already carries
-  # exactly that change. So the dependency comes from the distro and the branch
-  # is never fetched.
-  #
-  # Removed by path rather than with "pip uninstall": pip in a venv built with
-  # --system-site-packages can see the distro package, and uninstalling that
-  # would take files out from under dpkg.
-  rm -rf "${PREFIX}"/lib/python*/site-packages/Xlib \
-         "${PREFIX}"/lib/python*/site-packages/python_xlib-*.dist-info
-  # --no-deps on pynput as well as on the wheel. pynput requires
-  # python-xlib>=0.17, so without it pip installs the PyPI 0.33 release --
-  # which does not have the randr fix -- into the venv, where it shadows the
-  # distro copy and breaks resizing silently.
-  "${PREFIX}/bin/pip" install --quiet --upgrade --no-deps \
-    "${workdir}/${wheel}" pynput
-  # Everything else the wheel asks for, plus pynput's own two. All ordinary
-  # PyPI releases, which cannot change under a version once published.
-  # evdev is not here: it ships no wheel and has to be compiled, which needs a
-  # toolchain and kernel headers that a machine running a desktop has no other
-  # reason to carry. The distro package provides it, and pynput is satisfied by
-  # it the same way it is satisfied by the distro python-xlib. Everything left
-  # is a pure-Python wheel.
-  "${PREFIX}/bin/pip" install --quiet --upgrade \
-    'websockets<14' basicauth gputil prometheus-client msgpack psutil \
-    watchdog Pillow six
-
-  # --no-deps means pip no longer notices when upstream adds a dependency, and
-  # the failure would be an ImportError in a session rather than an error here.
-  # Compare what the installed wheel asks for against what is handled above.
-  unhandled="$("${PREFIX}/bin/python" - <<'DEPCHECK' 2>/dev/null || :
-import glob, re, sys
-handled = {'websockets','basicauth','gputil','prometheus-client','msgpack',
-           'pynput','psutil','watchdog','pillow','python-xlib','evdev','six'}
-out = []
-for m in glob.glob('/opt/selkies/lib/python*/site-packages/'
-                   'selkies_gstreamer-*.dist-info/METADATA'):
-    for line in open(m, encoding='utf-8', errors='replace'):
-        if not line.startswith('Requires-Dist:'):
-            continue
-        req = line.split(':', 1)[1].strip()
-        if ';' in req:                      # environment marker
-            req, marker = req.split(';', 1)
-            if 'linux' not in marker and 'platform' in marker:
-                continue
-        name = re.split(r'[\s<>=!~\[@(]', req.strip(), 1)[0]
-        if name and name.strip().lower() not in handled:
-            out.append(name.strip())
-print(' '.join(sorted(set(out))))
-DEPCHECK
-)"
-  [ -z "${unhandled}" ] || {
-    echo
-    echo "hdw4s: Selkies v${wanted} asks for dependencies this updater does" >&2
-    echo "  not install:${unhandled}" >&2
-    echo '  They were not installed, because the dependency list is explicit' >&2
-    echo '  here so that no dependency is fetched from a moving git branch.' >&2
-    echo '  Add them to hdw4s-update, or sessions will fail on import.' >&2
-  }
-
-  # The tarball unpacks into a single top-level directory whose name has changed
-  # between releases, so glob for whatever it turned out to be instead of
-  # guessing. Extracting into a scratch directory first keeps a failed unpack
-  # from leaving a half-populated web root behind.
-  rm -rf "${workdir}/web" "${WEBROOT}.new"
-  mkdir -p "${workdir}/web" "${WEBROOT}.new"
-  tar -xzf "${workdir}/${web}" -C "${workdir}/web"
-  # Assembled complete, beside the live one, and only then swapped in. The old
-  # order removed the web root as soon as pip had succeeded, so a failure in
-  # the unpack left it empty -- and permanently, because the version file had
-  # already moved on and every later run reported the release as already
-  # installed and skipped this block entirely.
-  if [ "$(find "${workdir}/web" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] &&
-     [ "$(find "${workdir}/web" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ]; then
-    mv "${workdir}"/web/*/* "${WEBROOT}.new/"
-  else
-    mv "${workdir}"/web/* "${WEBROOT}.new/"
   fi
-  # Move the old one aside rather than deleting it first. An interrupt between
-  # the two renames leaves the previous webroot under .prev to recover from,
-  # where deleting first left the version recorded as installed with no webroot
-  # at all -- and the next run takes the "already installed" branch and never
-  # rebuilds it.
-  rm -rf "${WEBROOT}.prev"
-  [ ! -d "${WEBROOT}" ] || mv "${WEBROOT}" "${WEBROOT}.prev"
-  mv "${WEBROOT}.new" "${WEBROOT}"
-  rm -rf "${WEBROOT}.prev"
-  echo ' done.'
-  upgraded='yes'
+  echo "Selkies v${wanted} is installed but has been modified since:" >&2
+  printf '%s\n' "${damage}" | head -10 | sed 's/^/  /' >&2
+  echo '  Reinstalling it.' >&2
+fi
+
+asset="$(asset_for_platform)"
+[ -n "${asset}" ] || {
+  echo "hdw4s: upstream's v${wanted} publishes no package for this system" >&2
+  # shellcheck source=/dev/null
+  echo "  ($(. /etc/os-release; echo "${ID}-${VERSION_ID}") $(dpkg --print-architecture))." >&2
+  echo '  Nothing has been changed.' >&2
+  exit 1
+}
+
+echo "Upgrading Selkies from v${current:-none} to v${wanted} (${asset})..."
+
+# The bytes to go back to, on disk and verified, before the new ones are
+# fetched. A rollback target that is only a URL is not a rollback target: the
+# asset can be withdrawn, and the moment it is needed is the moment the network
+# is least worth depending on.
+previous=''
+if [ -n "${current}" ]; then
+  previous="$(cached_deb_for "${current}")"
+  if [ -z "${previous}" ]; then
+    echo "  NOTE: there is no verified copy of the installed v${current} under" >&2
+    echo "    ${CACHE}, so a failed upgrade can only be rolled back by" >&2
+    echo '    removing the package, not by restoring that version.' >&2
+  fi
+fi
+
+echo -n '  Downloading...'
+url="$(tr -d ' \t\n' < "${release}" |
+       sed 's/.*"assets":\[//' |
+       sed "s|.*\"name\":\"${asset}\"||" |
+       sed 's/"name":".*//' |
+       sed -n 's|.*"browser_download_url":"\([^"]*\)".*|\1|p' | head -n1)"
+[ -n "${url}" ] || {
+  echo ' failed.'
+  echo "Upstream lists ${asset} with no download URL; aborting." >&2
+  exit 1
+}
+curl -fsSL --proto '=https' --proto-redir '=https' --max-time 900 --retry 3 \
+     -o "${workdir}/${asset}" "${url}"
+echo ' done.'
+
+echo -n '  Verifying...'
+sum="$(sha256sum "${workdir}/${asset}" | cut -d' ' -f1)"
+if [ "${asset}" = "${KNOWN_GOOD_ASSET}" ] && [ "${wanted}" = "${KNOWN_GOOD}" ]; then
+  verify_sha256 "${workdir}/${asset}" "${KNOWN_GOOD_SHA256_DEB}" 'package' || exit 1
+  checked='the hash recorded in hdw4s'
 else
-  echo "Selkies v${wanted} is already installed."
-  upgraded=''
+  published="$(asset_digest "${asset}")"
+  [ -n "${published}" ] || {
+    echo ' failed.'
+    echo "hdw4s: ${asset} is not the asset this hdw4s records a hash for," >&2
+    echo '  and GitHub publishes no digest for it either, so what was' >&2
+    echo '  downloaded cannot be checked against anything. Refusing to' >&2
+    echo '  install it. Nothing has been changed.' >&2
+    exit 1
+  }
+  verify_sha256 "${workdir}/${asset}" "${published}" 'package' || exit 1
+  checked="the digest GitHub publishes for ${asset}"
 fi
 
-# --- COSMETIC AND REPAIR PATCHES --------------------------------------------
-# Everything from here to the hand-over block runs AFTER the new version is
-# installed and BEFORE the smoke test and the rollback below, so none of it may
-# abort the run: an unattended failure here leaves a new version installed,
-# verified by nothing and rolled back from nothing. That reasoning is written
-# out for the reconnect-loop and hand-over blocks already; it was never applied
-# to the branding ones, and on 12 September the branding patch failed with
-# "mv: cannot stat index.html.tmp" and took the whole update down with it. The
-# cause was transient and does not reproduce; that it could stop the run at all
-# is the defect.
-#
-# Each block therefore runs in a subshell joined by "||", which suppresses both
-# errexit and the ERR trap, and a failure is reported and stepped over.
-cosmetic_failed() {
-  echo " FAILED."
-  echo "hdw4s-update: ${1} did not apply; continuing, so the update is still" >&2
-  echo "  verified and can still be rolled back. The session keeps whatever" >&2
-  echo "  that patch would have changed." >&2
+# The asset is named by the release, so a wrong one is unlikely; the point of
+# reading the control fields back is that being unlikely is not the same as
+# being checked, and installing a package that turns out to be something else
+# is not recoverable by anything below.
+got_pkg="$(dpkg-deb -f "${workdir}/${asset}" Package)"
+got_ver="$(version_from_package "$(dpkg-deb -f "${workdir}/${asset}" Version)")"
+got_arch="$(dpkg-deb -f "${workdir}/${asset}" Architecture)"
+if [ "${got_pkg}" != "${PKG}" ] || [ "${got_ver}" != "${wanted}" ] ||
+   { [ "${got_arch}" != "$(dpkg --print-architecture)" ] &&
+     [ "${got_arch}" != 'all' ]; }; then
+  echo ' failed.'
+  echo "Downloaded ${asset} is ${got_pkg} ${got_ver} (${got_arch}), not" >&2
+  echo "  ${PKG} ${wanted} ($(dpkg --print-architecture)); aborting." >&2
+  exit 1
+fi
+echo " done, against ${checked}."
+
+missing="$(unmet_depends "${workdir}/${asset}" | tr '\n' ' ')"
+[ -z "${missing# }" ] || {
+  echo "hdw4s: Selkies v${wanted} needs packages this machine does not have:" >&2
+  echo "  ${missing}" >&2
+  echo '  dpkg would unpack it over the working copy and then refuse to' >&2
+  echo '  configure it, so this stops here instead. Install them, or upgrade' >&2
+  echo '  hdw4s -- its own dependencies are what put them there.' >&2
+  exit 1
 }
 
-# --- BRANDING PATCH ---------------------------------------------------------
-# The stock client puts the upstream project name in the browser tab. Rewriting
-# the shipped index.html is unavoidable because the page is a build artifact
-# with no configuration hook, but keep the edit to a marked block that is
-# removed and re-added every run, so it stays idempotent and leaves no trace
-# once the file is replaced by an upgrade.
-index="${WEBROOT}/index.html"
-if [ -f "${index}" ]; then ( set -e
-  echo -n 'Applying branding patch...'
-  sed -i '/<!-- HDW4S_PATCH_START -->/,/<!-- HDW4S_PATCH_END -->/d' "${index}" || exit 1
-  # Neutralise the static title as well as overriding the property.
-  #
-  # The script below is injected on the line immediately after <title>, which
-  # is as early as it can run -- and still one paint too late. The parser sets
-  # the title element as it reads it, the browser shows it, and only then does
-  # the next line execute. That is the flash of upstream branding on a first
-  # load, when nothing is cached to mask it.
-  #
-  # This cannot write the final title, which depends on the hostname and is
-  # known only in the browser. It does not need to: it only has to be ours, so
-  # that no third-party name is ever painted. The script still refines it to
-  # "Desktop: <host>" a moment later.
-  #
-  # Idempotent, and index.html is a build artifact this script replaces
-  # wholesale on upgrade, so the edit never accumulates.
-  sed -i 's|<title>[^<]*</title>|<title>Desktop</title>|' "${index}" || exit 1
-  if grep -qi '</head>' "${index}"; then
-    inject="$(cat <<'HTML_EOF'
-<!-- HDW4S_PATCH_START -->
-<script>
-  (function() {
-    // Where the reverse proxy gives each session its own hostname, the first
-    // label is the only thing distinguishing one open tab from another.
-    var host = window.location.hostname.split('.')[0] || 'desktop';
-    var title = 'Desktop: ' + host.charAt(0).toUpperCase() + host.slice(1);
-
-    function applyTitle() {
-      var el = document.querySelector('title');
-      if (!el) { el = document.createElement('title'); document.head.appendChild(el); }
-      if (el.textContent !== title) el.textContent = title;
-    }
-    applyTitle();
-
-    // Refuse the write rather than undo it. Watching for the change and
-    // putting it back leaves the client's own title visible for the moment
-    // between the two, which is a flash of someone else's branding on every
-    // reload. Overriding the property means the write never lands.
-    try {
-      Object.defineProperty(document, 'title', {
-        configurable: true,
-        get: function() { return title; },
-        set: function() { applyTitle(); }
-      });
-    } catch (e) { /* fall through to the observer below */ }
-
-    // Kept as a fallback for the case where the property cannot be redefined,
-    // and for anything that edits the title element directly.
-    new MutationObserver(applyTitle)
-      .observe(document.head, { childList: true, subtree: true, characterData: true });
-
-    // Make the desktop fill the window on the first connection.
-    //
-    // The client only asks the server to resize from a browser "resize" event,
-    // and nothing fires one when a tab is first opened. So the desktop keeps
-    // whatever size the X server started at and the client letterboxes it --
-    // the black bars above and below.
-    //
-    // Forcing the stored "resize" setting to true, which is the obvious fix,
-    // makes it worse: the client assigns that value to a property already
-    // initialised to true, and the watcher that would send the request is
-    // guarded on the value having changed. Setting it to what it already is
-    // guarantees the request is never sent. That is why toggling the setting
-    // by hand fixes it -- toggling is the only thing that produces a change.
-    //
-    // So do not touch the setting. Call the client's own end-of-resize
-    // handler once, as soon as the stream is actually running, which is
-    // exactly what dragging the window edge would do.
-
-    // Bounds on what may be asked for. The server accepts any WxH matching a
-    // digits-x-digits pattern and only rounds it up to an even number, so
-    // nothing else stops a window a few pixels tall, or one shaped like a
-    // hair, from becoming the desktop. A desktop that cannot be clamped into
-    // the window is not a disaster: the client already letterboxes or scrolls,
-    // which is the right outcome for a request that made no sense.
-    var MIN_W = 640, MIN_H = 480;      // below this GNOME is unusable
-    var MAX_W = 7680, MAX_H = 4320;    // matches the X server's VideoRam ceiling
-    var MAX_PIXELS = MAX_W * MAX_H;
-    var MAX_ASPECT = 6;                // 32:9 ultrawide is 3.6; portrait is 0.6
-
-    function clampResolution(w, h) {
-      if (!(w > 0) || !(h > 0)) return null;
-      // Shape first. An absurd ratio is not something to scale down, it is
-      // something to refuse, so pull the long side in to the widest ratio a
-      // real monitor has.
-      if (w / h > MAX_ASPECT) w = Math.round(h * MAX_ASPECT);
-      if (h / w > MAX_ASPECT) h = Math.round(w * MAX_ASPECT);
-      // Then each side.
-      w = Math.min(Math.max(w, MIN_W), MAX_W);
-      h = Math.min(Math.max(h, MIN_H), MAX_H);
-      // Then the total, keeping the shape. Each side can be in range while
-      // the area is not.
-      if (w * h > MAX_PIXELS) {
-        var k = Math.sqrt(MAX_PIXELS / (w * h));
-        w = Math.max(MIN_W, Math.round(w * k));
-        h = Math.max(MIN_H, Math.round(h * k));
-      }
-      // The encoder needs even dimensions. Round down, because the server
-      // rounds up and that could push a clamped value back over a bound.
-      return [w - (w % 2), h - (h % 2)];
-    }
-
-    var clamped = false, asked = false, tries = 0;
-
-    function askForResize() {
-      if (asked) return;
-      // Respect someone who has deliberately turned remote resizing off.
-      if (typeof app !== 'undefined' && app.resizeRemote === false) return;
-      if (!webrtc.input || typeof webrtc.input.onresizeend !== 'function') return;
-      asked = true;
-      try { webrtc.input.onresizeend(); } catch (e) { asked = false; }
-    }
-
-    // Poll often enough to be in place before the connection completes. The
-    // handler below is chained onto an event, and an event that has already
-    // fired cannot be chained onto -- which is the whole reason the desktop
-    // sometimes came up letterboxed on a first connection and was fine after a
-    // reload. So the request is triggered by whichever of the two happens
-    // first, and asked-once guards against sending it twice.
-    var timer = setInterval(function() {
-      if (++tries > 600) { clearInterval(timer); return; }
-      try {
-        if (typeof webrtc === 'undefined' || !webrtc.input) return;
-
-        // Every resize request leaves through this one function, whether it
-        // came from here or from the user dragging the window, so it is the
-        // only place the bounds have to be applied.
-        if (!clamped && typeof webrtc.sendDataChannelMessage === 'function') {
-          var send = webrtc.sendDataChannelMessage.bind(webrtc);
-          webrtc.sendDataChannelMessage = function(msg) {
-            var m = (typeof msg === 'string') && msg.match(/^r,(\d+)x(\d+)$/);
-            if (!m) return send(msg);
-            var c = clampResolution(parseInt(m[1], 10), parseInt(m[2], 10));
-            if (!c) return;
-            var out = 'r,' + c[0] + 'x' + c[1];
-            if (out !== msg) {
-              console.log('hdw4s: clamped requested desktop size ' +
-                          m[1] + 'x' + m[2] + ' to ' + c[0] + 'x' + c[1]);
-            }
-            return send(out);
-          };
-          clamped = true;
-
-          // Path one: the channel has not opened yet, so chain onto the event.
-          var prev = webrtc.ondatachannelopen;
-          webrtc.ondatachannelopen = function() {
-            if (typeof prev === 'function') {
-              try { prev.apply(this, arguments); } catch (e) {}
-            }
-            setTimeout(askForResize, 250);
-          };
-        }
-
-        // Path two: it opened already, and the event is gone. Frames arriving
-        // means the channel is up, whether or not we saw it happen.
-        if (webrtc.element && webrtc.element.videoWidth) {
-          askForResize();
-          clearInterval(timer);
-          setTimeout(verifyFits, 3000);
-
-          // A hidden tab has no useful size to report, and browsers throttle
-          // its timers besides, so a desktop opened in a background tab is
-          // sized for whatever the window happened to be. Check again when
-          // someone actually looks at it.
-          document.addEventListener('visibilitychange', function() {
-            if (!document.hidden) setTimeout(verifyFits, 500);
-          });
-        }
-      } catch (e) { /* not ready yet; the next tick will try again */ }
-    }, 100);
-
-    // Last line of defence. If the desktop still does not match the window a
-    // few seconds in -- a request lost, a race nobody anticipated -- ask once
-    // more rather than leaving the user to reload the tab. Compares against
-    // the video's own intrinsic size, which is the resolution the server
-    // actually settled on.
-    function verifyFits() {
-      try {
-        if (typeof app !== 'undefined' && app.resizeRemote === false) return;
-        var v = webrtc.element;
-        if (!v || !v.videoWidth) return;
-        var want = webrtc.input.getWindowResolution();
-        var w = clampResolution(parseInt(want[0], 10), parseInt(want[1], 10));
-        if (!w) return;
-        if (Math.abs(v.videoWidth - w[0]) > 2 || Math.abs(v.videoHeight - w[1]) > 2) {
-          console.log('hdw4s: desktop is ' + v.videoWidth + 'x' + v.videoHeight +
-                      ' but the window wants ' + w[0] + 'x' + w[1] + '; asking again');
-          asked = false;
-          askForResize();
-        }
-      } catch (e) {}
-    }
-  })();
-</script>
-<!-- HDW4S_PATCH_END -->
-HTML_EOF
-)"
-    export inject
-    awk 'BEGIN { done = 0 }
-         !done && tolower($0) ~ /<\/head>/ { print ENVIRON["inject"]; done = 1 }
-         { print }' "${index}" > "${index}.tmp" || exit 1
-    mv "${index}.tmp" "${index}" || exit 1
-    echo ' done.'
-  else
-    echo ' skipped (no </head> found).'
-  fi
-) || cosmetic_failed 'the branding patch'; fi
-
-# The installed-app window shows the MANIFEST name, not the page title. So an
-# installed PWA still carried upstream's branding after the title was fixed --
-# the window frame read "Selkies WebRTC - Desktop: <host>", with the first half
-# coming from here. Same treatment and the same reasoning as the title: this
-# cannot carry the per-session name, which is known only in the browser, it
-# only has to be ours.
-manifest="${WEBROOT}/manifest.json"
-if [ -f "${manifest}" ]; then ( set -e
-  echo -n 'Applying manifest branding...'
-  sed -i -e 's|"name"[[:space:]]*:[[:space:]]*"[^"]*"|"name": "Desktop"|' \
-         -e 's|"short_name"[[:space:]]*:[[:space:]]*"[^"]*"|"short_name": "Desktop"|' \
-         "${manifest}" || exit 1
-  echo ' done.'
-) || cosmetic_failed 'the manifest branding'; fi
-
-# --- RECONNECT LOOP FIX -----------------------------------------------------
-# The client opens two signalling channels, one for video and one for audio,
-# and each one's disconnect handler tears the other down so that a reconnect
-# restarts both together. A guard is meant to stop that from bouncing back and
-# forth: the side that starts the cascade marks it by setting the status to
-# "checkconnect", and the side it wakes is supposed to notice the mark and stop
-# there.
-#
-# The comparison that reads the mark is written against the bare identifier
-# instead of the string, so it compares the status to a hoisted, still
-# undefined variable. It is therefore always false, the guard never fires, and
-# each channel unconditionally closes the other. One disconnect is then enough
-# to start a ping-pong that never ends: every reconnect is closed by the other
-# side, frequently while its socket is still opening, which is what puts
-# "WebSocket is closed before the connection is established" in the console
-# several times a second.
-#
-# The status is left at "checkconnect" for as long as this runs, so the page
-# also never reaches "connected" and the loading overlay stays up over a
-# desktop that is otherwise usable.
-#
-# A disconnect is rare on a local network and routine over a wide-area one,
-# which is why this only ever showed up for a session reached from outside.
-#
-# Quoting the string restores the intended guard. Idempotent: once the quotes
-# are there the pattern no longer matches, and app.js is a build artifact this
-# script replaces wholesale on upgrade, so the edit never accumulates.
-#
-# The whole block is conditional on finding the unquoted comparison, so it also
-# does the right thing when this stops being our problem. If upstream fixes it
-# -- by quoting the string, by comparing some other way, or by rewriting the
-# handler so that nothing of the sort is left -- the pattern does not match,
-# nothing is edited, and the update is silent. That is deliberate: this must
-# never be the reason an upgrade fails. The failure below fires only when the
-# pattern matched and the substitution then did not, which means the file is
-# not what it appeared to be and rewriting it blindly would be worse.
-appjs="${WEBROOT}/app.js"
-if [ -f "${appjs}" ] && grep -q 'app\.status == checkconnect' "${appjs}"; then
-  echo -n 'Applying reconnect loop fix...'
-  sed -i "s|app\.status == checkconnect;|app.status == 'checkconnect';|g" "${appjs}"
-  if grep -q 'app\.status == checkconnect' "${appjs}"; then
-    # Not exit. This runs before the smoke test and the rollback below, so an
-    # unattended run that stops here installs a new version, verifies nothing,
-    # and rolls nothing back. The hand-over block further down had the identical
-    # defect and was fixed; this is the same reasoning.
-    echo ' FAILED; the client keeps the old behaviour.' >&2
-  else
-    echo ' done.'
-  fi
+# --- THE 1.6 PREFIX ---------------------------------------------------------
+# A virtualenv this script built, before upstream shipped a package. dpkg knows
+# nothing about it, so nothing under it is anybody's property and moving it is
+# safe -- which is not true in the other direction, and is why this is asked
+# with dpkg-query rather than by looking for a file.
+if [ -d "${PREFIX}" ] && ! dpkg-query -S "${PREFIX}/bin/python" >/dev/null 2>&1; then
+  echo '  A pre-2.0 Selkies is in the way. It was installed by an older hdw4s'
+  echo '  as a virtualenv, not as a package, and dpkg cannot unpack over it'
+  echo "  cleanly, so it is moved to ${LEGACY} first."
+  rm -rf "${LEGACY}"
+  mv "${PREFIX}" "${LEGACY}"
+  # The 1.6 browser client. Selkies 2.0 serves its own from inside the package
+  # and hdw4s no longer passes --web-root, so nothing reads this again.
+  rm -rf /opt/gst-web /opt/gst-web.bak "${PREFIX}.bak"
+  legacy_moved='yes'
 fi
 
-# Two more defects in the streaming server itself, repaired the same way and for
-# the same reason: there is no seam to extend, the file is replaced wholesale by
-# the next upgrade so nothing accumulates, and each edit is conditional on
-# finding the exact text it replaces, so it goes quiet if upstream fixes it.
-#
-# Not sent upstream: they released a major rewrite in which neither defect
-# survives, and the line these run against is not where their attention is.
-#
-#   * Both signalling error handlers are coroutines that call time.sleep(2).
-#     That stops the whole event loop, not just the handler, and the handler
-#     runs whenever a peer is not registered yet -- which for an idle desktop is
-#     every two seconds, forever. A browser arriving during one of those waits
-#     is not answered until it ends.
-#
-#   * main() sets exit status 1 when it catches a fatal error, and then its
-#     finally block runs sys.exit(0) unconditionally. A SystemExit raised in a
-#     finally replaces the one in flight, so the process always reports success.
-#     Restart=on-failure therefore never fires: the desktop is gone and nothing
-#     brings it back.
-smain="${PREFIX}/lib/python3.12/site-packages/selkies_gstreamer/__main__.py"
-if [ -f "${smain}" ]; then
-  if grep -q '^ *time\.sleep(2)$' "${smain}"; then
-    echo -n 'Applying event loop fix...'
-    sed -i 's|^\( *\)time\.sleep(2)$|\1await asyncio.sleep(2)|' "${smain}"
-    if grep -q '^ *time\.sleep(2)$' "${smain}"; then
-      echo ' FAILED; the event loop keeps blocking.' >&2
-    else
-      echo ' done.'
-    fi
-  fi
-  # Matched as a pair, because sys.exit(0) on its own appears in plenty of
-  # programs legitimately; it is only wrong here because a finally runs it after
-  # the handler has already chosen a status.
-  if grep -q '^ *sys\.exit(1)$' "${smain}" && grep -q '^ *sys\.exit(0)$' "${smain}"; then
-    echo -n 'Applying exit status fix...'
-    sed -i -e 's|^\( *\)sys\.exit(1)$|\1_hdw4s_status = 1|' \
-           -e 's|^\( *\)sys\.exit(0)$|\1sys.exit(locals().get("_hdw4s_status", 0))|' \
-           "${smain}"
-    if grep -q '^ *sys\.exit(1)$' "${smain}"; then
-      echo ' FAILED; a crash still reports success.' >&2
-    else
-      echo ' done.'
-    fi
-  fi
+echo -n '  Installing...'
+if ! install_deb "${workdir}/${asset}"; then
+  echo 'CRITICAL: dpkg could not install the new package.' >&2
+  rollback "${previous}" || exit 1
+  exit 1
 fi
-
-# --- SESSION HAND-OVER, CLIENT HALF -----------------------------------------
-# The peer ids the browser uses are fixed, so a second client can never
-# register. Upstream refuses it in a way the client cannot tell from any other
-# closed socket, so it retries into the refusal for as long as the tab is open.
-# This half teaches the client to recognise the refusal and offer to take the
-# session over; the server half is a wrapper the session starts instead of the
-# stock entry point, and needs no patching.
-#
-# MUST run after the reconnect loop fix above: its anchors are written against
-# the corrected line, so running it first leaves nothing matching and the
-# feature is silently skipped.
-#
-# The patcher decides for itself whether it can apply cleanly, and does nothing
-# if the client has changed underneath. That is safe because the server half
-# looks at the client it is about to serve and stays out of the way when that
-# client cannot ask for a hand-over -- so a skip here leaves the pair behaving
-# as it did before the feature existed, rather than half-enabled.
-patcher='/usr/lib/hdw4s/hdw4s-patch-client'
-if [ -x "${patcher}" ] && [ -d "${WEBROOT}" ]; then
-  echo -n 'Applying session hand-over to the client...'
-  # Nothing this block learns is worth aborting an upgrade for. The script runs
-  # under "set -e" with "pipefail" from a timer, as root, and it aborts here
-  # *before* the smoke test and the rollback below -- so a failure to read a
-  # state would leave a new venv and a new webroot installed, unverified, and
-  # unrollbackable. The state is read from what the patcher prints; its exit
-  # status is for people running it by hand.
-  # Two lines can come back: the state of the tree, and "disabled" if hand-over
-  # has been switched off. Reading only the first made the disabled branch below
-  # unreachable, so a rollback lasted exactly until this next ran.
-  answer="$("${patcher}" --check "${WEBROOT}" 2>/dev/null)" || :
-  state="$(printf '%s\n' "${answer}" | head -1)"
-  if printf '%s\n' "${answer}" | grep -qx 'disabled'; then
-    state='disabled'
-  fi
-  # "stale" means an older revision of this patch, or a stamp over files the
-  # edits did not reach. Both are repaired by applying, which puts the saved
-  # originals back first -- so it belongs with the states worth acting on, not
-  # with the ones worth skipping.
-  case "${state}" in
-    patched)
-      echo ' already applied.' ;;
-    applicable|partial|stale)
-      if why="$("${patcher}" "${WEBROOT}" 2>&1 >/dev/null)"; then
-        echo ' done.'
-      else
-        echo ' failed; the client is unchanged.' >&2
-        # The one line that says why was previously thrown away, so a tree that
-        # could not be repaired reported the same thing every day for ever with
-        # no way to find out what was wrong.
-        [ -z "${why}" ] || printf '  %s\n' "${why}" >&2
-      fi ;;
-    '')
-      echo ' skipped: could not read the client state.' >&2 ;;
-    disabled)
-      echo ' not applied: it was rolled back. Delete /etc/hdw4s/handover.off'
-      echo '  to allow it again.' ;;
-    mismatch)
-      echo ' skipped: the client is not what this patch was written for.' ;;
-    *)
-      # Anything else means the patcher did not answer properly -- it crashed,
-      # or printed something we do not know. That is not the same as the client
-      # having changed, and saying so sends someone to the wrong place.
-      echo " skipped: could not read the client state (${state:0:40})." >&2 ;;
-  esac
-fi
-
-# Say plainly what a session will actually do, because a silently disabled
-# feature is how a regression goes unnoticed for days.
-#
-# This asks the same two questions the server asks itself at startup, in the
-# same order, rather than a proxy for them. An earlier version checked only
-# whether the upstream server was recognised, and so reported "active" for a
-# webroot whose patch had just been skipped -- printing a contradiction two
-# lines below the skip that caused it.
-if [ -r /usr/lib/hdw4s/hdw4s_signalling.py ]; then
-  echo -n 'Checking session hand-over...'
-  handover="$(PYTHONSAFEPATH=1 PYTHONPATH=/usr/lib/hdw4s HDW4S_WEBROOT="${WEBROOT}" \
-              "${PREFIX}/bin/python" - <<'HANDOVER' 2>/dev/null
-import hdw4s_signalling as handover
-from selkies_gstreamer import signalling_web
-if not handover.client_supports_handover():
-    print("client-cannot-ask")
-else:
-    print(handover.upstream_state(signalling_web.WebRTCSimpleServer))
-HANDOVER
-)" || :
-  case "${handover}" in
-    recognised)       echo ' active.' ;;
-    upstream-has-it)  echo ' provided by upstream; ours stands down.' ;;
-    client-cannot-ask)
-      echo ' not offered: the browser client cannot ask for it.' ;;
-    drifted)
-      echo ' DISABLED: the signalling server has changed underneath it.' >&2 ;;
-    *)  echo " could not be checked (${handover:-no answer})." >&2 ;;
-  esac
-fi
-# --- END SESSION HAND-OVER --------------------------------------------------
-
-# Import what a session imports, and build the two elements whose absence is
-# invisible until a browser connects. This runs on every upgrade, whatever the
-# sessions are doing: it needs no display and no session, and the alternative
-# is what used to happen -- a machine where every desktop was in use discarded
-# its rollback backups and reported success without executing any of the new
-# code.
-smoke_test() {
-  "${PREFIX}/bin/python" - <<'SMOKE' 2>&1
-import importlib, importlib.util
-import gi
-for ns in ("Gst", "GstWebRTC", "GstSdp", "GstRtp"):
-    gi.require_version(ns, "1.0")
-from gi.repository import Gst
-Gst.init(None)
-
-# webrtcbin comes from plugins-bad and the ICE agent from gstreamer1.0-nice.
-# A missing plugin is invisible until the element is actually made.
-# The elements the default pipeline builds, not just the two that were missing
-# once. rtpgccbwe is deliberately absent: it lives in gst-plugins-rs and is
-# only reached with an AV1 encoder or congestion control enabled.
-for el in ("webrtcbin", "nicesrc", "ximagesrc", "videoconvert", "capsfilter",
-           "queue", "x264enc", "rtph264pay", "opusenc", "rtpopuspay", "pulsesrc"):
-    assert Gst.ElementFactory.make(el, None) is not None, "missing element: " + el
-
-# Shelled out to at runtime, so nothing above would notice them missing: the
-# clipboard runs xsel on every copy and paste, and resizing drives xrandr.
-import shutil
-for prog in ("xsel", "xrandr"):
-    assert shutil.which(prog) is not None, "missing program: " + prog
-
-# Gst.Fraction lives in PyGObject's Gst overrides, which are a separate
-# package from the typelib. Without them everything above still passes --
-# the import works and the elements are made -- and the first framerate
-# Selkies constructs dies with "Fraction() takes no arguments", buried under
-# a page of advice about setting GSTREAMER_PATH.
-assert Gst.Fraction(30, 1) is not None, \
-    "PyGObject Gst overrides are missing (python3-gst-1.0)"
-
-# The distro python-xlib carries the fix the upstream fork exists for. A copy
-# without it landing in the venv shadows this one and breaks resizing.
-import Xlib
-from Xlib.error import XError
-from Xlib.ext.randr import BadRROutputError
-assert issubclass(BadRROutputError, XError), \
-    "python-xlib lacks the randr fix: %s" % Xlib.__file__
-
-# Importing the package proves almost nothing -- its __init__ pulls in only the
-# standard library, so it succeeds against an installation whose dependencies
-# were never installed at all. These are the modules that actually reach
-# websockets, msgpack, basicauth, GPUtil, prometheus_client, psutil, watchdog
-# and Pillow, and they are the ones a session loads.
-for m in ("signalling_web", "webrtc_signalling", "gpu_monitor", "metrics",
-          "system_monitor", "gstwebrtc_app", "resize", "gamepad"):
-    importlib.import_module("selkies_gstreamer." + m)
-
-# webrtc_input and __main__ are deliberately not imported: pynput picks its
-# backend at import time and needs an X connection, which there is no reason
-# to have here. Checking that they can be found proves they are installed
-# without running them.
-for m in ("pynput", "evdev"):
-    assert importlib.util.find_spec(m) is not None, "not installed: " + m
-SMOKE
-}
-
-restore_backup() {
-  [ ! -d "${PREFIX}.bak" ]  || { rm -rf "${PREFIX}";  mv "${PREFIX}.bak"  "${PREFIX}"; }
-  [ ! -d "${WEBROOT}.bak" ] || { rm -rf "${WEBROOT}"; mv "${WEBROOT}.bak" "${WEBROOT}"; }
-}
-
-# --- VERIFY AND ROLL BACK ---------------------------------------------------
-[ -n "${upgraded}" ] || exit 0
+echo ' done.'
 
 echo -n '  Checking that the new installation loads...'
 if out="$(smoke_test)"; then
-  echo ' done.'
+  echo " done (${out})."
 else
   echo ' failed.'
-  echo 'CRITICAL: the new installation cannot be loaded.' >&2
-  printf '%s\n' "${out}" | tail -5 >&2
-  if [ -d "${PREFIX}.bak" ] || [ -d "${WEBROOT}.bak" ]; then
-    echo '  Rolling back...' >&2
-    restore_backup
-    echo "  Rolled back to v${current:-none}." >&2
-  else
-    echo '  No previous installation to restore.' >&2
-  fi
+  echo 'CRITICAL: the new installation does not work.' >&2
+  printf '%s\n' "${out}" | tail -10 | sed 's/^/  /' >&2
+  rollback "${previous}" || exit 1
   exit 1
 fi
 
+# Only now, with a package that installs and loads, are the bytes worth
+# keeping: caching a .deb that has never worked would give the next failure a
+# rollback target that is itself broken.
+cache_deb "${wanted}" "${workdir}/${asset}" "${sum}" "${current}"
+[ -z "${legacy_moved:-}" ] || {
+  echo "  The pre-2.0 installation is still at ${LEGACY}. Nothing reads it;"
+  echo '  remove it once this release has been in use for a while.'
+}
+
+# --- RESTART WHAT IS SAFE TO RESTART ----------------------------------------
 # No --all. Instances stay loaded but inactive because the proxy unit requires
 # them, and restarting those started a full desktop for somebody who had not
 # asked for one -- undoing both socket activation and the reaper on every
@@ -879,16 +768,13 @@ fi
 mapfile -t units < <(systemctl list-units --plain --no-legend --state=active 'hdw4s@*' |
                      awk '{print $1}')
 # Sessions are socket-activated and are not started at boot, so this list is
-# normally empty and this is the branch nearly every upgrade takes. It used to
-# discard both backups and exit 0 without having executed a single byte of the
-# new installation -- the verification and rollback below were dead code in the
-# ordinary case. Import what the streaming server imports first: that is what a
-# missing GStreamer typelib or a broken dependency actually breaks, and it
-# breaks it in a way nothing else here would notice until a user saw a desktop
-# that never appeared.
+# normally empty and this is the branch nearly every upgrade takes. That is why
+# the smoke test above runs unconditionally and before this point: an upgrade
+# on a machine where nobody happened to be logged in used to reach the end
+# without having executed a single byte of the new installation, and report
+# success.
 [ "${#units[@]}" -gt 0 ] || {
   echo 'Upgrade complete; no sessions were running.'
-  rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
   exit 0
 }
 
@@ -979,7 +865,6 @@ done
 
 [ "${#idle[@]}" -gt 0 ] || {
   echo 'Every session is in use; nothing to restart.'
-  rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
   exit 0
 }
 
@@ -1006,21 +891,11 @@ done
 if [ -n "${healthy}" ]; then
   echo ' done.'
   echo "Upgrade to v${wanted} successful."
-  rm -rf "${PREFIX}.bak" "${WEBROOT}.bak"
   exit 0
 fi
 
 echo 'CRITICAL: sessions did not come back up. Rolling back...' >&2
-if [ -d "${PREFIX}.bak" ] || [ -d "${WEBROOT}.bak" ]; then
-  # Each side guarded by its own backup. Removing both and restoring one left
-  # the half with no backup deleted and unrecoverable, while the script
-  # reported that it had rolled back.
-  restore_backup
+if rollback "${previous}"; then
   systemctl restart "${units[@]}" || :
-  echo "Rolled back to v${current:-none}." >&2
-else
-  # Nothing to roll back to means this was a first install. Leave the new files
-  # in place; removing them would only guarantee the next run starts over.
-  echo 'No previous installation to restore.' >&2
 fi
 exit 1

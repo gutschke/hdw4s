@@ -7,10 +7,29 @@ Standards-Version: 4.7.0
 Homepage: https://github.com/gutschke/hdw4s
 Rules-Requires-Root: no
 
+# The dependency list has two halves. The first is what hdw4s itself runs. The
+# second, from libpulse0 down, is what upstream's Selkies package declares --
+# duplicated deliberately, because hdw4s fetches that package and installs it
+# with dpkg, and dpkg does not resolve dependencies: it unpacks over the
+# working copy and only then refuses to configure. Declaring them here is what
+# makes that install a decision rather than a gamble, and hdw4s-update checks
+# the downloaded package's own list against the machine before it starts, so a
+# dependency upstream adds is reported rather than discovered mid-unpack.
+#
+# What left the list when Selkies stopped being a wheel in a virtualenv hdw4s
+# built: python3-venv (no virtualenv), python3-gi, python3-gst-1.0,
+# gir1.2-gst* and gstreamer1.0-* (2.0 carries no GStreamer at all -- it encodes
+# through its own pixelflux and pcmflux extension modules), python3-xlib and
+# python3-evdev (vendored inside the package), python3-setuptools (GPUtil's
+# distutils import went with it) and xsel (the clipboard is in-process now).
+# xdotool and ca-certificates are new: the first is the fallback Selkies 2.0
+# forks for any keysym XTEST cannot inject, and the second is what lets curl
+# reach GitHub at all, which the package has always needed and never said.
 Package: hdw4s
 Architecture: all
 Depends: ${misc:Depends},
          curl,
+         ca-certificates,
          dbus-daemon,
          dbus-bin,
          gnome-session,
@@ -21,27 +40,32 @@ Depends: ${misc:Depends},
          systemd,
          libglib2.0-bin,
          python3,
-         python3-gi,
-         python3-gst-1.0,
-         python3-setuptools,
-         python3-evdev,
-         python3-xlib,
-         python3-venv,
          xauth,
-         xsel,
+         xdotool,
          x11-xserver-utils,
          xserver-xorg-core,
          xserver-xorg-video-dummy,
-         gir1.2-gst-plugins-base-1.0,
-         gir1.2-gst-plugins-bad-1.0,
-         gir1.2-gstreamer-1.0,
-         gstreamer1.0-nice,
-         gstreamer1.0-plugins-bad,
-         gstreamer1.0-plugins-base,
-         gstreamer1.0-plugins-good,
-         gstreamer1.0-plugins-ugly,
-         gstreamer1.0-x
-Recommends: pipewire-pulse, wireplumber, gnome-keyring
+         libpulse0,
+         libxcb1,
+         libxkbcommon0,
+         libx11-xcb1,
+         libva2,
+         libva-drm2,
+         libva-x11-2,
+         libdrm2,
+         libgbm1,
+         libegl1,
+         libwayland-server0,
+         libglib2.0-0t64 | libglib2.0-0,
+         libpixman-1-0,
+         libxcb-render0,
+         libxcb-shm0,
+         libxcb-dri3-0,
+         libxfixes3,
+         libxext6,
+         libice6,
+         libsm6
+Recommends: pipewire-pulse, wireplumber, gnome-keyring, pulseaudio-utils
 Description: headless GNOME desktop streamed to a web browser
  Gives an existing account on an existing machine a full GNOME desktop that is
  reachable from a browser, without containers and without a graphics card. A
