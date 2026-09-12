@@ -249,24 +249,35 @@ esac
 # webcam gates only refuse when a setting is *locked* off, so "false|locked" is
 # the form that actually keeps them shut.
 lockdown=(
-  --enable-dual-mode=false        # no client-initiated switch to WebRTC, so no
-                                  # ICE, STUN, TURN or mDNS sockets ever appear
-  --webrtc-ice-lite=true          # and nothing to hand out if one ever did
-  --file-transfers=none           # no upload, no download, no file manager
-  --enable-binary-clipboard=false
+  # Every boolean below carries "|locked". Without it the value is only a
+  # default: a bool the server reads back out of a client's SETTINGS frame is
+  # whatever that client last asked for, and only the lock makes the server
+  # keep its own answer. Binary clipboard is the one upstream wires into that
+  # path today, and an unlocked "false" there was worth nothing -- one frame
+  # from any connected page turned it back on, in both directions, while the
+  # settings the server publishes went on reporting it off. The others are not
+  # reachable that way today. They are locked anyway, so that the day one of
+  # them is wired up is not the day a control silently stops holding.
+  --enable-dual-mode='false|locked'   # no client-initiated switch to WebRTC, so
+                                      # no ICE, STUN, TURN or mDNS socket ever
+                                      # appears
+  --webrtc-ice-lite='true|locked'     # and nothing to hand out if one ever did
+  --file-transfers=none               # no upload, no download, no file manager
+  --enable-binary-clipboard='false|locked'
   --microphone-enabled='false|locked'
   --webcam-enabled='false|locked'
-  --gamepad-enabled=false
-  --enable-sharing=false
-  --enable-shared=false
-  --enable-collab=false
-  --enable-player2=false
-  --enable-player3=false
-  --enable-player4=false
-  --command-enabled=false         # already the default; pinned so a change of
-                                  # default cannot quietly hand out a shell
-  --enable-metrics-http=false
-  --second-screen=false
+  --gamepad-enabled='false|locked'
+  --enable-sharing='false|locked'
+  --enable-shared='false|locked'
+  --enable-collab='false|locked'
+  --enable-player2='false|locked'
+  --enable-player3='false|locked'
+  --enable-player4='false|locked'
+  --command-enabled='false|locked'    # already the default; pinned so a change
+                                      # of default cannot quietly hand out a
+                                      # shell
+  --enable-metrics-http='false|locked'
+  --second-screen='false|locked'
   # Branding, partially. This names the sidebar heading and nothing else.
   #
   # The browser TAB still reads "Selkies", because the client sets its title
