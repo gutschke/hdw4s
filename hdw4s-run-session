@@ -185,35 +185,11 @@ export SELKIES_TURN_REST_URI=''
 # An empty value never exists, so the override can never be taken.
 export SELKIES_RTC_CONFIG_JSON=''
 
-# Started through a wrapper of ours where there is a working one. It adds the
-# ability to hand a session to another device -- the peer ids the browser uses
-# are fixed, so a second client can never register, and without this it retries
-# into that refusal several times a second for as long as the tab is open.
-#
-# The wrapper is a subclass and one rebinding: it changes nothing upstream
-# ships, and stands down by itself if upstream has adopted the behaviour or has
-# moved far enough that it no longer recognises what it extends.
-#
-# Whether it can be used is decided by importing it, not by looking for the
-# file. A readable file is not a working module -- a half-written copy, a
-# missing dependency, or a syntax error would all pass a file test and then
-# kill the session at startup. That failure does not stop, either: the unit
-# restarts on failure every five seconds, which is slow enough that the start
-# limiter never trips, so the desktop would be gone and the machine would spend
-# the rest of the day booting an X server and throwing it away. Importing costs
-# a fraction of a second once per session start and turns that into a quiet
-# fallback to the entry point upstream ships.
-#
-# PYTHONSAFEPATH keeps the current directory off the module path. Sessions run
-# with the user's home as their working directory, and "python -m" would
-# otherwise look there first -- so a file left in a home directory, on shared
-# storage that several machines mount, would be imported in place of this one.
-# Bounded, because unlike the file test this replaces, this one can block. The
-# interpreter it runs lives in a tree the updater rebuilds daily, and reading
-# from a half-written venv or a stalled mount would hold the whole session start
-# here -- where there is already an X server, a bus and a desktop waiting behind
-# a two-minute limit. Fifteen seconds is far longer than the tenth of a second
-# it takes when nothing is wrong.
+# Upstream's own entry point, run directly. There is nothing of ours between
+# the unit and the streaming server: 2.0 ships a distribution package with a
+# console script, so there is no venv to find, no module to import, and no
+# subclass to stand up. Everything this package wants from the server is asked
+# for on the command line below.
 stream=(/opt/selkies/bin/selkies)
 
 # HDW4S_FRAMERATE has always meant a ceiling: this machine hosts several

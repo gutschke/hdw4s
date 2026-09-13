@@ -94,18 +94,19 @@ Either install the package:
 sudo apt install ./hdw4s_1.0_all.deb
 ```
 
-Several dependencies -- among them `gstreamer1.0-nice`, `python3-gst-1.0`,
-`python3-xlib`, `python3-evdev`, `xsel` and `gstreamer1.0-plugins-ugly` --
-live in Ubuntu's **universe** component, so it has to be enabled:
+Several dependencies -- `gnome-session` itself, `xdotool`, `pulseaudio-utils`
+and the `libva` libraries -- live in Ubuntu's **universe** component, so it has
+to be enabled:
 
 ```bash
 sudo add-apt-repository universe
 ```
 
-Most of these are reached by the streaming server through GObject
-introspection, GStreamer plugin loading, or a command it runs, rather than by
-any name that appears in this package -- so without them a session starts,
-reports success at every layer, and never produces a working desktop.
+Without universe the package will not install at all, which is the good case.
+The bad one is a machine where it was installed before universe was turned off:
+`xdotool` is how the streaming server sends keystrokes an application will not
+take any other way, so its absence costs a working keyboard rather than a
+working session, and nothing reports an error.
 
 or install from a checkout:
 

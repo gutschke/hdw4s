@@ -530,12 +530,15 @@ unreachable, and nothing reports it.
 
 ## UPDATES
 
-A timer follows upstream daily. It checks that what it downloaded is a
-well-formed archive before replacing anything, and refuses outright to install a
-release whose layout it does not recognise, rather than half-upgrading a working
-machine. It does not verify authenticity: there is no signature and no recorded
-hash, so a well-formed archive from the right URL is all it can establish. See
-SECURITY.md.
+A timer follows upstream daily, installing the distribution package upstream
+publishes. What it downloads is checked against a sha256 -- the one recorded in
+`hdw4s-update` for the release and platform the maintainer tested, otherwise the
+digest GitHub publishes for that asset -- and the download is refused if neither
+is available, so nothing is ever installed unchecked. It also reads the
+package's own control fields back and checks its declared dependencies against
+the machine before installing, rather than unpacking something that then cannot
+be configured. That pins the bytes to what somebody saw; it is not a signature,
+and upstream publishes none. See SECURITY.md.
 
 It restarts only sessions nobody is connected to. A session in use keeps the
 version it started with until it next stops on its own, which is when picking
