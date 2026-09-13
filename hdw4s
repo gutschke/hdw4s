@@ -1185,6 +1185,17 @@ ${upstream}
         proxy_read_timeout  86400s;
         proxy_send_timeout  86400s;
         proxy_buffering     off;
+
+        # If you add a Content-Security-Policy here -- and a hardened proxy
+        # usually does -- script-src must allow blob:. The streaming server
+        # plays audio through an AudioWorklet it loads from a blob URL, and a
+        # policy without it takes the sound away and nothing else: the picture,
+        # the input and the resizing all keep working, the audio packets go on
+        # arriving, and the page retries loading the worklet for as long as it
+        # is open. Allowing blob: under default-src is not enough, because
+        # script-src overrides it for worklets.
+        #
+        #   add_header Content-Security-Policy "... script-src 'self' blob: ...";
 EOF
   if [ -n "${pw}" ]; then
     cat <<EOF

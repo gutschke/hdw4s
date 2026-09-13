@@ -72,10 +72,12 @@ so the only way to stop the conflict is to stop sharing them.
   beyond HTTP. (A browser that reaches a session with no proxy in between does
   need one; that is what `HDW4S_MEDIA_PORTS=direct` is for.)
 * **One browser at a time, and moving between them just works.** Open the same
-  desktop somewhere else and the new window takes it; the old one is told the
-  connection was superseded. There is no prompt and no way back from the losing
-  side, and the several-viewers and shared-control features the streaming server
-  offers are deliberately switched off here -- see [Security](#security) for why.
+  desktop somewhere else and the new window takes it, in about a third of a
+  second; the old one stops and says the connection was terminated. Reloading
+  the old page takes the session straight back, as often as you like, and there
+  is no prompt in either direction. The several-viewers and shared-control
+  features the streaming server offers are deliberately switched off here --
+  see [Security](#security) for why.
 * **Coexists with a desktop that is already running**, on this machine or on
   another one sharing the same home directory over the network.
 * **Firewalled by construction.** The package owns one nftables table covering
