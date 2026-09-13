@@ -559,13 +559,20 @@ home directory, so it disappears with the session instead of accumulating.
 
 ## LIMITATIONS
 
-There is no way to configure STUN or TURN. The streaming server appends its own
-default STUN server unless it is named exactly, so a setting could only add a
-second and never replace the first; a session therefore always contacts that
-server at startup, which is a third party learning the machine's address and
-when sessions begin. TURN is disabled outright, because the server otherwise
-uses a relay belonging to a third party with a shared secret published in its
-own source -- which would carry the desktop's video, keystrokes and clipboard.
+There is no way to configure STUN or TURN, and nothing left for one to
+configure. A session serves a single WebSocket: dual mode is locked off, so the
+WebRTC stack never starts, no UDP socket is opened, no connection candidates
+are gathered and no STUN server is contacted. Checked rather than assumed --
+the streaming server's process owns one TCP listener on loopback and no UDP
+socket at all.
+
+Under 1.6 this was not true, and the reasons it mattered are worth keeping: the
+server appended its own default STUN server unless one was named exactly, so a
+setting could only ever add a second and never replace the first, and every
+session told a third party the machine's address and when it started. TURN was
+disabled outright because the server otherwise used a relay belonging to a
+third party with a shared secret published in its own source, which would have
+carried the desktop's video, keystrokes and clipboard.
 Enabling a relay you run yourself needs somewhere to keep its credentials that
 a session cannot read, which does not exist yet: the configuration files are
 read by the session as the desktop user, so a secret in them is readable by
