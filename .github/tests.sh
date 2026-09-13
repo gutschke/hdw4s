@@ -405,6 +405,51 @@ echo '== the four spellings of one release =='
   is 'an unprefixed tag is left alone' "$(version_from_tag '1.6.2')" '1.6.2'
 )
 
+# A dependency that is installed must be reported as installed however many
+# packages the machine has. The version this replaces asked with
+#
+#   printf '%s\n' "${have}" | grep -qxF -- "${name}"
+#
+# and grep -q exits the instant it matches, which SIGPIPEs the producer, which
+# is status 141, which under pipefail is the status of the pipeline -- so the
+# answer inverted, and only once the list was long enough that grep finished
+# first. A test container never saw it; a desktop with 4681 packages reported
+# every one of Selkies' twenty dependencies missing and refused to install.
+#
+# So the list here is deliberately long and the match deliberately first. That
+# is the shape that fails; a short list, or a match at the end, passes either
+# way and would not be a test.
+echo '== a long installed-package list does not invert the answer =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  eval "$(sed -n '/^unmet_depends() {/,/^}/p' "${ROOT}/hdw4s-update")"
+
+  # Stubs, because the real ones read this machine's dpkg database and the
+  # point is to fix the input, not to describe whatever is installed here.
+  # They are called only from the function eval'd above, which shellcheck
+  # cannot see, so it reads every one of them as dead code.
+  # shellcheck disable=SC2317
+  installed_names() { printf 'aardvark\n'; seq 1 20000 | sed 's/^/pkg/'; }
+  # shellcheck disable=SC2317
+  dpkg-deb() { printf 'aardvark, pkg19999, libnothing-at-all\n'; }
+
+  out="$(unmet_depends "${SB}/unused.deb" | tr '\n' ' ')"
+  is 'a match at the head of a long list counts as installed' \
+     "$(printf '%s' "${out}" | grep -c 'aardvark')" '0'
+  is 'a match at the tail counts too' \
+     "$(printf '%s' "${out}" | grep -c 'pkg19999')" '0'
+  has 'and something genuinely absent is still reported' "${out}" 'libnothing-at-all'
+
+  # Alternatives and version constraints, which share the same loop.
+  # shellcheck disable=SC2317
+  dpkg-deb() { printf 'libglib2.0-0 | aardvark, pkg1 (>= 1.2), libgone:any\n'; }
+  out="$(unmet_depends "${SB}/unused.deb" | tr '\n' ' ')"
+  is 'an alternative satisfied by the second name is not missing' \
+     "$(printf '%s' "${out}" | grep -c 'libglib')" '0'
+  is 'a version constraint does not hide the name' \
+     "$(printf '%s' "${out}" | grep -c 'pkg1 ')" '0'
+  has 'an architecture qualifier is stripped before the lookup' "${out}" 'libgone'
+)
+
 echo '== firewall ruleset shape =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s-firewall" > "${SB}/fw.sh"
@@ -587,7 +632,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=113   # update when tests are added; a wrong number is the point
+EXPECTED=119   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

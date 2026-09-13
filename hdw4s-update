@@ -271,7 +271,7 @@ smoke_test() {
   verify="$(dpkg --verify selkies 2>&1)" || :
   if [ -n "${verify}" ]; then
     echo 'dpkg --verify selkies reports files that no longer match:'
-    printf '%s\n' "${verify}" | head -10
+    head -10 <<<"${verify}"
     return 1
   fi
   version="$("${PREFIX}/bin/selkies" --version 2>&1)" || {
@@ -492,22 +492,43 @@ installed_names() {
                  }' | sort -u
 }
 
+# Answered out of a table rather than by asking grep once per dependency, and
+# that is not an optimisation.
+#
+# The version this replaces piped the installed names into "grep -qxF". grep -q
+# exits the instant it matches, which closes the pipe, which kills the producer
+# with SIGPIPE, which is status 141 -- and under "set -o pipefail" 141 is the
+# status of the whole pipeline. So a dependency that IS installed reported as
+# missing, and did so only when the match came early enough for grep to exit
+# before the producer finished writing. On a container with a few hundred
+# packages the list was short enough that it never happened; on a real desktop
+# with 4681 of them it reported all twenty as missing and refused the install.
+#
+# The general rule, since the same shape was in four other places here: a
+# consumer that can exit early -- grep -q, head -- must not end a pipeline in a
+# script that sets pipefail unless the producer is known to be tiny. Everything
+# below reads from a variable or a file instead.
 unmet_depends() {
-  local deb="$1" have dep alt name ok
-  have="$(installed_names)"
-  dpkg-deb -f "${deb}" Depends | tr ',' '\n' | while read -r dep; do
+  local deb="$1" dep alt name ok n
+  declare -A have
+  while read -r n; do
+    [ -n "${n}" ] || continue
+    have["${n}"]=1
+  done < <(installed_names)
+
+  # "read" with one variable and the default IFS trims the surrounding
+  # whitespace, which is why nothing here has to.
+  while read -r dep; do
     [ -n "${dep}" ] || continue
     ok=''
     # "a | b" is satisfied by either, so every alternative has to be asked.
     for alt in ${dep//|/ }; do
       case "${alt}" in '('*|*')') continue;; esac
       name="${alt%%:*}"
-      printf '%s\n' "${have}" | grep -qxF -- "${name}" || continue
-      ok='yes'
-      break
+      [ -z "${have["${name}"]:-}" ] || { ok='yes'; break; }
     done
-    [ -n "${ok}" ] || printf '%s\n' "$(printf '%s' "${dep}" | sed 's/^ *//; s/ *$//')"
-  done
+    [ -n "${ok}" ] || printf '%s\n' "${dep}"
+  done < <(dpkg-deb -f "${deb}" Depends | tr ',' '\n')
 }
 
 # --- ROLLING BACK -----------------------------------------------------------
@@ -577,17 +598,34 @@ else
     [ -z "${why}" ] || printf '  %s\n' "${why}" >&2
     exit 0
   }
-  wanted="$(version_from_tag "$(sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
-            "${release}" | head -n1)")"
+  # The address, then the substitution, then "q" -- rather than a "head -n1" on
+  # the end of a pipe. sed stops itself at the first match, so there is no
+  # early-exiting consumer to SIGPIPE the producer. A block cannot hang off an
+  # "s" command directly; written that way sed refuses the expression, prints
+  # nothing, and the tag comes back empty -- which the guard below then reports
+  # as "upstream returned no usable release tag" and, until this was changed,
+  # exited 0 on. A broken parser that looks like a quiet night is exactly the
+  # failure this file is meant not to have.
+  wanted="$(version_from_tag "$(sed -n '/"tag_name"/{
+              s/.*"tag_name": *"\([^"]*\)".*/\1/p;q
+            }' "${release}")")"
   echo ' done.'
 
-  # jq prints the literal string "null" for a missing key, so an empty test on
-  # its own would let a malformed response through and build a download URL for
+  # Not exit 0. Upstream always names its releases, so no tag means either the
+  # API changed shape or the parser above is broken, and neither is a thing
+  # that comes right by waiting. Exiting 0 here is how a machine stops updating
+  # while its timer goes on reporting success every night.
+  #
+  # "null" is spelled out because jq prints that literal for a missing key, and
+  # an emptiness test alone would let it through and build a download URL for
   # version "null".
   case "${wanted}" in
     ''|null)
-      echo 'Upstream returned no usable release tag; nothing to do.' >&2
-      exit 0
+      echo 'hdw4s: upstream returned a release document this cannot read: no' >&2
+      echo '  usable tag name in it. Nothing has been changed. If the GitHub' >&2
+      echo '  API has changed shape, hdw4s-update has to be taught the new' >&2
+      echo '  one; pin SELKIES_VERSION meanwhile to stop this repeating.' >&2
+      die
       ;;
   esac
 
@@ -678,7 +716,7 @@ if [ "${current}" = "${wanted}" ]; then
     die
   fi
   echo "Selkies v${wanted} is installed but has been modified since:" >&2
-  printf '%s\n' "${damage}" | head -10 | sed 's/^/  /' >&2
+  head -10 <<<"${damage}" | sed 's/^/  /' >&2
   echo '  Reinstalling it.' >&2
 fi
 
@@ -726,7 +764,9 @@ url="$(tr -d ' \t\n' < "${release}" |
        sed 's/.*"assets":\[//' |
        sed "s|.*\"name\":\"${asset}\"||" |
        sed 's/"name":".*//' |
-       sed -n 's|.*"browser_download_url":"\([^"]*\)".*|\1|p' | head -n1)"
+       sed -n '/"browser_download_url"/{
+                 s|.*"browser_download_url":"\([^"]*\)".*|\1|p;q
+               }')"
 [ -n "${url}" ] || {
   echo ' failed.'
   echo "Upstream lists ${asset} with no download URL; aborting." >&2
@@ -894,7 +934,11 @@ for unit in "${units[@]}"; do
     *)
       for _sample in 1 2 3; do
         conns="$(ss -Htnp state established "dport = :${port}" 2>/dev/null || :)"
-        if [ -n "${conns}" ] && ! printf '%s\n' "${conns}" | grep -q 'pid='; then
+        # Asked with a pattern rather than a pipe into grep -q, which would
+        # come back 141 on a busy machine and take this branch exactly when it
+        # should not: a session whose owners are perfectly visible classified
+        # as one whose owners are not.
+        if [ -n "${conns}" ] && [[ "${conns}" != *pid=* ]]; then
           # Connections exist but we cannot see who owns them, so we cannot tell
           # a user from the session talking to itself.
           attached='1'
