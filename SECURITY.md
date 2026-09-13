@@ -32,9 +32,10 @@ is not a substitute for authenticating people at the proxy.
 reach a session to a set of addresses. An address is a weak thing to rely on by
 itself: it can be spoofed unless the network prevents it, and on a shared
 network anything on that network can present it. Treat it as a second lock,
-never the first. The nftables rules also close the connection candidates the
-streaming server scatters across every address the machine has -- see the note
-on the media chain below for how, and for what that does and does not cover.
+never the first. The nftables rules also close the ephemeral range a WebRTC
+media path would scatter sockets across -- which, since dual mode is locked
+off, is now a second line rather than the first. See the note on the media
+chain below for how, and for what it does and does not cover.
 
 **The updater installs an unsigned upstream package as root.** `hdw4s-update`
 fetches the streaming server's `.deb` from its upstream GitHub releases over TLS
@@ -65,8 +66,15 @@ stays in the journal for its retention period, so `hdw4s auth` does not retract
 one that has already been logged; and rotating a credential does not shorten
 that window.
 
-The nftables `media` chain closes the streaming server's connection-candidate
-sockets. Where the kernel allows it, it matches the cgroup that owns each
+The nftables `media` chain closes the sockets a WebRTC media path would open.
+Under 2.0 there are none to close: the session serves one WebSocket, dual mode
+is locked off so the WebRTC stack never starts, and the streaming server's
+process owns one TCP listener on loopback and no UDP socket at all -- checked,
+not assumed. The chain stays because what it constrains is broader than that
+one program, as the rest of this note explains, and because a future release
+that reached for a media path should find the door already shut.
+
+Where the kernel allows it, it matches the cgroup that owns each
 socket, which means it constrains sockets **by what created them, not by which
 port they use**. Where it does not -- an older kernel, older nftables, or a
 container below kernel 6.11, where matching a cgroup by level silently never
