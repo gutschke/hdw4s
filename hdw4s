@@ -20,6 +20,30 @@ die() {
   exit 1
 }
 
+# Wrong arguments are the user's mistake, not this program's fault. Without
+# standing the trap down first they exited through it, so every mistyped
+# command printed the usage text and then "Script hdw4s failed unexpectedly"
+# underneath it -- which reads as a crash, and sends somebody looking for a bug
+# in the tool instead of at the line they just typed.
+# The command that does own a setting, spelled the way it is actually invoked.
+# Not "hdw4s <owner> <instance> <value>" for all of them: turning authentication
+# off is a different command rather than a different argument, so that form sent
+# people to "hdw4s auth NAME none", which takes one argument too many and failed
+# in front of them. A suggestion nobody can paste is worse than none.
+owning_command() {
+  case "$1:$3" in
+    HDW4S_AUTH:none) printf 'hdw4s noauth %s' "$2";;
+    HDW4S_AUTH:*)    printf 'hdw4s auth %s' "$2";;
+    *)               printf 'hdw4s %s %s%s' "${OWNED_BY[$1]}" "$2" "${3:+ $3}";;
+  esac
+}
+
+usage_error() {
+  usage >&2
+  trap '' INT TERM QUIT HUP EXIT ERR
+  exit 2
+}
+
 # Every path this program writes goes through these, so that a test can point
 # them somewhere disposable. Without that the tests read -- and would sooner or
 # later write -- the real configuration of the machine they run on.
@@ -745,7 +769,7 @@ cmd_set() {
       die "hdw4s: ${key} is not set this way for one session." \
           "  It takes effect through a drop-in that only 'hdw4s ${OWNED_BY[${key}]}'" \
           '  writes, so setting it here would be recorded and ignored. Run:' \
-          "    hdw4s ${OWNED_BY[${key}]} ${inst}${value:+ ${value}}" \
+          "    $(owning_command "${key}" "${inst}" "${value}")" \
           "  Setting it without a session name applies to sessions created" \
           '  afterwards, which is what the sample configuration describes.'
     [ -z "${inst}" ] || [ -z "${GLOBAL_ONLY[${key}]+set}" ] ||
@@ -1461,19 +1485,19 @@ cmd_release() {
 
 case "${1:-}" in
   list)     shift; cmd_list "$@";;
-  show)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_show "$@";;
-  enable)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_enable "$@";;
-  disable)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_disable "$@";;
-  keyring)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_keyring "$@";;
-  seed)     shift; [ $# -ge 1 ] || { usage >&2; exit 2; }; cmd_seed "$@";;
+  show)     shift; [ $# -eq 1 ] || usage_error; cmd_show "$@";;
+  enable)   shift; [ $# -eq 1 ] || usage_error; cmd_enable "$@";;
+  disable)  shift; [ $# -eq 1 ] || usage_error; cmd_disable "$@";;
+  keyring)  shift; [ $# -eq 1 ] || usage_error; cmd_keyring "$@";;
+  seed)     shift; [ $# -ge 1 ] || usage_error; cmd_seed "$@";;
   reap)     shift; cmd_reap "$@";;
-  auth)     shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_auth "$@";;
-  noauth)   shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_noauth "$@";;
-  transport) shift; [ $# -eq 2 ] || { usage >&2; exit 2; }; cmd_transport "$@";;
-  proxy)    shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_proxy "$@";;
+  auth)     shift; [ $# -eq 1 ] || usage_error; cmd_auth "$@";;
+  noauth)   shift; [ $# -eq 1 ] || usage_error; cmd_noauth "$@";;
+  transport) shift; [ $# -eq 2 ] || usage_error; cmd_transport "$@";;
+  proxy)    shift; [ $# -eq 1 ] || usage_error; cmd_proxy "$@";;
   set)      shift; cmd_set "$@";;
   unset)    shift; cmd_unset "$@";;
-  release)  shift; [ $# -eq 1 ] || { usage >&2; exit 2; }; cmd_release "$@";;
+  release)  shift; [ $# -eq 1 ] || usage_error; cmd_release "$@";;
   firewall) shift; exec /usr/lib/hdw4s/hdw4s-firewall "$@";;
   --version) echo "hdw4s ${HDW4S_VERSION}";;
   -h|--help|help|'') usage;;

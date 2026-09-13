@@ -180,6 +180,50 @@ echo '== configuration is validated before it is trusted =='
   printf 'HDW4S_PROXIES=10.0.0.1\n' > "${SB}/etc/hdw4s.conf"
   HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" --version >/dev/null 2>&1 \
     && ok 'a good config does not' || bad 'a good config does not'
+
+  # Wrong arguments are the user's mistake. They used to exit through the ERR
+  # trap, so the usage text was followed by "Script hdw4s failed unexpectedly"
+  # and a mistyped command read as a crash in the tool.
+  out="$(HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" auth one two 2>&1)" && rc=0 || rc=$?
+  is    'too many arguments is a usage error' "${rc}" '2'
+  has   'and prints the usage'                "${out}" 'Usage: hdw4s'
+  hasnt 'and does not read as a crash'        "${out}" 'failed unexpectedly'
+)
+
+echo '== a setting owned by a command names a command that exists =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # "hdw4s set X HDW4S_AUTH=none" told the user to run "hdw4s auth X none",
+  # which takes one argument too many and failed in front of them. Turning
+  # authentication off is a different command, not a different argument.
+  is 'turning auth off points at noauth' \
+     "$(owning_command HDW4S_AUTH inst none)" 'hdw4s noauth inst'
+  is 'turning it on points at auth'      \
+     "$(owning_command HDW4S_AUTH inst basic)" 'hdw4s auth inst'
+  # Transport really does take the value as an argument; it must keep it.
+  is 'transport keeps its value'         \
+     "$(owning_command HDW4S_TRANSPORT inst unix)" 'hdw4s transport inst unix'
+  # And every suggestion has to be one the dispatcher actually accepts. Checking
+  # only that the verb exists is not enough and was tried: "hdw4s auth X none"
+  # names a real command and still fails, because auth takes one argument. So
+  # run each suggestion and require that it is not rejected as a usage error --
+  # it will fail for other reasons here, having no such instance, and that is
+  # fine. Exit 2 is the one answer that means "you cannot type this".
+  # One assertion, not one per suggestion: a group that emits a different
+  # number of results depending on the outcome throws the suite's own count
+  # off, and "129 of 128 tests ran" is a worse report than the failure it is
+  # hiding.
+  _unpasteable=''
+  for _c in "$(owning_command HDW4S_AUTH i none)" \
+            "$(owning_command HDW4S_AUTH i basic)" \
+            "$(owning_command HDW4S_TRANSPORT i unix)"; do
+    # Splitting is the point here: the suggestion is a command line, and the
+    # test is whether the dispatcher accepts it as one.
+    # shellcheck disable=SC2086
+    set -- ${_c}; shift          # drop the leading "hdw4s"
+    HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" "$@" >/dev/null 2>&1
+    [ $? -ne 2 ] || _unpasteable="${_unpasteable}${_c}; "
+  done
+  is 'every suggestion can actually be typed' "${_unpasteable}" ''
 )
 
 echo '== unset takes a name, not a pattern =='
@@ -660,7 +704,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=121   # update when tests are added; a wrong number is the point
+EXPECTED=128   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
