@@ -29,7 +29,9 @@ Two independent oracles, because one of them can be right for the wrong reason:
 Run it against a session with no browser attached. Connecting opens a data
 websocket, which the server treats as the session's current one.
 """
+import glob
 import json
+import os
 import subprocess
 import sys
 import time
@@ -167,25 +169,61 @@ def check_refusals(base):
             bad(f"GET {path}", f"expected {expect}, got {code}")
 
 
-def check_home(home):
-    """No feature that is switched off may still leave something in the home.
+def check_home(home, unit):
+    """The upload directory must not be inside the account's home.
 
-    The upload directory is made when the module is imported, before any flag
-    is read, so `--file-transfers=none` refuses the transfers and creates the
-    folder anyway. There is no settings entry to assert on -- the path is one
-    of the ones the server never publishes -- so this looks at the home.
+    It is created when the module is imported, before any flag is read, so
+    `--file-transfers=none` refuses the transfers and makes the folder anyway.
+    The path is one the server never publishes, so it is read off the running
+    server's own command line.
+
+    This used to look for `~/Desktop` and call its absence a pass. That works
+    only on a home that has never had a desktop session: `Desktop` is an
+    ordinary xdg-user-dirs entry, so on any real account the check failed while
+    nothing was wrong, and on a fresh one it passed without establishing where
+    the upload directory actually points. Asking the server is both.
     """
     if not home:
-        print("  skip ~/Desktop (pass --home DIR: the session's own home, "
-              "which is not this script's)")
+        print("  skip the upload directory (pass --home DIR: the session's "
+              "own home, which is not this script's)")
         return
-    import os.path
-    target = os.path.join(home, "Desktop")
-    if os.path.exists(target):
-        bad("~/Desktop", f"{target} exists: the upload directory is still "
-                         "pointed at the account's home")
+    argv = _server_argv(unit)
+    if argv is None:
+        bad("upload directory", "cannot find the running streaming server to "
+                                "ask; pass --unit, or check the session is up")
+        return
+    path = next((a.split("=", 1)[1] for a in argv
+                 if a.startswith("--file-manager-path=")), None)
+    if path is None:
+        bad("upload directory", "the server was given no --file-manager-path, "
+                                "so it defaults to ~/Desktop in the account's "
+                                "home")
+    elif os.path.realpath(path).startswith(os.path.realpath(home) + os.sep):
+        bad("upload directory", f"{path} is inside {home}")
     else:
-        ok("no upload directory in the home")
+        ok(f"the upload directory is outside the home ({path})")
+
+
+def _server_argv(unit):
+    """The streaming server's argv, found under the session's own cgroup."""
+    import glob
+    for cmdline in glob.glob("/proc/[0-9]*/cmdline"):
+        try:
+            with open(cmdline, "rb") as fh:
+                argv = fh.read().split(b"\0")
+        except OSError:
+            continue
+        if not argv or b"/selkies" not in argv[0]:
+            continue
+        if unit:
+            try:
+                with open(cmdline.replace("cmdline", "cgroup")) as fh:
+                    if unit not in fh.read():
+                        continue
+            except OSError:
+                continue
+        return [a.decode("utf-8", "replace") for a in argv if a]
+    return None
 
 
 def check_defeat(base, unit):
@@ -269,7 +307,7 @@ def main():
         check_ceilings(settings, framerate)
     check_refusals(base)
     check_defeat(base, unit)
-    check_home(home)
+    check_home(home, unit)
 
     # Not an assertion: a setting the server never heard of is already caught
     # above by "overridden". This only names the likely cause when it happens.
