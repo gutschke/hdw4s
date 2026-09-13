@@ -172,6 +172,8 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_THUMBNAILS\fR: Whether the file manager draws image thumbnails\. Defaults to \fBoff\fR, and like \fBHDW4S_INDEXING\fR takes effect only with \fBHDW4S_ISOLATION=profile\fR\. The file manager's own \fBlocal\-only\fR setting does not protect a network home, because the kernel calls NFS native; see SHARED HOME DIRECTORIES\.
 .IP "\[ci]" 4
+\fBHDW4S_HIDPI\fR: How a high\-density client is handled: \fBscale\fR (the default) asks for the size of the browser window and lets the browser stretch the result, which is correct size and slightly soft; \fBnative\fR asks for the client's full device resolution, which is pixel\-exact and, on GNOME, half size\. See SHARED HOME DIRECTORIES for why the desktop does not scale itself\.
+.IP "\[ci]" 4
 \fBSELKIES_VERSION\fR: Pin a Selkies release and stop following upstream\.
 .IP "" 0
 .SH "SHARED HOME DIRECTORIES"
@@ -204,6 +206,8 @@ That last line covers files the software writes as well as the user's own, and t
                 not created here at all\.
 .fi
 .IP "" 0
+.P
+A high\-density client is a related trap\. The desktop does not scale itself: GNOME works its scale out from the monitor's physical size, a virtual monitor reports none, and GNOME therefore stops at 1\. Asking the streaming server for a higher DPI does not help either, because on GNOME that reaches only the X resource database, which the settings daemon owns\. So a client on a 2x screen asking for its full device resolution gets a desktop at half size\. \fBHDW4S_HIDPI\fR defaults to \fBscale\fR for that reason\.
 .P
 The indexer is a separate matter, and is off by default \-\- see \fBHDW4S_INDEXING\fR\. On a home shared between machines it is work without an answer: every machine crawls the same tree over the network, each keeps its own copy of the result on local disk, and none of them sees a change made from another machine, because the only change notification it has is inotify and inotify does not cross NFS\. It is not removed and not masked: the package is a hard dependency of the file manager, and masking it would reach the account's real login session on the same machine\. The session sets the keys that Settings \-> Search \-> Search Locations writes, so a user can turn it back on for their own session where they would think to look\. The cost is that searching inside documents stops working; searching by name still works, but walks the tree instead of consulting an index\.
 .P

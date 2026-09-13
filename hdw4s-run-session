@@ -21,6 +21,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_DPI:=follow}"
 : "${HDW4S_INDEXING:=off}"
 : "${HDW4S_THUMBNAILS:=off}"
+: "${HDW4S_HIDPI:=scale}"
 : "${HDW4S_ENCODER:=h264enc}"
 
 # The streaming server now defaults this to true and implements resizing itself,
@@ -330,6 +331,37 @@ esac
 dpi=()
 [ "${HDW4S_DPI}" = 'follow' ] || dpi=(--scaling-dpi="${HDW4S_DPI}")
 
+# How a high-density client is handled.
+#
+# "native" is upstream's default and is wrong on GNOME. The client asks for a
+# framebuffer at its device resolution -- a 2x screen on a 1600x900 window gets
+# 3200x1800 -- and the desktop is still drawn at scale 1, so every control and
+# all text come out at half the intended size. Crisp and unusable.
+#
+# It is not a setting we failed to turn on. GNOME would scale this itself, but
+# mutter derives the scale from the monitor's physical size, and the virtual
+# monitor reports 0mm x 0mm, at which point mutter returns 1.0 and stops. The
+# DPI the streaming server can be told is inert here too: it reaches GNOME only
+# through xrdb, and gnome-settings-daemon owns that value. Sending 192 writes
+# Xft.dpi into the user's home and changes nothing on screen.
+#
+# "scale" asks the client for the CSS resolution instead and lets the browser
+# stretch it. Correct size on a 2x screen, byte-identical on a 1x one, and a
+# quarter of the pixels through a software H.264 encoder. The cost is that the
+# image is smoothed rather than pixel-exact.
+#
+# A user who prefers the sharper picture can switch it back for their own
+# browser from the sidebar, with no restart; the pick outranks this default.
+#
+# The better answer is to give the virtual monitor a physical size that tracks
+# the client's density, the way Chrome Remote Desktop does, which would let
+# GNOME scale natively and crisply. That needs code upstream does not have, and
+# is on the list to offer them.
+case "${HDW4S_HIDPI}" in
+  native) hidpi=(--use-css-scaling=false) ;;
+  *)      hidpi=(--use-css-scaling=true)  ;;
+esac
+
 lockdown=(
   # Every boolean below carries "|locked". Without it the value is only a
   # default: a bool the server reads back out of a client's SETTINGS frame is
@@ -385,7 +417,7 @@ lockdown=(
   --enable-resize="${HDW4S_RESIZE}" \
   --encoder="${HDW4S_ENCODER}" \
   --framerate="${framerate}" \
-  "${dpi[@]}" "${lockdown[@]}" &
+  "${dpi[@]}" "${hidpi[@]}" "${lockdown[@]}" &
 children+=($!)
 stream_pid="$!"
 

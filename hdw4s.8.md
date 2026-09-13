@@ -281,6 +281,13 @@ belongs to the copy of the streaming server, of which there is one.
     file manager's own `local-only` setting does not protect a network home,
     because the kernel calls NFS native; see SHARED HOME DIRECTORIES.
 
+  * `HDW4S_HIDPI`:
+    How a high-density client is handled: `scale` (the default) asks for the
+    size of the browser window and lets the browser stretch the result, which
+    is correct size and slightly soft; `native` asks for the client's full
+    device resolution, which is pixel-exact and, on GNOME, half size. See
+    SHARED HOME DIRECTORIES for why the desktop does not scale itself.
+
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 
@@ -329,6 +336,14 @@ three of them come from the streaming server rather than from the desktop:
                     transfers, which this package does not enable. Pointed
                     at the session's runtime directory instead, so it is
                     not created here at all.
+
+A high-density client is a related trap. The desktop does not scale itself:
+GNOME works its scale out from the monitor's physical size, a virtual monitor
+reports none, and GNOME therefore stops at 1. Asking the streaming server for a
+higher DPI does not help either, because on GNOME that reaches only the X
+resource database, which the settings daemon owns. So a client on a 2x screen
+asking for its full device resolution gets a desktop at half size. `HDW4S_HIDPI`
+defaults to `scale` for that reason.
 
 The indexer is a separate matter, and is off by default -- see
 `HDW4S_INDEXING`. On a home shared between machines it is work without an
