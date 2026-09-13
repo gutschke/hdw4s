@@ -624,6 +624,7 @@ SESSION_SETTINGS=(
   'HDW4S_RESIZE:true'
   'HDW4S_DPI:follow'
   'HDW4S_INDEXING:off'
+  'HDW4S_THUMBNAILS:off'
   'HDW4S_IDLE_DAYS:7'
   'HDW4S_PROFILE_DIR:/var/lib/hdw4s'
 )
@@ -649,6 +650,7 @@ declare -A SETTABLE=(
   [HDW4S_RESIZE]='true|false'
   [HDW4S_DPI]='dpi'
   [HDW4S_INDEXING]='off|on'
+  [HDW4S_THUMBNAILS]='off|on'
   [HDW4S_LANG]='any'
   [HDW4S_IDLE_DAYS]='number'
   [HDW4S_MEDIA_PORTS]='proxied|direct'

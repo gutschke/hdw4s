@@ -275,6 +275,12 @@ belongs to the copy of the streaming server, of which there is one.
     account's rather than the session's and is left alone, with a warning. See
     SHARED HOME DIRECTORIES for why, and for what turning it off costs.
 
+  * `HDW4S_THUMBNAILS`:
+    Whether the file manager draws image thumbnails. Defaults to `off`, and
+    like `HDW4S_INDEXING` takes effect only with `HDW4S_ISOLATION=profile`. The
+    file manager's own `local-only` setting does not protect a network home,
+    because the kernel calls NFS native; see SHARED HOME DIRECTORIES.
+
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 
@@ -336,6 +342,18 @@ Settings -> Search -> Search Locations writes, so a user can turn it back on for
 their own session where they would think to look. The cost is that searching
 inside documents stops working; searching by name still works, but walks the
 tree instead of consulting an index.
+
+Thumbnails go the same way and on weaker grounds, which is worth stating.
+The file manager's own setting is `local-only`, which sounds like the
+protection a network home wants and is not: `local` there means the kernel
+calls the filesystem native, and it calls NFS native. So the default reads
+every image in a browsed directory in full, over the network. Against that:
+the result is cached in the profile and the profile persists, so it is a cost
+per machine rather than per session; the file manager skips anything over its
+own size limit; and this is something a user can see and probably wants. What
+tips it is that a desktop delivered as a video stream pays for a wall of
+thumbnails twice, once over the network and again in the encoder.
+`HDW4S_THUMBNAILS=on` gives them back.
 
 The first two are what `HDW4S_DPI` set to a number stops -- `96` stops them
 outright, another number still applies itself once at startup and writes them

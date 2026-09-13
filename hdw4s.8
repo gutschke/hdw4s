@@ -170,6 +170,8 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_INDEXING\fR: Whether the desktop's file indexer runs\. Defaults to \fBoff\fR, and takes effect only with \fBHDW4S_ISOLATION=profile\fR; without that the indexer is the account's rather than the session's and is left alone, with a warning\. See SHARED HOME DIRECTORIES for why, and for what turning it off costs\.
 .IP "\[ci]" 4
+\fBHDW4S_THUMBNAILS\fR: Whether the file manager draws image thumbnails\. Defaults to \fBoff\fR, and like \fBHDW4S_INDEXING\fR takes effect only with \fBHDW4S_ISOLATION=profile\fR\. The file manager's own \fBlocal\-only\fR setting does not protect a network home, because the kernel calls NFS native; see SHARED HOME DIRECTORIES\.
+.IP "\[ci]" 4
 \fBSELKIES_VERSION\fR: Pin a Selkies release and stop following upstream\.
 .IP "" 0
 .SH "SHARED HOME DIRECTORIES"
@@ -204,6 +206,8 @@ That last line covers files the software writes as well as the user's own, and t
 .IP "" 0
 .P
 The indexer is a separate matter, and is off by default \-\- see \fBHDW4S_INDEXING\fR\. On a home shared between machines it is work without an answer: every machine crawls the same tree over the network, each keeps its own copy of the result on local disk, and none of them sees a change made from another machine, because the only change notification it has is inotify and inotify does not cross NFS\. It is not removed and not masked: the package is a hard dependency of the file manager, and masking it would reach the account's real login session on the same machine\. The session sets the keys that Settings \-> Search \-> Search Locations writes, so a user can turn it back on for their own session where they would think to look\. The cost is that searching inside documents stops working; searching by name still works, but walks the tree instead of consulting an index\.
+.P
+Thumbnails go the same way and on weaker grounds, which is worth stating\. The file manager's own setting is \fBlocal\-only\fR, which sounds like the protection a network home wants and is not: \fBlocal\fR there means the kernel calls the filesystem native, and it calls NFS native\. So the default reads every image in a browsed directory in full, over the network\. Against that: the result is cached in the profile and the profile persists, so it is a cost per machine rather than per session; the file manager skips anything over its own size limit; and this is something a user can see and probably wants\. What tips it is that a desktop delivered as a video stream pays for a wall of thumbnails twice, once over the network and again in the encoder\. \fBHDW4S_THUMBNAILS=on\fR gives them back\.
 .P
 The first two are what \fBHDW4S_DPI\fR set to a number stops \-\- \fB96\fR stops them outright, another number still applies itself once at startup and writes them that once \-\- at the cost of a desktop that no longer scales to a HiDPI or zoomed browser\. It is left following by default because that cost falls on everyone who opens a session, while these two files matter only to an account that keeps something in them\.
 .P

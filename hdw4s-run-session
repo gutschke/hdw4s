@@ -20,6 +20,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_FRAMERATE:=30}"
 : "${HDW4S_DPI:=follow}"
 : "${HDW4S_INDEXING:=off}"
+: "${HDW4S_THUMBNAILS:=off}"
 : "${HDW4S_ENCODER:=h264enc}"
 
 # The streaming server now defaults this to true and implements resizing itself,
@@ -186,6 +187,33 @@ elif [ "${HDW4S_ISOLATION:-none}" = 'profile' ]; then
     reset_if_present org.freedesktop.Tracker3.Miner.Files "${_k}"
   done
   rm -f "${XDG_CONFIG_HOME}/autostart/tracker-miner-fs-3.desktop"
+fi
+
+# Image thumbnails, off by default for the same reason and with a caveat.
+#
+# The file manager's own setting for this is "local-only", which sounds like
+# the protection a network home wants and is not: "local" there means the
+# kernel calls the filesystem native, and it calls NFS native. So the default
+# thumbnails a network home exactly as eagerly as a local disk, reading each
+# image in full over the network to do it.
+#
+# Weaker grounds than the indexer, and worth saying so. The result is cached in
+# the profile, which persists, so it is a cost per machine rather than per
+# session; the file manager skips anything over its own size limit anyway; and
+# unlike the indexer this is something the user can see and probably wants.
+# What tips it is the delivery: a desktop reaching a browser as a video stream
+# pays for a wall of thumbnails twice, once over NFS and again in the encoder.
+#
+# HDW4S_THUMBNAILS=on gives them back.
+if [ "${HDW4S_THUMBNAILS}" = 'off' ] && [ "${HDW4S_ISOLATION:-none}" = 'profile' ]
+then
+  set_if_present org.gnome.nautilus.preferences show-image-thumbnails "'never'"
+elif [ "${HDW4S_THUMBNAILS}" = 'off' ]; then
+  echo 'hdw4s: HDW4S_THUMBNAILS=off needs HDW4S_ISOLATION=profile; the setting' \
+       'belongs to the account rather than to this session, so it has been' \
+       'left alone.' >&2
+elif [ "${HDW4S_ISOLATION:-none}" = 'profile' ]; then
+  reset_if_present org.gnome.nautilus.preferences show-image-thumbnails
 fi
 
 # shellcheck disable=SC2086
