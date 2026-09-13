@@ -230,7 +230,16 @@ required.
 
 Ubuntu 24.04 is what this is developed and tested on: `.github/clean-install-test.sh`
 installs the built package onto a freshly bootstrapped 24.04 system and checks
-that a session's code loads. Nothing else is tested that thoroughly. A Debian of
+that the streaming server ends up installed and loadable.
+
+Two further suites run against a session that is actually up, which nothing
+offline can stand in for. `.github/live/lockdown.py` asks the running server
+what its settings are and proves the sixteen features this package switches off
+are still off -- including that the operator set them, since four have upstream
+defaults that already agree. `.github/live/walkthrough.py` drives two headless
+browsers and asks the questions a user asks: is there a picture, is there sound,
+does the desktop follow the window, and does a second window take the session
+over cleanly and give it back. Both need nothing but python3. A Debian of
 similar vintage is expected to work and may well need a dependency this list
 does not name -- four of them were only discovered by running that test -- so
 treat a first install elsewhere as something to watch rather than something
