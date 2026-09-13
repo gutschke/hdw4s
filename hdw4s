@@ -985,7 +985,11 @@ clients_of() {
   # Counting nothing because we cannot look is not the same as counting nothing
   # because nobody is there, and the difference decides whether a desktop in
   # use gets stopped. Say so rather than guess.
-  if [ -n "${out}" ] && ! printf '%s\n' "${out}" | grep -q 'pid='; then
+  # Not "printf | grep -q": grep exits on the first match, the producer takes
+  # SIGPIPE, and pipefail adopts that as the pipeline's status -- so a match
+  # reads as a miss once the output outgrows the pipe buffer. It never does
+  # here, but the failure is silent and the test is free.
+  if [ -n "${out}" ] && [ "${out#*pid=}" = "${out}" ]; then
     echo 'unknown'
     return 0
   fi

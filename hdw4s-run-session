@@ -329,7 +329,7 @@ stream_pid="$!"
 # unit or a provisioning script has something real to wait on.
 (
   for _ in $(seq 1 60); do
-    if ss -Hltn "sport = :${HDW4S_PORT}" 2>/dev/null | grep -q .; then
+    if [ -n "$(ss -Hltn "sport = :${HDW4S_PORT}" 2>/dev/null)" ]; then
       NOTIFY_SOCKET="${HDW4S_NOTIFY_SOCKET}" systemd-notify --ready \
         --status="display ${DISPLAY}, port ${HDW4S_PORT}, instance ${instance}"
       exit 0

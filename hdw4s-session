@@ -318,7 +318,8 @@ esac
 # which is exactly how a terminal that nothing could start went unexplained.
 unset LC_ALL
 if [ -z "${HDW4S_LANG:-}" ] && [ -r /etc/default/locale ]; then
-  HDW4S_LANG="$(sed -n 's/^LANG=//p' /etc/default/locale | tr -d \" | head -n1)"
+  HDW4S_LANG="$(awk -F= '/^LANG=/ { gsub(/"/, "", $2); print $2; exit }' \
+                    /etc/default/locale)"
 fi
 : "${HDW4S_LANG:=C.UTF-8}"
 case "${HDW4S_LANG}" in
