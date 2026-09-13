@@ -351,6 +351,26 @@ if ! run apt-get install -y --no-install-recommends "/tmp/$(basename "${deb}")" 
 fi
 echo ' done.'
 
+# The package cannot fetch Selkies from its own postinst, and in here it cannot
+# hand the job to systemd either.
+#
+# A maintainer script runs inside dpkg, which holds both of its own locks, so
+# installing another .deb from there is impossible -- a nested dpkg exits 2.
+# On a real machine postinst works around that by starting hdw4s-updater
+# through systemd, which runs outside the transaction. A chroot has no systemd,
+# so postinst says so and prints the command to run instead.
+#
+# This runs that command. Not as a workaround: the printed instruction is part
+# of the product, and an instruction nobody ever follows is one nobody notices
+# has stopped working. If it fails here, it fails for anyone building an image.
+echo -n 'Fetching Selkies the way the package just said to...'
+if ! run /usr/lib/hdw4s/hdw4s-update > "${ROOT}/tmp/update.log" 2>&1; then
+  echo ' FAILED.'
+  tail -20 "${ROOT}/tmp/update.log" >&2
+  exit 1
+fi
+echo ' done.'
+
 # --- the checks that matter --------------------------------------------------
 # Not "did apt succeed". It did, on the release that could never start a
 # desktop, and it did again on an install where every Python dependency was
@@ -379,9 +399,10 @@ dpkg_field() { run dpkg-query -W -f="\${$1}" "$2" 2>/dev/null || :; }
 
 echo 'Inspecting the installed system:'
 
-# 1. The updater is allowed to fail quietly during installation. Here it is not,
-#    and "installed" is dpkg's own word for unpacked *and* configured -- which
-#    is what separates a finished install from one that stopped halfway.
+# 1. "installed" is dpkg's own word for unpacked *and* configured, which is
+#    what separates a finished install from one that stopped halfway. The
+#    updater was run above and was not allowed to fail, so anything short of
+#    this is a real failure rather than a machine that had no network yet.
 selkies_status="$(dpkg_field 'db:Status-Status' selkies)"
 if [ "${selkies_status}" = 'installed' ]; then
   echo '  selkies installed                 yes'
@@ -445,20 +466,32 @@ run hdw4s --version >/dev/null 2>&1 || fail 'hdw4s --version failed'
 # trusting one word.
 echo
 echo '--- installed system -------------------------------------------------'
+[ -n "$(dpkg_field Version selkies)" ] || selkies_absent='not installed'
 printf '  %-24s %s\n' 'hdw4s' \
   "$(awk '/^Package: hdw4s$/{f=1; next} f&&/^Version:/{print $2; exit} /^$/{f=0}' \
      "${ROOT}/var/lib/dpkg/status" 2>/dev/null)"
 printf '  %-24s %s\n' 'selkies' \
-  "$(dpkg_field Version selkies)"
+  "$(dpkg_field Version selkies || :)${selkies_absent:-}"
 printf '  %-24s %s\n' 'debs installed' \
   "$(grep -c '^Status: install ok installed' "${ROOT}/var/lib/dpkg/status" 2>/dev/null)"
 printf '  %-24s %s\n' 'size on disk' "$(du -sh "${ROOT}" 2>/dev/null | cut -f1)"
 
 # The package's own file list, which is the only record it leaves: it ships no
 # maintainer scripts, so there is nothing else to read back.
-printf '  %-24s %s\n' 'files in selkies' \
-  "$(dpkg_field Installed-Size selkies) kB, $(wc -l \
-     < "${ROOT}/var/lib/dpkg/info/selkies.list" 2>/dev/null || echo '?') paths"
+#
+# Guarded on the file existing, rather than on wc failing. "wc -l < missing
+# 2>/dev/null" does not suppress anything: the redirection is the shell's, and
+# it fails before wc exists to have its stderr redirected -- so a run where
+# Selkies was not installed printed a raw "No such file or directory" into the
+# middle of its own summary, above the line that said why.
+selkies_list="${ROOT}/var/lib/dpkg/info/selkies.list"
+if [ -r "${selkies_list}" ]; then
+  printf '  %-24s %s kB, %s paths\n' 'files in selkies' \
+    "$(dpkg_field Installed-Size selkies)" "$(wc -l < "${selkies_list}")"
+else
+  printf '  %-24s %s\n' 'files in selkies' \
+    'none: dpkg has no file list, so the package is not installed'
+fi
 
 echo '  programs the server shells out to:'
 for prog in xdotool xset xrandr; do
