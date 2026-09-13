@@ -183,9 +183,22 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   # or backs one up. Firefox does need the wrapper in /usr/lib/hdw4s/wrappers,
   # because it ignores the XDG variables entirely.
 
-  # Indexing a shared home once per machine is wasted work and multiplies the
-  # write load on the file server for no benefit.
-  export TRACKER_DISABLE_MINERS='all'
+  # gnome-session runs its own service manager here, so the indexer's autostart
+  # file is honoured: the X-GNOME-HiddenUnderSystemd that normally suppresses it
+  # applies only under a systemd user manager, and there is none on this private
+  # bus. This stops it starting eagerly. It does not stop D-Bus activation -- the
+  # file manager can still summon it -- so the settings applied in
+  # hdw4s-run-session are the actual mechanism, and this only keeps the miner
+  # from running before they are in place.
+  #
+  # Written every session rather than once, so it survives a profile that was
+  # seeded from a home directory or edited by hand.
+  if [ "${HDW4S_INDEXING:-off}" = 'off' ]; then
+    install -d -m0700 "${XDG_CONFIG_HOME}/autostart"
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' \
+                  'Name=Tracker File System Miner' 'Hidden=true' \
+      > "${XDG_CONFIG_HOME}/autostart/tracker-miner-fs-3.desktop"
+  fi
 fi
 
 # gvfs exposes one FUSE mount per runtime directory. Two sessions for the same

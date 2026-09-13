@@ -19,6 +19,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_SESSION:=gnome-session}"
 : "${HDW4S_FRAMERATE:=30}"
 : "${HDW4S_DPI:=follow}"
+: "${HDW4S_INDEXING:=off}"
 : "${HDW4S_ENCODER:=h264enc}"
 
 # The streaming server now defaults this to true and implements resizing itself,
@@ -49,6 +50,18 @@ set_if_present() {
   timeout 10 gsettings writable "${schema}" "${key}" >/dev/null 2>&1 || return 0
   timeout 10 gsettings set "${schema}" "${key}" "${value}" 2>/dev/null ||
     echo "hdw4s: could not set ${schema} ${key}" >&2
+}
+
+# The other half of set_if_present, and not optional. A setting this session
+# writes into the profile's own database stays written: turning the setting
+# back off in the configuration does not undo it, because nothing goes back to
+# look. Without this, HDW4S_INDEXING=on left the indexer with an empty list of
+# directories and no way to recover short of editing dconf by hand.
+reset_if_present() {
+  local schema="$1" key="$2"
+  timeout 10 gsettings writable "${schema}" "${key}" >/dev/null 2>&1 || return 0
+  timeout 10 gsettings reset "${schema}" "${key}" 2>/dev/null ||
+    echo "hdw4s: could not reset ${schema} ${key}" >&2
 }
 
 # Applied in the background, once the desktop is on its way up. These three are
@@ -124,8 +137,56 @@ dbus-update-activation-environment \
   XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME \
   GNOME_SHELL_SESSION_MODE PATH HOME LANG \
   PULSE_SERVER PULSE_RUNTIME_PATH PIPEWIRE_RUNTIME_DIR \
-  TRACKER_DISABLE_MINERS GVFS_DISABLE_FUSE \
+  GVFS_DISABLE_FUSE \
   2>/dev/null || echo 'hdw4s: could not publish the activation environment' >&2
+
+# The desktop's file indexer, off by default. On a home shared between machines
+# it is work without an answer: each machine crawls the same tree over the
+# network, keeps its own copy of the result on local disk, and cannot see a
+# change made from another machine, because the only change notification it has
+# is inotify and inotify does not cross NFS. One real account here keeps 107GB
+# of photographs in a directory the indexer is configured to crawl.
+#
+# Not removed and not masked. The package is a hard dependency of the file
+# manager, and masking the user units would reach the account's real login
+# session on this machine, which nothing here is allowed to do. These are the
+# keys Settings -> Search -> Search Locations writes, so the change is visible
+# where a user would look for it and they can undo it there for their own
+# session. The daemon still starts and still answers; it has nothing to crawl.
+#
+# Applied here rather than in the background block below, because the miner
+# reads them once at startup and "probably wins the race" is not a mechanism.
+#
+# What was here before was "export TRACKER_DISABLE_MINERS=all", which no
+# Tracker 3 binary reads -- it was a Tracker 2 control. It had been believed for
+# long enough that a test was skipped on the strength of it while the miner ran.
+if [ "${HDW4S_INDEXING}" = 'off' ] && [ "${HDW4S_ISOLATION:-none}" = 'profile' ]
+then
+  set_if_present org.freedesktop.Tracker3.Miner.Files \
+                 index-recursive-directories '@as []'
+  set_if_present org.freedesktop.Tracker3.Miner.Files \
+                 index-single-directories    '@as []'
+  set_if_present org.freedesktop.Tracker3.Miner.Files \
+                 index-removable-devices     false
+  set_if_present org.freedesktop.Tracker3.Miner.Files \
+                 index-optical-discs         false
+  # Belt and braces with nothing configured to crawl, but this is the key that
+  # stops inotify watches being taken out at all, and those are a per-user
+  # kernel limit shared with everything else the account is running.
+  set_if_present org.freedesktop.Tracker3.Miner.Files enable-monitors false
+elif [ "${HDW4S_INDEXING}" = 'off' ]; then
+  echo 'hdw4s: HDW4S_INDEXING=off needs HDW4S_ISOLATION=profile; the indexer' \
+       'belongs to the account rather than to this session, so it has been' \
+       'left alone.' >&2
+elif [ "${HDW4S_ISOLATION:-none}" = 'profile' ]; then
+  # Put back whatever a previous "off" wrote. These keys live in the profile's
+  # own database, so they survive the setting changing underneath them.
+  for _k in index-recursive-directories index-single-directories \
+            index-removable-devices index-optical-discs enable-monitors; do
+    reset_if_present org.freedesktop.Tracker3.Miner.Files "${_k}"
+  done
+  rm -f "${XDG_CONFIG_HOME}/autostart/tracker-miner-fs-3.desktop"
+fi
 
 # shellcheck disable=SC2086
 ${HDW4S_SESSION} &

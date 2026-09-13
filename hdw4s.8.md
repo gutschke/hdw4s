@@ -269,6 +269,12 @@ belongs to the copy of the streaming server, of which there is one.
     number other than 96 is still applied once when the session starts, so
     both files are written that once. Pinning 96 writes neither, ever.
 
+  * `HDW4S_INDEXING`:
+    Whether the desktop's file indexer runs. Defaults to `off`, and takes
+    effect only with `HDW4S_ISOLATION=profile`; without that the indexer is the
+    account's rather than the session's and is left alone, with a warning. See
+    SHARED HOME DIRECTORIES for why, and for what turning it off costs.
+
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 
@@ -317,6 +323,19 @@ three of them come from the streaming server rather than from the desktop:
                     transfers, which this package does not enable. Pointed
                     at the session's runtime directory instead, so it is
                     not created here at all.
+
+The indexer is a separate matter, and is off by default -- see
+`HDW4S_INDEXING`. On a home shared between machines it is work without an
+answer: every machine crawls the same tree over the network, each keeps its own
+copy of the result on local disk, and none of them sees a change made from
+another machine, because the only change notification it has is inotify and
+inotify does not cross NFS. It is not removed and not masked: the package is a
+hard dependency of the file manager, and masking it would reach the account's
+real login session on the same machine. The session sets the keys that
+Settings -> Search -> Search Locations writes, so a user can turn it back on for
+their own session where they would think to look. The cost is that searching
+inside documents stops working; searching by name still works, but walks the
+tree instead of consulting an index.
 
 The first two are what `HDW4S_DPI` set to a number stops -- `96` stops them
 outright, another number still applies itself once at startup and writes them
