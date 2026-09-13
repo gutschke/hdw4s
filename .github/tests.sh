@@ -487,15 +487,43 @@ echo '== firewall ruleset shape =='
             grep -cE '^(counter )?accept$')"
   is 'no chain accepts unconditionally' "${uncond}" '0'
   # And the drop is still there, once per chain, at the end of it.
+  #
+  # Keyed by the chain's name, and matched on the end of the rule rather than
+  # the whole of it. Both mattered: this compared the second line of the list
+  # against the exact string "counter drop", so it silently depended on which
+  # chain generate() happened to emit second, and on which media chain this
+  # machine gets -- the cgroup form ends "socket cgroupv2 level 1
+  # "hdw4s.slice" counter drop", which is the same verdict wearing a
+  # condition. It passed on a machine where hdw4s had never run and failed on
+  # one where it had, which is not a property a test reading generated text
+  # should have at all.
   ends="$(printf '%s\n' "${out}" |
-          awk '/chain [a-z]+ \{/ { inchain = 1; last = "" }
+          awk '/chain [a-z]+ \{/ { inchain = 1; last = ""; name = $2 }
                inchain && !/^[[:space:]]*#/ && /accept$|drop$/ { last = $0 }
                inchain && /^[[:space:]]*\}/ {
-                 inchain = 0; sub(/^[[:space:]]+/, "", last); print last }')"
-  is 'input chain ends in the drop' \
-     "$(printf '%s\n' "${ends}" | sed -n 1p)" 'counter drop'
-  is 'media chain ends in the drop' \
-     "$(printf '%s\n' "${ends}" | sed -n 2p)" 'counter drop'
+                 inchain = 0; sub(/^[[:space:]]+/, "", last)
+                 print name "\t" last }')"
+  ends_in_drop() {
+    local line
+    line="$(printf '%s\n' "${ends}" | awk -F'\t' -v n="$1" '$1 == n { print $2 }')"
+    case "${line}" in
+      '')             echo "no ${1} chain";;
+      *'counter drop') echo 'counter drop';;
+      *)              echo "${line}";;
+    esac
+  }
+  is 'input chain ends in the drop' "$(ends_in_drop input)" 'counter drop'
+  is 'media chain ends in the drop' "$(ends_in_drop media)" 'counter drop'
+  # generate() emits whichever media chain this machine can support, so the
+  # assertion above only ever sees one of the two. Hand the matcher the other
+  # one directly, so that the test means the same thing on every machine
+  # instead of quietly checking half as much on most of them.
+  ends="$(printf 'media\tsocket cgroupv2 level 1 "hdw4s.slice" counter drop\n')"
+  is 'the cgroup form counts as ending in the drop' \
+     "$(ends_in_drop media)" 'counter drop'
+  ends="$(printf 'media\tip saddr @proxies4 accept\n')"
+  is 'a chain ending in an accept does not' \
+     "$(ends_in_drop media)" 'ip saddr @proxies4 accept'
 
   # generate() emits one of two media chains depending on whether this machine
   # can match a cgroup, so a test of its output only ever exercises one of them.
@@ -632,7 +660,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=119   # update when tests are added; a wrong number is the point
+EXPECTED=121   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
