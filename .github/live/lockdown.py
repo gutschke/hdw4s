@@ -29,6 +29,7 @@ Two independent oracles, because one of them can be right for the wrong reason:
 Run it against a session with no browser attached. Connecting opens a data
 websocket, which the server treats as the session's current one.
 """
+import base64
 import glob
 import json
 import os
@@ -280,12 +281,109 @@ def check_defeat(base, unit):
         ok("enable_binary_clipboard survives a client asking for it")
 
 
+def check_defeat_wire_verb(base, unit, probe_file):
+    """The lock is enforced on one path. This is the other one.
+
+    check_defeat above proves a SETTINGS frame cannot move
+    enable_binary_clipboard, because "|locked" is enforced inside the settings
+    object's sanitize_value. Only the SETTINGS path calls it. The one-token
+    "_ebc,<bool>" message writes the input handler's own copy of the setting
+    directly and never goes near it, so the lock does not hold there -- and the
+    stock client sends "_ebc", so it is a live path rather than a curiosity.
+
+    That on its own moves a flag, not data. What stops the data is a second and
+    unrelated gate on the way out, which reads a *different* copy of the
+    setting -- the one built from the command line, which "_ebc" cannot reach.
+    That gate is what this asserts, because it is the one whose removal would
+    matter: it exists only in the websocket transport, and the WebRTC transport
+    has no equivalent check at all. Today that is academic because dual mode is
+    locked off. It stops being academic the moment it is not.
+
+    The precondition is established here rather than assumed: the clipboard is
+    loaded, over the same socket, with a uri-list naming a real file. Without
+    that the server has nothing to refuse to send, and silence would be read as
+    a pass.
+    """
+    if not unit or not probe_file:
+        print("  skip the _ebc path (needs --unit and --probe-file NAME.png, "
+              "a real file inside the session)")
+        return
+    since = time.strftime("%Y-%m-%d %H:%M:%S")
+    time.sleep(1)  # journal timestamps have one-second resolution
+    try:
+        sock, rest = wsprobe.connect(base)
+    except OSError as exc:
+        bad("_ebc path", f"could not connect: {exc}")
+        return
+    try:
+        for i, text in enumerate(wsprobe.frames(sock, rest)):
+            if text and text.startswith("{") and '"server_settings"' in text:
+                break
+            if i > 40:
+                break
+        # Off, then on: the server logs the change and not the state, and
+        # returns early when asked for what is already set.
+        for want in ("false", "true"):
+            wsprobe.send(sock, f"_ebc,{want}")
+            time.sleep(1)
+        uri = "file://" + probe_file
+        wsprobe.send(sock, "cb,text/uri-list," +
+                     base64.b64encode(uri.encode()).decode())
+        time.sleep(2)
+        wsprobe.send(sock, "cr")
+        time.sleep(3)
+    finally:
+        sock.close()
+    log = subprocess.run(
+        ["journalctl", "-u", unit, "--since", since, "--no-pager", "-o", "cat"],
+        capture_output=True, text=True)
+    if log.returncode != 0:
+        bad("_ebc path", "cannot read the session journal: "
+                         f"{log.stderr.strip() or log.returncode}")
+        return
+    moved = "Binary clipboard setting changing to: True" in log.stdout
+    refused = "Attempted to send binary clipboard data" in log.stdout
+    planted = "Set binary clipboard content" in log.stdout
+    if refused:
+        ok("a file read reached the outbound gate and was refused")
+    elif not planted:
+        # The uri-list never reached the X11 clipboard, so the server had
+        # nothing to resolve and nothing to refuse. Reporting that as a pass
+        # would be reading silence as a result; reporting it as a failure would
+        # blame the gate for a precondition this script did not manage to set.
+        #
+        # The usual cause is that xclip is absent: 2.0 offers the clipboard
+        # in-process over XFixes and shells out to xclip only for targets the
+        # native path will not offer, which is exactly this one. Install xclip
+        # in the session to run this check.
+        #
+        # Its absence is not a defence and must not be read as one. Nothing
+        # asserts it, any package may pull it in, and an administrator may
+        # install it this afternoon. The reason hdw4s does not depend on it is
+        # that the locked-down configuration does not need it -- not that
+        # leaving it out protects anything. What protects the session is the
+        # outbound gate this check asserts, which holds either way.
+        print("  skip the _ebc path (the clipboard write did not land; "
+              "install xclip in the session to exercise it)")
+    elif moved:
+        bad("_ebc path", "the wire verb moved the setting and nothing refused "
+                         "the send -- the outbound gate did not fire")
+    else:
+        # Neither line: the verb did not move the setting either, so upstream
+        # has closed the path. Say so rather than quietly passing.
+        ok("the _ebc wire verb no longer moves the setting")
+    if moved:
+        print("  note: \"_ebc\" moved enable_binary_clipboard despite |locked; "
+              "the lock is enforced only on the SETTINGS path")
+
+
 def main():
     argv = sys.argv[1:]
     unit = None
     home = None
     framerate = 30
-    for flag in ("--unit", "--home", "--framerate"):
+    probe = None
+    for flag in ("--unit", "--home", "--framerate", "--probe-file"):
         if flag in argv:
             i = argv.index(flag)
             value = argv[i + 1]
@@ -294,6 +392,8 @@ def main():
                 unit = value
             elif flag == "--home":
                 home = value
+            elif flag == "--probe-file":
+                probe = value
             else:
                 framerate = int(value)
     base = argv[0] if argv else "http://127.0.0.1:7303"
@@ -307,6 +407,7 @@ def main():
         check_ceilings(settings, framerate)
     check_refusals(base)
     check_defeat(base, unit)
+    check_defeat_wire_verb(base, unit, probe)
     check_home(home, unit)
 
     # Not an assertion: a setting the server never heard of is already caught
