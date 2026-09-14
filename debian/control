@@ -66,6 +66,7 @@ Depends: ${misc:Depends},
          libice6,
          libsm6
 Recommends: pipewire-pulse, wireplumber, gnome-keyring, pulseaudio-utils
+Suggests: msmtp
 Description: headless GNOME desktop streamed to a web browser
  Gives an existing account on an existing machine a full GNOME desktop that is
  reachable from a browser, without containers and without a graphics card. A

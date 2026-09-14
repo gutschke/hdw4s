@@ -716,11 +716,42 @@ the session's own account: the banner answers, the message is accepted, and the
 local mail system relays it onward -- `status=sent`, a real delivery to the
 smarthost.
 
-So a program that must send mail from a desktop should speak SMTP to
-`localhost`, which is what every mail client already does. The gap only affects
-programs that shell out to `sendmail`, and the one that does so here is
-convenient to lose: `sudo`'s `mail_badpass` cannot raise a message from a
-session, so a mistyped password in a desktop generates no mail at all.
+So a mail client needs nothing: they all speak SMTP already. The gap affects
+programs that shell out to `sendmail`, `mail`(1) among them. To close it,
+install a `sendmail` that submits over SMTP rather than through the queue
+directory, and let it take the name:
+
+    apt-get install msmtp
+
+    cat > /etc/msmtprc <<'END'
+    defaults
+    auth       off
+    tls        off
+    syslog     on
+
+    account    local
+    host       127.0.0.1
+    port       25
+
+    account default : local
+    END
+
+    dpkg-divert --divert /usr/sbin/sendmail.orig --rename --add /usr/sbin/sendmail
+    ln -sfn /usr/bin/msmtp /usr/sbin/sendmail
+
+Install `msmtp`, not `msmtp-mta`. The latter claims to *be* the machine's mail
+system, and asking for it proposes removing the one already there --
+`apt-get install -s msmtp-mta` answers `Remv postfix`, taking `bsd-mailx` with
+it. That mail system is still wanted: it keeps the queue, the retries and the
+onward relay, and none of this changes any of them, only how a message is handed
+over. The diversion is what survives an upgrade of the mail system's own
+package; `dpkg-divert --rename --remove /usr/sbin/sendmail` puts it back.
+
+One property is given up. `msmtp` needs the mail system listening at the moment
+of the call and reports an error when it is not, where the queue directory would
+have held the message for collection later. On a machine whose mail system is a
+running service that is a small trade, and a visible error is an improvement on
+what it replaces, which was a silent loss.
 
 This package is for machines with no screen. A session for an account that is
 also logged in at a physical console on the same machine is not supported and
