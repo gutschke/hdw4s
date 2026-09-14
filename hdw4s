@@ -12,11 +12,19 @@ trap 'rc="$?"
 # Exit with an explanation rather than the trap's generic complaint. The trap
 # is for faults nobody anticipated; anything diagnosed here has already been
 # described to the user and does not need a second, vaguer line after it.
-HDW4S_VERSION='1.1'
+HDW4S_VERSION='1.2'
 
 die() {
   trap '' INT TERM QUIT HUP EXIT ERR
   printf '%s\n' "$@" >&2
+  exit 1
+}
+
+# The same, for a fault that has already explained itself. A rejected instance
+# name prints why and then stops; the trap's generic line underneath turned a
+# refusal the user can act on into what looks like a bug in the tool.
+fail() {
+  trap '' INT TERM QUIT HUP EXIT ERR
   exit 1
 }
 
@@ -122,11 +130,9 @@ Usage: hdw4s <command> [arguments]
   firewall --print        print the ruleset that --apply would load
   firewall --restore      reload the table if something else flushed it
 
-An instance is a user name, optionally followed by a colon and a session
-number for a second concurrent desktop belonging to the same account:
+An instance is a user name. An account has one desktop:
 
   hdw4s enable alice
-  hdw4s enable alice:2
 
 "set" and "unset" without an instance act on the defaults for every session:
 
@@ -143,16 +149,54 @@ EOF
 
 # --- instance names ---------------------------------------------------------
 
-# A colon is the only separator that is safe here. systemd leaves ":" untouched
-# when it escapes an instance name, so "%i" and "%I" are identical and no path
-# built from either can acquire a surprise separator. A "-" would be unescaped
-# by "%I" into "/", which would silently turn user "jean-luc" into "jean/luc".
-# A ":" also cannot appear in a user name, because it separates the fields of
-# /etc/passwd, so splitting on it can never cut a name in half.
+# An instance is an account name, and nothing else: one desktop per account.
+#
+# Versions up to 1.1 also accepted "<user>:<session>" for a second concurrent
+# desktop belonging to the same account. That form is no longer created.
+#
+# It was withdrawn for what it cost to reason about rather than because it broke:
+# two instances against one home directory, one keyring and one set of
+# application single-instance locks, to deliver something that is better had by
+# giving the account a desktop on a second machine -- a case this package
+# supports properly, and the reason HDW4S_ISOLATION=profile exists.
+#
+# Instances created by an earlier version keep working and can still be shut
+# down and released; see split_legacy_name below. Nothing creates a new one.
+#
+# Why a colon was the separator, kept because it still governs those instances
+# and any future change here: systemd leaves ":" untouched when it escapes an
+# instance name, so "%i" and "%I" are identical and no path built from either
+# can acquire a surprise separator. A "-" would be unescaped by "%I" into "/",
+# which would silently turn user "jean-luc" into "jean/luc". A ":" also cannot
+# appear in a user name, because it separates the fields of /etc/passwd, so
+# splitting on it can never cut a name in half.
+#
 # The name only. Split out from the account lookup below because "release" has
 # to work for a session whose account has since been deleted, and must not buy
 # that by giving up the check that keeps an instance name out of a file path.
 split_name() {
+  local inst="$1"
+  case "${inst}" in
+    *:*)
+      echo "hdw4s: '${inst}' names a second session for one account." >&2
+      echo '  An account has one desktop. Instances of the form' >&2
+      echo '  "<user>:<session>" are no longer created; an existing one can' >&2
+      echo "  still be shut down with 'hdw4s release ${inst}'." >&2
+      return 1;;
+  esac
+  split_legacy_name "${inst}"
+}
+
+# The same checks, with the retired "<user>:<session>" form still accepted.
+#
+# Only "release" uses this, and it has to: an instance enabled by an earlier
+# version owns a slot, a port the firewall opens, drop-ins and credentials, and
+# a name the strict grammar rejects. Refusing it would leave editing the slot
+# table by hand -- which its own header tells the administrator never to do --
+# as the only way to clean the instance up. "release" stops the units itself, so
+# this one exception is enough to retire such an instance completely; no other
+# command needs to understand the old form.
+split_legacy_name() {
   local inst="$1"
   user="${inst%%:*}"
   session="${inst#*:}"
@@ -310,7 +354,7 @@ has_auth() {
 }
 
 cmd_list() {
-  local idx inst port state prof auth trans unprotected=0 orphaned=0
+  local idx inst port state prof auth trans unprotected=0 orphaned=0 legacy=0
   printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
     INSTANCE USER PORT AUTH PROFILE TRANSPORT STATE DISPLAY
   [ -r "${SLOTS}" ] || return 0
@@ -324,6 +368,18 @@ cmd_list() {
     # opens. This is the command an administrator uses to find out what is
     # reachable, so it has to account for every slot, including the ones it
     # cannot say much about.
+    # A second session for one account, from a version that still created
+    # them. It is not orphaned -- the account exists and the desktop may well
+    # be running -- so saying so would send an administrator looking for a
+    # deleted user. It is reported as what it is, and the footer says what to
+    # do about it.
+    case "${inst}" in
+      *:*)
+        printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
+          "${inst}" "${inst%%:*}" "${port}" '-' '-' '-' 'legacy' '-'
+        legacy=$(( legacy + 1 ))
+        continue;;
+    esac
     if ! split_instance "${inst}" 2>/dev/null; then
       printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
         "${inst}" '(none)' "${port}" '-' '-' '-' 'orphaned' '-'
@@ -355,6 +411,14 @@ cmd_list() {
     echo '  is still allocated and the firewall still opens its port.'
     echo "  Free them with 'hdw4s release <instance>'."
   }
+  [ "${legacy}" -eq 0 ] || {
+    echo
+    echo "${legacy} slot(s) marked legacy are a second desktop for an account"
+    echo '  that already has one, created by a version that still offered'
+    echo '  that. An account now has one desktop. These keep running and keep'
+    echo '  their port, and no other command will accept the name -- retire'
+    echo "  one with 'hdw4s release <user>:<session>', which stops it first."
+  }
 
   [ "${unprotected}" -eq 0 ] || {
     echo
@@ -371,7 +435,7 @@ cmd_show() {
   # Handled here rather than left to -e: an unhandled failure also trips the
   # ERR trap, so a mistyped name printed its own clear diagnosis and then a
   # second, vaguer line about the script failing unexpectedly.
-  split_instance "${inst}" || exit 1
+  split_instance "${inst}" || fail
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] ||
     die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}'."
@@ -379,8 +443,7 @@ cmd_show() {
   # Say where each value came from. Guessing which of the two files won is the
   # single most common source of confusion in a layered configuration.
   echo "instance      ${inst}"
-  echo "user          ${user}  (from the instance name)"
-  echo "session       ${session}"
+  echo "user          ${user}"
   echo "slot          ${idx}  (${SLOTS})"
   echo "port          ${port}  (${HDW4S_BASE_PORT} + slot)"
   if [ -r "${ETCDIR}/${inst}.conf" ]; then
@@ -434,7 +497,7 @@ cmd_show() {
 
 cmd_enable() {
   local inst="$1" idx prof fresh='no'
-  split_instance "${inst}" || exit 1
+  split_instance "${inst}" || fail
   # Whether this instance is being created rather than re-enabled, decided
   # before anything below writes the file. "enable" is documented as safe to
   # re-run, so a session that already exists must come out of it configured
@@ -801,7 +864,7 @@ cmd_set() {
 
 cmd_unset() {
   local inst='' file key tmp
-  if [ "$#" -gt 1 ]; then inst="$1"; shift; split_instance "${inst}" || exit 1; fi
+  if [ "$#" -gt 1 ]; then inst="$1"; shift; split_instance "${inst}" || fail; fi
   [ "$#" -eq 1 ] || die 'hdw4s: unset takes one setting'
   key="$1"
   file="$(config_file "${inst}")"
@@ -847,7 +910,8 @@ cmd_unset() {
 # that does nothing until some unmentioned command is run is how configuration
 # files get a reputation for not working.
 set_hint() {
-  local inst="$1" pair firewall='' session='' updater='' atenable='' relay=''
+  local inst="$1" pair firewall='' session='' updater='' atenable='' relay='' \
+        atenable2=''
   shift
   for pair in "$@"; do
     case "${pair%%=*}" in
@@ -862,12 +926,21 @@ set_hint() {
       # Written into the socket drop-in by "hdw4s transport", not read at
       # session start, so a restart does not pick it up.
       HDW4S_PROXY_GROUP) relay='yes';;
+      # Takes effect through a drop-in that only "hdw4s enable" writes, the
+      # ReadWritePaths for the profile directory. A restart on its own re-reads
+      # the same drop-in and changes nothing, which is the advice this used to
+      # give.
+      HDW4S_PROFILE_DIR) atenable2='yes';;
       *) session='yes';;
     esac
   done
   [ -z "${firewall}" ] || echo "  Run 'hdw4s firewall --apply' to use it."
   [ -z "${updater}" ] || echo "  Run '/usr/lib/hdw4s/hdw4s-update' to use it."
   [ -z "${atenable}" ] || echo '  Applies to sessions created after this.'
+  [ -z "${atenable2}" ] || {
+    echo "  Run 'hdw4s enable ${inst:-<session>}' again to rewrite the drop-in,"
+    echo "  then 'systemctl restart hdw4s@${inst:-<session>}' to use it."
+  }
   [ -z "${relay}" ] ||
     echo "  Run 'hdw4s transport ${inst:-<session>} unix' again to use it."
   if [ -n "${session}" ]; then
@@ -919,7 +992,7 @@ make_credential() {
 }
 
 require_slot() {
-  split_instance "$1" || exit 1
+  split_instance "$1" || fail
   [ -n "$(slot_of "$1")" ] ||
     die "hdw4s: $1 has no slot; run 'hdw4s enable $1' first."
   command -v systemd-creds >/dev/null ||
@@ -928,7 +1001,7 @@ require_slot() {
 
 cmd_transport() {
   local inst="$1" mode="$2" idx port group dir
-  split_instance "${inst}" || exit 1
+  split_instance "${inst}" || fail
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
   port="$(port_of "${idx}")"
@@ -1126,7 +1199,7 @@ cmd_auth() {
 
 cmd_noauth() {
   local inst="$1"
-  split_instance "${inst}" || exit 1
+  split_instance "${inst}" || fail
   # Existence, not readability: see has_auth. Asking whether we can read a
   # root-only file makes the answer depend on who is asking.
   [ -e "${ETCDIR}/${inst}.auth.cred" ] ||
@@ -1148,7 +1221,7 @@ cmd_noauth() {
 
 cmd_proxy() {
   local inst="$1" idx port cred user pw
-  split_instance "${inst}" || exit 1
+  split_instance "${inst}" || fail
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
   port="$(port_of "${idx}")"
@@ -1193,7 +1266,7 @@ cmd_proxy() {
 
 server {
     listen 443 ssl;
-    server_name ${inst%%:*}.example.com;
+    server_name ${inst}.example.com;
 
     # ssl_certificate     /etc/ssl/certs/...;
     # ssl_certificate_key /etc/ssl/private/...;
@@ -1290,7 +1363,7 @@ cmd_seed() {
       *)        die "hdw4s: seed: unexpected argument '$1'";;
     esac
   done
-  split_instance "${inst}" || exit 1
+  split_instance "${inst}" || fail
   [ -n "$(slot_of "${inst}")" ] ||
     die "hdw4s: ${inst} has no slot; run 'hdw4s enable ${inst}' first."
 
@@ -1450,7 +1523,7 @@ cmd_keyring() {
 
 cmd_disable() {
   local inst="$1"
-  split_instance "${inst}" || exit 1
+  split_instance "${inst}" || fail
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
   systemctl stop "hdw4s@${inst}.service" 2>/dev/null || :
@@ -1465,8 +1538,12 @@ cmd_release() {
   # gone leaves editing the table by hand as the only way out -- which its own
   # header tells the administrator never to do. The name is still checked: it
   # is interpolated into the paths this function removes.
-  split_name "${inst}" || exit 1
-  split_instance "${inst}" || :
+  #
+  # The legacy spelling for the same reason: an instance named "<user>:<session>"
+  # by a version that still created them is exactly the instance an administrator
+  # now needs to be able to retire, so this is the one command that accepts the
+  # name the rest of the tool refuses.
+  split_legacy_name "${inst}" || fail
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" "hdw4s@${inst}.service" 2>/dev/null || :
   rm -rf "${DROPIN}/hdw4s@${inst}.service.d" \
@@ -1484,9 +1561,21 @@ cmd_release() {
   echo 'keyring in the profile below can no longer be unlocked. Left in place:'
   echo "its profile under"
   echo "$(profile_dir_of "${inst}")/${inst}, and its settings in"
-  echo "${ETCDIR}/${inst}.conf -- so that re-enabling it restores them. The"
-  echo "slot, and with it the port, is not reserved and may go to someone else;"
-  echo "enabling again rewrites the port that conf file records."
+  echo "${ETCDIR}/${inst}.conf."
+  case "${inst}" in
+    # Nothing can enable this name again, so saying the leftovers are there to
+    # be restored would be an offer that cannot be taken up. Say what they
+    # actually are: rubbish, and safe to delete once anything wanted out of the
+    # profile has been taken.
+    *:*)
+      echo 'Nothing can enable that name again -- an account has one desktop --'
+      echo 'so both are now only a copy to salvage settings from, and can be'
+      echo 'deleted once you are done with them.';;
+    *)
+      echo 'Re-enabling the session restores them. The slot, and with it the'
+      echo 'port, is not reserved and may go to someone else; enabling again'
+      echo 'rewrites the port that conf file records.';;
+  esac
 }
 
 case "${1:-}" in

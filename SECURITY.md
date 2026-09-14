@@ -13,7 +13,7 @@ spare time; there is no embargo policy and no bounty.
 
 ## What this program assumes
 
-Four things are true by design rather than by oversight. A report that one of
+Five things are true by design rather than by oversight. A report that one of
 them is the case is not a vulnerability; a report that one of them can be
 subverted is.
 
@@ -36,6 +36,22 @@ never the first. The nftables rules also close the ephemeral range a WebRTC
 media path would scatter sockets across -- which, since dual mode is locked
 off, is now a second line rather than the first. See the note on the media
 chain below for how, and for what it does and does not cover.
+
+**A session's account can become root if `sudoers` says it can.** `sudo` inside
+a session behaves as it does on any other machine: `sudoers` and PAM decide who
+and ask for a password. This package neither grants that nor withholds it. It
+follows that compromising a desktop belonging to an administrator is
+compromising root on that machine, and the reverse proxy is what stands between
+the two. Put differently: the first paragraph above and this one multiply.
+
+Up to 1.1 the session unit narrowed its capability bounding set so that `sudo`
+failed before `sudoers` was read. That was not a barrier and should not be
+reported as the loss of one. A setuid-root program still reached uid 0 --
+capabilities are not what grants the uid -- and uid 0 reads and writes every
+root-owned file through the ordinary permission bits; it was measured reading
+`/etc/shadow` and `/etc/sudoers` under exactly that bounding set. All the
+restriction blocked was the group change, which only `sudo`, `su` and `login`
+ever ask for, so it denied root to administrators and to nobody else.
 
 **The updater installs an unsigned upstream package as root.** `hdw4s-update`
 fetches the streaming server's `.deb` from its upstream GitHub releases over TLS

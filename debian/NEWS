@@ -1,0 +1,22 @@
+hdw4s (1.2) UNRELEASED; urgency=medium
+
+  An account now has one desktop per machine. Instance names of the form
+  "<user>:<session>", which gave one account a second concurrent desktop on the
+  same machine, are no longer created.
+
+  Nothing is removed from a machine by this upgrade. An instance enabled by an
+  earlier version keeps running, keeps its slot and keeps its port, and
+  "hdw4s list" reports it with the state "legacy" so it can be found. Every
+  command refuses that name except "hdw4s release", which stops the session
+  first, so retiring one is a single command:
+
+      hdw4s release alice:2
+
+  You do not have to. A legacy instance that is left alone goes on working.
+
+  One account with a desktop on several machines, against one home directory,
+  is a different arrangement, is unaffected, and remains what
+  HDW4S_ISOLATION=profile exists for.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Mon, 14 Sep 2026 10:00:00 -0700
+

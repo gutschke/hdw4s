@@ -226,11 +226,14 @@ while IFS=: read -r key def; do
     [ "${got}" = "${def}" ] ||
       bad 'hdw4s show' "${key} defaults to ${def} here and ${got} in ${f}"
   done
-  # HDW4S_IDLE_DAYS is not defaulted with the ":=" form; the reaper passes it
-  # to setting_of instead.
-  if [ -z "${found}" ] && [ "${key}" = 'HDW4S_IDLE_DAYS' ]; then
-    grep -q "setting_of \"\${inst}\" ${key} ${def}\b" hdw4s || found=''
-    grep -q "setting_of \"\${inst}\" ${key} ${def}" hdw4s && found='yes'
+  # Not every setting is defaulted with the ":=" form. HDW4S_IDLE_DAYS is read
+  # by the reaper and passes the default to setting_of instead. Accept that
+  # spelling too rather than name the settings that use it, which is a list
+  # that goes stale the moment one is added.
+  if [ -z "${found}" ] &&
+     grep -q "setting_of \"\${inst}\" ${key} ${def}\([^0-9a-zA-Z_]\|\$\)" hdw4s
+  then
+    found='yes'
   fi
   [ -n "${found}" ] ||
     bad 'hdw4s show' "${key} is in its table but nothing defaults it to ${def}"

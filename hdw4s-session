@@ -201,8 +201,16 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   fi
 fi
 
-# gvfs exposes one FUSE mount per runtime directory. Two sessions for the same
-# account would otherwise fight over the same mount point.
+# Set when an account could have two desktops on one machine, to stop them
+# fighting over a mount point. That reason does not survive inspection: gvfs
+# builds the mount point from XDG_RUNTIME_DIR, which is per-instance here, so
+# two sessions would have had two mount points. It is now doubly moot, because
+# an account has one desktop.
+#
+# It is kept because removing it is a change in what the desktop can do -- the
+# FUSE bridge is what lets programs that do not speak GIO open a file on a
+# remote mount by path -- and that has never been exercised here, on a shared
+# home directory, over NFS. Removing it needs that test, not this reasoning.
 export GVFS_DISABLE_FUSE=1
 
 export PULSE_RUNTIME_PATH="${XDG_RUNTIME_DIR}/pulse"
@@ -311,12 +319,16 @@ esac
 # dbus-run-session, not dbus-launch: the bus is owned by this process and dies
 # with it, rather than being left behind for nothing to reap.
 #
-# It is also what makes a second desktop for the same account possible at all.
-# On a private bus the systemd manager is not reachable, so gnome-session
-# cannot start its components as user units -- there is only ever one systemd
-# user manager per account, and it belongs to whichever session got there
-# first. gnome-session falls back to its own service manager, and the check
-# that would otherwise refuse to start a second session is bypassed with it.
+# A private bus also decides how gnome-session starts its components. The
+# systemd manager is not reachable on one, so they cannot be user units;
+# gnome-session falls back to its own service manager instead. That fallback is
+# what keeps the desktop inside this unit's cgroup, where KillMode=control-group
+# can reap it -- components started as user units would belong to the account's
+# user@.service and outlive a "systemctl stop" of this session.
+#
+# It is load-bearing and it is not guaranteed: GNOME 46 still has the fallback,
+# GNOME 49 removed it. That is one of the two things pinning this package to
+# GNOME 46; see hdw4s(8).
 # Choose the session's locale here, before the bus exists.
 #
 # LC_ALL=C at the top of this script keeps its own parsing predictable and is

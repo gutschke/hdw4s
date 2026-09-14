@@ -43,9 +43,9 @@ machine ever sees it, so it does not need to be predictable.
 ### 3. A shared home directory does not have to mean a shared desktop
 
 A GNOME session assumes it owns its home directory. When the same home is
-mounted on several machines, or another desktop is already logged in against
-it, two sessions end up writing the same settings database, keyring and
-metadata stores -- none of which are safe to share, and several of which use
+mounted on several machines and a desktop runs against it on each, those
+sessions end up writing the same settings database, keyring and metadata
+stores -- none of which are safe to share, and several of which use
 memory-mapped or journalled files that do not work over NFS at all.
 
 `HDW4S_ISOLATION=profile` keeps the shared home for the user's *files* and moves
@@ -195,6 +195,15 @@ a connection to a session port gets an interactive desktop as that account: it
 can type, click, read and write the clipboard, resize the screen, and take the
 desktop away from whoever is using it.
 
+**A desktop whose account can `sudo` is a desktop whose compromise is root.**
+`sudo` inside a session works exactly as it does anywhere else: `sudoers` and
+PAM decide, a password is asked for, a wrong one is refused. This package adds
+no rule and no exception, and -- as of 1.2 -- no longer takes one away either.
+It used to restrict the session's capability bounding set in a way that made
+`sudo` fail before `sudoers` was read, which looked like a control and was not
+one; `hdw4s(8)`, RUNNING SOMETHING AS ROOT, has the measurement. If an account
+should not administer the machine from a browser, say so in `sudoers`.
+
 Two endpoints, `/api/status` and `/api/health`, answer before any authentication
 runs and always will. A proxy credential hides who is connected, not that a
 session exists.
@@ -228,6 +237,13 @@ silence.
 Ubuntu 24.04 or a Debian of comparable vintage, GNOME, and no graphics card
 required.
 
+**A machine with no screen.** hdw4s is for headless machines, and running a
+session for an account that is also logged in at a physical console on the same
+machine is not supported and not tested. Nothing forbids it and no reason is
+known why it could not work -- `HDW4S_ISOLATION=profile` exists for the conflict
+it would cause -- but nothing here checks for it or warns about it, and two
+desktops sharing one account's settings corrupt them rather than complaining.
+
 Ubuntu 24.04 is what this is developed and tested on: `.github/clean-install-test.sh`
 installs the built package onto a freshly bootstrapped 24.04 system and checks
 that the streaming server ends up installed and loadable.
@@ -245,11 +261,18 @@ does not name -- four of them were only discovered by running that test -- so
 treat a first install elsewhere as something to watch rather than something
 that is known to work. The test takes `--suite`, if you want to find out.
 
-Running a second desktop for an account **on the same machine** relies on
-gnome-session falling back to its own service manager, which GNOME 49 removes
-and GNOME 50 replaces with a hard refusal; GNOME 50 also drops the X11 session
-that the current Selkies release needs. Sessions on *different* machines sharing
-one home directory are unaffected, because those checks are local to a machine.
+**An account gets one desktop.** Asking for a second on the same machine is
+refused; sessions on *different* machines sharing one home directory are a
+supported case and are unaffected.
+
+A session runs GNOME on a private D-Bus of its own, which means gnome-session
+cannot reach a systemd user manager and falls back to its own service manager.
+That fallback is not a detail of the second-desktop case -- it is what the
+package runs on. It is also what keeps the desktop inside the session's control
+group, where stopping the unit can reap it. **GNOME 49 removes the fallback and
+GNOME 50 replaces it with a hard refusal; GNOME 50 also drops the X11 session
+that the current Selkies release needs.** So GNOME past 46 does not work here,
+and that is a limit on the whole package rather than on an optional extra.
 
 Neither limit reaches the rest of the design. Nothing in a session -- the X
 server, the streaming, the audio, the isolation -- depends on which desktop is

@@ -3,7 +3,8 @@
 # silenced wholesale:
 #   SC2034  variables assigned here are read by the code sourced from hdw4s,
 #           which the linter cannot see across the source boundary.
-#   SC2154  "user" and "session" are outputs of split_name, set as globals.
+#   SC2154  "user" and "session" are outputs of split_name and
+#           split_legacy_name, set as globals.
 #   SC2030/SC2031  each group runs in its own subshell on purpose, so that one
 #           failure cannot derail the rest; the linter reads the isolation as
 #           an accident.
@@ -77,8 +78,17 @@ echo '== instance names =='
   # pass.
   user=''; session=''
   split_name 'alice'   2>/dev/null || :; is 'plain name accepted'     "${user}:${session}" 'alice:1'
+  # An account has one desktop. The second-session form is refused everywhere
+  # except "release", which has to be able to retire one that already exists.
+  split_name 'alice:2' 2>/dev/null && bad 'colon rejected' || ok 'colon rejected'
   user=''; session=''
-  split_name 'alice:2' 2>/dev/null || :; is 'colon selects a session' "${user}:${session}" 'alice:2'
+  split_legacy_name 'alice:2' 2>/dev/null || :
+  is 'colon accepted for release' "${user}:${session}" 'alice:2'
+  # The escape hatch is not a hole: it gives up the session number, and nothing
+  # else. Everything that keeps a name out of a file path still applies to it.
+  split_legacy_name '../../root/x' 2>/dev/null && bad 'legacy path traversal rejected' || ok 'legacy path traversal rejected'
+  split_legacy_name 'alice:0'      2>/dev/null && bad 'legacy session 0 rejected'      || ok 'legacy session 0 rejected'
+  split_legacy_name ''             2>/dev/null && bad 'legacy empty name rejected'     || ok 'legacy empty name rejected'
   # A name reaches file paths, so it is checked even where the account need not exist.
   split_name '../../root/x' 2>/dev/null && bad 'path traversal rejected' || ok 'path traversal rejected'
   split_name 'alice:0'      2>/dev/null && bad 'session 0 rejected'       || ok 'session 0 rejected'
@@ -704,7 +714,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=128   # update when tests are added; a wrong number is the point
+EXPECTED=132   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

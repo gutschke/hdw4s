@@ -151,15 +151,29 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
 ## INSTANCES
 
-An instance is a user name, optionally followed by a colon and a session number:
+An instance is a user name. An account has one desktop:
 
     hdw4s enable alice
-    hdw4s enable alice:2
 
-The second form gives one account a second concurrent desktop on the same
-machine. A colon is used because systemd leaves it untouched when it escapes an
-instance name, and because it cannot occur in a user name, so splitting on it
-can never cut a name in half.
+Versions up to 1.1 also accepted `alice:2`, a second concurrent desktop for the
+same account on the same machine. That form is no longer created.
+
+It was withdrawn because it was not worth what it cost to reason about, not
+because it stopped working. A second desktop doubled the states every part of
+the package had to account for -- two instances against one home directory, one
+keyring, one set of application single-instance locks -- to deliver something
+that can be had instead by giving the account a desktop on a second machine,
+which is a case this package already supports properly.
+
+**An instance created by an earlier version keeps working**, and keeps its slot
+and its port. `hdw4s list` reports it with the state `legacy`. No command will
+accept the name except `hdw4s release`, which stops the session first, so
+retiring one takes a single command:
+
+    hdw4s release alice:2
+
+An account wanting desktops on *several machines* at once is a different thing
+and is supported; see `HDW4S_ISOLATION`.
 
 ## CONFIGURATION
 
@@ -291,11 +305,64 @@ belongs to the copy of the streaming server, of which there is one.
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 
+## RUNNING SOMETHING AS ROOT
+
+`sudo` works the way it does everywhere else. `sudoers` and PAM decide who may
+use it, a password is asked for and a wrong one is refused, and this package
+adds no rule, wrapper or exception of its own.
+
+It did not always, and the reason is worth keeping because it looked
+deliberate. Until 1.2 the session unit's capability bounding set held
+`CAP_NET_RAW` and nothing else. A setuid-root program without `CAP_SETGID`
+cannot change group, so `sudo` failed at `unable to change to root gid` --
+before `sudoers` was consulted, before anyone was asked for a password, and
+with nothing said about why. An administrator's own desktop refused them root
+while `sudoers` said they could have it.
+
+That read as a security control and was not one. A setuid-root program reaches
+uid 0 whatever the bounding set says, because the kernel grants the uid at
+`execve`; and a process with uid 0 owns every root-owned file through the
+ordinary permission bits, needing no capability to do it. Run under exactly
+that bounding set, a setuid-root test binary reported:
+
+    euid=0  caps=cap_net_raw=ep
+    /etc/shadow                       r : OK
+    /etc/sudoers                      r : OK
+    /root/canary                      w : OK
+    /etc/systemd/system/probe.service w : OK
+
+The missing capability stopped the *group* change, which only programs on the
+legitimate path -- `sudo`, `su`, `login` -- ever ask for. It could not deny
+root to anybody `sudoers` denies it to. It could only deny it to the
+administrators `sudoers` allows.
+
+What does constrain a root process inside a session is the unit's sandbox, not
+its capabilities. `ProtectSystem=strict` makes the file system read-only apart
+from the session's own directories, so the writes above fail there; devices are
+hidden and kernel tunables are not writable. `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`
+and `CAP_NET_ADMIN` are still out of the bounding set, so mounting, loading a
+module and reconfiguring the network stay impossible for uid 0 in a session.
+
+    sudo systemd-run --pty --collect --uid=0 -- bash
+
+is the way out to a root shell without those restrictions. systemd does not
+consult polkit for a caller that is already root, and the shell it starts is a
+transient unit outside the session's control group -- which also means it is
+named in the journal, rather than being an unremarked setuid transition.
+
+**A desktop whose account can `sudo` is a desktop whose compromise is root.**
+That is true of any Linux machine. What is particular here is that the desktop
+is reachable through a reverse proxy, so more people are in a position to try.
+If an account should not administer the machine from a browser, say so in
+`sudoers`: that is where an administrator looks for the answer, and it is the
+only place that decides it.
+
 ## SHARED HOME DIRECTORIES
 
 A GNOME session assumes it is the only one using its home directory. That
-assumption breaks when the same home is mounted on more than one machine, or
-when another desktop is already logged in against it. Two sessions then write
+assumption breaks when the same home is mounted on more than one machine and a
+desktop runs against it on each -- the case this section exists for, and the
+one way an account gets more than one desktop. Those sessions then write
 the same settings database, the same keyring and the same metadata stores. None
 of those are safe to share, and the settings database and the metadata stores
 use memory-mapped and journalled files that are documented not to work over NFS
@@ -631,21 +698,54 @@ read by the session as the desktop user, so a secret in them is readable by
 every account with a desktop on that machine.
 
 
-A second desktop for an account that is already logged in on the same machine
-works only because gnome-session falls back to its own service manager when it
-cannot reach a systemd user manager, and there is only ever one of those per
-account. GNOME 49 removes that fallback and GNOME 50 removes the X11 session
-altogether, so that arrangement does not survive an upgrade past Ubuntu 24.04.
+An account gets one desktop per machine. The same account having desktops on
+*different* machines, against one home directory, is a supported case and is
+what `HDW4S_ISOLATION=profile` exists for.
 
-Sessions on *different* machines sharing one home directory are not affected:
-the checks involved are local to a machine.
+`sendmail` does not work inside a session; SMTP to `localhost` does. The two
+differ because the local `sendmail` command does not talk to the mail system
+over the network -- it writes into the queue directory through `postdrop` --
+and `ProtectSystem=strict` makes that directory read-only. It fails with
+`Read-only file system` and the message is lost, leaving only a warning in the
+journal.
 
-Neither limit reaches the rest of the design. The X server, the streaming, the
-audio and the isolation are all indifferent to which desktop is started, so
+The mail system itself is outside the session and perfectly reachable. A
+session shares the machine's network namespace, so submitting to `127.0.0.1:25`
+works and is the supported route. Measured from inside a running session, as
+the session's own account: the banner answers, the message is accepted, and the
+local mail system relays it onward -- `status=sent`, a real delivery to the
+smarthost.
+
+So a program that must send mail from a desktop should speak SMTP to
+`localhost`, which is what every mail client already does. The gap only affects
+programs that shell out to `sendmail`, and the one that does so here is
+convenient to lose: `sudo`'s `mail_badpass` cannot raise a message from a
+session, so a mistyped password in a desktop generates no mail at all.
+
+This package is for machines with no screen. A session for an account that is
+also logged in at a physical console on the same machine is not supported and
+not tested. It is not prevented either, and no reason is known why it could not
+work -- the conflict it would cause is the one `HDW4S_ISOLATION=profile`
+addresses -- but nothing here detects it or warns about it, and two desktops
+writing one account's settings corrupt them rather than reporting anything.
+
+A session gives GNOME a private D-Bus, so gnome-session cannot reach a systemd
+user manager and falls back to its own service manager. Two things follow, and
+both are load-bearing rather than incidental. The desktop's components stay
+inside the session's control group, which is what lets `KillMode=control-group`
+reap the whole desktop when the unit stops -- as user units they would belong to
+the account's `user@.service` and survive it. And the package depends on that
+fallback existing at all: **GNOME 49 removes it and GNOME 50 replaces it with a
+hard refusal, and GNOME 50 also removes the X11 session** the current Selkies
+release needs. Neither version works here, and the limit is on the package
+rather than on any optional part of it.
+
+That limit does not reach the rest of the design. The X server, the streaming,
+the audio and the isolation are all indifferent to which desktop is started, so
 setting `HDW4S_SESSION` to one that is not being withdrawn from X11 -- Xfce,
-MATE, LXQt -- avoids both. That is a smaller change than it sounds, and a much
-smaller one than bridging a Wayland session back onto an X11 display, which is
-possible but visibly a workaround.
+MATE, LXQt -- avoids both halves of it. That is a smaller change than it sounds,
+and a much smaller one than bridging a Wayland session back onto an X11 display,
+which is possible but visibly a workaround.
 
 Snap and Flatpak applications ignore the wrappers and some of the environment
 used to isolate a session, so they may still share state between desktops.

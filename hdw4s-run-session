@@ -236,6 +236,9 @@ session_pid="$!"
 if [ "${HDW4S_AUTH:-none}" = 'basic' ] &&
    [ -n "${CREDENTIALS_DIRECTORY:-}" ] &&
    [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ]; then
+  # An instance is the account name; the strip keeps the user name right for an
+  # instance named "<user>:<session>" by a version that still created them,
+  # which can still be running.
   SELKIES_BASIC_AUTH_USER="${instance%%:*}"
   SELKIES_BASIC_AUTH_PASSWORD="$(cat "${CREDENTIALS_DIRECTORY}/hdw4s-auth")"
   export SELKIES_BASIC_AUTH_USER SELKIES_BASIC_AUTH_PASSWORD

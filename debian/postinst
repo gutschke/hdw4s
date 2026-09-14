@@ -24,6 +24,10 @@ if [ "$1" = 'configure' ]; then
       d="/etc/systemd/system/hdw4s@${inst}.service.d"
       [ -e "${d}/40-home.conf" ] || continue
       grep -q '^RequiresMountsFor=' "${d}/40-home.conf" && continue
+      # An instance is the account name. The strip is for instances named
+      # "<user>:<session>" by a version that still created them: this loop runs
+      # over what is already installed, so it has to read names this version
+      # will not issue.
       user="${inst%%:*}"
       home="$(getent passwd -- "${user}" | cut -d: -f6)"
       [ -n "${home}" ] || continue

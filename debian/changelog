@@ -1,3 +1,36 @@
+hdw4s (1.2) UNRELEASED; urgency=medium
+
+  * An account has one desktop per machine. The "<user>:<session>" instance
+    name, which gave one account a second concurrent desktop on the same
+    machine, is no longer created; every command refuses it except "release",
+    which is what retires one that already exists. An instance from an earlier
+    version keeps running and keeps its port, and "hdw4s list" shows it as
+    "legacy" rather than as an orphan, which is what it used to look like.
+  * "hdw4s show" no longer prints a session number that was always 1.
+  * sudo works. The session unit's capability bounding set left out CAP_SETUID
+    and CAP_SETGID, so sudo failed at "unable to change to root gid" before
+    sudoers was read and before anyone was asked for a password -- on every
+    machine running this package, since before it was released, and nobody
+    chose it. It read as a security control and was not one: a setuid-root
+    program reaches uid 0 whatever the bounding set says, and uid 0 owns every
+    root-owned file by the ordinary permission bits. Measured under exactly
+    that bounding set, a setuid-root binary read /etc/shadow and /etc/sudoers.
+    All it blocked was the group change, which only sudo, su and login ask for,
+    so it denied root to administrators and to nobody else. sudoers decides
+    now, as it does everywhere else.
+  * The reason the package needs GNOME 46 is stated as what it is. A session
+    runs on a private D-Bus, so gnome-session cannot reach a systemd user
+    manager and falls back to its own service manager -- and that fallback is
+    what keeps the desktop inside the unit's control group, where stopping the
+    unit can reap it. GNOME 49 removes the fallback and GNOME 50 refuses
+    outright. This was documented as a limit on running a second desktop; it is
+    a limit on the package.
+  * HDW4S_ISOLATION=profile is justified by the case it actually serves, one
+    home directory mounted on several machines. It no longer claims to be for
+    coexisting with another desktop logged in on the same machine.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Mon, 14 Sep 2026 10:00:00 -0700
+
 hdw4s (1.1) unstable; urgency=medium
 
   * A desktop can now be moved between devices. It belongs to one browser at a

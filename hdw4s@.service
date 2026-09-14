@@ -12,27 +12,63 @@ Requires=hdw4s-firewall.service
 # desktop tries to read settings out of it.
 
 [Service]
-# There is deliberately no User= here. The instance name is "<user>" or
-# "<user>:<session>", and systemd has no specifier for "the part before the
-# colon" -- but "User=%i" cannot simply be overridden by a drop-in either,
-# because an invalid user name in the base unit is a fatal parse error and the
-# unit never loads far enough for the override to apply. So "hdw4s enable"
-# writes User= into a drop-in for every instance, and hdw4s-session refuses to
-# run as root, which is what a missing drop-in would otherwise mean.
+# There is deliberately no User= here. The instance name is the account name,
+# so "User=%i" would be correct as far as it goes -- but an invalid user name in
+# a base unit is a fatal parse error, and the unit then never loads far enough
+# for a drop-in to override it. An instance named for an account that does not
+# exist would become unloadable rather than failing with something an
+# administrator can read. So "hdw4s enable" writes User= into a drop-in for
+# every instance, and hdw4s-session refuses to run as root, which is what a
+# missing drop-in would otherwise mean.
 
-# CAP_NET_RAW, and nothing else. An empty set looks tidier but breaks ping in a
-# way that takes a long time to understand: the distribution ships /usr/bin/ping
-# with cap_net_raw=ep, and the kernel refuses to execve a binary whose effective
+# A narrow bounding set, and three capabilities in it.
+#
+# CAP_NET_RAW is here because an empty set breaks ping in a way that takes a
+# long time to understand: the distribution ships /usr/bin/ping with
+# cap_net_raw=ep, and the kernel refuses to execve a binary whose effective
 # capabilities cannot be granted, so the session gets "Operation not permitted"
-# from exec with nothing said about sockets. Allowing the capability into the
+# from exec with nothing said about sockets. Allowing a capability into the
 # bounding set does not hand it to anything: a process still needs it on its own
-# file to use it, and setting that needs CAP_SETFCAP, which is not here. So this
-# admits the few binaries the distribution already marked, and no others.
-# Packet capture stays impossible regardless, because AF_PACKET is not in
+# file to use it, and setting that needs CAP_SETFCAP, which is not here. Packet
+# capture stays impossible regardless, because AF_PACKET is not in
 # RestrictAddressFamilies below.
-CapabilityBoundingSet=CAP_NET_RAW
+#
+# CAP_SETUID and CAP_SETGID are here because leaving them out does not do what
+# it looks like it does. Without them a setuid-root program cannot change its
+# gid, so sudo fails at "unable to change to root gid: Operation not permitted"
+# -- before sudoers is consulted and before anyone is asked for a password. It
+# reads as a security control and is not one. Measured, on a setuid-root binary
+# run with exactly the bounding set that omitted them:
+#
+#     euid=0  caps=cap_net_raw=ep
+#     /etc/shadow                       r : OK
+#     /etc/sudoers                      r : OK
+#     /root/canary                      w : OK
+#     /etc/systemd/system/probe.service w : OK
+#
+# euid 0 is granted by the kernel at execve whatever the bounding set says, and
+# a process with euid 0 owns every root-owned file by the ordinary permission
+# bits -- no capability is involved. What the omission blocked was the gid
+# change, which is the legitimate path (sudo, su) and not the attack path. It
+# could not deny root to anyone sudoers denies it to, only to the administrators
+# sudoers allows.
+#
+# What keeps a session from acting on that is the sandbox below -- ProtectSystem=
+# strict makes the writes above fail inside this unit -- and sudoers, which is
+# where "who may become root" belongs and where an administrator will look for
+# it. The rest of the bounding set still does real work: CAP_SYS_ADMIN,
+# CAP_SYS_MODULE, CAP_NET_ADMIN and everything else remain out, so mounting,
+# module loading and network reconfiguration stay impossible for uid 0 here.
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
 DevicePolicy=closed
 Environment=LIBGL_ALWAYS_SOFTWARE=1
+# Not /run/user/<uid>, even though this unit now runs one desktop per account
+# and could name it. That directory belongs to logind, which creates it for a
+# login session and removes it with the last one; this unit has no PAM session
+# and so no claim on it. RuntimeDirectory= below makes systemd the owner of
+# whatever XDG_RUNTIME_DIR names, so pointing it at /run/user/<uid> would have
+# stopping the desktop delete the runtime directory out from under an ssh login
+# by the same account. A directory of its own costs nothing and cannot do that.
 Environment=XDG_RUNTIME_DIR=%t/hdw4s/%i
 # Put the application wrappers ahead of the real binaries. They are what
 # redirects programs that ignore the XDG variables, Firefox above all.
@@ -55,8 +91,8 @@ NotifyAccess=all
 OOMPolicy=continue
 PrivateDevices=yes
 # Gives this session its own /tmp, so the X11 socket and lock file cannot
-# collide with another desktop on this machine and there is nothing left to
-# clean up when the unit stops, however it stops.
+# collide with another account's desktop on this machine and there is nothing
+# left to clean up when the unit stops, however it stops.
 PrivateTmp=yes
 ProtectClock=yes
 ProtectControlGroups=yes
@@ -118,6 +154,28 @@ WorkingDirectory=~
 #                             executable memory stops its engine from starting.
 #   PrivateUsers=yes          maps every other account to "nobody", which ruins
 #                             group-shared files and is worse over NFS.
+#   PAMName=<stack>           would give the session a logind session, and does
+#                             create one. It breaks this unit in two separate
+#                             ways, both measured rather than guessed.
+#
+#                             pam_systemd sets XDG_RUNTIME_DIR to
+#                             /run/user/<uid>, overriding the per-instance
+#                             directory set above -- and RuntimeDirectory=
+#                             below makes systemd the owner of whatever that
+#                             names, so stopping the desktop would delete the
+#                             runtime directory of any ssh login the same
+#                             account has open at the time, taking that
+#                             person's dbus session and gvfs mounts with it.
+#
+#                             And logind moves the session's processes into a
+#                             session-NN.scope of its own, out of this unit's
+#                             cgroup, so KillMode=control-group reaps nothing:
+#                             stopping the unit left a full desktop running and
+#                             the logind session stuck in "closing" forever. A
+#                             short experiment accumulated twenty of them.
+#
+#                             None of this is needed for sudo, which works the
+#                             ordinary way -- see CapabilityBoundingSet= above.
 
 # Deliberately no [Install] section. A session is not started at boot and is
 # not enabled directly: "hdw4s enable" enables hdw4s-proxy@<instance>.socket,

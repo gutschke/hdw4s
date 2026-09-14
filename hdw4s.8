@@ -110,15 +110,25 @@ Put the table back if it has gone missing, and do nothing if it has not\. Run pe
 \fBfirewall \-\-print\fR
 Write the ruleset to standard output without loading it\.
 .SH "INSTANCES"
-An instance is a user name, optionally followed by a colon and a session number:
+An instance is a user name\. An account has one desktop:
 .IP "" 4
 .nf
 hdw4s enable alice
-hdw4s enable alice:2
 .fi
 .IP "" 0
 .P
-The second form gives one account a second concurrent desktop on the same machine\. A colon is used because systemd leaves it untouched when it escapes an instance name, and because it cannot occur in a user name, so splitting on it can never cut a name in half\.
+Versions up to 1\.1 also accepted \fBalice:2\fR, a second concurrent desktop for the same account on the same machine\. That form is no longer created\.
+.P
+It was withdrawn because it was not worth what it cost to reason about, not because it stopped working\. A second desktop doubled the states every part of the package had to account for \-\- two instances against one home directory, one keyring, one set of application single\-instance locks \-\- to deliver something that can be had instead by giving the account a desktop on a second machine, which is a case this package already supports properly\.
+.P
+\fBAn instance created by an earlier version keeps working\fR, and keeps its slot and its port\. \fBhdw4s list\fR reports it with the state \fBlegacy\fR\. No command will accept the name except \fBhdw4s release\fR, which stops the session first, so retiring one takes a single command:
+.IP "" 4
+.nf
+hdw4s release alice:2
+.fi
+.IP "" 0
+.P
+An account wanting desktops on \fIseveral machines\fR at once is a different thing and is supported; see \fBHDW4S_ISOLATION\fR\.
 .SH "CONFIGURATION"
 Two files are read in order, the second overriding the first:
 .IP "" 4
@@ -176,8 +186,36 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBSELKIES_VERSION\fR: Pin a Selkies release and stop following upstream\.
 .IP "" 0
+.SH "RUNNING SOMETHING AS ROOT"
+\fBsudo\fR works the way it does everywhere else\. \fBsudoers\fR and PAM decide who may use it, a password is asked for and a wrong one is refused, and this package adds no rule, wrapper or exception of its own\.
+.P
+It did not always, and the reason is worth keeping because it looked deliberate\. Until 1\.2 the session unit's capability bounding set held \fBCAP_NET_RAW\fR and nothing else\. A setuid\-root program without \fBCAP_SETGID\fR cannot change group, so \fBsudo\fR failed at \fBunable to change to root gid\fR \-\- before \fBsudoers\fR was consulted, before anyone was asked for a password, and with nothing said about why\. An administrator's own desktop refused them root while \fBsudoers\fR said they could have it\.
+.P
+That read as a security control and was not one\. A setuid\-root program reaches uid 0 whatever the bounding set says, because the kernel grants the uid at \fBexecve\fR; and a process with uid 0 owns every root\-owned file through the ordinary permission bits, needing no capability to do it\. Run under exactly that bounding set, a setuid\-root test binary reported:
+.IP "" 4
+.nf
+euid=0  caps=cap_net_raw=ep
+/etc/shadow                       r : OK
+/etc/sudoers                      r : OK
+/root/canary                      w : OK
+/etc/systemd/system/probe\.service w : OK
+.fi
+.IP "" 0
+.P
+The missing capability stopped the \fIgroup\fR change, which only programs on the legitimate path \-\- \fBsudo\fR, \fBsu\fR, \fBlogin\fR \-\- ever ask for\. It could not deny root to anybody \fBsudoers\fR denies it to\. It could only deny it to the administrators \fBsudoers\fR allows\.
+.P
+What does constrain a root process inside a session is the unit's sandbox, not its capabilities\. \fBProtectSystem=strict\fR makes the file system read\-only apart from the session's own directories, so the writes above fail there; devices are hidden and kernel tunables are not writable\. \fBCAP_SYS_ADMIN\fR, \fBCAP_SYS_MODULE\fR and \fBCAP_NET_ADMIN\fR are still out of the bounding set, so mounting, loading a module and reconfiguring the network stay impossible for uid 0 in a session\.
+.IP "" 4
+.nf
+sudo systemd\-run \-\-pty \-\-collect \-\-uid=0 \-\- bash
+.fi
+.IP "" 0
+.P
+is the way out to a root shell without those restrictions\. systemd does not consult polkit for a caller that is already root, and the shell it starts is a transient unit outside the session's control group \-\- which also means it is named in the journal, rather than being an unremarked setuid transition\.
+.P
+\fBA desktop whose account can \fBsudo\fR is a desktop whose compromise is root\.\fR That is true of any Linux machine\. What is particular here is that the desktop is reachable through a reverse proxy, so more people are in a position to try\. If an account should not administer the machine from a browser, say so in \fBsudoers\fR: that is where an administrator looks for the answer, and it is the only place that decides it\.
 .SH "SHARED HOME DIRECTORIES"
-A GNOME session assumes it is the only one using its home directory\. That assumption breaks when the same home is mounted on more than one machine, or when another desktop is already logged in against it\. Two sessions then write the same settings database, the same keyring and the same metadata stores\. None of those are safe to share, and the settings database and the metadata stores use memory\-mapped and journalled files that are documented not to work over NFS at all\.
+A GNOME session assumes it is the only one using its home directory\. That assumption breaks when the same home is mounted on more than one machine and a desktop runs against it on each \-\- the case this section exists for, and the one way an account gets more than one desktop\. Those sessions then write the same settings database, the same keyring and the same metadata stores\. None of those are safe to share, and the settings database and the metadata stores use memory\-mapped and journalled files that are documented not to work over NFS at all\.
 .P
 Setting \fBHDW4S_ISOLATION=profile\fR keeps the shared home for the user's files but moves most of the session's settings, state and cache to a private directory on local disk \-\- most, because the streaming server writes three paths it builds from the home directory itself, which no XDG variable reaches\. Concretely, the session gets its own \fBXDG_DATA_HOME\fR, \fBXDG_STATE_HOME\fR, \fBXDG_CACHE_HOME\fR and dconf profile, its own X authority cookie, its own audio server socket, and wrappers that give Firefox and Thunderbird their own profiles\.
 .P
@@ -342,11 +380,19 @@ There is no way to configure STUN or TURN, and nothing left for one to configure
 .P
 Under 1\.6 this was not true, and the reasons it mattered are worth keeping: the server appended its own default STUN server unless one was named exactly, so a setting could only ever add a second and never replace the first, and every session told a third party the machine's address and when it started\. TURN was disabled outright because the server otherwise used a relay belonging to a third party with a shared secret published in its own source, which would have carried the desktop's video, keystrokes and clipboard\. Enabling a relay you run yourself needs somewhere to keep its credentials that a session cannot read, which does not exist yet: the configuration files are read by the session as the desktop user, so a secret in them is readable by every account with a desktop on that machine\.
 .P
-A second desktop for an account that is already logged in on the same machine works only because gnome\-session falls back to its own service manager when it cannot reach a systemd user manager, and there is only ever one of those per account\. GNOME 49 removes that fallback and GNOME 50 removes the X11 session altogether, so that arrangement does not survive an upgrade past Ubuntu 24\.04\.
+An account gets one desktop per machine\. The same account having desktops on \fIdifferent\fR machines, against one home directory, is a supported case and is what \fBHDW4S_ISOLATION=profile\fR exists for\.
 .P
-Sessions on \fIdifferent\fR machines sharing one home directory are not affected: the checks involved are local to a machine\.
+\fBsendmail\fR does not work inside a session; SMTP to \fBlocalhost\fR does\. The two differ because the local \fBsendmail\fR command does not talk to the mail system over the network \-\- it writes into the queue directory through \fBpostdrop\fR \-\- and \fBProtectSystem=strict\fR makes that directory read\-only\. It fails with \fBRead\-only file system\fR and the message is lost, leaving only a warning in the journal\.
 .P
-Neither limit reaches the rest of the design\. The X server, the streaming, the audio and the isolation are all indifferent to which desktop is started, so setting \fBHDW4S_SESSION\fR to one that is not being withdrawn from X11 \-\- Xfce, MATE, LXQt \-\- avoids both\. That is a smaller change than it sounds, and a much smaller one than bridging a Wayland session back onto an X11 display, which is possible but visibly a workaround\.
+The mail system itself is outside the session and perfectly reachable\. A session shares the machine's network namespace, so submitting to \fB127\.0\.0\.1:25\fR works and is the supported route\. Measured from inside a running session, as the session's own account: the banner answers, the message is accepted, and the local mail system relays it onward \-\- \fBstatus=sent\fR, a real delivery to the smarthost\.
+.P
+So a program that must send mail from a desktop should speak SMTP to \fBlocalhost\fR, which is what every mail client already does\. The gap only affects programs that shell out to \fBsendmail\fR, and the one that does so here is convenient to lose: \fBsudo\fR's \fBmail_badpass\fR cannot raise a message from a session, so a mistyped password in a desktop generates no mail at all\.
+.P
+This package is for machines with no screen\. A session for an account that is also logged in at a physical console on the same machine is not supported and not tested\. It is not prevented either, and no reason is known why it could not work \-\- the conflict it would cause is the one \fBHDW4S_ISOLATION=profile\fR addresses \-\- but nothing here detects it or warns about it, and two desktops writing one account's settings corrupt them rather than reporting anything\.
+.P
+A session gives GNOME a private D\-Bus, so gnome\-session cannot reach a systemd user manager and falls back to its own service manager\. Two things follow, and both are load\-bearing rather than incidental\. The desktop's components stay inside the session's control group, which is what lets \fBKillMode=control\-group\fR reap the whole desktop when the unit stops \-\- as user units they would belong to the account's \fBuser@\.service\fR and survive it\. And the package depends on that fallback existing at all: \fBGNOME 49 removes it and GNOME 50 replaces it with a hard refusal, and GNOME 50 also removes the X11 session\fR the current Selkies release needs\. Neither version works here, and the limit is on the package rather than on any optional part of it\.
+.P
+That limit does not reach the rest of the design\. The X server, the streaming, the audio and the isolation are all indifferent to which desktop is started, so setting \fBHDW4S_SESSION\fR to one that is not being withdrawn from X11 \-\- Xfce, MATE, LXQt \-\- avoids both halves of it\. That is a smaller change than it sounds, and a much smaller one than bridging a Wayland session back onto an X11 display, which is possible but visibly a workaround\.
 .P
 Snap and Flatpak applications ignore the wrappers and some of the environment used to isolate a session, so they may still share state between desktops\.
 .P
