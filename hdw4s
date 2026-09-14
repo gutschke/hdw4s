@@ -710,7 +710,7 @@ declare -A SETTABLE=(
   [HDW4S_BASE_PORT]='number'
   [HDW4S_BLOCK_SIZE]='number'
   [HDW4S_SESSION]='any'
-  [HDW4S_FRAMERATE]='number'
+  [HDW4S_FRAMERATE]='framerate'
   [HDW4S_RESIZE]='true|false'
   [HDW4S_DPI]='dpi'
   [HDW4S_INDEXING]='off|on'
@@ -728,6 +728,14 @@ check_value() {
   case "${rule}" in
     number) case "${value}" in ''|*[!0-9]*)
               die "hdw4s: ${key} takes a number, not '${value}'";; esac;;
+    # A bare number, or the "N,LOW-HIGH" form. The range has to be settable:
+    # hdw4s-run-session turns a bare number into "N,8-N" precisely so the
+    # setting caps the rate rather than merely starting there, and passes an
+    # explicit range through untouched. Typed as a plain number, the only way
+    # to use the form the runner supports was to edit the file by hand.
+    framerate)
+            [[ "${value}" =~ ^[0-9]+(,[0-9]+-[0-9]+)?$ ]] ||
+              die "hdw4s: ${key} takes a number or an 'N,LOW-HIGH' range, not '${value}'";;
     dpi)    case "${value}" in follow) :;; ''|*[!0-9]*)
               die "hdw4s: ${key} takes 'follow' or a number, not '${value}'";; esac;;
     path)   case "${value}" in /*) :;;

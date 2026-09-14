@@ -198,6 +198,20 @@ echo '== configuration is validated before it is trusted =='
   is    'too many arguments is a usage error' "${rc}" '2'
   has   'and prints the usage'                "${out}" 'Usage: hdw4s'
   hasnt 'and does not read as a crash'        "${out}" 'failed unexpectedly'
+
+  # HDW4S_FRAMERATE is a rate or a range. hdw4s-run-session turns a bare number
+  # into "N,8-N" so the setting caps the rate instead of merely starting there,
+  # and passes an explicit range through untouched -- so the range form has to
+  # be settable. Typed as a plain number it was not, and editing the file by
+  # hand was the only way to use what the runner supports.
+  for v in 30 30,8-30; do
+    HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" set "HDW4S_FRAMERATE=${v}" >/dev/null 2>&1 \
+      && ok "framerate ${v} accepted" || bad "framerate ${v} accepted"
+  done
+  for v in abc '30,' 30-8; do
+    HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" set "HDW4S_FRAMERATE=${v}" >/dev/null 2>&1 \
+      && bad "framerate ${v} refused" || ok "framerate ${v} refused"
+  done
 )
 
 echo '== a setting owned by a command names a command that exists =='
@@ -714,7 +728,7 @@ echo '== an install rewrites every file that names the payload path =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=132   # update when tests are added; a wrong number is the point
+EXPECTED=137   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
