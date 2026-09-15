@@ -55,10 +55,12 @@ EXPECTED = {
     "webrtc_ice_lite": (True, True),
     # The browser must not read or write the account's files.
     "file_transfers": ([], None),
-    # The binary path carries arbitrary MIME types into the X selection. This
-    # is the one the server reads back out of a client SETTINGS frame, so the
-    # lock is the whole control and the value on its own means nothing.
-    "enable_binary_clipboard": (False, True),
+    # Images in the clipboard, which is the common case after a screenshot.
+    # Measured working in both directions; formatted text is not carried by
+    # either end, so a rich copy still arrives as plain text. This is the one
+    # setting the server reads back out of a client SETTINGS frame, so the lock
+    # is what makes it hold -- in this direction as much as the other.
+    "enable_binary_clipboard": (True, True),
     "microphone_enabled": (False, True),
     "webcam_enabled": (False, True),
     # No uinput device is wired up for a session; refuse rather than half-work.
@@ -320,6 +322,8 @@ def check_defeat(base, unit):
         print("  skip runtime defeat of enable_binary_clipboard "
               "(pass --unit hdw4s@INSTANCE; needs the session journal)")
         return
+    configured = EXPECTED["enable_binary_clipboard"][0]
+    attack = not configured
     since = time.strftime("%Y-%m-%d %H:%M:%S")
     time.sleep(1)  # journal timestamps have one-second resolution
     try:
@@ -333,11 +337,17 @@ def check_defeat(base, unit):
                 break
             if i > 40:
                 break
-        # Off first, then on. The server logs the change, not the state, and
-        # returns early when a frame asks for what is already set -- so a run
-        # that only asks for "on" against an already-defeated session sees
-        # silence and reads it as a refusal. Establish the starting point.
-        for want in (False, True):
+        # The configured value first, then its opposite. The server logs the
+        # change, not the state, and returns early when a frame asks for what
+        # is already set -- so a run that only sends the attack against an
+        # already-defeated session sees silence and reads it as a refusal.
+        # Establish the starting point, then try to move it.
+        #
+        # Which value is the attack follows the policy rather than being
+        # written down here. Hard-coding "on" meant that turning the setting on
+        # left this asking the server to do what it already does, which no
+        # session will ever log -- a check that cannot fail.
+        for want in (configured, attack):
             wsprobe.send(sock, "SETTINGS," + json.dumps({
                 "displayId": "primary",
                 "initialClientWidth": 1920, "initialClientHeight": 1080,
@@ -352,9 +362,9 @@ def check_defeat(base, unit):
     if log.returncode != 0:
         bad("runtime defeat", "cannot read the session journal: "
                               f"{log.stderr.strip() or log.returncode}")
-    elif "Binary clipboard setting changing to: True" in log.stdout:
-        bad("runtime defeat", "a client turned binary clipboard back on -- the "
-                              "flag needs |locked, not a bare false")
+    elif "Binary clipboard setting changing to: %s" % attack in log.stdout:
+        bad("runtime defeat", "a client moved binary clipboard to %s -- the "
+                              "flag needs |locked, not a bare value" % attack)
     else:
         ok("enable_binary_clipboard survives a client asking for it")
 

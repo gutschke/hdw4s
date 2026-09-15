@@ -435,11 +435,11 @@ lockdown=(
   # default: a bool the server reads back out of a client's SETTINGS frame is
   # whatever that client last asked for, and only the lock makes the server
   # keep its own answer. Binary clipboard is the one upstream wires into that
-  # path today, and an unlocked "false" there was worth nothing -- one frame
-  # from any connected page turned it back on, in both directions, while the
-  # settings the server publishes went on reporting it off. The others are not
-  # reachable that way today. They are locked anyway, so that the day one of
-  # them is wired up is not the day a control silently stops holding.
+  # path today, so whichever way it is set, only the lock makes the setting
+  # mean anything -- a client frame moved it in both directions while the
+  # settings the server publishes went on reporting the old value. The others
+  # are not reachable that way today. They are locked anyway, so that the day
+  # one of them is wired up is not the day a control silently stops holding.
   --enable-dual-mode='false|locked'   # no client-initiated switch to WebRTC, so
                                       # no ICE, STUN, TURN or mDNS socket ever
                                       # appears
@@ -452,7 +452,7 @@ lockdown=(
   # every machine, for a feature that is off. Pointing it at the runtime
   # directory puts it somewhere that disappears when the session stops.
   --file-manager-path="${XDG_RUNTIME_DIR}/hdw4s-files"
-  --enable-binary-clipboard='false|locked'
+  --enable-binary-clipboard='true|locked'
   # The one control here that is a policy rather than a refusal. The server
   # refuses microphone data on exactly one condition -- "not enabled and
   # locked" (selkies.py, the MICROPHONE_DISABLED path) -- so 'false|locked' is
