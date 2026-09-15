@@ -23,3 +23,7 @@
 # live security findings and network details. If you are about to remove this
 # line, do not.
 /private/
+
+# Python bytecode, which is a build artifact of running the live tests.
+__pycache__/
+*.pyc
