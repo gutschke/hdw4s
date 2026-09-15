@@ -1,98 +1,23 @@
 hdw4s (2.0.1) unstable; urgency=medium
 
-  * A session no longer refuses to paint when the browser cannot grant the
-    microphone or the camera. Turning either feature on also starts its uplink,
-    which is what makes the capture device exist -- and a client that cannot
-    satisfy the permission request then never started its *video* stream
-    either, so the page loaded and stayed blank with nothing said. The uplink
-    is still started, because that is the feature working; what changed is that
-    the walkthrough now grants the permission the way a person does, so the
-    suite exercises the configuration that ships instead of a quieter one.
-    Measured: 18 of 18 checks with a fake device present, 4 of 18 without.
-  * A session uses the GPU when the machine has one. The unit binds /dev/dri in
-    and grants the device rule -- both inert where there is no such device --
-    and "hdw4s enable" reads the group that owns the render node and writes it
-    into a drop-in, because that group differs between machines. All three are
-    needed and each alone does nothing; without them the encoder falls back to
-    software without complaint, which reads as a slow machine. Hardware
-    encoding halves the cost of a session: 16% of a core against 34% at 30fps.
-  * HDW4S_FRAMERATE defaults to "30,8-60" rather than "30". A session still
-    starts at 30, and a client may now raise it to 60 from the video settings
-    panel. A bare number is still a hard ceiling. Measured at 1280x656: 60fps
-    costs 19% of a core with a GPU and 49% without, both reaching the rate.
-  * The upstream asset matcher accepts both of upstream's file-naming schemes,
-    so a clean install can find the streaming server. Upstream renamed every
-    asset of an already-published tag; an installed machine never noticed and a
-    fresh install could not find the package at all.
-  * Two .pyc files under .github/live were tracked and shipped in 2.0.
+  * A desktop no longer stays blank when the browser declines the microphone
+    or the camera.
+  * Sessions use the GPU when the machine has one, which roughly halves what a
+    desktop costs to stream.
+  * The frame rate can be raised to 60 from the video settings panel.
 
  -- Markus Gutschke <gutschke@users.noreply.github.com>  Tue, 15 Sep 2026 11:19:54 -0700
 
 hdw4s (2.0) unstable; urgency=medium
 
-  * An account has one desktop per machine. The "<user>:<session>" instance
-    name, which gave one account a second concurrent desktop on the same
-    machine, is no longer created; every command refuses it except "release",
-    which is what retires one that already exists. An instance from an earlier
-    version keeps running and keeps its port, and "hdw4s list" shows it as
-    "legacy" rather than as an orphan, which is what it used to look like.
-  * "hdw4s show" no longer prints a session number that was always 1.
-  * A session no longer tries to start PulseAudio on top of PipeWire.
-    /etc/xdg/autostart/pulseaudio.desktop carries X-GNOME-HiddenUnderSystemd,
-    so an ordinary desktop skips it; a session here has no systemd user manager,
-    the guard does not apply, and the entry ran every time -- PulseAudio started,
-    found pipewire-pulse holding the socket, and exited 1. The autostart entry is
-    now hidden in the session's own profile, and only where pipewire-pulse is
-    the provider, since on a real PulseAudio machine that entry is the sound
-    server.
-  * New setting HDW4S_WEBCAM, default no. Same refusal behind it as the
-    microphone -- disabled and locked -- and one more moving part: with "yes"
-    the V4L2 interposer is preloaded into the session's applications, because a
-    container has no camera and no kernel device for one, and the interposer is
-    what answers a program's camera calls from the streaming server's socket.
-    It is kept out of the streaming server's own environment, which is the
-    other end of that socket, and the lockdown suite asserts that.
-  * New setting HDW4S_MICROPHONE, default no. The streaming server refuses
-    microphone data on exactly one condition -- the feature disabled and locked
-    -- which is what this has always shipped as. Setting it to yes lifts the
-    refusal and keeps the lock, so the operator decides and a connected page
-    cannot. It switches nobody's microphone on: the uplink starts off and
-    muting stays the session's own toggle.
-  * HDW4S_FRAMERATE can be set to a range. It has always meant a ceiling, and
-    hdw4s-run-session turns a bare number into "N,8-N" so that it is one --
-    a bare number sets only the initial rate and leaves the span at the
-    streaming server's own 8 to 240, so a client could raise itself to 240 from
-    the sidebar. An explicit range is passed through untouched, but "hdw4s set"
-    typed the setting as a plain number and refused one, leaving editing the
-    file by hand as the only way to use the form the runner supports.
-  * The manual says why sendmail does not work in a session and what to do
-    about it. ProtectSystem=strict makes the mail queue directory read-only, so
-    postdrop cannot write and the message is lost with only a journal warning;
-    SMTP to 127.0.0.1 is unaffected, because the mail system runs outside the
-    session and a session shares the machine's network namespace. Installing an
-    SMTP-submitting sendmail closes the gap for programs that shell out to it.
-    Suggests: msmtp.
-  * sudo works. The session unit's capability bounding set left out CAP_SETUID
-    and CAP_SETGID, so sudo failed at "unable to change to root gid" before
-    sudoers was read and before anyone was asked for a password -- on every
-    machine running this package, since before it was released, and nobody
-    chose it. It read as a security control and was not one: a setuid-root
-    program reaches uid 0 whatever the bounding set says, and uid 0 owns every
-    root-owned file by the ordinary permission bits. Measured under exactly
-    that bounding set, a setuid-root binary read /etc/shadow and /etc/sudoers.
-    All it blocked was the group change, which only sudo, su and login ask for,
-    so it denied root to administrators and to nobody else. sudoers decides
-    now, as it does everywhere else.
-  * The reason the package needs GNOME 46 is stated as what it is. A session
-    runs on a private D-Bus, so gnome-session cannot reach a systemd user
-    manager and falls back to its own service manager -- and that fallback is
-    what keeps the desktop inside the unit's control group, where stopping the
-    unit can reap it. GNOME 49 removes the fallback and GNOME 50 refuses
-    outright. This was documented as a limit on running a second desktop; it is
-    a limit on the package.
-  * HDW4S_ISOLATION=profile is justified by the case it actually serves, one
-    home directory mounted on several machines. It no longer claims to be for
-    coexisting with another desktop logged in on the same machine.
+  * Retargeted to Selkies 2.0. A machine running the older Selkies needs the
+    selkies-1.6 branch instead.
+  * The microphone and the camera can be turned on, with HDW4S_MICROPHONE and
+    HDW4S_WEBCAM. Both are off by default.
+  * sudo works from a desktop, governed by sudoers as it is anywhere else.
+  * An account gets one desktop per machine.
+  * A second browser takes a desktop over without asking first, where 1.1
+    offered a button. Reloading the first window takes it back.
 
  -- Markus Gutschke <gutschke@users.noreply.github.com>  Mon, 14 Sep 2026 23:29:37 -0700
 
