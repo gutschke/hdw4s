@@ -17,6 +17,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 # -- the X server, the streaming, the audio, the isolation -- is unaffected by
 # which of them is started.
 : "${HDW4S_SESSION:=gnome-session}"
+: "${HDW4S_MICROPHONE:=no}"
 : "${HDW4S_FRAMERATE:=30}"
 : "${HDW4S_DPI:=follow}"
 : "${HDW4S_INDEXING:=off}"
@@ -365,6 +366,12 @@ case "${HDW4S_HIDPI}" in
   *)      hidpi=(--use-css-scaling=true)  ;;
 esac
 
+# Whether the accounts behind these sessions may be heard.
+case "${HDW4S_MICROPHONE}" in
+  yes) microphone='true|locked'  ;;
+  *)   microphone='false|locked' ;;
+esac
+
 lockdown=(
   # Every boolean below carries "|locked". Without it the value is only a
   # default: a bool the server reads back out of a client's SETTINGS frame is
@@ -388,7 +395,15 @@ lockdown=(
   # directory puts it somewhere that disappears when the session stops.
   --file-manager-path="${XDG_RUNTIME_DIR}/hdw4s-files"
   --enable-binary-clipboard='false|locked'
-  --microphone-enabled='false|locked'
+  # The one control here that is a policy rather than a refusal. The server
+  # refuses microphone data on exactly one condition -- "not enabled and
+  # locked" (selkies.py, the MICROPHONE_DISABLED path) -- so 'false|locked' is
+  # a hard no and 'true|locked' is a yes that the client still has to act on.
+  # It does not switch anyone's microphone on: the uplink starts off
+  # (microphone_on_start defaults false), the browser asks for the device, and
+  # muting is the client's toggle. The lock keeps the choice the operator's
+  # without taking the moment-to-moment decision away from the user.
+  "--microphone-enabled=${microphone}"
   --webcam-enabled='false|locked'
   --gamepad-enabled='false|locked'
   --enable-sharing='false|locked'

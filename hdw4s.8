@@ -184,6 +184,8 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_HIDPI\fR: How a high\-density client is handled: \fBscale\fR (the default) asks for the size of the browser window and lets the browser stretch the result, which is correct size and slightly soft; \fBnative\fR asks for the client's full device resolution, which is pixel\-exact and, on GNOME, half size\. See SHARED HOME DIRECTORIES for why the desktop does not scale itself\.
 .IP "\[ci]" 4
+\fBHDW4S_MICROPHONE\fR: Whether these desktops may be heard\. Defaults to \fBno\fR, which passes \fBmicrophone\-enabled=false|locked\fR to the streaming server \-\- the one condition on which it refuses microphone data outright, so a desktop cannot be listened to by a client that asks nicely or through a flaw in the page\. Set it to \fByes\fR and the refusal is lifted while the lock stays on, so the operator still decides and a connected page still cannot change it\. It does not switch anyone's microphone on: the uplink starts off, the browser asks for the device the first time it is used, and muting remains the session's own toggle\. Read when a session starts, so a restart applies it\.
+.IP "\[ci]" 4
 \fBSELKIES_VERSION\fR: Pin a Selkies release and stop following upstream\.
 .IP "" 0
 .SH "RUNNING SOMETHING AS ROOT"

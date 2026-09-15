@@ -302,6 +302,17 @@ belongs to the copy of the streaming server, of which there is one.
     device resolution, which is pixel-exact and, on GNOME, half size. See
     SHARED HOME DIRECTORIES for why the desktop does not scale itself.
 
+  * `HDW4S_MICROPHONE`:
+    Whether these desktops may be heard. Defaults to `no`, which passes
+    `microphone-enabled=false|locked` to the streaming server -- the one
+    condition on which it refuses microphone data outright, so a desktop cannot
+    be listened to by a client that asks nicely or through a flaw in the page.
+    Set it to `yes` and the refusal is lifted while the lock stays on, so the
+    operator still decides and a connected page still cannot change it. It does
+    not switch anyone's microphone on: the uplink starts off, the browser asks
+    for the device the first time it is used, and muting remains the session's
+    own toggle. Read when a session starts, so a restart applies it.
+
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 

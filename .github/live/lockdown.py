@@ -411,6 +411,33 @@ def check_defeat_wire_verb(base, unit, probe_file):
               "the lock is enforced only on the SETTINGS path")
 
 
+def adopt_configured(unit):
+    """Take the operator's choice from the running server, for settings that
+    are a policy rather than a fixed refusal.
+
+    Most of EXPECTED is hdw4s's intended lockdown and does not vary. The
+    microphone does: HDW4S_MICROPHONE decides it per machine, so asserting a
+    remembered value would fail on exactly the machines where the feature was
+    deliberately turned on -- and a check that fails when the operator does
+    what the setting is for is a check that gets switched off.
+
+    What does not vary, and is still asserted, is the lock. Whichever way the
+    value went, a connected page must not be able to move it.
+    """
+    argv = _server_argv(unit) if unit else None
+    if argv is None:
+        return
+    for flag, name in (("--microphone-enabled=", "microphone_enabled"),):
+        raw = next((a.split("=", 1)[1] for a in argv if a.startswith(flag)), None)
+        if raw is None:
+            continue
+        value = raw.split("|", 1)[0] == "true"
+        if value != EXPECTED[name][0]:
+            EXPECTED[name] = (value, EXPECTED[name][1])
+            print(f"  note: {name} is configured on for this session; "
+                  f"asserting that, and that it is still locked")
+
+
 def main():
     argv = sys.argv[1:]
     unit = None
@@ -432,6 +459,7 @@ def main():
                 framerate = int(value)
     base = argv[0] if argv else "http://127.0.0.1:7303"
     print(f"lockdown: {base}")
+    adopt_configured(unit)
     try:
         settings = check_settings(base)
     except Exception as exc:                       # noqa: BLE001 -- report, don't trace
