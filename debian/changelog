@@ -1,3 +1,17 @@
+hdw4s (2.1.0) unstable; urgency=medium
+
+  * Images copied in the browser can be pasted into the desktop, and images
+    copied in the desktop can be pasted back. Formatted text still arrives as
+    plain text.
+  * Files can be moved in and out of a session. They live in the account's
+    Downloads folder, which is also the only directory the browser can reach.
+  * A desktop can be shared with a second viewer. Nobody reaches a session
+    without a credential either way.
+  * A session can drive a second display, which appears as another browser
+    window.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Tue, 15 Sep 2026 16:20:43 -0700
+
 hdw4s (2.0.1) unstable; urgency=medium
 
   * A desktop no longer stays blank when the browser declines the microphone

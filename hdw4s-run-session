@@ -444,7 +444,7 @@ lockdown=(
                                       # no ICE, STUN, TURN or mDNS socket ever
                                       # appears
   --webrtc-ice-lite='true|locked'     # and nothing to hand out if one ever did
-  --file-transfers=upload,download
+  --file-transfers='upload,download'
   # Files move in both directions, and they land in the account's Downloads
   # folder rather than anywhere this tool invents. The directory is created
   # when the module is imported, before any flag is consulted, so pointing it
