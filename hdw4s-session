@@ -199,6 +199,27 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
                   'Name=Tracker File System Miner' 'Hidden=true' \
       > "${XDG_CONFIG_HOME}/autostart/tracker-miner-fs-3.desktop"
   fi
+
+  # The same mechanism, for the same reason, against PulseAudio.
+  #
+  # /etc/xdg/autostart/pulseaudio.desktop runs start-pulseaudio-x11 and carries
+  # X-GNOME-HiddenUnderSystemd=true. On an ordinary desktop gnome-session runs
+  # under systemd, the entry is skipped, and pipewire-pulse serves the
+  # PulseAudio socket unopposed. Here there is no systemd user manager, so the
+  # guard does not apply and the entry runs: PulseAudio starts, finds
+  # pipewire-pulse already holding the socket, and exits 1 -- after a spray of
+  # "Connection refused" and "Failed to connect to pulseaudio server" that
+  # reads like a broken sound stack and is not.
+  #
+  # Only where pipewire-pulse is the provider. On a machine actually running
+  # PulseAudio this entry is how the sound server starts, and hiding it would
+  # take the audio away rather than tidy the log.
+  if [ -x /usr/bin/pipewire-pulse ]; then
+    install -d -m0700 "${XDG_CONFIG_HOME}/autostart"
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' \
+                  'Name=PulseAudio Sound System' 'Hidden=true' \
+      > "${XDG_CONFIG_HOME}/autostart/pulseaudio.desktop"
+  fi
 fi
 
 # Set when an account could have two desktops on one machine, to stop them
