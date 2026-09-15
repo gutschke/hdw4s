@@ -368,8 +368,8 @@ esac
 
 # Whether the accounts behind these sessions may be heard.
 case "${HDW4S_MICROPHONE}" in
-  yes) microphone='true|locked'  ;;
-  *)   microphone='false|locked' ;;
+  yes) microphone=(--microphone-enabled='true|locked' --microphone-on-start=true) ;;
+  *)   microphone=(--microphone-enabled='false|locked') ;;
 esac
 
 lockdown=(
@@ -403,7 +403,17 @@ lockdown=(
   # (microphone_on_start defaults false), the browser asks for the device, and
   # muting is the client's toggle. The lock keeps the choice the operator's
   # without taking the moment-to-moment decision away from the user.
-  "--microphone-enabled=${microphone}"
+  #
+  # "on" also starts the uplink, and that is not a convenience -- it is the
+  # difference between having a microphone and not. The virtual source the
+  # session's own applications see is created inside the microphone *data*
+  # path, so until the browser is actually sending, there is no capture device
+  # in the session at all and anything that enumerates devices finds none.
+  # Starting the uplink is what makes the device exist. It is left unlocked, so
+  # a user who would rather their session did not ask for the microphone on
+  # every connection can still say so: the capability is the operator's, the
+  # preference is theirs.
+  "${microphone[@]}"
   --webcam-enabled='false|locked'
   --gamepad-enabled='false|locked'
   --enable-sharing='false|locked'
