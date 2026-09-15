@@ -37,6 +37,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
@@ -153,10 +154,32 @@ def check_ceilings(settings, framerate):
         ok(f"encoder menu withdrawn to {enc.get('value')!r}")
 
 
+def _request(url):
+    """A GET that carries the credential if the URL names one.
+
+    urllib does not turn "user:pass@host" into an Authorization header by
+    itself, and the difference matters here: an unauthenticated request to a
+    session that wants a credential answers 401, which is neither the 403 this
+    asserts nor a failure of the thing being asserted. Without this the suite
+    could only ever be run against a session with authentication turned off --
+    which is not the configuration anyone actually runs.
+    """
+    u = urllib.parse.urlsplit(url)
+    if u.username is None:
+        return urllib.request.Request(url)
+    netloc = u.hostname + (f":{u.port}" if u.port else "")
+    req = urllib.request.Request(urllib.parse.urlunsplit(
+        (u.scheme, netloc, u.path, u.query, u.fragment)))
+    cred = base64.b64encode(
+        f"{u.username}:{u.password or ''}".encode()).decode()
+    req.add_header("Authorization", f"Basic {cred}")
+    return req
+
+
 def check_refusals(base):
     """The lockdown as behaviour rather than as self-description."""
     for path, expect in (("/api/files/", 403),):
-        req = urllib.request.Request(base.rstrip("/") + path)
+        req = _request(base.rstrip("/") + path)
         try:
             code = urllib.request.urlopen(req, timeout=10).getcode()
         except urllib.error.HTTPError as exc:
@@ -344,8 +367,19 @@ def check_defeat_wire_verb(base, unit, probe_file):
     moved = "Binary clipboard setting changing to: True" in log.stdout
     refused = "Attempted to send binary clipboard data" in log.stdout
     planted = "Set binary clipboard content" in log.stdout
-    if refused:
+    # Assert the configured state, not a remembered one. The day binary
+    # clipboard is deliberately turned on, EXPECTED changes and this assertion
+    # has to turn around with it -- reading the policy from there rather than
+    # hard-coding it is what stops that day ending in a check being switched
+    # off instead of corrected.
+    want_off = EXPECTED["enable_binary_clipboard"][0] is False
+    if refused and not want_off:
+        bad("_ebc path", "binary clipboard is configured on, but the outbound "
+                         "gate refused the send anyway")
+    elif refused:
         ok("a file read reached the outbound gate and was refused")
+    elif planted and not want_off:
+        ok("binary clipboard is configured on and nothing refused the send")
     elif not planted:
         # The uri-list never reached the X11 clipboard, so the server had
         # nothing to resolve and nothing to refuse. Reporting that as a pass
