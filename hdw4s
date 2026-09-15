@@ -1313,6 +1313,16 @@ server {
 
     # ... your own authentication here: auth_request, OIDC, client certs ...
 
+    # Give this desktop its own name in the browser tab. The client sets
+    # document.title from the "name" in manifest.json -- it hardcodes "Selkies"
+    # and then overwrites it from the manifest -- so serving a manifest here is
+    # the supported way to tell two desktops apart, and needs no patched
+    # client. The exact match wins over the "location /" below.
+    location = /manifest.json {
+        default_type application/json;
+        return 200 '{"name":"Desktop: ${inst}","short_name":"${inst}","display":"fullscreen","background_color":"#000000","theme_color":"#000000","icons":[{"src":"icon-512.png","type":"image/png","sizes":"512x512"}],"start_url":"."}';
+    }
+
     location / {
 ${upstream}
         proxy_http_version 1.1;
