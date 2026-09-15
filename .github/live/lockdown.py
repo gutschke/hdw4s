@@ -53,8 +53,9 @@ EXPECTED = {
     "enable_dual_mode": (False, True),
     # No STUN/TURN lookups to third parties from the user's session.
     "webrtc_ice_lite": (True, True),
-    # The browser must not read or write the account's files.
-    "file_transfers": ([], None),
+    # Files move both ways, scoped to the account's Downloads folder by
+    # file_manager_path rather than the whole home.
+    "file_transfers": (["upload", "download"], None),
     # Images in the clipboard, which is the common case after a screenshot.
     # Measured working in both directions; formatted text is not carried by
     # either end, so a rich copy still arrives as plain text. This is the one
@@ -65,11 +66,12 @@ EXPECTED = {
     "webcam_enabled": (False, True),
     # No uinput device is wired up for a session; refuse rather than half-work.
     "gamepad_enabled": (False, True),
-    # Every form of second viewer. A session is one account's desktop, and
-    # admitting a second viewer means admitting them to that account.
-    "enable_sharing": (False, True),
-    "enable_shared": (False, True),
-    "enable_collab": (False, True),
+    # Every form of second viewer. Admitting one still requires a credential:
+    # the view-only password is separate and cannot match while it is unset,
+    # which is asserted below rather than taken on trust.
+    "enable_sharing": (True, True),
+    "enable_shared": (True, True),
+    "enable_collab": (True, True),
     "enable_player2": (False, True),
     "enable_player3": (False, True),
     "enable_player4": (False, True),
@@ -180,7 +182,7 @@ def _request(url):
 
 def check_refusals(base):
     """The lockdown as behaviour rather than as self-description."""
-    for path, expect in (("/api/files/", 403),):
+    for path, expect in (("/api/files/", 200),):
         req = _request(base.rstrip("/") + path)
         try:
             code = urllib.request.urlopen(req, timeout=10).getcode()
@@ -193,6 +195,37 @@ def check_refusals(base):
             ok(f"GET {path} -> {expect}")
         else:
             bad(f"GET {path}", f"expected {expect}, got {code}")
+
+
+def check_no_anonymous(base):
+    """A second viewer still needs a credential.
+
+    Sharing is on, so the question is no longer whether extra viewers are
+    refused but whether one can arrive without a password. The view-only login
+    is a separate secret that nothing sets here, and the server only accepts it
+    when it is non-empty -- so an unauthenticated request must still be
+    refused. Asserted rather than read out of the settings, because the
+    settings describe intent and this describes what the socket does.
+    """
+    import urllib.parse
+    u = urllib.parse.urlsplit(base)
+    anon = urllib.parse.urlunsplit(
+        (u.scheme, u.netloc.split("@")[-1], u.path, u.query, u.fragment))
+    for path in ("/", "/api/files/"):
+        try:
+            code = urllib.request.urlopen(
+                anon.rstrip("/") + path, timeout=10).getcode()
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+        except OSError as exc:
+            bad(f"anonymous GET {path}", f"unreachable: {exc}")
+            continue
+        if code == 401:
+            ok(f"anonymous GET {path} is refused")
+        else:
+            bad(f"anonymous GET {path}",
+                f"expected 401, got {code} -- a viewer reached this without "
+                f"a credential")
 
 
 def check_home(home, unit):
@@ -534,6 +567,7 @@ def main():
     if settings:
         check_ceilings(settings, framerate)
     check_refusals(base)
+    check_no_anonymous(base)
     check_defeat(base, unit)
     check_interposer(unit)
     check_defeat_wire_verb(base, unit, probe)

@@ -444,14 +444,15 @@ lockdown=(
                                       # no ICE, STUN, TURN or mDNS socket ever
                                       # appears
   --webrtc-ice-lite='true|locked'     # and nothing to hand out if one ever did
-  --file-transfers=none               # no upload, no download, no file manager
-  # ...and nowhere for them to land. This is not a second switch for the same
-  # thing: the directory is created when the module is imported, before any
-  # flag is consulted, so --file-transfers=none refuses the transfers but still
-  # leaves a "Desktop" folder in the account's home -- on a shared home, on
-  # every machine, for a feature that is off. Pointing it at the runtime
-  # directory puts it somewhere that disappears when the session stops.
-  --file-manager-path="${XDG_RUNTIME_DIR}/hdw4s-files"
+  --file-transfers=upload,download
+  # Files move in both directions, and they land in the account's Downloads
+  # folder rather than anywhere this tool invents. The directory is created
+  # when the module is imported, before any flag is consulted, so pointing it
+  # at a path that already exists is what stops a stray folder appearing on a
+  # home that is shared across every machine -- which is why this is not simply
+  # the home itself. It also bounds what the browser can read: the file API
+  # serves this directory, not the account.
+  --file-manager-path="${HOME}/Downloads"
   --enable-binary-clipboard='true|locked'
   # The one control here that is a policy rather than a refusal. The server
   # refuses microphone data on exactly one condition -- "not enabled and
@@ -486,9 +487,14 @@ lockdown=(
   "${microphone[@]}"
   "${webcam[@]}"
   --gamepad-enabled='false|locked'
-  --enable-sharing='false|locked'
-  --enable-shared='false|locked'
-  --enable-collab='false|locked'
+  # Every form of second viewer. These do not widen who can reach a session:
+  # a viewer still needs a credential, and the view-only one is a separate
+  # password that cannot match while it is unset -- measured, not assumed.
+  # What they widen is what a second viewer may do once here, which in this
+  # deployment is anyone the proxy has already let through.
+  --enable-sharing='true|locked'
+  --enable-shared='true|locked'
+  --enable-collab='true|locked'
   --enable-player2='false|locked'
   --enable-player3='false|locked'
   --enable-player4='false|locked'
