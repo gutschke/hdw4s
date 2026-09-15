@@ -33,7 +33,14 @@ PROFILE_PREFIX = "hdw4s-live-"
 
 
 class Browser:
-    def __init__(self, port, tag, headers=None):
+    def __init__(self, port, tag, headers=None, display=None):
+        # `display` runs a real browser on an X server instead of headless.
+        # Clipboard work needs it: a paste is only honoured after genuine user
+        # activation, and a synthetic key event delivered over the debugging
+        # protocol is not that. With a display, XTEST can press the keys the
+        # way a person does, and the browser reads the X selection that the
+        # local desktop actually holds.
+        self.display = display
         self.port, self.tag = port, tag
         self.headers = headers or {}
         self.profile = tempfile.mkdtemp(prefix=PROFILE_PREFIX + tag + "-",
@@ -49,8 +56,13 @@ class Browser:
         self.wire = {}
 
     def start(self):
+        env = dict(os.environ)
+        head = ["--headless=new"]
+        if self.display:
+            env["DISPLAY"] = self.display
+            head = []
         self.proc = subprocess.Popen([
-            "google-chrome", "--headless=new", "--no-sandbox", "--disable-gpu",
+            "google-chrome", *head, "--no-sandbox", "--disable-gpu",
             "--disable-extensions", "--disable-background-networking",
             "--remote-debugging-port=%d" % self.port,
             "--user-data-dir=" + self.profile,
@@ -68,9 +80,10 @@ class Browser:
             # configuration that ships.
             "--use-fake-ui-for-media-stream",
             "--use-fake-device-for-media-stream",
+            "--window-position=0,0",
             "--window-size=1280,800",
             "about:blank",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _connect(self, timeout):
         deadline = time.time() + timeout
