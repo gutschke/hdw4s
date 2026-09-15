@@ -1,4 +1,4 @@
-hdw4s (1.2) UNRELEASED; urgency=medium
+hdw4s (2.0) unstable; urgency=medium
 
   * An account has one desktop per machine. The "<user>:<session>" instance
     name, which gave one account a second concurrent desktop on the same
@@ -64,7 +64,7 @@ hdw4s (1.2) UNRELEASED; urgency=medium
     home directory mounted on several machines. It no longer claims to be for
     coexisting with another desktop logged in on the same machine.
 
- -- Markus Gutschke <gutschke@users.noreply.github.com>  Mon, 14 Sep 2026 10:00:00 -0700
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Mon, 14 Sep 2026 23:29:37 -0700
 
 hdw4s (1.1) unstable; urgency=medium
 

@@ -88,6 +88,26 @@ so the only way to stop the conflict is to stop sharing them.
   rolls back if they did not. It refuses outright to install a release whose
   layout it does not recognise.
 
+## Which version, and which branch
+
+This is **hdw4s 2.0**, and it needs **Selkies 2.0**. Selkies 2.0 is a near-total
+rewrite of the streaming server: different package, different media path,
+different client protocol. A machine running the older Selkies cannot run this.
+
+The previous line is still here and still works. It targets **Selkies 1.6**,
+and it is on the `selkies-1.6` branch, with `v1.1` as its last release. Picking
+it is deliberate, which is the intent -- 2.0 is what everyone should be on --
+but it is kept because the older Selkies had genuine utility and some
+deployments will not move yet.
+
+    git clone https://github.com/gutschke/hdw4s        # 2.0, the default
+    git clone -b selkies-1.6 https://github.com/gutschke/hdw4s
+
+What 2.0 changes for someone upgrading, beyond the streaming server underneath:
+a desktop is taken over by a second browser without being asked first, where
+1.1 offered a button; an account gets one desktop per machine; and the
+microphone and camera can be turned on, which 1.1 could not do at all.
+
 ## Installation
 
 Either install the package:
