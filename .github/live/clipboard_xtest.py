@@ -164,9 +164,34 @@ def main():
         b.wait_for("(document.getElementById('status-display')||{classList:"
                    "{contains:()=>false}}).classList.contains('hidden')",
                    lambda v: v is True, timeout=120)
-        ok("the session is streaming in a real browser", url)
+        # Focus first. The client stops the video stream while its window is
+        # unfocused, so a frame count taken before this reads zero against a
+        # perfectly healthy session.
         win = local.focus_browser()
-        ok("the browser window has keyboard focus" if win else "", "") if win else \
+        local.click(700, 500)
+        # The status bar going away is not proof that anything is being sent.
+        # A server throwing on every request cleared it just the same, and this
+        # suite reported a healthy session against a desktop nobody could use.
+        # Count frames on the wire, which stops moving the moment the server
+        # does -- the same oracle the walkthrough uses, for the same reason.
+        # Counted in the page, not off the wire: this suite opens the session
+        # the way a user does, and the socket then lives in a Worker whose
+        # frames never reach this debugging session. The walkthrough sidesteps
+        # that with ?socket_worker=false; here the page's own counter is the
+        # signal that survives either arrangement.
+        CHUNKS = "window.videoChunksReceived || 0"
+        before = b.eval(CHUNKS) or 0
+        b.pump(5)
+        frames = (b.eval(CHUNKS) or 0) - before
+        if frames > 0:
+            ok("the session is streaming in a real browser",
+               "%s, +%d video chunks decoded" % (url, frames))
+        else:
+            bad("the session is streaming in a real browser",
+                "no video arrived; every clipboard reading below would "
+                "be taken against a session that is not working")
+            raise SystemExit("refusing to measure the clipboard of a dead session")
+        ok("the browser window has keyboard focus", "") if win else \
             bad("the browser window has keyboard focus", "no window found")
 
         print("\n  --- a screenshot on the local desktop, pasted into the session ---")
