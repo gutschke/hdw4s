@@ -19,7 +19,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_SESSION:=gnome-session}"
 : "${HDW4S_MICROPHONE:=no}"
 : "${HDW4S_WEBCAM:=no}"
-: "${HDW4S_FRAMERATE:=30}"
+: "${HDW4S_FRAMERATE:=30,8-60}"
 : "${HDW4S_DPI:=follow}"
 : "${HDW4S_INDEXING:=off}"
 : "${HDW4S_THUMBNAILS:=off}"
@@ -329,12 +329,27 @@ export SELKIES_RTC_CONFIG_JSON=''
 # for on the command line below.
 stream=(/opt/selkies/bin/selkies)
 
-# HDW4S_FRAMERATE has always meant a ceiling: this machine hosts several
-# desktops and the setting exists to bound what any one of them costs. The
-# streaming server changed that meaning underneath us. It now reads a range, and
-# a bare number sets only the *initial* value while leaving the span at its
-# default of 8 to 240, so a client could raise itself to 240 from the sidebar
-# and the setting would look like it had been honoured.
+# HDW4S_FRAMERATE is a range: where a session starts, and how far a client may
+# move it from the video settings panel.
+#
+# The default is "30,8-60" -- start at 30, and let someone who wants smoother
+# motion ask for up to 60. Measured on one session, 1280x656, over 25 seconds:
+#
+#   hardware encoding (VAAPI)     30fps -> 16% of a core   60fps -> 19%
+#   software encoding (x264)      30fps -> 34% of a core   60fps -> 49%
+#
+# So on a machine with a GPU the second half of that range is nearly free, and
+# on one without it costs about half a core per session that asks for it. Both
+# reached the rate they were given. 120 was also measured on hardware, at 27%,
+# and is available to anyone who sets it.
+#
+# A bare number still means a hard ceiling -- "30" is "30,8-30" -- so an
+# administrator who pinned a rate keeps exactly what they pinned.
+#
+# The server changed this meaning underneath us once already: a bare number
+# sets only the *initial* value while leaving the span at its own default of 8
+# to 240, so a client could raise itself to 240 from the sidebar and the setting
+# would look like it had been honoured.
 #
 # Passed as "N,8-N" instead: start at N, and refuse anything above it, while
 # still letting a client drop lower on a bad link. A value that already names a
@@ -447,15 +462,27 @@ lockdown=(
   # muting is the client's toggle. The lock keeps the choice the operator's
   # without taking the moment-to-moment decision away from the user.
   #
-  # "on" also starts the uplink, and that is not a convenience -- it is the
-  # difference between having a microphone and not. The virtual source the
-  # session's own applications see is created inside the microphone *data*
-  # path, so until the browser is actually sending, there is no capture device
-  # in the session at all and anything that enumerates devices finds none.
-  # Starting the uplink is what makes the device exist. It is left unlocked, so
-  # a user who would rather their session did not ask for the microphone on
-  # every connection can still say so: the capability is the operator's, the
-  # preference is theirs.
+  # "on" also starts the uplink, and that is what makes the device exist: the
+  # virtual source the session's own applications see is created inside the
+  # *data* path, so until the browser is actually sending there is no capture
+  # device in the session at all and anything enumerating devices finds none.
+  #
+  # ⚠ It has a sharp edge, measured rather than guessed. Starting the uplink
+  # makes the client ask the browser for the device as the session connects,
+  # and when that request cannot be satisfied -- the prompt declined, no
+  # microphone on the machine, an automated client -- the *video* stream never
+  # starts either. The page loads and stays blank with nothing said. One
+  # session, one flag: 18 of 18 walkthrough checks without it, 4 of 18 with
+  # either one alone.
+  #
+  # It is kept on anyway, because a desktop whose camera and microphone simply
+  # work is the point, and because the failure needs a client that cannot grant
+  # the permission at all. The walkthrough now grants it the way a person does
+  # -- see browser.py -- so the suite exercises the configuration that ships
+  # rather than a quieter one.
+  #
+  # The real fix belongs upstream: a refused or impossible permission must not
+  # block the video path. Filed in the tally.
   "${microphone[@]}"
   "${webcam[@]}"
   --gamepad-enabled='false|locked'

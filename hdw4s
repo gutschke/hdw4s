@@ -12,7 +12,7 @@ trap 'rc="$?"
 # Exit with an explanation rather than the trap's generic complaint. The trap
 # is for faults nobody anticipated; anything diagnosed here has already been
 # described to the user and does not need a second, vaguer line after it.
-HDW4S_VERSION='2.0'
+HDW4S_VERSION='2.0.1'
 
 die() {
   trap '' INT TERM QUIT HUP EXIT ERR
@@ -544,6 +544,34 @@ cmd_enable() {
     "ReadWritePaths=${home}" \
     > "${DROPIN}/hdw4s@${inst}.service.d/40-home.conf"
 
+  # The GPU, if this machine has one. The unit binds /dev/dri in and grants the
+  # device rule, but the node is group-owned and the group differs between
+  # machines -- "render" on a stock host, "plugdev" inside these containers,
+  # because the container config chooses it -- so the unit cannot name it and it
+  # is read off the node here.
+  #
+  # Without it the session can see the node and not open it: the encoder says
+  # "Failed to init VAAPI: Permission denied" once and then encodes every frame
+  # in software, which reads as a slow machine rather than a missing group.
+  #
+  # Re-run "hdw4s enable" if a GPU is added or taken away.
+  gpu_group=''
+  for node in /dev/dri/renderD*; do
+    [ -e "${node}" ] || continue
+    gpu_group="$(stat -c '%G' "${node}" 2>/dev/null || :)"
+    case "${gpu_group}" in ''|UNKNOWN) gpu_group='' ;; esac
+    break
+  done
+  if [ -n "${gpu_group}" ]; then
+    printf '%s\n' \
+      '# Written by "hdw4s enable" from the owner of /dev/dri/renderD*.' \
+      '[Service]' \
+      "SupplementaryGroups=${gpu_group}" \
+      > "${DROPIN}/hdw4s@${inst}.service.d/45-gpu.conf"
+  else
+    rm -f "${DROPIN}/hdw4s@${inst}.service.d/45-gpu.conf"
+  fi
+
   # ProtectSystem=strict makes everything read-only but what is named, and the
   # unit names only /var/lib/hdw4s. Any other profile directory was therefore
   # read-only inside the session, which failed at "install -d" with a bare
@@ -685,7 +713,7 @@ SESSION_SETTINGS=(
   'HDW4S_SESSION:gnome-session'
   'HDW4S_ADDR:127.0.0.1'
   'HDW4S_ENCODER:h264enc'
-  'HDW4S_FRAMERATE:30'
+  'HDW4S_FRAMERATE:30,8-60'
   'HDW4S_RESIZE:true'
   'HDW4S_DPI:follow'
   'HDW4S_INDEXING:off'

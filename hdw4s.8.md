@@ -270,9 +270,22 @@ belongs to the copy of the streaming server, of which there is one.
     `/etc/default/locale` is used, and `C.UTF-8` only if that is absent. It has
     to be a UTF-8 locale: some terminals refuse to start otherwise.
 
-  * `HDW4S_FRAMERATE`, `HDW4S_ENCODER`:
-    Passed through to the streaming server. Leave them alone unless the picture
-    is visibly wrong; the defaults suit a machine with no graphics card.
+  * `HDW4S_FRAMERATE`:
+    Where a session starts, and how far a client may move it from the video
+    settings panel. Defaults to `30,8-60`: it starts at 30, and someone who
+    wants smoother motion can ask for up to 60. A bare number is a hard ceiling
+    instead, so `30` means 30 and nothing else -- which is what an administrator
+    who pinned a rate gets to keep.
+
+    Measured on one session at 1280x656, over 25 seconds, both reaching the rate
+    they were given: with a GPU, 30fps cost 16% of a core and 60fps 19%; without
+    one, 34% and 49%. So the upper half of the default range is nearly free on a
+    machine that can encode in hardware, and costs about half a core per session
+    that asks for it on one that cannot. 120 measured at 27% on hardware.
+
+  * `HDW4S_ENCODER`:
+    Passed through to the streaming server. Leave it alone unless the picture is
+    visibly wrong.
 
   * `HDW4S_DPI`:
     Whether the desktop's display density follows the browser's, which is what
@@ -309,9 +322,13 @@ belongs to the copy of the streaming server, of which there is one.
     be listened to by a client that asks nicely or through a flaw in the page.
     Set it to `yes` and the refusal is lifted while the lock stays on, so the
     operator still decides and a connected page still cannot change it. It does
-    not switch anyone's microphone on: the uplink starts off, the browser asks
-    for the device the first time it is used, and muting remains the session's
-    own toggle. Read when a session starts, so a restart applies it.
+    not switch anyone's microphone on, and deliberately does not start the
+    uplink either: a session that asks the browser for a device as it connects
+    never starts its video stream at all when that request cannot be
+    satisfied -- a declined prompt, a machine with no microphone -- and the
+    desktop stays blank with nothing said. So the capture device inside the
+    session appears once the uplink is turned on from the session's own menu,
+    and not before. Read when a session starts, so a restart applies it.
 
   * `HDW4S_WEBCAM`:
     Whether these desktops may see a camera. Defaults to `no`, which passes

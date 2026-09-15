@@ -58,7 +58,16 @@ class Browser:
             # Without this the audio element never starts and the test measures
             # Chrome's autoplay policy rather than the session.
             "--autoplay-policy=no-user-gesture-required",
+            # Accepting the permission prompt is only half of it. Without a
+            # device to accept *for*, getUserMedia still fails -- and a session
+            # started with microphone-on-start or webcam-on-start then never
+            # starts its video stream either, so the whole suite scored 4 of 18
+            # against a desktop that was working perfectly for anyone with a
+            # real camera. These two together make this browser behave like a
+            # person who has a webcam and clicked Allow, which is the
+            # configuration that ships.
             "--use-fake-ui-for-media-stream",
+            "--use-fake-device-for-media-stream",
             "--window-size=1280,800",
             "about:blank",
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -111,7 +111,7 @@ export HDW4S_ISOLATION
 # connects to and forwards here, which is what lets a desktop exist only
 # while somebody is using it.
 : "${HDW4S_ADDR:=127.0.0.1}"
-: "${HDW4S_FRAMERATE:=30}"
+: "${HDW4S_FRAMERATE:=30,8-60}"
 : "${HDW4S_ENCODER:=h264enc}"
 
 profile="${HDW4S_PROFILE_DIR}/${instance}"

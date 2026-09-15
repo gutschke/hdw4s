@@ -61,6 +61,25 @@ Requires=hdw4s-firewall.service
 # module loading and network reconfiguration stay impossible for uid 0 here.
 CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
 DevicePolicy=closed
+# The GPU, where the machine has one. Both lines are inert on a machine without
+# one -- the "-" makes the bind optional, and a device rule for a class of nodes
+# that do not exist grants nothing -- so this is set unconditionally rather than
+# made an administrator's decision to get wrong.
+#
+# Both are needed, and neither alone does anything. PrivateDevices= gives the
+# session a private /dev holding only pseudo-devices, so the render node is not
+# there to open: DeviceAllow= grants the cgroup permission and BindPaths= puts
+# the node in the namespace. Without the bind the session reports "No such file
+# or directory"; without the allow it reports "Permission denied" -- and the
+# encoder quietly falls back to software in both cases, which looks like a slow
+# machine rather than a missing device.
+#
+# The group that owns the node is the third piece and cannot be named here,
+# because it differs between machines -- render on a stock host, plugdev inside
+# these containers. "hdw4s enable" reads it off the node and writes it into a
+# drop-in.
+DeviceAllow=char-drm rw
+BindPaths=-/dev/dri
 Environment=LIBGL_ALWAYS_SOFTWARE=1
 # Not /run/user/<uid>, even though this unit now runs one desktop per account
 # and could name it. That directory belongs to logind, which creates it for a

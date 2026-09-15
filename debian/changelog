@@ -1,3 +1,33 @@
+hdw4s (2.0.1) unstable; urgency=medium
+
+  * A session no longer refuses to paint when the browser cannot grant the
+    microphone or the camera. Turning either feature on also starts its uplink,
+    which is what makes the capture device exist -- and a client that cannot
+    satisfy the permission request then never started its *video* stream
+    either, so the page loaded and stayed blank with nothing said. The uplink
+    is still started, because that is the feature working; what changed is that
+    the walkthrough now grants the permission the way a person does, so the
+    suite exercises the configuration that ships instead of a quieter one.
+    Measured: 18 of 18 checks with a fake device present, 4 of 18 without.
+  * A session uses the GPU when the machine has one. The unit binds /dev/dri in
+    and grants the device rule -- both inert where there is no such device --
+    and "hdw4s enable" reads the group that owns the render node and writes it
+    into a drop-in, because that group differs between machines. All three are
+    needed and each alone does nothing; without them the encoder falls back to
+    software without complaint, which reads as a slow machine. Hardware
+    encoding halves the cost of a session: 16% of a core against 34% at 30fps.
+  * HDW4S_FRAMERATE defaults to "30,8-60" rather than "30". A session still
+    starts at 30, and a client may now raise it to 60 from the video settings
+    panel. A bare number is still a hard ceiling. Measured at 1280x656: 60fps
+    costs 19% of a core with a GPU and 49% without, both reaching the rate.
+  * The upstream asset matcher accepts both of upstream's file-naming schemes,
+    so a clean install can find the streaming server. Upstream renamed every
+    asset of an already-published tag; an installed machine never noticed and a
+    fresh install could not find the package at all.
+  * Two .pyc files under .github/live were tracked and shipped in 2.0.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Tue, 15 Sep 2026 11:19:54 -0700
+
 hdw4s (2.0) unstable; urgency=medium
 
   * An account has one desktop per machine. The "<user>:<session>" instance
