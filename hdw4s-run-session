@@ -18,6 +18,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 # which of them is started.
 : "${HDW4S_SESSION:=gnome-session}"
 : "${HDW4S_MICROPHONE:=no}"
+: "${HDW4S_WEBCAM:=no}"
 : "${HDW4S_FRAMERATE:=30}"
 : "${HDW4S_DPI:=follow}"
 : "${HDW4S_INDEXING:=off}"
@@ -218,8 +219,50 @@ elif [ "${HDW4S_ISOLATION:-none}" = 'profile' ]; then
   reset_if_present org.gnome.nautilus.preferences show-image-thumbnails
 fi
 
+# Whether these desktops may see a camera.
+#
+# The same shape as the microphone, plus one moving part. The virtual camera is
+# created on the first frame from the browser, and applications reach it
+# through the V4L2 interposer the streaming server's package ships: a shared
+# object that intercepts the calls a program makes to open a camera and answers
+# them from the session's own socket. So the interposer has to be in the
+# environment of the session's *applications*, and the uplink has to be running
+# for there to be anything behind it.
+#
+# It must not be in the environment of the streaming server, which is the thing
+# on the other end of that socket. Preloading it there would have the producer
+# of the frames intercepting its own camera calls. Hence two launches with
+# different environments rather than one setting for both; lockdown.py asserts
+# the streaming server's environment stays clear of it.
+webcam_preload=''
+case "${HDW4S_WEBCAM}" in
+  yes)
+    webcam=(--webcam-enabled='true|locked' --webcam-on-start=true)
+    # The streaming server's package ships the interposer for several
+    # architectures -- on this machine x86_64 and i386 -- and they are plain
+    # .so files with no soname, so ldconfig does not index them and a bare
+    # LD_PRELOAD name does not resolve. The path has to be spelled out, and it
+    # has to be the one matching this machine: a glob picks i386 first, and the
+    # loader then declines to preload a 32-bit object into a 64-bit process,
+    # warns once to stderr, and carries on with no camera. That failure looks
+    # exactly like the feature not working.
+    for so in "/usr/lib/$(uname -m)-linux-gnu/selkies_v4l2_interposer.so" \
+              /usr/lib/*/selkies_v4l2_interposer.so; do
+      [ -e "${so}" ] || continue
+      webcam_preload="env LD_PRELOAD=${so}"
+      break
+    done
+    if [ -z "${webcam_preload}" ]; then
+      echo 'hdw4s: HDW4S_WEBCAM=yes but the V4L2 interposer was not found, so' \
+           '  applications will not see a camera. It ships with the streaming' \
+           '  server; check that package is installed.' >&2
+    fi
+    ;;
+  *) webcam=(--webcam-enabled='false|locked') ;;
+esac
+
 # shellcheck disable=SC2086
-${HDW4S_SESSION} &
+${webcam_preload} ${HDW4S_SESSION} &
 children+=($!)
 session_pid="$!"
 
@@ -414,7 +457,7 @@ lockdown=(
   # every connection can still say so: the capability is the operator's, the
   # preference is theirs.
   "${microphone[@]}"
-  --webcam-enabled='false|locked'
+  "${webcam[@]}"
   --gamepad-enabled='false|locked'
   --enable-sharing='false|locked'
   --enable-shared='false|locked'

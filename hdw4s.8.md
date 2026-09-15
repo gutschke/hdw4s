@@ -313,6 +313,17 @@ belongs to the copy of the streaming server, of which there is one.
     for the device the first time it is used, and muting remains the session's
     own toggle. Read when a session starts, so a restart applies it.
 
+  * `HDW4S_WEBCAM`:
+    Whether these desktops may see a camera. Defaults to `no`, which passes
+    `webcam-enabled=false|locked` -- the one condition on which the streaming
+    server turns webcam frames away. `yes` lifts the refusal, keeps the lock,
+    and additionally preloads the V4L2 interposer into the session's
+    applications. That last part is not optional: a container has no camera and
+    no kernel device for one, so the interposer is what answers a program's
+    camera calls, out of a socket the streaming server serves. It is preloaded
+    into the session and deliberately **not** into the streaming server, which
+    is the other end of that socket. Read when a session starts.
+
   * `SELKIES_VERSION`:
     Pin a Selkies release and stop following upstream.
 

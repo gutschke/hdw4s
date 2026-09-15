@@ -228,6 +228,61 @@ def check_home(home, unit):
         ok(f"the upload directory is outside the home ({path})")
 
 
+def _server_proc(unit):
+    """The streaming server's /proc directory, found under the session's cgroup."""
+    import glob
+    for cmdline in glob.glob("/proc/[0-9]*/cmdline"):
+        try:
+            with open(cmdline, "rb") as fh:
+                argv = fh.read().split(b"\0")
+        except OSError:
+            continue
+        if not argv or b"/selkies" not in argv[0]:
+            continue
+        if unit:
+            try:
+                with open(cmdline.replace("cmdline", "cgroup")) as fh:
+                    if unit not in fh.read():
+                        continue
+            except OSError:
+                continue
+        return cmdline.rsplit("/", 1)[0]
+    return None
+
+
+def check_interposer(unit):
+    """The V4L2 interposer belongs in the applications, never in the server.
+
+    HDW4S_WEBCAM=yes preloads a shared object that answers a program's camera
+    calls out of the session's own socket. The streaming server is what is on
+    the other end of that socket: preloading it there would have the producer
+    of the frames intercepting its own camera calls. The two are launched with
+    deliberately different environments, and nothing but this notices if that
+    stops being true.
+    """
+    if not unit:
+        print("  skip the interposer's placement (pass --unit hdw4s@INSTANCE)")
+        return
+    proc = _server_proc(unit)
+    if proc is None:
+        bad("interposer", "cannot find the running streaming server to ask")
+        return
+    try:
+        with open(proc + "/environ", "rb") as fh:
+            env = fh.read().decode("utf-8", "replace").split("\0")
+    except OSError as exc:
+        bad("interposer", f"cannot read the server's environment: {exc}")
+        return
+    preload = next((e.split("=", 1)[1] for e in env
+                    if e.startswith("LD_PRELOAD=")), "")
+    if "interposer" in preload:
+        bad("interposer", f"the streaming server has it preloaded: {preload}")
+    elif preload:
+        bad("interposer", f"the streaming server has an unexpected LD_PRELOAD: {preload}")
+    else:
+        ok("the streaming server has no LD_PRELOAD")
+
+
 def _server_argv(unit):
     """The streaming server's argv, found under the session's own cgroup."""
     import glob
@@ -427,7 +482,8 @@ def adopt_configured(unit):
     argv = _server_argv(unit) if unit else None
     if argv is None:
         return
-    for flag, name in (("--microphone-enabled=", "microphone_enabled"),):
+    for flag, name in (("--microphone-enabled=", "microphone_enabled"),
+                       ("--webcam-enabled=", "webcam_enabled")):
         raw = next((a.split("=", 1)[1] for a in argv if a.startswith(flag)), None)
         if raw is None:
             continue
@@ -469,6 +525,7 @@ def main():
         check_ceilings(settings, framerate)
     check_refusals(base)
     check_defeat(base, unit)
+    check_interposer(unit)
     check_defeat_wire_verb(base, unit, probe)
     check_home(home, unit)
 

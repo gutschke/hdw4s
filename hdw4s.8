@@ -186,6 +186,8 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_MICROPHONE\fR: Whether these desktops may be heard\. Defaults to \fBno\fR, which passes \fBmicrophone\-enabled=false|locked\fR to the streaming server \-\- the one condition on which it refuses microphone data outright, so a desktop cannot be listened to by a client that asks nicely or through a flaw in the page\. Set it to \fByes\fR and the refusal is lifted while the lock stays on, so the operator still decides and a connected page still cannot change it\. It does not switch anyone's microphone on: the uplink starts off, the browser asks for the device the first time it is used, and muting remains the session's own toggle\. Read when a session starts, so a restart applies it\.
 .IP "\[ci]" 4
+\fBHDW4S_WEBCAM\fR: Whether these desktops may see a camera\. Defaults to \fBno\fR, which passes \fBwebcam\-enabled=false|locked\fR \-\- the one condition on which the streaming server turns webcam frames away\. \fByes\fR lifts the refusal, keeps the lock, and additionally preloads the V4L2 interposer into the session's applications\. That last part is not optional: a container has no camera and no kernel device for one, so the interposer is what answers a program's camera calls, out of a socket the streaming server serves\. It is preloaded into the session and deliberately \fBnot\fR into the streaming server, which is the other end of that socket\. Read when a session starts\.
+.IP "\[ci]" 4
 \fBSELKIES_VERSION\fR: Pin a Selkies release and stop following upstream\.
 .IP "" 0
 .SH "RUNNING SOMETHING AS ROOT"

@@ -681,6 +681,7 @@ declare -A GLOBAL_ONLY=(
 # are checked against the scripts by .github/checks.sh.
 SESSION_SETTINGS=(
   'HDW4S_MICROPHONE:no'
+  'HDW4S_WEBCAM:no'
   'HDW4S_SESSION:gnome-session'
   'HDW4S_ADDR:127.0.0.1'
   'HDW4S_ENCODER:h264enc'
@@ -711,6 +712,7 @@ declare -A SETTABLE=(
   [HDW4S_BASE_PORT]='number'
   [HDW4S_BLOCK_SIZE]='number'
   [HDW4S_MICROPHONE]='no|yes'
+  [HDW4S_WEBCAM]='no|yes'
   [HDW4S_SESSION]='any'
   [HDW4S_FRAMERATE]='framerate'
   [HDW4S_RESIZE]='true|false'

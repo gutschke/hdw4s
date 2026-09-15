@@ -15,6 +15,13 @@ hdw4s (1.2) UNRELEASED; urgency=medium
     now hidden in the session's own profile, and only where pipewire-pulse is
     the provider, since on a real PulseAudio machine that entry is the sound
     server.
+  * New setting HDW4S_WEBCAM, default no. Same refusal behind it as the
+    microphone -- disabled and locked -- and one more moving part: with "yes"
+    the V4L2 interposer is preloaded into the session's applications, because a
+    container has no camera and no kernel device for one, and the interposer is
+    what answers a program's camera calls from the streaming server's socket.
+    It is kept out of the streaming server's own environment, which is the
+    other end of that socket, and the lockdown suite asserts that.
   * New setting HDW4S_MICROPHONE, default no. The streaming server refuses
     microphone data on exactly one condition -- the feature disabled and locked
     -- which is what this has always shipped as. Setting it to yes lifts the
