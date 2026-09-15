@@ -502,7 +502,10 @@ lockdown=(
                                       # of default cannot quietly hand out a
                                       # shell
   --enable-metrics-http='false|locked'
-  --second-screen='false|locked'
+  # X11 mints a RandR monitor on demand, so a second display needs no hardware
+  # on this side at all: it appears as another browser window to put on
+  # whatever monitor the viewer has.
+  --second-screen='true|locked'
   # Branding, partially. This names the sidebar heading and nothing else.
   #
   # The browser TAB still reads "Selkies", because the client sets its title

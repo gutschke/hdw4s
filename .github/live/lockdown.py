@@ -81,7 +81,7 @@ EXPECTED = {
     "enable_metrics_http": (False, True),
     # One X screen is configured; a second one streams a display that is not
     # there and lets a client resize what is.
-    "second_screen": (False, True),
+    "second_screen": (True, True),
     # Not security, but the tab belongs to this package, not to upstream.
     "ui_title": ("Desktop", None),
 }
