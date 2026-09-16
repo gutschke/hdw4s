@@ -234,12 +234,21 @@ Restart=no
 # with it.
 
 # ---- privilege -------------------------------------------------------------
-# NoNewPrivileges is deliberately NOT set. It would take setuid with it, and
-# that costs the Chrome sandbox, which is too much to pay. Becoming root is
-# blocked the simpler way instead: the slot account is a member of no
+# NoNewPrivileges is NOT set, and the reason originally recorded for that is
+# measured false. It was kept off to preserve the Chrome sandbox; Chrome uses the
+# namespace sandbox, which needs no capability and no setuid binary, and the
+# setuid helper it would otherwise fall back to cannot work under the bounding
+# set below in any case. Measured: the renderers run in a user namespace of their
+# own, with a PID namespace each.
+#
+# So turning it on looks close to free for this session type. It is left off
+# because that is the decision on record and re-taking it belongs to whoever made
+# it, not to whoever noticed -- the question is pending, not answered. Becoming
+# root is blocked meanwhile by the simpler thing: the slot account is in no
 # sudo-capable group, so there is nothing for sudo to authorise.
-# The ceiling on what a setuid-root binary in this session can obtain, and with
-# NoNewPrivileges deliberately off it is the ONLY remaining ceiling.
+#
+# The bounding set is the ceiling on what a setuid-root binary here can obtain,
+# and while NoNewPrivileges stays off it is the only remaining ceiling.
 #
 # One capability, where the base unit has three, and the difference is the point.
 # CAP_SETUID and CAP_SETGID let a process change identity after exec; nothing on

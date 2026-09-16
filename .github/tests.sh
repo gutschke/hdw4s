@@ -765,6 +765,38 @@ echo '== a slot records what kind of session it is =='
   is 'a desktop session still reads its files' "${r%%$'\t'*}" 'none'
 )
 
+echo '== a slot table written by an older version still works =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # The deployed machines have a two-field table written by 2.2.0, and the
+  # install puts readers in front of it that were written for three. If a
+  # two-field row mishandles, "list", "reap" and the firewall break for real
+  # users -- on upgrade, which is the worst moment. This is that table.
+  printf '%s\n' \
+    '# Session slots. One line per session: <index> <instance>.' \
+    '0 alice' '1 INSTANCE' '2 carol' > "${SLOTS}"
+
+  is 'every old row reads as a desktop' \
+     "$(for i in alice INSTANCE carol; do type_of "${i}"; done | sort -u | tr '\n' ' ')" \
+     'desktop '
+  is 'and resolves to the desktop unit' "$(unit_of INSTANCE)" 'hdw4s@INSTANCE.service'
+  is 'slot_of still finds a two-field row' "$(slot_of carol)" '2'
+  is 'and alloc_slot is idempotent against one' "$(alloc_slot INSTANCE)" '1'
+  is 'which did not rewrite the row' \
+     "$(awk '$2=="INSTANCE"{print NF}' "${SLOTS}" | head -1)" '2'
+
+  # The readers walk the table with "read -r idx inst _". Prove that shape is
+  # required, by showing what the old two-variable form does to a three-field
+  # row: it does not drop the type, it appends it to the name, so the slot is
+  # indexed under a session that does not exist.
+  printf '%s\n' '3 eph0 ephemeral' >> "${SLOTS}"
+  old_form="$(while read -r idx inst; do [ "${idx}" = '3' ] && echo "${inst}"; done < "${SLOTS}")"
+  new_form="$(while read -r idx inst _; do [ "${idx}" = '3' ] && echo "${inst}"; done < "${SLOTS}")"
+  is 'the old reader shape corrupts the name' "${old_form}" 'eph0 ephemeral'
+  is 'and the shape the readers use does not' "${new_form}" 'eph0'
+  is 'a mixed table still answers for the old rows' "$(unit_of alice)" 'hdw4s@alice.service'
+  is 'and for the new one'                          "$(unit_of eph0)" 'hdw4s-ephemeral@eph0.service'
+)
+
 echo '== the relay names no session unit, and enable supplies one =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
 
@@ -825,7 +857,7 @@ echo '== the relay names no session unit, and enable supplies one =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=158   # update when tests are added; a wrong number is the point
+EXPECTED=167   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
