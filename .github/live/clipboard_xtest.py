@@ -143,12 +143,17 @@ class LocalX:
 
 def main():
     url = sys.argv[1]
-    host, user = "HOST", "INSTANCE"
+    # No defaults; see clipboard.py.
+    host = user = ""
     for i, a in enumerate(sys.argv):
         if a == "--host":
             host = sys.argv[i + 1]
         if a == "--instance":
             user = sys.argv[i + 1]
+
+    if not host or not user:
+        sys.exit(f"{sys.argv[0]}: --host and --instance are required; this suite drives a\n"
+                 "  live session and will not guess whose.")
 
     sess = Session(host, user)
     sess.install(AGENT)

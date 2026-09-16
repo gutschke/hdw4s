@@ -63,6 +63,30 @@ if [ -n "${banned}" ]; then
 fi
 okif 'no browser-mode word in shipped files'
 
+# Local detail: the addresses, container ids and account names of the machines
+# this happens to be developed on. None of it is useful to anybody who installs
+# the package, and two of them -- a real person's account name and an internal
+# address -- sat in a public repository for weeks as the default arguments of a
+# test, where nobody was looking because they were not secrets and did not feel
+# like a leak.
+#
+# Each pattern is written with a bracketed character so this check does not match
+# its own source, the same trap as a process search containing its own pattern.
+# The maintainer's own name is deliberately absent: it belongs in debian/control
+# and the licence, and banning it would make this check cry wolf until somebody
+# turned it off.
+begin
+local_detail="$(grep -rIln -E \
+    'ariadn[e]|atticu[s]|ct1[0-9][0-9]|10\.10\.[0-9]|172\.24\.[0-9]' . \
+    --exclude-dir=.git --exclude-dir=private --exclude-dir=tmp \
+    --exclude-dir=node_modules 2>/dev/null || true)"
+local_detail="$(printf '%s\n' "${local_detail}" | grep -v '^\./\.github/checks\.sh$' || true)"
+if [ -n "${local_detail}" ]; then
+  printf '%s\n' "${local_detail}"
+  bad 'local detail' 'a machine or account from this estate appears in the files above'
+fi
+okif 'no local machine or account names in shipped files'
+
 echo '== shell =='
 begin
 for f in "${SCRIPTS[@]}"; do

@@ -153,13 +153,18 @@ def pixels(raw):
 
 def main():
     url = sys.argv[1]
-    host = "HOST"
-    user = "INSTANCE"
+    # No defaults. A suite that ships one names somebody's machine and somebody's
+    # account in a public repository, and it did.
+    host = user = ""
     for i, a in enumerate(sys.argv):
         if a == "--host":
             host = sys.argv[i + 1]
         if a == "--instance":
             user = sys.argv[i + 1]
+
+    if not host or not user:
+        sys.exit(f"{sys.argv[0]}: --host and --instance are required; this suite drives a\n"
+                 "  live session and will not guess whose.")
 
     sess = Session(host, user)
     sess.install(os.path.join(os.path.dirname(os.path.abspath(__file__)),

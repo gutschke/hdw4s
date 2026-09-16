@@ -773,16 +773,16 @@ echo '== a slot table written by an older version still works =='
   # users -- on upgrade, which is the worst moment. This is that table.
   printf '%s\n' \
     '# Session slots. One line per session: <index> <instance>.' \
-    '0 alice' '1 INSTANCE' '2 carol' > "${SLOTS}"
+    '0 alice' '1 bob' '2 carol' > "${SLOTS}"
 
   is 'every old row reads as a desktop' \
-     "$(for i in alice INSTANCE carol; do type_of "${i}"; done | sort -u | tr '\n' ' ')" \
+     "$(for i in alice bob carol; do type_of "${i}"; done | sort -u | tr '\n' ' ')" \
      'desktop '
-  is 'and resolves to the desktop unit' "$(unit_of INSTANCE)" 'hdw4s@INSTANCE.service'
+  is 'and resolves to the desktop unit' "$(unit_of bob)" 'hdw4s@bob.service'
   is 'slot_of still finds a two-field row' "$(slot_of carol)" '2'
-  is 'and alloc_slot is idempotent against one' "$(alloc_slot INSTANCE)" '1'
+  is 'and alloc_slot is idempotent against one' "$(alloc_slot bob)" '1'
   is 'which did not rewrite the row' \
-     "$(awk '$2=="INSTANCE"{print NF}' "${SLOTS}" | head -1)" '2'
+     "$(awk '$2=="bob"{print NF}' "${SLOTS}" | head -1)" '2'
 
   # The readers walk the table with "read -r idx inst _". Prove that shape is
   # required, by showing what the old two-variable form does to a three-field
