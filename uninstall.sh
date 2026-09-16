@@ -55,8 +55,8 @@ if command -v dpkg-query >/dev/null 2>&1 &&
 fi
 
 echo -n 'Stopping sessions...'
-mapfile -t units < <(systemctl list-units --plain --no-legend --all 'hdw4s@*' |
-                     awk '{print $1}')
+mapfile -t units < <(systemctl list-units --plain --no-legend --all \
+                       'hdw4s@*' 'hdw4s-ephemeral@*' | awk '{print $1}')
 [ "${#units[@]}" -eq 0 ] || systemctl disable --now "${units[@]}" >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-updater.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-firewall.timer >/dev/null 2>&1 || :
@@ -79,6 +79,7 @@ echo ' done.'
 
 echo -n 'Removing units...'
 rm -f /etc/systemd/system/hdw4s@.service \
+      /etc/systemd/system/hdw4s-ephemeral@.service \
       /etc/systemd/system/hdw4s-proxy@.service \
       /etc/systemd/system/hdw4s-proxy@.socket \
       /etc/systemd/system/hdw4s.slice \
@@ -94,9 +95,11 @@ rm -f /etc/systemd/system/hdw4s@.service \
 # while the drop-ins and the socket links that "hdw4s enable" really does write
 # were left behind. Reinstalling then came back up with stale User= and port
 # assignments for slots that had since been handed to somebody else.
-rm -f /etc/systemd/system/multi-user.target.wants/hdw4s@*.service
+rm -f /etc/systemd/system/multi-user.target.wants/hdw4s@*.service \
+      /etc/systemd/system/multi-user.target.wants/hdw4s-ephemeral@*.service
 rm -f /etc/systemd/system/sockets.target.wants/hdw4s-proxy@*.socket
 rm -rf /etc/systemd/system/hdw4s@*.service.d \
+       /etc/systemd/system/hdw4s-ephemeral@*.service.d \
        /etc/systemd/system/hdw4s-proxy@*.service.d \
        /etc/systemd/system/hdw4s-proxy@*.socket.d
 

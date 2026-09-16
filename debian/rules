@@ -16,5 +16,6 @@ override_dh_installsystemd:
 	dh_installsystemd --no-enable --no-start hdw4s-reaper.service
 	dh_installsystemd --no-enable --no-start hdw4s-updater.service
 	dh_installsystemd --no-enable --no-start hdw4s@.service
+	dh_installsystemd --no-enable --no-start hdw4s-ephemeral@.service
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.socket
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.service

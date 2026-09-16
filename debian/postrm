@@ -28,6 +28,7 @@ if [ "$1" = 'purge' ]; then
   # attached to slots that had been handed out again in the meantime.
   rm -rf /etc/hdw4s/*.conf /etc/hdw4s/*.cred
   rm -rf /etc/systemd/system/hdw4s@*.service.d \
+         /etc/systemd/system/hdw4s-ephemeral@*.service.d \
          /etc/systemd/system/hdw4s-proxy@*.service.d \
          /etc/systemd/system/hdw4s-proxy@*.socket.d
   rm -f /etc/systemd/system/sockets.target.wants/hdw4s-proxy@*.socket

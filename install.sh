@@ -19,7 +19,8 @@ trap 'rc="$?"
 src="$(cd "$(dirname "$0")" && pwd)"
 SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait}
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
-         hdw4s@.service hdw4s-proxy@.socket hdw4s-proxy@.service
+         hdw4s@.service hdw4s-ephemeral@.service
+         hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-firewall.service
          hdw4s-firewall-check.service hdw4s-firewall.timer
          hdw4s-updater.{service,timer} hdw4s-reaper.{service,timer}
@@ -204,7 +205,7 @@ echo ' done.'
 
 echo -n 'Linking...'
 ln -sf "${dst}/hdw4s" "${sys}/sbin/hdw4s"
-for u in hdw4s@.service hdw4s.slice hdw4s-firewall.service \
+for u in hdw4s@.service hdw4s-ephemeral@.service hdw4s.slice hdw4s-firewall.service \
          hdw4s-proxy@.socket hdw4s-proxy@.service \
          hdw4s-firewall-check.service hdw4s-firewall.timer \
          hdw4s-updater.service hdw4s-updater.timer \

@@ -1,0 +1,149 @@
+[Unit]
+Description=HDW4S ephemeral desktop for slot %i
+Documentation=man:hdw4s(8)
+# An ephemeral session is a desktop that keeps nothing. It starts from a fresh
+# profile, and when the connection ends the profile goes with it. What that
+# promises is narrow and deliberate: no artefact of a previous session is left
+# on the filesystem. It says nothing about copies the machine makes for its own
+# reasons -- page cache, swap, a hibernation image, a snapshot of the host --
+# and it must never be documented as though it did.
+After=network-online.target hdw4s-firewall.service
+Wants=network-online.target
+# A hard requirement for the same reason as the base unit, and more so here:
+# stopping the firewall unit runs its ExecStop=, which deletes the table that is
+# the only thing between this session and the network. This is the session type
+# that exists to run code nobody trusts, so it is the last one that should be
+# able to start without that table.
+Requires=hdw4s-firewall.service
+# Stops with the last thing that wanted it; the pool's admission unit is what
+# wants it, so a slot nobody is using does not linger.
+StopWhenUnneeded=yes
+
+[Service]
+# ---- identity -------------------------------------------------------------
+# Resolved at service START, not at unit load, which is what lets one template
+# serve a pool of slots whose accounts are minted just before the unit runs.
+User=%i
+Slice=hdw4s-%i.slice
+Type=notify
+NotifyAccess=all
+TimeoutStartSec=120
+UMask=0077
+WorkingDirectory=~
+
+EnvironmentFile=-/etc/hdw4s/hdw4s.conf
+EnvironmentFile=-/etc/hdw4s/%i.conf
+
+# ---- where the session lives, and why it vanishes --------------------------
+# The profile is the session: with isolation on it holds the settings, the dconf
+# database, the GNOME state, the keyring and the browser profile. Measured on
+# 2026-09-16, it is the dominant artefact a stopped session leaves behind, and
+# it survives a clean stop, a SIGKILL and a hard container stop alike.
+#
+# So it is moved off the disk entirely, using a setting the product already has
+# rather than new machinery: HDW4S_PROFILE_DIR points at this unit's own
+# RuntimeDirectory, which systemd creates for the session user and removes when
+# the unit stops -- on both stop paths, measured. Destruction becomes the
+# platform's job instead of ours.
+#
+# Two further notes for whoever edits this. The directory must be one systemd
+# already creates for the session user: hdw4s-session builds the profile AS that
+# user, and a root-owned directory under /run fails with "Permission denied".
+# And StateDirectory= is deliberately absent, which is only safe BECAUSE of the
+# redirect above: removing the directive alone does not remove the directory,
+# since hdw4s-session creates the profile unconditionally.
+RuntimeDirectory=hdw4s/%i
+RuntimeDirectoryMode=0700
+Environment=HDW4S_PROFILE_DIR=/run/hdw4s
+Environment=HDW4S_ISOLATION=profile
+
+# The home is the session's own, not an account's on a shared filesystem, so it
+# needs no mount to wait for and gets no 40-home.conf -- the drop-in `hdw4s
+# enable` writes, which bakes an account's home path into RequiresMountsFor= and
+# fails with 226/NAMESPACE if that path later changes.
+#
+# HOME is NOT set here. systemd takes it from the slot account's passwd entry,
+# as does WorkingDirectory=~, and a unit that disagreed with passwd would be two
+# sources of truth for one path. Minting the slot with this home is the
+# identity step's job; this unit only creates and sizes the directory.
+#
+# The size is explicit because /run is sized from the HOST's memory, not the
+# container's: on a 16 GiB container that is around 100 GiB, so without a size
+# the cgroup OOM killer fires long before the filesystem fills, which is not a
+# bound anybody chose.
+RuntimeDirectory=hdw4s-home/%i
+TemporaryFileSystem=/run/hdw4s-home/%i:size=1G,mode=0700
+
+# ---- what the session must not see or leave --------------------------------
+# An empty /home: the session cannot tell that other accounts exist. Measured
+# against the alternative of merely not mounting them, which leaves the names.
+ProtectHome=tmpfs
+# Its own /tmp and /var/tmp. The /var/tmp private tree turned out NOT to survive
+# any stop path we could produce, so this is defence in depth rather than the
+# load-bearing line an earlier draft of the plan called it.
+PrivateTmp=yes
+TemporaryFileSystem=/var/tmp
+
+# Shared memory and semaphores outlive the session otherwise. logind's default
+# would remove them, but it acts on logind sessions and this product has none:
+# measured 2026-09-16, a segment owned by the session uid survived a clean stop
+# and cleared only when the container rebooted. The directive is therefore not
+# redundant with the default -- it is the only thing doing the job.
+RemoveIPC=yes
+
+# ---- lifetime --------------------------------------------------------------
+# A cap, and no resurrection. Restart= must stay "no": with the base unit's
+# on-failure a SIGKILL brings the session straight back, which defeats the cap
+# and, during testing, silently replaces the thing being measured.
+Restart=no
+
+# ---- privilege -------------------------------------------------------------
+# NoNewPrivileges is deliberately NOT set. It would take setuid with it, and
+# that costs the Chrome sandbox, which is too much to pay. Becoming root is
+# blocked the simpler way instead: the slot account is a member of no
+# sudo-capable group, so there is nothing for sudo to authorise.
+# The ceiling on what a setuid-root binary in this session can obtain, and with
+# NoNewPrivileges deliberately off it is the ONLY remaining ceiling -- which is
+# why leaving it unset here was worse than leaving it unset in the base unit.
+# The same three as the base unit: CAP_SYS_ADMIN, CAP_NET_ADMIN and the rest
+# stay out, so mounting, module loading and network reconfiguration remain
+# impossible even for uid 0 inside.
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
+LockPersonality=yes
+# This also sets DevicePolicy=closed, so the base unit's separate line is not
+# repeated here -- verified with `systemctl show -p DevicePolicy`, not assumed.
+PrivateDevices=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+# See the base unit for the measurement behind this; it applies unchanged.
+LimitNOFILE=65536
+# A core dump is a file the session did not choose to write. On both machines
+# measured, `kernel.core_pattern` is "core", so a dump lands in the working
+# directory -- inside the tmpfs home, and destroyed with it. That is luck, not
+# design: core_pattern is host-global, and a machine with systemd-coredump or
+# apport writes the dump to /var/lib/systemd/coredump or /var/crash instead,
+# outside every namespace this unit builds. Refusing the dump makes the promise
+# independent of a setting this product does not own.
+LimitCORE=0
+# Defence in depth, and deliberately not load-bearing: the threat model puts RAM
+# and swap out of scope, so nothing here rests on this. It is set because it is
+# free, not because a claim needs it.
+MemorySwapMax=0
+OOMPolicy=continue
+KillMode=control-group
+
+ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
+ExecStart=/usr/lib/hdw4s/hdw4s-session %i
+
+[Install]
+WantedBy=multi-user.target
