@@ -262,6 +262,26 @@ fi
 # different environments rather than one setting for both; lockdown.py asserts
 # the streaming server's environment stays clear of it.
 webcam_preload=''
+# Whether this streaming server can start a capture device only when something
+# actually reads it, rather than at connect.
+#
+# Probed, never assumed from a version. The two behave identically until the
+# moment it matters: with on-start, the page asks the browser for the camera as
+# the session connects, so the indicator light on the user's own machine comes on
+# and stays on for the whole session whether or not anything reads it. That is
+# the behaviour this probe exists to avoid, and it is worth avoiding even when
+# the camera is wanted -- a light that is always on tells nobody anything.
+#
+# The flags come from a change that is not upstream yet, so a stock streaming
+# server does not have them and a machine can silently go back to stock when a
+# package is installed over it. Asking the binary is the only answer that
+# survives that.
+capture_on_demand='no'
+if "${HDW4S_SELKIES:-/opt/selkies/bin/selkies}" --help 2>/dev/null |
+     grep -q -- '--webcam-on-demand'; then
+  capture_on_demand='yes'
+fi
+
 case "${HDW4S_WEBCAM}" in
   yes)
     # Enabled, but deliberately NOT locked. The dashboard hides a control
@@ -271,7 +291,15 @@ case "${HDW4S_WEBCAM}" in
     # it off. Locking a camera on is not pinning a preference, it is removing a
     # privacy control. Unlocked, the value is still what this session starts
     # with; the difference is that its owner can stop it.
-    webcam=(--webcam-enabled=true --webcam-on-start=true)
+    if [ "${capture_on_demand}" = 'yes' ]; then
+      webcam=(--webcam-enabled=true --webcam-on-demand=true)
+    else
+      webcam=(--webcam-enabled=true --webcam-on-start=true)
+      echo 'hdw4s: this streaming server has no on-demand capture, so the camera
+      is requested from the browser at connect and its indicator light stays
+      on for the whole session. Check that the build carrying that change is
+      the one installed; a package install can put a stock one back.' >&2
+    fi
     # The streaming server's package ships the interposer for several
     # architectures -- on this machine x86_64 and i386 -- and they are plain
     # .so files with no soname, so ldconfig does not index them and a bare
@@ -463,7 +491,13 @@ case "${HDW4S_MICROPHONE}" in
   # Unlocked for the same reason as the webcam below: a locked setting has
   # no control in the dashboard, and a microphone nobody can mute is worse
   # than one that starts off.
-  yes) microphone=(--microphone-enabled=true --microphone-on-start=true) ;;
+  yes) if [ "${capture_on_demand}" = 'yes' ]; then
+         # Present, and started by something opening it. The browser is not
+         # asked for the microphone until a program in the session wants one.
+         microphone=(--microphone-enabled=true --microphone-on-demand=true)
+       else
+         microphone=(--microphone-enabled=true --microphone-on-start=true)
+       fi ;;
   *)   microphone=(--microphone-enabled='false|locked') ;;
 esac
 

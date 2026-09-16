@@ -909,7 +909,12 @@ mapfile -t units < <(systemctl list-units --plain --no-legend --state=active \
 idle=()
 busy=()
 for unit in "${units[@]}"; do
-  inst="${unit#hdw4s@}"; inst="${inst%.service}"
+  # Both templates are matched above, so strip either prefix. Stripping only
+  # "hdw4s@" left an ephemeral unit named "hdw4s-ephemeral@<slot>", which then
+  # found no conf and no slot row, read as having no port, and was counted among
+  # the sessions nobody is using -- so the updater would have restarted a desktop
+  # somebody was working in, which is the one thing this loop exists to avoid.
+  inst="${unit#hdw4s@}"; inst="${inst#hdw4s-ephemeral@}"; inst="${inst%.service}"
   port="$(sed -n 's/^[[:space:]]*HDW4S_PORT=\([0-9]\{1,\}\).*/\1/p' \
           "/etc/hdw4s/${inst}.conf" 2>/dev/null | tail -n1)"
   if [ -z "${port}" ]; then
