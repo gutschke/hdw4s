@@ -792,6 +792,7 @@ declare -A GLOBAL_ONLY=(
   # per-instance value would be read by nothing and would look like it worked.
   [HDW4S_EPHEMERAL_SLOTS]=1 [HDW4S_EPHEMERAL_HOME_SIZE]=1
   [HDW4S_EPHEMERAL_PROFILE_SIZE]=1 [HDW4S_EPHEMERAL_SHM_SIZE]=1
+  [HDW4S_EPHEMERAL_BACKGROUND]=1
 )
 
 # Settings whose effect does not live in the configuration file at all. The
@@ -846,6 +847,7 @@ declare -A SETTABLE=(
   [HDW4S_EPHEMERAL_HOME_SIZE]='size'
   [HDW4S_EPHEMERAL_PROFILE_SIZE]='size'
   [HDW4S_EPHEMERAL_SHM_SIZE]='size'
+  [HDW4S_EPHEMERAL_BACKGROUND]='color'
   [HDW4S_MICROPHONE]='no|yes'
   [HDW4S_WEBCAM]='no|yes'
   [HDW4S_WEBRTC]='no|yes'
@@ -887,6 +889,8 @@ check_value() {
     # and the message then names the mount instead of the value that caused it.
     size)   [[ "${value}" =~ ^[0-9]+[KMG]?$|^[0-9]+%$ ]] ||
               die "hdw4s: ${key} takes a size such as 512M, 2G or 10%, not '${value}'";;
+    color)  [[ "${value}" =~ ^#[0-9a-fA-F]{6}$ ]] ||
+              die "hdw4s: ${key} takes a colour such as #ec4899, not '${value}'";;
     path)   case "${value}" in /*) :;;
               *) die "hdw4s: ${key} takes an absolute path, not '${value}'";; esac;;
     any)    :;;

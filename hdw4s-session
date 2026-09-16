@@ -254,6 +254,29 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
       > "${XDG_CONFIG_HOME}/autostart/gnome-initial-setup-first-login.desktop"
   fi
 
+  # Chrome's first run, which is state in the profile rather than a flag.
+  #
+  # A fresh profile means Chrome opens chrome://terms/ -- the branded "Google
+  # Chrome and ChromeOS Additional Terms of Service" window -- over the desktop,
+  # every single connection. Measured: the "First Run" sentinel in the user data
+  # directory suppresses it exactly as --no-first-run does.
+  #
+  # The sentinel is used rather than the flag deliberately. A flag has to be
+  # delivered by a launcher, and google-chrome.desktop runs the binary by
+  # absolute path, so a wrapper on PATH does not reach it and a .desktop override
+  # reaches only what the dock starts -- typing "google-chrome" in a terminal
+  # would still get the dialog. The sentinel is read however Chrome is started.
+  #
+  # Written for ephemeral sessions only. On an ordinary session the profile
+  # persists, so the dialog appears once on a genuinely new profile, which is
+  # what should happen.
+  if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+    for d in google-chrome google-chrome-beta google-chrome-unstable chromium; do
+      install -d -m0700 "${XDG_CONFIG_HOME}/${d}"
+      : > "${XDG_CONFIG_HOME}/${d}/First Run"
+    done
+  fi
+
   # The same mechanism, for the same reason, against PulseAudio.
   #
   # /etc/xdg/autostart/pulseaudio.desktop runs start-pulseaudio-x11 and carries

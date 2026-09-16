@@ -40,17 +40,11 @@ enable-monitors=false
 index-recursive-directories=@as []
 index-single-directories=@as []
 
-# ---- a visual cue that this session keeps nothing --------------------------
-# gnome-control-center resets all of these together when a user picks a stock
-# wallpaper, which is why the lock file beside this one names every one of them
-# rather than just picture-uri.
-[org/gnome/desktop/background]
-picture-uri=''
-picture-uri-dark=''
-primary-color='#1a1a2e'
-secondary-color='#1a1a2e'
-color-shading-type='solid'
-picture-options='none'
+# The visual cue that this session keeps nothing is NOT here: the colour is an
+# administrator's choice, so hdw4s-ephemeral-slots generates it into
+# 20-background from HDW4S_EPHEMERAL_BACKGROUND. The lock file beside this one
+# still names every background key, because gnome-control-center rewrites all of
+# them together when a stock wallpaper is picked.
 
 [org/gnome/desktop/interface]
 enable-hot-corners=false

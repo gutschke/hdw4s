@@ -112,6 +112,29 @@ if [ -n "${CREDENTIALS_DIRECTORY:-}" ] &&
     < "${CREDENTIALS_DIRECTORY}/hdw4s-keyring" >/dev/null 2>&1 || {
     echo 'hdw4s: could not unlock the session keyring' >&2
   }
+elif [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ] &&
+     command -v gnome-keyring-daemon >/dev/null; then
+  # An ephemeral session gets a keyring with no password, created here so that
+  # nothing has to ask for one later.
+  #
+  # Without this the profile has no keyring at all, and the first program to
+  # store a secret -- a browser saving a password is the usual one -- raises
+  # "choose a password for the new keyring". That is a bad question to be asked
+  # here: there is no password for this session, the keyring is destroyed with
+  # the profile when the connection ends, and anything it protected dies with
+  # it. A password would protect data that cannot outlive the session from an
+  # attacker who would have to be inside it.
+  #
+  # An empty password is what makes the collection open without a prompt.
+  # Measured: --unlock on its own does NOT create the keyring, and asking the
+  # Secret Service to create a collection returns a prompt object instead. The
+  # daemon has to be started with --daemonize and given the password on stdin;
+  # then login.keyring and user.keystore appear and the default alias resolves.
+  printf '\n' | gnome-keyring-daemon --daemonize --unlock \
+    --components=secrets,pkcs11,ssh >/dev/null 2>&1 || {
+    echo 'hdw4s: could not create the session keyring; programs that store a' >&2
+    echo '  secret will ask for a keyring password' >&2
+  }
 fi
 
 # Tell the bus what a program it launches should inherit. Without this, a
