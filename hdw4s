@@ -562,7 +562,7 @@ cmd_show() {
 
 cmd_enable() {
   local type='desktop'
-  if [ "$1" = '--ephemeral' ]; then type='ephemeral'; shift; fi
+  if [ "${1:-}" = '--ephemeral' ]; then type='ephemeral'; shift; fi
   local inst="$1" idx prof fresh='no'
   # An ephemeral slot is not an account anybody named: it is minted by
   # hdw4s-ephemeral-slots, and the checks below are about a human's account.
@@ -1753,7 +1753,7 @@ case "${1:-}" in
   list)     shift; cmd_list "$@";;
   show)     shift; [ $# -eq 1 ] || usage_error; cmd_show "$@";;
   enable)   shift
-            case "$1" in --ephemeral) [ $# -eq 2 ] || usage_error;;
+            case "${1:-}" in --ephemeral) [ $# -eq 2 ] || usage_error;;
                          *)           [ $# -eq 1 ] || usage_error;; esac
             cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || usage_error; cmd_disable "$@";;

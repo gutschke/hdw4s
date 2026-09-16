@@ -11,7 +11,21 @@ set -o nounset -o pipefail
 # selected the account with User=, created XDG_RUNTIME_DIR and the profile
 # directories, and put the instance name in argv.
 
-instance="${1:?usage: hdw4s-session <instance>}"
+instance="${1:?usage: hdw4s-session <instance> [--ephemeral]}"
+
+# Which kind of session this is, taken from the command line rather than the
+# environment. The unit that runs an ephemeral session passes it here because
+# EnvironmentFile= overrides Environment= -- measured, whatever order they appear
+# in -- so a unit cannot protect a value by exporting it, and a machine-wide
+# setting in hdw4s.conf would otherwise decide what kind of session this is.
+case "${2:-}" in
+  '')           HDW4S_SESSION_TYPE='desktop' ;;
+  --ephemeral)  HDW4S_SESSION_TYPE='ephemeral' ;;
+  *) echo "hdw4s: unknown argument '${2}'" >&2
+     echo 'usage: hdw4s-session <instance> [--ephemeral]' >&2
+     exit 1 ;;
+esac
+export HDW4S_SESSION_TYPE
 
 # The unit names no account; "hdw4s enable" writes one into a drop-in. If that
 # drop-in is missing -- someone ran "systemctl enable hdw4s@name" by hand --
@@ -96,6 +110,22 @@ if [ -z "${HDW4S_PORT:-}" ]; then
   HDW4S_PORT=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE + slot ))
 fi
 export HDW4S_PORT
+
+# An ephemeral session is profile-isolated by definition, and its profile lives
+# on the tmpfs its unit mounts. Neither is a preference, so neither is read from
+# a configuration file -- they are set here, after the files have been sourced,
+# and they overwrite whatever those files said.
+#
+# This is not belt and braces. EnvironmentFile= overrides Environment= whatever
+# order they appear in, measured, so a unit cannot defend a value by exporting
+# it: HDW4S_ISOLATION=none set machine-wide reached the session and turned every
+# artefact below off, leaving a desktop that came up looking correct and kept
+# none of the promises the session type exists to make. The type arrives as an
+# argument for the same reason -- a configuration file cannot reach argv.
+if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+  HDW4S_ISOLATION='profile'
+  HDW4S_PROFILE_DIR="${HDW4S_EPHEMERAL_PROFILE_ROOT:-/run/hdw4s-profile}"
+fi
 
 : "${HDW4S_PROFILE_DIR:=/var/lib/hdw4s}"
 : "${HDW4S_ISOLATION:=none}"

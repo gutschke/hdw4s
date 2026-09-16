@@ -97,7 +97,6 @@ Environment=DCONF_PROFILE=hdw4s-ephemeral
 # What kind of session this is, for the parts of the session script that have to
 # differ. One variable rather than a test against the profile name or the unit
 # name, so there is one thing to grep for.
-Environment=HDW4S_SESSION_TYPE=ephemeral
 
 # A Chrome policy that exists only inside this session. The directory is bound
 # over the one Chrome reads, so a normal session on the same machine sees the
@@ -128,7 +127,6 @@ BindReadOnlyPaths=/etc/hdw4s/chrome-policies:/etc/opt/chrome/policies/managed
 # since hdw4s-session creates the profile unconditionally.
 RuntimeDirectory=hdw4s/%i
 RuntimeDirectoryMode=0700
-Environment=HDW4S_ISOLATION=profile
 
 # The profile is deliberately NOT under XDG_RUNTIME_DIR, though it was and the
 # two were the same directory. They are split because they want opposite things.
@@ -156,7 +154,6 @@ Environment=HDW4S_ISOLATION=profile
 # set, the session's mount at this path was a bind of the host's /run subtree,
 # 13 GB of it, while `systemctl show` cheerfully reported the 2 GB
 # TemporaryFileSystem= it had been given and never applied.
-Environment=HDW4S_PROFILE_DIR=/run/hdw4s-profile
 
 # The home is the session's own, not an account's on a shared filesystem, so it
 # needs no mount to wait for and gets no 40-home.conf -- the drop-in `hdw4s
@@ -282,7 +279,14 @@ OOMPolicy=continue
 KillMode=control-group
 
 ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
-ExecStart=/usr/lib/hdw4s/hdw4s-session %i
+# The session type arrives as an ARGUMENT, not as an environment variable.
+# EnvironmentFile= overrides Environment= regardless of the order they appear in
+# -- measured, and the opposite of what an earlier comment here claimed -- so
+# anything this unit exports can be overwritten by a machine-wide setting in
+# /etc/hdw4s/hdw4s.conf. A session that quietly stopped being isolated would
+# still come up and look right while doing none of what this unit exists to do.
+# An argument cannot be overridden by a configuration file.
+ExecStart=/usr/lib/hdw4s/hdw4s-session %i --ephemeral
 
 [Install]
 WantedBy=multi-user.target
