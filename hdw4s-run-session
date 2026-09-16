@@ -237,7 +237,14 @@ fi
 webcam_preload=''
 case "${HDW4S_WEBCAM}" in
   yes)
-    webcam=(--webcam-enabled='true|locked' --webcam-on-start=true)
+    # Enabled, but deliberately NOT locked. The dashboard hides a control
+    # whose setting is locked -- isRenderable() in the sidebar returns false on
+    # locked regardless of the value -- so "true|locked" leaves the camera
+    # working and takes away the only way for the person sitting there to turn
+    # it off. Locking a camera on is not pinning a preference, it is removing a
+    # privacy control. Unlocked, the value is still what this session starts
+    # with; the difference is that its owner can stop it.
+    webcam=(--webcam-enabled=true --webcam-on-start=true)
     # The streaming server's package ships the interposer for several
     # architectures -- on this machine x86_64 and i386 -- and they are plain
     # .so files with no soname, so ldconfig does not index them and a bare
@@ -426,7 +433,10 @@ esac
 
 # Whether the accounts behind these sessions may be heard.
 case "${HDW4S_MICROPHONE}" in
-  yes) microphone=(--microphone-enabled='true|locked' --microphone-on-start=true) ;;
+  # Unlocked for the same reason as the webcam below: a locked setting has
+  # no control in the dashboard, and a microphone nobody can mute is worse
+  # than one that starts off.
+  yes) microphone=(--microphone-enabled=true --microphone-on-start=true) ;;
   *)   microphone=(--microphone-enabled='false|locked') ;;
 esac
 

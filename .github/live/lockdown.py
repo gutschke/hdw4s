@@ -531,10 +531,18 @@ def adopt_configured(unit):
         if raw is None:
             continue
         value = raw.split("|", 1)[0] == "true"
-        if value != EXPECTED[name][0]:
-            EXPECTED[name] = (value, EXPECTED[name][1])
-            print(f"  note: {name} is configured on for this session; "
-                  f"asserting that, and that it is still locked")
+        locked = raw.endswith("|locked")
+        if value != EXPECTED[name][0] or locked != EXPECTED[name][1]:
+            EXPECTED[name] = (value, locked)
+            # Turned on, these are deliberately NOT locked: the dashboard hides
+            # the control for any locked setting, so locking a camera or a
+            # microphone on leaves it running with no way for the person in the
+            # session to stop it. Off, they stay locked -- that is the refusal
+            # the server enforces. So the lock state is read from the session
+            # rather than assumed, and asserted either way.
+            print(f"  note: {name} is configured {'on' if value else 'off'} for this "
+                  f"session; asserting that, and that it is "
+                  f"{'locked' if locked else 'unlocked so its control is reachable'}")
 
 
 def main():
