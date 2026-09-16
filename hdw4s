@@ -890,7 +890,7 @@ check_value() {
     size)   [[ "${value}" =~ ^[0-9]+[KMG]?$|^[0-9]+%$ ]] ||
               die "hdw4s: ${key} takes a size such as 512M, 2G or 10%, not '${value}'";;
     color)  [[ "${value}" =~ ^#[0-9a-fA-F]{6}$ ]] ||
-              die "hdw4s: ${key} takes a colour such as #ec4899, not '${value}'";;
+              die "hdw4s: ${key} takes a colour such as #772953, not '${value}'";;
     path)   case "${value}" in /*) :;;
               *) die "hdw4s: ${key} takes an absolute path, not '${value}'";; esac;;
     any)    :;;

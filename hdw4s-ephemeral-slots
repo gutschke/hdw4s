@@ -46,10 +46,12 @@ DROPDIR="${HDW4S_DROPIN_DIR:-/run/systemd/system}"
 : "${HDW4S_EPHEMERAL_HOME_SIZE:=1G}"
 : "${HDW4S_EPHEMERAL_PROFILE_SIZE:=2G}"
 : "${HDW4S_EPHEMERAL_SHM_SIZE:=512M}"
-# Not an Ubuntu colour, deliberately. Ubuntu's is #e95420 and its stock
-# background is a blue gradient; a cue that says "this session keeps nothing"
-# works by NOT looking like an ordinary desktop.
-: "${HDW4S_EPHEMERAL_BACKGROUND:=#ec4899}"
+# Canonical aubergine, from the published brand palette. On brand without being
+# the desktop's own colour: Yaru paints orange (#e95420, in 22 files on a stock
+# install) and the aubergines appear in none of them, so this reads as part of
+# the family while still not looking like an ordinary desktop -- which is the
+# whole job of a cue.
+: "${HDW4S_EPHEMERAL_BACKGROUND:=#772953}"
 
 # The window these identities may occupy. Nothing outside it is ever written, and
 # nothing inside it is expected to exist in /etc/passwd: a collision means the
@@ -98,7 +100,7 @@ esac
 # database that will not compile falls back to schema defaults in silence.
 case "${HDW4S_EPHEMERAL_BACKGROUND}" in
   '#'[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
-  *) die "HDW4S_EPHEMERAL_BACKGROUND must be a colour like #ec4899, not '${HDW4S_EPHEMERAL_BACKGROUND}'." ;;
+  *) die "HDW4S_EPHEMERAL_BACKGROUND must be a colour like #772953, not '${HDW4S_EPHEMERAL_BACKGROUND}'." ;;
 esac
 last=$(( HDW4S_EPHEMERAL_UID_BASE + HDW4S_EPHEMERAL_SLOTS - 1 ))
 if [ "${HDW4S_EPHEMERAL_UID_BASE}" -lt "${UID_MIN}" ] || [ "${last}" -gt "${UID_MAX}" ]; then
