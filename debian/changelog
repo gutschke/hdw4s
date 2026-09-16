@@ -1,3 +1,12 @@
+hdw4s (2.2.0) unstable; urgency=medium
+
+  * The camera and microphone can be switched on and off from the side menu
+    again. They were pinned on, and a pinned setting is one the dashboard draws
+    no control for, so there was no way to turn either off from inside a
+    session.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Tue, 15 Sep 2026 23:55:00 -0700
+
 hdw4s (2.1.0) unstable; urgency=medium
 
   * Images copied in the browser can be pasted into the desktop, and images
