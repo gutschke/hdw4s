@@ -19,6 +19,9 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_SESSION:=gnome-session}"
 : "${HDW4S_MICROPHONE:=no}"
 : "${HDW4S_WEBCAM:=no}"
+: "${HDW4S_WEBRTC:=no}"
+: "${HDW4S_TURN_HOST:=}"
+: "${HDW4S_TURN_PORT:=3478}"
 : "${HDW4S_FRAMERATE:=30,8-60}"
 : "${HDW4S_DPI:=follow}"
 : "${HDW4S_INDEXING:=off}"
@@ -440,6 +443,55 @@ case "${HDW4S_MICROPHONE}" in
   *)   microphone=(--microphone-enabled='false|locked') ;;
 esac
 
+# WebRTC, and the reason turning it on is not simply a flag. The streaming
+# server's TURN defaults name a live third-party relay
+# (staticauth.openrelay.metered.ca) with a published shared secret, so a session
+# that switches to WebRTC without saying otherwise hands the browser a working
+# credential for a stranger's relay.
+#
+# Two things make that hard to switch off. A setting overridden to the empty
+# string is treated as not overridden at all and reverts to its default, so
+# blanking a TURN setting restores the relay rather than removing it. And the
+# shared-secret path emits a TURN entry unconditionally -- there is no value of
+# turn_host that produces none. So a concrete host is always passed here, and it
+# is an RFC 2606 `.invalid` name, which by standard can never resolve: the
+# client's relay candidate fails at DNS, on IPv4 and IPv6 alike, with no
+# dependence on a firewall or on what the network routes. The secret is random so
+# no credential for a real host is ever minted, and it travels in the environment
+# rather than argv, where any process could read it.
+#
+# There are other routes to the same place -- a trusted rtc_config_json outranks
+# the shared-secret path, and failing every method falls back to a config with no
+# TURN entry at all -- but this is the one measured here, so it is the one used.
+#
+# Google and Cloudflare STUN stay. The config generator appends them whatever is
+# configured, they reflect an address rather than carrying media, and
+# `webrtc-ice-lite` keeps this server from contacting either: only the user's own
+# browser does.
+case "${HDW4S_WEBRTC}" in
+  yes)
+    webrtc=(--enable-dual-mode='true|locked' --webrtc-ice-lite='true|locked')
+    if [ -n "${HDW4S_TURN_HOST}" ]; then
+      if [ -z "${HDW4S_TURN_SECRET:-}" ]; then
+        echo 'hdw4s: HDW4S_TURN_HOST is set but HDW4S_TURN_SECRET is empty, so the' \
+             'credential would be signed with a guessable secret. Refusing to start.' >&2
+        exit 1
+      fi
+      webrtc+=(--turn-host="${HDW4S_TURN_HOST}" --turn-port="${HDW4S_TURN_PORT}")
+      export SELKIES_TURN_SHARED_SECRET="${HDW4S_TURN_SECRET}"
+    else
+      webrtc+=(--turn-host='turn.invalid' --turn-port="${HDW4S_TURN_PORT}")
+      turn_secret="$(head -c 18 /dev/urandom | base64)"
+      export SELKIES_TURN_SHARED_SECRET="${turn_secret}"
+    fi
+    ;;
+  *)
+    # No client-initiated switch to WebRTC, so no ICE, STUN, TURN or mDNS socket
+    # ever appears, and nothing to hand out if one ever did.
+    webrtc=(--enable-dual-mode='false|locked' --webrtc-ice-lite='true|locked')
+    ;;
+esac
+
 lockdown=(
   # Every boolean below carries "|locked". Without it the value is only a
   # default: a bool the server reads back out of a client's SETTINGS frame is
@@ -450,10 +502,7 @@ lockdown=(
   # settings the server publishes went on reporting the old value. The others
   # are not reachable that way today. They are locked anyway, so that the day
   # one of them is wired up is not the day a control silently stops holding.
-  --enable-dual-mode='false|locked'   # no client-initiated switch to WebRTC, so
-                                      # no ICE, STUN, TURN or mDNS socket ever
-                                      # appears
-  --webrtc-ice-lite='true|locked'     # and nothing to hand out if one ever did
+  "${webrtc[@]}"
   --file-transfers='upload,download'
   # Files move in both directions, and they land in the account's Downloads
   # folder rather than anywhere this tool invents. The directory is created
