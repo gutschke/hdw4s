@@ -1,8 +1,14 @@
 [Unit]
 Description=Connection relay for the HDW4S session %i
 Documentation=man:hdw4s(8)
-Requires=hdw4s@%i.service hdw4s-proxy@%i.socket
-After=hdw4s@%i.service hdw4s-proxy@%i.socket
+# Which session unit stands behind this relay is deliberately NOT named here.
+# There is more than one kind of session now, and a dependency cannot be undone
+# by a drop-in: an empty "Requires=" does not reset the list -- measured on
+# systemd 255, the original was still there afterwards -- so a template naming
+# one unit could never be pointed at another. "hdw4s enable" writes it per
+# instance, exactly as it already writes the port, and for the same reason.
+Requires=hdw4s-proxy@%i.socket
+After=hdw4s-proxy@%i.socket
 
 [Service]
 # systemd's own relay, so there is no new daemon and nothing of ours in the

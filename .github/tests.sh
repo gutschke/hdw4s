@@ -725,10 +725,68 @@ echo '== an install rewrites every file that names the payload path =='
   is 'none left after the rewrite' "${after}" '0'
 )
 
+echo '== the relay names no session unit, and enable supplies one =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+
+  # The template must not name a session unit. It used to, and a drop-in cannot
+  # take that back: an empty "Requires=" does not reset the list, so an instance
+  # served by a different unit would have carried both.
+  is 'the proxy template names no session unit' \
+     "$(grep -c '^\(Requires\|After\)=hdw4s@' "${ROOT}/hdw4s-proxy@.service")" '0'
+  is 'and still requires its own socket' \
+     "$(grep -c '^Requires=hdw4s-proxy@%i.socket' "${ROOT}/hdw4s-proxy@.service")" '1'
+  # shellcheck disable=SC2016  # the pattern is literal source text, not an expansion
+  case "$(grep -A2 '^unit_of()' "${ROOT}/hdw4s")" in
+    *'hdw4s@${1}.service'*) ok 'one helper names the session unit';;
+    *) bad 'one helper names the session unit' 'unit_of does not';;
+  esac
+  # shellcheck disable=SC2016  # likewise: this matches the literal line in the script
+  case "$(sed -n '/hdw4s-proxy@${inst}.service.d\/30-session.conf/p' "${ROOT}/hdw4s")" in
+    *30-session.conf*) ok 'enable writes the session drop-in';;
+    *) bad 'enable writes the session drop-in' 'not written';;
+  esac
+
+  # The two installers carry the same backfill. Duplicated on purpose --
+  # packaging is not a dependency of install.sh -- so the only thing keeping
+  # them honest is this comparison.
+  # Leading whitespace is normalised away: the block sits inside an "if" in one
+  # file and at top level in the other, and the thing that must not drift is what
+  # it does, not how far it is indented.
+  pick() { sed -n '/# BEGIN session-dropin-backfill/,/# END session-dropin-backfill/p' "$1" \
+             | sed 's/^[[:space:]]*//'; }
+  is 'the backfill block exists in postinst' "$(pick "${ROOT}/debian/postinst" | wc -l | tr -d ' ')" \
+     "$(pick "${ROOT}/install.sh" | wc -l | tr -d ' ')"
+  if [ -n "$(pick "${ROOT}/debian/postinst")" ] &&
+     [ "$(pick "${ROOT}/debian/postinst")" = "$(pick "${ROOT}/install.sh")" ]; then
+    ok 'both installers carry the identical block'
+  else
+    bad 'both installers carry the identical block' 'they differ or are missing'
+  fi
+
+  # Run the shipped block against a fixture, rather than a copy of it.
+  mkdir -p "${SB}/etc/hdw4s" "${SB}/units/hdw4s-proxy@alice.service.d" \
+           "${SB}/units/hdw4s-proxy@bob.service.d"
+  printf '%s\n' '# comment' '0 alice' '1 bob' '2 carol' > "${SB}/etc/hdw4s/instances"
+  printf 'keep me\n' > "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf"
+  blk="$(pick "${ROOT}/debian/postinst")"
+  # Stubbed because the shipped block calls it; reached only through the eval.
+  # shellcheck disable=SC2317
+  systemctl() { :; }
+  ( ETCDIR="${SB}/etc/hdw4s" UNITDIR="${SB}/units"; eval "${blk}" )
+  case "$(cat "${SB}/units/hdw4s-proxy@alice.service.d/30-session.conf" 2>/dev/null)" in
+    *'Requires=hdw4s@alice.service'*) ok 'an instance with no drop-in gets one';;
+    *) bad 'an instance with no drop-in gets one' 'missing or wrong';;
+  esac
+  is 'an existing drop-in is left alone' \
+     "$(cat "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf")" 'keep me'
+  is 'an instance with no relay directory is skipped' \
+     "$(set -- "${SB}/units"/*carol*; [ -e "$1" ] && echo present || echo absent)" 'absent'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=137   # update when tests are added; a wrong number is the point
+EXPECTED=146   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

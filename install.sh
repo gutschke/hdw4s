@@ -226,6 +226,35 @@ echo 'Fetching Selkies...'
   echo 'Could not fetch Selkies now; the daily timer will retry.'
 }
 
+# The relay no longer names its session unit, so an installation over an
+# existing one has to supply the drop-in for sessions that already exist --
+# otherwise each one starts, finds nothing listening, and sits in hdw4s-wait
+# until it times out, which reads as a broken desktop rather than a missing file.
+#
+# This is the same block as the one in debian/postinst, deliberately duplicated
+# rather than sourced: packaging is not a dependency of this script. A test
+# asserts the two are identical, so they cannot drift.
+# BEGIN session-dropin-backfill (.github/tests.sh executes this block verbatim)
+# The two roots are variables so the test can run this against a fixture
+# rather than against a copy of it, which would only ever prove the copy works.
+: "${ETCDIR:=/etc/hdw4s}"
+: "${UNITDIR:=/etc/systemd/system}"
+if [ -r "${ETCDIR}/instances" ]; then
+  while read -r idx inst; do
+    case "${idx}" in ''|\#*) continue;; esac
+    d="${UNITDIR}/hdw4s-proxy@${inst}.service.d"
+    [ -d "${d}" ] || continue
+    [ -e "${d}/30-session.conf" ] && continue
+    printf '%s\n' \
+      '# Written by "hdw4s enable": the session unit behind this relay.' \
+      '[Unit]' \
+      "Requires=hdw4s@${inst}.service" \
+      "After=hdw4s@${inst}.service" \
+      > "${d}/30-session.conf"
+  done < "${ETCDIR}/instances"
+fi
+# END session-dropin-backfill
+
 systemctl daemon-reload
 systemctl enable --now hdw4s-firewall.service
 systemctl enable --now hdw4s-firewall.timer

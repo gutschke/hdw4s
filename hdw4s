@@ -247,6 +247,13 @@ slot_of() {
     '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}"
 }
 
+# The systemd unit that runs a given instance's desktop. One place, because a
+# second kind of session means every "hdw4s@${inst}" spelled out by hand is a
+# site that silently acts on the wrong unit.
+unit_of() {
+  echo "hdw4s@${1}.service"
+}
+
 alloc_slot() {
   local inst="$1" idx used lock
   install -d -m0755 "$(dirname "${SLOTS}")"
@@ -592,6 +599,17 @@ cmd_enable() {
 
   # The relay forwards to wherever the session actually listens.
   install -d -m0755 "${DROPIN}/hdw4s-proxy@${inst}.service.d"
+
+  # The session unit this relay brings up. The template cannot name it: an
+  # ephemeral slot is served by a different unit, and a dependency in a template
+  # cannot be overridden by a drop-in -- an empty "Requires=" does not reset the
+  # list. So the relay names no session unit and this supplies it.
+  printf '%s\n' \
+    '# Written by "hdw4s enable": the session unit behind this relay.' \
+    '[Unit]' \
+    "Requires=$(unit_of "${inst}")" \
+    "After=$(unit_of "${inst}")" \
+    > "${DROPIN}/hdw4s-proxy@${inst}.service.d/30-session.conf"
   # Only the port. The wait that goes with it lives in the unit, because a
   # multi-line ExecStartPre= is parsed as several directives and quietly
   # discarded -- systemd is not a shell and embedding one in a unit file goes

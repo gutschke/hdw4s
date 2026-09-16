@@ -43,6 +43,37 @@ if [ "$1" = 'configure' ]; then
     systemctl daemon-reload || :
   fi
 
+  # The relay used to name its session unit itself; it no longer can, because
+  # there is more than one kind of session and a template's dependency cannot be
+  # overridden by a drop-in. Without this, an upgrade would leave every existing
+  # relay with no session dependency at all -- it would start, find nothing
+  # listening, and sit in hdw4s-wait until it timed out, which reads as a broken
+  # desktop rather than a missing drop-in.
+  #
+  # An existing file is never overwritten: it may name a unit this loop has no
+  # way to work out.
+  # BEGIN session-dropin-backfill (.github/tests.sh executes this block verbatim)
+  # The two roots are variables so the test can run this against a fixture
+  # rather than against a copy of it, which would only ever prove the copy works.
+  : "${ETCDIR:=/etc/hdw4s}"
+  : "${UNITDIR:=/etc/systemd/system}"
+  if [ -r "${ETCDIR}/instances" ]; then
+    while read -r idx inst; do
+      case "${idx}" in ''|\#*) continue;; esac
+      d="${UNITDIR}/hdw4s-proxy@${inst}.service.d"
+      [ -d "${d}" ] || continue
+      [ -e "${d}/30-session.conf" ] && continue
+      printf '%s\n' \
+        '# Written by "hdw4s enable": the session unit behind this relay.' \
+        '[Unit]' \
+        "Requires=hdw4s@${inst}.service" \
+        "After=hdw4s@${inst}.service" \
+        > "${d}/30-session.conf"
+    done < "${ETCDIR}/instances"
+  fi
+  # END session-dropin-backfill
+  systemctl daemon-reload || :
+
   # On an upgrade the firewall unit is already active, and it is Type=oneshot
   # with RemainAfterExit=yes, so debhelper's "start" below is a no-op --
   # deliberately, because --no-stop-on-upgrade is what keeps live sessions from
