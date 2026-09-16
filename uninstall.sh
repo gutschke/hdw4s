@@ -80,6 +80,7 @@ echo ' done.'
 echo -n 'Removing units...'
 rm -f /etc/systemd/system/hdw4s@.service \
       /etc/systemd/system/hdw4s-ephemeral@.service \
+      /etc/systemd/system/hdw4s-ephemeral-slots.service \
       /etc/systemd/system/hdw4s-proxy@.service \
       /etc/systemd/system/hdw4s-proxy@.socket \
       /etc/systemd/system/hdw4s.slice \
@@ -110,6 +111,19 @@ if [ -e /etc/sysctl.d/60-hdw4s.conf ]; then
   rm -f /etc/sysctl.d/60-hdw4s.conf
   sysctl -q --system 2>/dev/null || :
 fi
+# The slot identities and the per-slot drop-ins the minting writes. They live in
+# /run and a reboot would clear them, but an uninstall that leaves accounts
+# resolving is a surprise nobody needs. /run/userdb is shared with any other
+# record provider on the machine, so only records this package wrote are
+# touched, matched on the realName this package stamps into them.
+for f in /run/userdb/*.user; do
+  [ -e "${f}" ] || continue
+  grep -q '"realName":"Ephemeral session"' "${f}" 2>/dev/null || continue
+  slot="${f%.user}"
+  rm -f "${slot}.user" "${slot}.group"
+done
+rm -rf /run/hdw4s-ns /run/systemd/system/hdw4s-ephemeral@*.service.d
+
 systemctl daemon-reload
 echo ' done.'
 

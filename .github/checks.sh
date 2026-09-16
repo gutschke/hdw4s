@@ -14,10 +14,11 @@ set -o nounset -o pipefail
 cd "$(dirname "$0")/.."
 
 SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s-wait
+         hdw4s-ephemeral-slots
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
          debian/postinst debian/prerm debian/postrm
          .github/checks.sh .github/tests.sh .github/clean-install-test.sh)
-UNITS=(hdw4s@.service hdw4s-ephemeral@.service
+UNITS=(hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
        hdw4s-proxy@.socket hdw4s-proxy@.service
        hdw4s-firewall.service hdw4s-firewall-check.service
        hdw4s-firewall.timer hdw4s-updater.service hdw4s-updater.timer

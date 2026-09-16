@@ -15,6 +15,12 @@ Wants=network-online.target
 # that exists to run code nobody trusts, so it is the last one that should be
 # able to start without that table.
 Requires=hdw4s-firewall.service
+# Not merely ordering: User=%i resolves at start, and the record that makes it
+# resolve is minted by this unit. Without it the session fails with 217/USER,
+# which reads as a broken service rather than a missing account. It also writes
+# the per-slot drop-in that mounts this session's home.
+Requires=hdw4s-ephemeral-slots.service
+After=hdw4s-ephemeral-slots.service
 # Stops with the last thing that wanted it; the pool's admission unit is what
 # wants it, so a slot nobody is using does not linger.
 StopWhenUnneeded=yes
@@ -29,10 +35,46 @@ Type=notify
 NotifyAccess=all
 TimeoutStartSec=120
 UMask=0077
-WorkingDirectory=~
+
+# Inside, every slot is "user" in /home/user. The slot's outside name and uid
+# are what the machine schedules; they are not what the session is shown.
+#
+# Hiding the name is cosmetic, and says so plainly: a session that learned it
+# was "ephemeral3" could do nothing with the knowledge, because the isolation is
+# the uid, the namespace and the empty /home, none of which a name unlocks.
+#
+# The fixed HOME is not cosmetic. A profile used as a template encodes absolute
+# paths throughout -- dconf values, the browser profile, recently-used lists,
+# wallpaper URIs -- so a home that moved per slot would need every one of them
+# rewritten, and would carry the name of the account the template was built from
+# into every session started from it. One path, and that whole class of problem
+# does not arise.
+#
+# Both of these are namespace-local. The files below name the slot uid "user"
+# and nothing else; getent inside reads them, because nss falls back to `files`
+# for a uid these do carry.
+BindReadOnlyPaths=%t/hdw4s-ns/%i/passwd:/etc/passwd
+BindReadOnlyPaths=%t/hdw4s-ns/%i/group:/etc/group
+# nss-systemd reads these records directly, with no daemon to ask, so the bound
+# passwd above does not hide them: without this, `getent passwd ephemeral0`
+# answers from inside. Measured 2026-09-16.
+InaccessiblePaths=%t/userdb
+# systemd fills these from the slot account, which resolves OUTSIDE the
+# namespace and so carries the outside name. They are the last two leaks.
+Environment=USER=user
+Environment=LOGNAME=user
 
 EnvironmentFile=-/etc/hdw4s/hdw4s.conf
 EnvironmentFile=-/etc/hdw4s/%i.conf
+
+# The same reasoning as the base unit: not /run/user/<uid>, which belongs to
+# logind and which this unit has no PAM session to claim. A directory of its own
+# costs nothing, and RuntimeDirectory= below makes systemd its owner.
+Environment=XDG_RUNTIME_DIR=%t/hdw4s/%i
+# The application wrappers go ahead of the real binaries; they are what redirects
+# programs that ignore the XDG variables.
+Environment=PATH=/usr/lib/hdw4s/wrappers:/usr/local/bin:/usr/bin:/bin
+Environment=LIBGL_ALWAYS_SOFTWARE=1
 
 # ---- where the session lives, and why it vanishes --------------------------
 # The profile is the session: with isolation on it holds the settings, the dconf
@@ -62,27 +104,58 @@ Environment=HDW4S_ISOLATION=profile
 # enable` writes, which bakes an account's home path into RequiresMountsFor= and
 # fails with 226/NAMESPACE if that path later changes.
 #
-# HOME is NOT set here. systemd takes it from the slot account's passwd entry,
-# as does WorkingDirectory=~, and a unit that disagreed with passwd would be two
-# sources of truth for one path. Minting the slot with this home is the
-# identity step's job; this unit only creates and sizes the directory.
+# The home is a tmpfs mounted at the path the passwd entry above promises, and
+# the mount itself is NOT here: it needs the slot's uid as a number, which a
+# template cannot derive from %i, so hdw4s-ephemeral-slots writes it as a
+# per-slot drop-in. A session whose drop-in is missing fails to start rather
+# than running without a home, which is the failure worth having.
 #
-# The size is explicit because /run is sized from the HOST's memory, not the
-# container's: on a 16 GiB container that is around 100 GiB, so without a size
-# the cgroup OOM killer fires long before the filesystem fills, which is not a
-# bound anybody chose.
-RuntimeDirectory=hdw4s-home/%i
-TemporaryFileSystem=/run/hdw4s-home/%i:size=1G,mode=0700
+# The size lives in that drop-in too (HDW4S_EPHEMERAL_HOME_SIZE, default 1G) and
+# is not left unset, because a tmpfs takes half of memory by default and /run is
+# sized from the HOST's memory rather than the container's: on a 16 GiB
+# container that is around 100 GiB, so the cgroup OOM killer would fire long
+# before the filesystem filled, which is not a bound anybody chose.
+#
+# HOME and the working directory are stated rather than left to systemd, which
+# reads both from the account as it resolves OUTSIDE the namespace and would
+# name the slot's own path.
+Environment=HOME=/home/user
+WorkingDirectory=/home/user
 
 # ---- what the session must not see or leave --------------------------------
-# An empty /home: the session cannot tell that other accounts exist. Measured
-# against the alternative of merely not mounting them, which leaves the names.
+# An empty /home, into which the drop-in mounts the single directory the session
+# is allowed: it cannot tell that other accounts exist. Measured against
+# the alternative of merely not mounting them, which leaves the names.
 ProtectHome=tmpfs
 # Its own /tmp and /var/tmp. The /var/tmp private tree turned out NOT to survive
 # any stop path we could produce, so this is defence in depth rather than the
 # load-bearing line an earlier draft of the plan called it.
 PrivateTmp=yes
 TemporaryFileSystem=/var/tmp
+# And its own /dev/shm, which neither of the two lines above provides:
+# PrivateTmp= covers /tmp and /var/tmp only, and PrivateDevices= builds a private
+# /dev that still carries the machine's shared /dev/shm through.
+#
+# Measured 2026-09-16, with RemoveIPC=yes already set: a file written to
+# /dev/shm from inside survived the unit's exit -- both when it was owned by the
+# session uid and, as a control, when it was owned by root. RemoveIPC= is
+# documented to cover POSIX shared memory as well as System V, so why it did not
+# remove either is NOT established here, and nothing below depends on the
+# answer. Do not replace this paragraph with a mechanism unless you have one you
+# measured.
+#
+# The directive earns its place twice over regardless. A shared /dev/shm is also
+# a live surface, not only a remanence question: it is a writable filesystem the
+# session would hold in common with every real user's desktop on the machine for
+# as long as it runs.
+#
+# mode=1777 is what /dev/shm is everywhere and the sticky bit is load-bearing;
+# this mount is seen by nobody but the session. The size is explicit for the same
+# reason as the home -- an unsized tmpfs takes half of the HOST's memory. 512M is
+# a starting value, not a measured one: Chrome's documented trouble threshold is
+# the 64M container default, and what a real session peaks at here has not been
+# measured yet.
+TemporaryFileSystem=/dev/shm:mode=1777,size=512M
 
 # Shared memory and semaphores outlive the session otherwise. logind's default
 # would remove them, but it acts on logind sessions and this product has none:
@@ -92,10 +165,20 @@ TemporaryFileSystem=/var/tmp
 RemoveIPC=yes
 
 # ---- lifetime --------------------------------------------------------------
-# A cap, and no resurrection. Restart= must stay "no": with the base unit's
-# on-failure a SIGKILL brings the session straight back, which defeats the cap
-# and, during testing, silently replaces the thing being measured.
+# No resurrection. Restart= must stay "no": with the base unit's on-failure a
+# SIGKILL brings the session straight back, which during testing silently
+# replaces the thing being measured -- that happened once, and a whole set of
+# readings turned out to describe the replacement.
 Restart=no
+# There is deliberately NO absolute cap here, and the reason is not that one was
+# forgotten. RuntimeMaxSec= would not be a cap on this unit: NotifyAccess=all
+# lets any process in the session's cgroup send EXTEND_TIMEOUT_USEC= and push
+# past it indefinitely, which is no use on a session type whose premise is that
+# the occupant is untrusted. And the socket stays enabled, so a client that
+# reconnects gets a new session in the same slot -- the contents rotate and the
+# slot is never freed. A number here would read as a guarantee and behave as a
+# recycler, so the value is left to the measurement that sets the idle window
+# with it.
 
 # ---- privilege -------------------------------------------------------------
 # NoNewPrivileges is deliberately NOT set. It would take setuid with it, and

@@ -1,0 +1,211 @@
+#!/bin/bash -e
+# Mint the pool of ephemeral slot identities, once, before anything can start a
+# session as one of them.
+#
+# Why a fixed pool rather than an identity per session. The session unit is
+# socket-activated, and systemd resolves User= when it starts the unit -- before
+# any ExecStartPre= of ours could run. A record written by the unit itself is
+# therefore written too late: measured, such a unit fails with 217/USER, and a
+# failure at that point reads as "the service is broken" rather than "the account
+# does not exist yet". So the records exist before the sockets do, and this runs
+# ordered ahead of them.
+#
+# The uid is consequently REUSED by successive sessions in the same slot. That is
+# only safe because nothing owned by it outlives a session: the home and the
+# profile are tmpfs under the unit's RuntimeDirectory, RemoveIPC=yes clears
+# shared memory and semaphores, PrivateTmp= clears /tmp, and StateDirectory= is
+# absent. Each of those was measured rather than assumed; if any is ever dropped,
+# the reuse stops being harmless.
+#
+# The records live in /run/userdb, which nss-systemd reads directly -- no
+# systemd-userdbd needed. /run is tmpfs, so they never touch disk and are minted
+# fresh at every boot, which is the property this feature wants anyway.
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+# shellcheck disable=SC2154  # rc is assigned in the trap body below; the other
+# scripts here escape this warning only because they happen to use `rc` elsewhere.
+trap 'rc="$?"
+      trap "" INT TERM QUIT HUP EXIT ERR
+      [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
+      exit "${rc}"' INT TERM QUIT HUP EXIT ERR
+
+ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
+USERDB="${HDW4S_USERDB_DIR:-/run/userdb}"
+# Derived per-boot state, so /run rather than /etc.
+NSDIR="${HDW4S_NS_DIR:-/run/hdw4s-ns}"
+DROPDIR="${HDW4S_DROPIN_DIR:-/run/systemd/system}"
+# shellcheck source=/dev/null
+[ ! -r "${ETCDIR}/hdw4s.conf" ] || . "${ETCDIR}/hdw4s.conf"
+
+: "${HDW4S_EPHEMERAL_SLOTS:=1}"
+: "${HDW4S_EPHEMERAL_PREFIX:=ephemeral}"
+: "${HDW4S_EPHEMERAL_UID_BASE:=60900}"
+: "${HDW4S_EPHEMERAL_HOME_SIZE:=1G}"
+
+# The window these identities may occupy. Nothing outside it is ever written, and
+# nothing inside it is expected to exist in /etc/passwd: a collision means the
+# machine is not what this feature assumes, and guessing past it would hand a
+# session somebody else's uid.
+UID_MIN=60900
+UID_MAX=60999
+
+die() { echo "hdw4s-ephemeral-slots: $*" >&2; exit 1; }
+
+case "${HDW4S_EPHEMERAL_SLOTS}" in
+  ''|*[!0-9]*) die "HDW4S_EPHEMERAL_SLOTS must be a number, not '${HDW4S_EPHEMERAL_SLOTS}'." ;;
+esac
+[ "${HDW4S_EPHEMERAL_SLOTS}" -ge 1 ] ||
+  die "HDW4S_EPHEMERAL_SLOTS must be at least 1."
+
+# Exact-match, not a prefix test: a name is either <prefix><digits> and nothing
+# else, or it is not one of ours. A substring check here would let a real account
+# called "ephemeral-backups" be treated as a slot.
+case "${HDW4S_EPHEMERAL_PREFIX}" in
+  ''|*[!a-z]*) die "HDW4S_EPHEMERAL_PREFIX must be lowercase letters only." ;;
+esac
+
+case "${HDW4S_EPHEMERAL_UID_BASE}" in
+  ''|*[!0-9]*) die "HDW4S_EPHEMERAL_UID_BASE must be a number." ;;
+esac
+
+# Goes into a mount option, so it is checked rather than passed through: a
+# rejected option makes the whole namespace fail to build, and the message names
+# the mount rather than the setting that caused it.
+case "${HDW4S_EPHEMERAL_HOME_SIZE}" in
+  ''|*[!0-9KMG%]*|[!0-9]*)
+    die "HDW4S_EPHEMERAL_HOME_SIZE must be a size like 1G, 512M or 10%, not '${HDW4S_EPHEMERAL_HOME_SIZE}'." ;;
+esac
+last=$(( HDW4S_EPHEMERAL_UID_BASE + HDW4S_EPHEMERAL_SLOTS - 1 ))
+if [ "${HDW4S_EPHEMERAL_UID_BASE}" -lt "${UID_MIN}" ] || [ "${last}" -gt "${UID_MAX}" ]; then
+  die "uids ${HDW4S_EPHEMERAL_UID_BASE}-${last} fall outside the ${UID_MIN}-${UID_MAX} window."
+fi
+
+install -d -m 0755 "${USERDB}" "${NSDIR}" "${DROPDIR}"
+
+# Set when a slot's unit has already been loaded, which is the only case that
+# needs a reload; see the note beside the drop-in below.
+reload=''
+
+i=0
+while [ "${i}" -lt "${HDW4S_EPHEMERAL_SLOTS}" ]; do
+  name="${HDW4S_EPHEMERAL_PREFIX}${i}"
+  id=$(( HDW4S_EPHEMERAL_UID_BASE + i ))
+
+  # A real account of that name or uid means this machine already uses the
+  # window, and minting over it would give a session an identity that owns
+  # somebody's files. Refuse rather than repair.
+  # Compared by field rather than by grepping getent's output: a pipe out of
+  # getent under `pipefail` turns a match into SIGPIPE, and 141 reads as failure.
+  row="$(getent passwd "${name}" 2>/dev/null || true)"
+  if [ -n "${row}" ]; then
+    row="${row#*:}"; row="${row#*:}"       # drop name and password fields
+    [ "${row%%:*}" = "${id}" ] ||
+      die "an account named '${name}' already exists with uid ${row%%:*}, not ${id}."
+  fi
+  byuid="$(getent passwd "${id}" 2>/dev/null || true)"
+  if [ -n "${byuid}" ] && [ "${byuid%%:*}" != "${name}" ]; then
+    die "uid ${id} already belongs to '${byuid%%:*}'."
+  fi
+
+  # The same home every slot reports, matching the namespaced passwd below and
+  # the unit's HOME=. It does not exist out here and is not meant to: the
+  # directory is a tmpfs inside the session's own namespace. Naming a per-slot
+  # path instead would be worse than useless -- nothing creates one, and
+  # anything that believed it (`hdw4s enable` writes RequiresMountsFor= from
+  # exactly this field) would order a session after a mount that never appears.
+  home='/home/user'
+  # realName is read by accounts-daemon, which runs OUTSIDE the session's
+  # namespace and answers gnome-shell over the system bus, so it is one of the
+  # few fields a desktop can still show. Keep it free of the slot's name.
+  #
+  # The shell below is load-bearing for the same reason, which is not obvious:
+  # a nologin shell is what makes accounts-daemon mark the slot SystemAccount,
+  # and that is what keeps it out of ListCachedUsers and out of every user list
+  # a desktop draws from it. Measured 2026-09-16. Give the slot a real shell
+  # here and the outside name starts appearing in user pickers, with nothing
+  # else in the tree changed and no test failing. The session's own shell is
+  # set in the namespaced passwd below and is unaffected.
+  rec='{"userName":"'"${name}"'","uid":'"${id}"',"gid":'"${id}"',
+        "realName":"Ephemeral session",
+        "homeDirectory":"'"${home}"'","shell":"/usr/sbin/nologin",
+        "disposition":"dynamic"}'
+  grp='{"groupName":"'"${name}"'","gid":'"${id}"',"disposition":"dynamic"}'
+
+  # Both spellings of each record: nss-systemd looks a user up by name and by
+  # uid, and a record filed under only one of them resolves only one way.
+  printf '%s\n' "${rec}" > "${USERDB}/${name}.user"
+  printf '%s\n' "${rec}" > "${USERDB}/${id}.user"
+  printf '%s\n' "${grp}" > "${USERDB}/${name}.group"
+  printf '%s\n' "${grp}" > "${USERDB}/${id}.group"
+  chmod 0644 "${USERDB}/${name}.user" "${USERDB}/${id}.user" \
+             "${USERDB}/${name}.group" "${USERDB}/${id}.group"
+
+  getent passwd "${name}" >/dev/null ||
+    die "wrote a record for '${name}' and it still does not resolve."
+
+  # A passwd and group the session sees instead of the machine's. Inside, the
+  # slot is called "user" and lives in /home/user, whichever slot it is.
+  #
+  # That is cosmetic in the security sense -- a session that learned its real
+  # name could do nothing extra with it, since the isolation is the uid, the
+  # namespace and the empty /home. It earns its place for a different reason: a
+  # template profile encodes absolute paths all over it, in dconf values, browser
+  # profiles, recently-used lists and wallpaper URIs. A home that is always
+  # /home/user makes one template correct in every slot, and keeps the account it
+  # was built from out of every session that starts from it.
+  #
+  # Only system accounts are carried over. Real people are left out on purpose:
+  # ProtectHome=tmpfs already hides their directories, and this hides their names
+  # to match.
+  ns="${NSDIR}/${name}"
+  install -d -m 0755 "${ns}"
+  awk -F: '$3 < 1000 || $3 == 65534' /etc/passwd > "${ns}/passwd"
+  printf 'user:x:%s:%s:ephemeral session:/home/user:/bin/bash\n' "${id}" "${id}" \
+    >> "${ns}/passwd"
+  # Field 4 -- the member list -- is dropped, because it names real people:
+  # `sudo`, `audio` and `plugdev` routinely list every human on the machine, and
+  # copying the line wholesale put three of them inside the session on the first
+  # box this was measured on. Nothing is lost by dropping it: a group the unit
+  # grants arrives as a kernel credential, and the name still resolves from the
+  # gid on the line.
+  awk -F: 'BEGIN { OFS = ":" } $3 < 1000 || $3 == 65534 { $4 = ""; print }' \
+    /etc/group > "${ns}/group"
+  printf 'user:x:%s:\n' "${id}" >> "${ns}/group"
+  chmod 0644 "${ns}/passwd" "${ns}/group"
+
+  # The home, as a tmpfs the namespace owns outright. It is mounted where the
+  # passwd entry above promises rather than bound there from /run, because
+  # systemd orders its mounts by destination and "/home" sorts before "/run":
+  # the bind ran first and published the uncapped /run filesystem at /home/user,
+  # measured, with no error anywhere. Mounting it directly has no order to get
+  # wrong, and nothing to clean up either -- the mount lives in the session's
+  # namespace and is gone with the last process on every stop path.
+  #
+  # This cannot live in the template, which is why it is generated here: `uid=`
+  # must be a number, and a unit template has no way to turn %i into one. The
+  # script that assigns the uid is the one place that already knows it.
+  drop="${DROPDIR}/hdw4s-ephemeral@${name}.service.d"
+  install -d -m 0755 "${drop}"
+  cat > "${drop}/10-home.conf" <<EOF
+# Generated by hdw4s-ephemeral-slots; edits are lost at the next boot.
+[Service]
+TemporaryFileSystem=/home/user:size=${HDW4S_EPHEMERAL_HOME_SIZE},mode=0700,uid=${id},gid=${id}
+EOF
+
+  # systemd caches a unit once it has loaded it, so a drop-in written afterwards
+  # is not read until a reload. At boot there is nothing to reload: this runs
+  # before the sockets that could start a session, so no instance has been
+  # loaded. Only a re-mint on a running system needs one, and asking for a
+  # reload from inside a unit systemd is still starting is a documented way to
+  # deadlock -- so it is asked for when it is needed and not otherwise.
+  [ "$(systemctl show -p LoadState --value "hdw4s-ephemeral@${name}.service" \
+         2>/dev/null)" != 'loaded' ] || reload='yes'
+
+  i=$(( i + 1 ))
+done
+
+[ -z "${reload}" ] || systemctl daemon-reload
+
+echo "hdw4s: minted ${HDW4S_EPHEMERAL_SLOTS} ephemeral slot(s) from ${HDW4S_EPHEMERAL_PREFIX}0."

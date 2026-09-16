@@ -1,0 +1,23 @@
+[Unit]
+Description=Mint the hdw4s ephemeral slot identities
+Documentation=man:hdw4s(8)
+# The records must exist before anything can start a session as one of these
+# accounts. systemd resolves User= when it starts a unit, and a socket-activated
+# session unit whose User= does not resolve fails with 217/USER -- measured --
+# which reads as a broken service rather than a missing account. Ordering this
+# ahead of the sockets is what keeps that from being anybody's 2 a.m. puzzle.
+DefaultDependencies=no
+After=local-fs.target
+Before=sockets.target shutdown.target
+Conflicts=shutdown.target
+# /run is tmpfs, so the records are gone at every boot and this is what puts
+# them back. There is nothing to clean up on the way down.
+RefuseManualStop=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/hdw4s/hdw4s-ephemeral-slots
+
+[Install]
+WantedBy=sysinit.target
