@@ -59,6 +59,18 @@ BindReadOnlyPaths=%t/hdw4s-ns/%i/group:/etc/group
 # passwd above does not hide them: without this, `getent passwd ephemeral0`
 # answers from inside. Measured 2026-09-16.
 InaccessiblePaths=%t/userdb
+# The names of everyone else with a desktop on this machine. ProtectSystem=strict
+# makes the filesystem read-only, not invisible, so without this a session can
+# list /etc/hdw4s, /var/lib/hdw4s and /run/hdw4s-proxy and read off every real
+# account by file name -- the same names this unit goes to the trouble of
+# stripping out of the passwd and group files it binds over. Contents were never
+# reachable (another profile is 0700 and owned by its user); the names were.
+#
+# /run/hdw4s is NOT in this list and cannot be: it is the parent of this unit's
+# own RuntimeDirectory, and covering it makes the session's own runtime directory
+# inaccessible -- measured. Closing that one means moving XDG_RUNTIME_DIR out of
+# the shared parent, which is where "hdw4s list" reads a session's display from.
+InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s-proxy
 # systemd fills these from the slot account, which resolves OUTSIDE the
 # namespace and so carries the outside name. They are the last two leaks.
 Environment=USER=user
