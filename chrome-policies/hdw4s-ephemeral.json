@@ -1,0 +1,15 @@
+{
+  "_comment_scope": "Visible only inside an ephemeral session. The unit bind-mounts this directory over /etc/opt/chrome/policies/managed, so a normal session on the same machine sees an empty directory and keeps every feature below.",
+
+  "_comment_model": "The on-device model is around 3 GB. An ephemeral session starts from a fresh profile every connection, so it would download it again every connection, onto a tmpfs, and throw it away at disconnect. 1 = do not download. The spelling is GenAI with a capital I: GenAi... does not exist in the binary and a policy key Chrome does not recognise is ignored in silence.",
+  "GenAILocalFoundationalModelSettings": 1,
+
+  "_comment_firstrun": "The first-run surfaces, which a fresh profile shows every time.",
+  "PromotionalTabsEnabled": false,
+  "DefaultBrowserSettingEnabled": false,
+
+  "_comment_signin": "Signing in would tie an account to a session that is about to be destroyed, and would leave the account's own history holding what was done in it.",
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+  "MetricsReportingEnabled": false
+}

@@ -8,6 +8,10 @@ hdw4s-wait             usr/lib/hdw4s
 hdw4s.xorg.conf          usr/lib/hdw4s
 wrappers/*               usr/lib/hdw4s/wrappers
 hdw4s.conf               usr/share/hdw4s
+dconf/profile            usr/share/hdw4s/dconf
+dconf/10-policy          usr/share/hdw4s/dconf
+dconf/locks/10-policy    usr/share/hdw4s/dconf/locks
+chrome-policies/hdw4s-ephemeral.json  etc/hdw4s/chrome-policies
 hdw4s@.service           usr/lib/systemd/system
 hdw4s-ephemeral@.service usr/lib/systemd/system
 hdw4s-ephemeral-slots.service usr/lib/systemd/system

@@ -165,6 +165,13 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   # Trading a documented filesystem limitation for a new startup dependency is
   # not an improvement.
   #
+  # That objection is to "service-db:keyfile/user" specifically, and not to
+  # DCONF_PROFILE as such -- which this script does set, for ephemeral sessions.
+  # A "system-db:" layer is a direct memory map: measured reading correctly with
+  # no session bus at all and no dconf-service running, and there is no lock file
+  # because nothing writes it from the session. Writes still need the service and
+  # still land in the user layer, exactly as they do here.
+  #
   # What this does not cover: paths a program builds from the home directory
   # itself rather than from these variables. The streaming server is the one
   # that matters, because it is the one program guaranteed to be running: when
@@ -198,6 +205,53 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
     printf '%s\n' '[Desktop Entry]' 'Type=Application' \
                   'Name=Tracker File System Miner' 'Hidden=true' \
       > "${XDG_CONFIG_HOME}/autostart/tracker-miner-fs-3.desktop"
+
+    # The autostart entry above is NOT what starts the indexer, and on its own
+    # this setting did nothing. Measured: tracker-miner-fs-3 running as
+    # every session's own user, parented to init, with the Hidden= entry sitting
+    # in the profile and a dconf key telling it to index nothing. It is
+    # D-Bus activated -- /usr/share/dbus-1/services/org.freedesktop.Tracker3.
+    # Miner.Files.service names it -- so anything that asks for the name starts
+    # it, and nautilus asks.
+    #
+    # A session service file in XDG_DATA_HOME shadows the system one by name,
+    # which is the same per-profile shape as the autostart entries and reaches
+    # nothing outside the session. SystemdService= is deliberately absent: with
+    # it, dbus hands the request to a user manager that this product does not
+    # run, and the shadow would be ignored on a machine that does.
+    #
+    # The Control service goes too: it exists to start and steer the miner.
+    # org.gnome.Nautilus.Tracker3.Miner.Files is left alone -- its Exec is a
+    # Flatpak path that does not exist on a system install, so it starts nothing.
+    install -d -m0700 "${XDG_DATA_HOME}/dbus-1/services"
+    for svc in org.freedesktop.Tracker3.Miner.Files \
+               org.freedesktop.Tracker3.Miner.Files.Control; do
+      printf '%s\n' '[D-BUS Service]' "Name=${svc}" 'Exec=/bin/false' \
+        > "${XDG_DATA_HOME}/dbus-1/services/${svc}.service"
+    done
+  fi
+
+  # The first-run wizard, for ephemeral sessions only.
+  #
+  # gnome-initial-setup autostarts on "unless-exists gnome-initial-setup-done",
+  # and writes that marker only when the user completes it. The marker lives in
+  # the profile, so an ordinary session sees the wizard once and never again --
+  # which is the behaviour a new account should get, and is left alone.
+  #
+  # An ephemeral session builds a fresh profile every connection, so the marker
+  # is never there and the wizard covers the desktop every single time.
+  # Observed: "Welcome to Ubuntu 24.04.5 LTS!" over a fully painted desktop, on
+  # first light and again on the next cold start.
+  #
+  # Hiding the autostart entry rather than writing the marker, because that is
+  # the mechanism already used twice above and it says what it means. The marker
+  # would also work and is the condition GNOME itself tests; if this ever stops
+  # working because the .desktop was renamed, that is the fallback.
+  if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+    install -d -m0700 "${XDG_CONFIG_HOME}/autostart"
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' \
+                  'Name=GNOME Initial Setup' 'Hidden=true' \
+      > "${XDG_CONFIG_HOME}/autostart/gnome-initial-setup-first-login.desktop"
   fi
 
   # The same mechanism, for the same reason, against PulseAudio.

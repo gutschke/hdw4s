@@ -45,6 +45,7 @@ DROPDIR="${HDW4S_DROPIN_DIR:-/run/systemd/system}"
 : "${HDW4S_EPHEMERAL_UID_BASE:=60900}"
 : "${HDW4S_EPHEMERAL_HOME_SIZE:=1G}"
 : "${HDW4S_EPHEMERAL_PROFILE_SIZE:=2G}"
+: "${HDW4S_EPHEMERAL_SHM_SIZE:=512M}"
 
 # The window these identities may occupy. Nothing outside it is ever written, and
 # nothing inside it is expected to exist in /etc/passwd: a collision means the
@@ -82,6 +83,10 @@ esac
 case "${HDW4S_EPHEMERAL_PROFILE_SIZE}" in
   ''|*[!0-9KMG%]*|[!0-9]*)
     die "HDW4S_EPHEMERAL_PROFILE_SIZE must be a size like 2G, 512M or 10%, not '${HDW4S_EPHEMERAL_PROFILE_SIZE}'." ;;
+esac
+case "${HDW4S_EPHEMERAL_SHM_SIZE}" in
+  ''|*[!0-9KMG%]*|[!0-9]*)
+    die "HDW4S_EPHEMERAL_SHM_SIZE must be a size like 512M, 1G or 10%, not '${HDW4S_EPHEMERAL_SHM_SIZE}'." ;;
 esac
 last=$(( HDW4S_EPHEMERAL_UID_BASE + HDW4S_EPHEMERAL_SLOTS - 1 ))
 if [ "${HDW4S_EPHEMERAL_UID_BASE}" -lt "${UID_MIN}" ] || [ "${last}" -gt "${UID_MAX}" ]; then
@@ -206,6 +211,7 @@ while [ "${i}" -lt "${HDW4S_EPHEMERAL_SLOTS}" ]; do
 [Service]
 TemporaryFileSystem=/home/user:size=${HDW4S_EPHEMERAL_HOME_SIZE},mode=0700,uid=${id},gid=${id}
 TemporaryFileSystem=/run/hdw4s-profile/${name}:size=${HDW4S_EPHEMERAL_PROFILE_SIZE},mode=0700,uid=${id},gid=${id}
+TemporaryFileSystem=/dev/shm:mode=1777,size=${HDW4S_EPHEMERAL_SHM_SIZE}
 EOF
 
   # systemd caches a unit once it has loaded it, so a drop-in written afterwards

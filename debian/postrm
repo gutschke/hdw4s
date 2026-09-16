@@ -28,6 +28,13 @@ if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
     rm -f "${slot}.user" "${slot}.group"
   done
   rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.service.d
+# The settings layer and the policy. Only our own profile and database are
+# touched; /etc/dconf/profile/user belongs to every session on the machine.
+rm -rf /etc/dconf/db/hdw4s-ephemeral.d /etc/dconf/db/hdw4s-ephemeral \
+       /etc/dconf/profile/hdw4s-ephemeral /etc/hdw4s/chrome-policies
+rmdir --ignore-fail-on-non-empty /etc/opt/chrome/policies/managed \
+      /etc/opt/chrome/policies 2>/dev/null || :
+if command -v dconf >/dev/null 2>&1; then dconf update 2>/dev/null || :; fi
 fi
 
 if [ "$1" = 'purge' ]; then

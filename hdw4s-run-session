@@ -145,6 +145,7 @@ dbus-update-activation-environment \
   GNOME_SHELL_SESSION_MODE PATH HOME LANG \
   PULSE_SERVER PULSE_RUNTIME_PATH PIPEWIRE_RUNTIME_DIR \
   GVFS_DISABLE_FUSE \
+  DCONF_PROFILE \
   2>/dev/null || echo 'hdw4s: could not publish the activation environment' >&2
 
 # The desktop's file indexer, off by default. On a home shared between machines

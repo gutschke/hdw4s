@@ -24,6 +24,8 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait}
          hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-firewall.service
          hdw4s-firewall-check.service hdw4s-firewall.timer
+         dconf/profile dconf/10-policy dconf/locks/10-policy
+         chrome-policies/hdw4s-ephemeral.json
          hdw4s-updater.{service,timer} hdw4s-reaper.{service,timer}
          install.sh uninstall.sh LICENSE)
 
@@ -146,7 +148,8 @@ esac
 man="${sys}/share/man/man8"
 
 echo -n 'Installing files...'
-install -d -m0755 "${dst}" "${dst}/wrappers" "${sys}/sbin" "${man}" /etc/hdw4s
+install -d -m0755 "${dst}" "${dst}/wrappers" "${dst}/dconf/locks" \
+                  "${dst}/chrome-policies" "${sys}/sbin" "${man}" /etc/hdw4s
 # Re-running the installed copy and accepting the same path makes src and dst
 # the same directory, and cp then refuses -- with the generic "failed
 # unexpectedly" line, which says nothing about why.
@@ -162,6 +165,39 @@ chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wa
 # Imported, not executed.
 chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
            "${dst}"/*.conf "${dst}"/hdw4s.8*
+
+# The settings layer every ephemeral session starts from, and the Chrome policy
+# that is visible only inside one.
+#
+# The dconf files are package-owned and are rewritten on every install: they are
+# ours, the administrator's own additions belong in the 50-template layer above
+# them, and an install that left a stale lockdown in place would be the kind of
+# difference nobody looks for.
+install -d -m0755 /etc/dconf/profile /etc/dconf/db/hdw4s-ephemeral.d/locks \
+                  /etc/hdw4s/chrome-policies
+install -m0644 "${dst}/dconf/profile"         /etc/dconf/profile/hdw4s-ephemeral
+install -m0644 "${dst}/dconf/10-policy"       /etc/dconf/db/hdw4s-ephemeral.d/10-policy
+install -m0644 "${dst}/dconf/locks/10-policy" /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
+install -m0644 "${dst}/chrome-policies/hdw4s-ephemeral.json" \
+               /etc/hdw4s/chrome-policies/hdw4s-ephemeral.json
+
+# The mount point the unit binds over. It must exist on the host or the
+# namespace fails to build, and it must stay EMPTY: a policy file left here
+# would apply to every Chrome on the machine, which is the opposite of the
+# point. Chrome does not create this directory itself.
+install -d -m0755 /etc/opt/chrome/policies/managed
+
+# Compiles the text above into the binary database dconf memory-maps. A missing
+# database is not an error -- dconf warns on stderr, returns 0, and silently
+# falls back to schema defaults -- so a failure here has to be said out loud.
+if command -v dconf >/dev/null; then
+  dconf update 2>/dev/null ||
+    echo 'Warning: "dconf update" failed; ephemeral sessions will start from
+      stock GNOME defaults rather than the policy above.'
+else
+  echo 'Note: dconf is not installed, so the ephemeral policy database was not
+      compiled. Install dconf-cli and run "dconf update".'
+fi
 
 # The configuration file is the administrator's once it exists; never overwrite
 # an edited one on reinstall.

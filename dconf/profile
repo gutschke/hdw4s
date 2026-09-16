@@ -1,0 +1,14 @@
+# The dconf profile an ephemeral session reads. Two layers, in precedence order.
+#
+# system-db: is NOT the keyfile back end. hdw4s-session rejects DCONF_PROFILE
+# for pointing dconf at "service-db:keyfile/user", which needs a service to
+# answer before any setting can be read and leaves a lock beside its database
+# that a killed session does not clean up. Neither applies here: dconf(7)
+# documents a system database as a direct memory map, and it was measured
+# reading correctly with no session bus at all and no dconf-service running.
+# Writes still need the service, and still go to the user layer.
+#
+# Never add these lines to /etc/dconf/profile/user. Every dconf client on the
+# machine reads that file, including the administrator's own login session.
+user-db:user
+system-db:hdw4s-ephemeral

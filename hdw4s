@@ -788,6 +788,10 @@ EOF
 declare -A GLOBAL_ONLY=(
   [HDW4S_PROXIES]=1 [HDW4S_BASE_PORT]=1 [HDW4S_BLOCK_SIZE]=1
   [HDW4S_MEDIA_PORTS]=1 [HDW4S_ALLOW_SYSTEM_USER]=1 [SELKIES_VERSION]=1
+  # Read by the slot-minting service, which runs once for the machine. A
+  # per-instance value would be read by nothing and would look like it worked.
+  [HDW4S_EPHEMERAL_SLOTS]=1 [HDW4S_EPHEMERAL_HOME_SIZE]=1
+  [HDW4S_EPHEMERAL_PROFILE_SIZE]=1 [HDW4S_EPHEMERAL_SHM_SIZE]=1
 )
 
 # Settings whose effect does not live in the configuration file at all. The
@@ -838,6 +842,10 @@ declare -A SETTABLE=(
   [HDW4S_ADDR]='any'
   [HDW4S_BASE_PORT]='number'
   [HDW4S_BLOCK_SIZE]='number'
+  [HDW4S_EPHEMERAL_SLOTS]='number'
+  [HDW4S_EPHEMERAL_HOME_SIZE]='size'
+  [HDW4S_EPHEMERAL_PROFILE_SIZE]='size'
+  [HDW4S_EPHEMERAL_SHM_SIZE]='size'
   [HDW4S_MICROPHONE]='no|yes'
   [HDW4S_WEBCAM]='no|yes'
   [HDW4S_WEBRTC]='no|yes'
@@ -873,6 +881,12 @@ check_value() {
               die "hdw4s: ${key} takes a number or an 'N,LOW-HIGH' range, not '${value}'";;
     dpi)    case "${value}" in follow) :;; ''|*[!0-9]*)
               die "hdw4s: ${key} takes 'follow' or a number, not '${value}'";; esac;;
+    # A tmpfs size, as mount(8) takes it: bytes, a K/M/G suffix, or a percentage
+    # of physical memory. Checked here rather than at mount time because a
+    # rejected option does not fail the setting, it fails the whole namespace --
+    # and the message then names the mount instead of the value that caused it.
+    size)   [[ "${value}" =~ ^[0-9]+[KMG]?$|^[0-9]+%$ ]] ||
+              die "hdw4s: ${key} takes a size such as 512M, 2G or 10%, not '${value}'";;
     path)   case "${value}" in /*) :;;
               *) die "hdw4s: ${key} takes an absolute path, not '${value}'";; esac;;
     any)    :;;

@@ -1,0 +1,21 @@
+# Keys an ephemeral session may not override.
+#
+# Only the ones whose whole purpose is defeated by overriding them. A lock is
+# not a preference: every key here is one where a session changing it either
+# strands its own user or removes the signal that tells them what kind of
+# session they are in.
+
+# Locking the screen strands the user: there is no password to unlock it with.
+/org/gnome/desktop/screensaver/lock-enabled
+/org/gnome/desktop/screensaver/idle-activation-enabled
+/org/gnome/desktop/session/idle-delay
+
+# The background is the cue that this session keeps nothing. Every key, because
+# Settings rewrites all six when a stock wallpaper is chosen, and leaving one
+# unlocked lets the cue be removed by an action nobody thinks of as removing it.
+/org/gnome/desktop/background/picture-uri
+/org/gnome/desktop/background/picture-uri-dark
+/org/gnome/desktop/background/primary-color
+/org/gnome/desktop/background/secondary-color
+/org/gnome/desktop/background/color-shading-type
+/org/gnome/desktop/background/picture-options

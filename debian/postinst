@@ -74,6 +74,37 @@ if [ "$1" = 'configure' ]; then
   # END session-dropin-backfill
   systemctl daemon-reload || :
 
+  # The settings layer every ephemeral session starts from. Package-owned and
+  # rewritten on every install: the administrator's own additions belong in the
+  # 50-template layer above these, and an upgrade that left a stale lockdown
+  # behind would be the kind of difference nobody thinks to look for.
+  mkdir -p /etc/dconf/profile /etc/dconf/db/hdw4s-ephemeral.d/locks
+  cp /usr/share/hdw4s/dconf/profile         /etc/dconf/profile/hdw4s-ephemeral
+  cp /usr/share/hdw4s/dconf/10-policy       /etc/dconf/db/hdw4s-ephemeral.d/10-policy
+  cp /usr/share/hdw4s/dconf/locks/10-policy /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
+  chmod 0644 /etc/dconf/profile/hdw4s-ephemeral \
+             /etc/dconf/db/hdw4s-ephemeral.d/10-policy \
+             /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
+
+  # The mount point the ephemeral unit binds its Chrome policy over. It has to
+  # exist or the namespace fails to build, and it has to stay EMPTY: a policy
+  # file here would apply to every Chrome on the machine, which is the opposite
+  # of what the bind is for. Chrome does not create this directory itself.
+  mkdir -p /etc/opt/chrome/policies/managed
+
+  # Compiles the text into the database dconf memory-maps. A missing database is
+  # not an error: dconf warns on stderr, exits 0, and falls back to schema
+  # defaults -- so this failing has to be said out loud rather than swallowed.
+  if command -v dconf >/dev/null 2>&1; then
+    dconf update 2>/dev/null || {
+      echo 'hdw4s: "dconf update" failed; ephemeral sessions will start from' >&2
+      echo '  stock GNOME defaults rather than the shipped policy.' >&2
+    }
+  else
+    echo 'hdw4s: dconf is not installed, so the ephemeral policy database was' >&2
+    echo '  not compiled. Install dconf-cli and run "dconf update".' >&2
+  fi
+
   # On an upgrade the firewall unit is already active, and it is Type=oneshot
   # with RemainAfterExit=yes, so debhelper's "start" below is a no-op --
   # deliberately, because --no-stop-on-upgrade is what keeps live sessions from

@@ -75,6 +75,26 @@ Environment=XDG_RUNTIME_DIR=%t/hdw4s/%i
 # programs that ignore the XDG variables.
 Environment=PATH=/usr/lib/hdw4s/wrappers:/usr/local/bin:/usr/bin:/bin
 Environment=LIBGL_ALWAYS_SOFTWARE=1
+# The settings layer this session starts from. It names a profile in
+# /etc/dconf/profile, whose system-db line is a direct memory map -- no service
+# has to answer for a setting to be read, which is what makes it usable here at
+# all. hdw4s-run-session publishes this to the session bus alongside the XDG
+# variables, or the writer and the reader would disagree about which database
+# they are using.
+Environment=DCONF_PROFILE=hdw4s-ephemeral
+# What kind of session this is, for the parts of the session script that have to
+# differ. One variable rather than a test against the profile name or the unit
+# name, so there is one thing to grep for.
+Environment=HDW4S_SESSION_TYPE=ephemeral
+
+# A Chrome policy that exists only inside this session. The directory is bound
+# over the one Chrome reads, so a normal session on the same machine sees the
+# empty original and keeps every feature the policy turns off -- which is the
+# whole reason this is a mount rather than a file placed on the host.
+#
+# The mount point has to exist on the host or the namespace fails to build;
+# the package creates it empty and never puts a policy in it.
+BindReadOnlyPaths=/etc/hdw4s/chrome-policies:/etc/opt/chrome/policies/managed
 
 # ---- where the session lives, and why it vanishes --------------------------
 # The profile is the session: with isolation on it holds the settings, the dconf
@@ -176,13 +196,10 @@ TemporaryFileSystem=/var/tmp
 # session would hold in common with every real user's desktop on the machine for
 # as long as it runs.
 #
-# mode=1777 is what /dev/shm is everywhere and the sticky bit is load-bearing;
-# this mount is seen by nobody but the session. The size is explicit for the same
-# reason as the home -- an unsized tmpfs takes half of the HOST's memory. 512M is
-# a starting value, not a measured one: Chrome's documented trouble threshold is
-# the 64M container default, and what a real session peaks at here has not been
-# measured yet.
-TemporaryFileSystem=/dev/shm:mode=1777,size=512M
+# The mount itself is generated with the other two sizes, so that every
+# per-session limit is set in one place and by one setting each. mode=1777 is
+# what /dev/shm is everywhere and the sticky bit is load-bearing; this mount is
+# seen by nobody but the session.
 
 # Shared memory and semaphores outlive the session otherwise. logind's default
 # would remove them, but it acts on logind sessions and this product has none:

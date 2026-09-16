@@ -1,0 +1,56 @@
+# Settings every ephemeral session starts from. Package-owned: edit the file,
+# run "dconf update", and the next session reads the compiled database.
+#
+# The 50-template layer sits above this one and is NOT generated yet. Its
+# position is reserved deliberately: a session that resets a key falls back to
+# the administrator's template rather than to stock GNOME, and that only works
+# if the template is a layer rather than a seeded copy of the user database.
+# Do not renumber these files to close the gap.
+
+# ---- the session cannot be locked, because nobody can unlock it ------------
+# There is no password to type: the session has no PAM, and the account has no
+# usable one. A locked screen here is a session that has to be killed by an
+# administrator, and the user cannot tell that from a hung desktop.
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+# ---- nothing follows the user out of the session ---------------------------
+# All of this would otherwise be written into a profile that is destroyed
+# anyway, so the point is not storage: it is that a fresh session must not
+# inherit a previous occupant's traces through a service that outlives it.
+[org/gnome/desktop/privacy]
+remember-recent-files=false
+remember-app-usage=false
+report-technical-problems=false
+send-software-usage-stats=false
+
+[org/gnome/desktop/search-providers]
+disable-external=true
+
+# ---- the indexer ----------------------------------------------------------
+# This is the dconf half only. The autostart entry is a different mechanism and
+# is handled per-profile by hdw4s-session; believing a key here disables a
+# .desktop file is a mistake this project has already made once.
+[org/freedesktop/Tracker3/Miner/Files]
+enable-monitors=false
+index-recursive-directories=@as []
+index-single-directories=@as []
+
+# ---- a visual cue that this session keeps nothing --------------------------
+# gnome-control-center resets all of these together when a user picks a stock
+# wallpaper, which is why the lock file beside this one names every one of them
+# rather than just picture-uri.
+[org/gnome/desktop/background]
+picture-uri=''
+picture-uri-dark=''
+primary-color='#1a1a2e'
+secondary-color='#1a1a2e'
+color-shading-type='solid'
+picture-options='none'
+
+[org/gnome/desktop/interface]
+enable-hot-corners=false
