@@ -884,8 +884,12 @@ cache_deb "${wanted}" "${workdir}/${asset}" "${sum}" "${current}"
 # them, and restarting those started a full desktop for somebody who had not
 # asked for one -- undoing both socket activation and the reaper on every
 # upgrade.
-mapfile -t units < <(systemctl list-units --plain --no-legend --state=active 'hdw4s@*' |
-                     awk '{print $1}')
+# Both templates, because a Selkies upgrade is no less relevant to an ephemeral
+# session than to a desktop one -- and a glob that names only the first would
+# leave exactly one kind of session running the old streaming server, silently
+# and for as long as it stayed up.
+mapfile -t units < <(systemctl list-units --plain --no-legend --state=active \
+                       'hdw4s@*' 'hdw4s-ephemeral@*' | awk '{print $1}')
 # Sessions are socket-activated and are not started at boot, so this list is
 # normally empty and this is the branch nearly every upgrade takes. That is why
 # the smoke test above runs unconditionally and before this point: an upgrade

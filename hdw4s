@@ -247,19 +247,42 @@ slot_of() {
     '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}"
 }
 
+# What kind of session an instance is. Recorded in the table rather than guessed
+# from the name, because six readers need the answer long after "hdw4s enable"
+# has exited, and a name prefix would make a configurable string load-bearing in
+# all of them. A row written by an older version has two fields and means
+# "desktop", which is what every session was when it was written.
+type_of() {
+  local t=''
+  [ ! -r "${SLOTS}" ] ||
+    t="$(awk -v i="${1}" '$1 !~ /^#/ && $2 == i { print $3; exit }' "${SLOTS}")"
+  echo "${t:-desktop}"
+}
+
 # The systemd unit that runs a given instance's desktop. One place, because a
 # second kind of session means every "hdw4s@${inst}" spelled out by hand is a
-# site that silently acts on the wrong unit.
+# site that silently acts on the wrong unit -- and acting on the wrong unit is
+# quiet: it starts something, so nothing reports an error.
 unit_of() {
-  echo "hdw4s@${1}.service"
+  case "$(type_of "${1}")" in
+    ephemeral) echo "hdw4s-ephemeral@${1}.service";;
+    *)         echo "hdw4s@${1}.service";;
+  esac
+}
+
+# Where that unit's drop-ins live. Writing one into the other unit's directory is
+# the failure this exists to prevent: it lands, systemd never reads it, and the
+# session fails for a reason the file would have fixed.
+dropin_of() {
+  echo "${DROPIN}/$(unit_of "${1}").d"
 }
 
 alloc_slot() {
-  local inst="$1" idx used lock
+  local inst="$1" type="${2:-desktop}" idx used lock
   install -d -m0755 "$(dirname "${SLOTS}")"
   [ -e "${SLOTS}" ] || {
     printf '%s\n' \
-      '# Session slots. One line per session: <index> <instance>.' \
+      '# Session slots. One line per session: <index> <instance> <type>.' \
       '# The index fixes the port (base + index); it is assigned once and does' \
       '# not move, so proxy and firewall configuration stays valid. Remove a' \
       '# line only with "hdw4s release", never by hand while a session runs.' \
@@ -293,7 +316,7 @@ alloc_slot() {
     echo "  Raise HDW4S_BLOCK_SIZE in ${CONF} and rerun 'hdw4s firewall --apply'." >&2
     return 1
   fi
-  printf '%s %s\n' "${idx}" "${inst}" >> "${SLOTS}"
+  printf '%s %s %s\n' "${idx}" "${inst}" "${type}" >> "${SLOTS}"
   exec {lock}<&-
   echo "${idx}"
 }
@@ -323,6 +346,19 @@ internal_port_of() {
 setting_with_source() {
   local inst="$1" key="$2" fallback="$3" v=''
   local f
+  # An ephemeral slot takes several of its settings from its unit rather than
+  # from a conf file -- the profile directory and the isolation mode among them
+  # -- and Environment= in the unit beats the EnvironmentFile= lines above it, so
+  # that is the value in force. Reading only the conf files made this command
+  # report a profile under /var/lib/hdw4s that has never existed for such a
+  # session, and an isolation mode it does not run with. Ask systemd rather than
+  # keeping a second copy of the unit's values here, which would be one more
+  # thing able to disagree with it.
+  if [ "$(type_of "${inst}")" = 'ephemeral' ]; then
+    v="$(systemctl show "$(unit_of "${inst}")" -p Environment --value 2>/dev/null |
+           tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n1)"
+    [ -z "${v}" ] || { printf '%s\t%s' "${v}" "$(unit_of "${inst}")"; return 0; }
+  fi
   for f in "${ETCDIR}/${inst}.conf" "${CONF}"; do
     [ -r "${f}" ] || continue
     v="$(sed -n "s/^[[:space:]]*${key}=[\"']\{0,1\}\([^\"'#]*\).*/\1/p" \
@@ -355,6 +391,23 @@ profile_dir_of() {
 # authenticated. A security report that depends on who is reading it is worse
 # than none. Anything that needs the value itself, rather than the fact, checks
 # readability where it reads.
+# Re-point an existing credential at the unit's drop-in directory, without
+# rotating it. "hdw4s enable" is documented as safe to re-run, and a session that
+# already has a credential must not be handed a new one -- the reverse proxy is
+# configured with the old one and would start answering 401. But the drop-in can
+# legitimately be absent: it was written under a different unit name before the
+# session's type was recorded, or removed by "hdw4s release".
+link_credential() {
+  local inst="$1" name="$2" order="$3" cred="${ETCDIR}/${1}.${2}.cred"
+  [ -e "${cred}" ] || return 0
+  install -d -m0755 "$(dropin_of "${inst}")"
+  printf '%s\n' \
+    "# Written by \"hdw4s ${name}\"." \
+    '[Service]' \
+    "LoadCredentialEncrypted=hdw4s-${name}:${cred}" \
+    > "$(dropin_of "${inst}")/${order}-${name}.conf"
+}
+
 has_auth() {
   [ -e "${ETCDIR}/$1.auth.cred" ] &&
   [ "$(setting_of "$1" HDW4S_AUTH none)" = 'basic' ]
@@ -366,7 +419,12 @@ cmd_list() {
     INSTANCE USER PORT AUTH PROFILE TRANSPORT STATE DISPLAY
   [ -r "${SLOTS}" ] || return 0
   # Slots are reused as they are released, so the file is not in index order.
-  while read -r idx inst; do
+  # The trailing "_" absorbs the type field, and every field after it. Without a
+  # variable of its own the rest of the line lands in "inst", which does not drop
+  # the type so much as rename the session -- and the name is the key every other
+  # reader looks the slot up by. The type itself is read by type_of() straight
+  # from the table, so nothing here needs to hold it.
+  while read -r idx inst _; do
     case "${idx}" in ''|\#*) continue;; esac
     port="$(port_of "${idx}")"
     # A slot whose account has been deleted, or which names a system account,
@@ -393,7 +451,7 @@ cmd_list() {
       orphaned=$(( orphaned + 1 ))
       continue
     fi
-    state="$(systemctl show -p ActiveState --value "hdw4s@${inst}.service" \
+    state="$(systemctl show -p ActiveState --value "$(unit_of "${inst}")" \
              2>/dev/null || echo unknown)"
     [ "$(setting_of "${inst}" HDW4S_ISOLATION none)" = 'profile' ] &&
       prof='yes' || prof='no'
@@ -503,8 +561,14 @@ cmd_show() {
 }
 
 cmd_enable() {
+  local type='desktop'
+  if [ "$1" = '--ephemeral' ]; then type='ephemeral'; shift; fi
   local inst="$1" idx prof fresh='no'
-  split_instance "${inst}" || fail
+  # An ephemeral slot is not an account anybody named: it is minted by
+  # hdw4s-ephemeral-slots, and the checks below are about a human's account.
+  if [ "${type}" = 'desktop' ]; then
+    split_instance "${inst}" || fail
+  fi
   # Whether this instance is being created rather than re-enabled, decided
   # before anything below writes the file. "enable" is documented as safe to
   # re-run, so a session that already exists must come out of it configured
@@ -512,9 +576,19 @@ cmd_enable() {
   # deployment would answer its reverse proxy with 401 and take the desktop
   # away from someone who changed nothing.
   [ -e "${ETCDIR}/${inst}.conf" ] || fresh='yes'
-  idx="$(alloc_slot "${inst}")"
+  idx="$(alloc_slot "${inst}" "${type}")"
 
-  install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
+  install -d -m0755 "$(dropin_of "${inst}")"
+
+  # Four drop-ins below describe an account: who it is, where its home is, which
+  # GPU group it needs, where its profile lives. An ephemeral slot has none of
+  # those to describe -- its unit sets User=%i itself, its home is a tmpfs inside
+  # its own namespace, and its profile is a RuntimeDirectory, which is writable
+  # under ProtectSystem=strict without being named. Writing them anyway is not
+  # merely redundant: 40-home.conf would order the session after a mount of a
+  # path that exists nowhere outside the namespace, and the unit would fail
+  # 226/NAMESPACE naming a directory nobody can find.
+  if [ "${type}" = 'desktop' ]; then
 
   # The unit carries no User= of its own. systemd has no specifier for "the
   # part of the instance name before the colon", and "User=%i" cannot be
@@ -525,7 +599,7 @@ cmd_enable() {
     '# Written by "hdw4s enable"; edit /etc/hdw4s/'"${inst}"'.conf instead.' \
     '[Service]' \
     "User=${user}" \
-    > "${DROPIN}/hdw4s@${inst}.service.d/50-user.conf"
+    > "$(dropin_of "${inst}")/50-user.conf"
 
   # ProtectSystem=strict makes the whole filesystem read-only apart from what
   # is named, and a desktop has to be able to write its own home. The unit
@@ -549,7 +623,7 @@ cmd_enable() {
     '' \
     '[Service]' \
     "ReadWritePaths=${home}" \
-    > "${DROPIN}/hdw4s@${inst}.service.d/40-home.conf"
+    > "$(dropin_of "${inst}")/40-home.conf"
 
   # The GPU, if this machine has one. The unit binds /dev/dri in and grants the
   # device rule, but the node is group-owned and the group differs between
@@ -574,9 +648,9 @@ cmd_enable() {
       '# Written by "hdw4s enable" from the owner of /dev/dri/renderD*.' \
       '[Service]' \
       "SupplementaryGroups=${gpu_group}" \
-      > "${DROPIN}/hdw4s@${inst}.service.d/45-gpu.conf"
+      > "$(dropin_of "${inst}")/45-gpu.conf"
   else
-    rm -f "${DROPIN}/hdw4s@${inst}.service.d/45-gpu.conf"
+    rm -f "$(dropin_of "${inst}")/45-gpu.conf"
   fi
 
   # ProtectSystem=strict makes everything read-only but what is named, and the
@@ -587,14 +661,15 @@ cmd_enable() {
   # directory is: this is the one moment the value is known.
   prof="$(profile_dir_of "${inst}")"
   if [ "${prof}" = '/var/lib/hdw4s' ]; then
-    rm -f "${DROPIN}/hdw4s@${inst}.service.d/45-profile.conf"
+    rm -f "$(dropin_of "${inst}")/45-profile.conf"
   else
     printf '%s\n' \
       '# Written by "hdw4s enable". Re-run it if HDW4S_PROFILE_DIR changes.' \
       '[Service]' \
       "ReadWritePaths=${prof}" \
-      > "${DROPIN}/hdw4s@${inst}.service.d/45-profile.conf"
+      > "$(dropin_of "${inst}")/45-profile.conf"
     install -d -m0755 "${prof}"
+  fi
   fi
 
   # The relay forwards to wherever the session actually listens.
@@ -648,7 +723,11 @@ cmd_enable() {
   # where an address is the only thing between a stranger and somebody's
   # desktop, and that deserves more than a line in a manual.
   if has_auth "${inst}"; then
-    :
+    # The credential is kept; only the drop-in that points at it is refreshed,
+    # so a session whose type changed -- or which was released and re-enabled --
+    # does not come back up refusing to start for want of a file it already
+    # has the secret for.
+    link_credential "${inst}" 'auth' 70
   elif [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ]; then
     echo
     echo 'Generating the credential this session is configured to require...'
@@ -1009,7 +1088,7 @@ set_hint() {
     echo "  Run 'hdw4s transport ${inst:-<session>} unix' again to use it."
   if [ -n "${session}" ]; then
     if [ -n "${inst}" ]; then
-      echo "  Run 'systemctl restart hdw4s@${inst}' to use it."
+      echo "  Run 'systemctl restart $(unit_of "${inst}")' to use it."
     else
       echo '  Restart the affected sessions to use it.'
     fi
@@ -1045,12 +1124,12 @@ make_credential() {
         '  use. Check "systemd-creds has-tpm2" and try again as root.'
   fi
 
-  install -d -m0755 "${DROPIN}/hdw4s@${inst}.service.d"
+  install -d -m0755 "$(dropin_of "${inst}")"
   printf '%s\n' \
     "# Written by \"hdw4s ${name}\"." \
     '[Service]' \
     "LoadCredentialEncrypted=hdw4s-${name}:${cred}" \
-    > "${DROPIN}/hdw4s@${inst}.service.d/${order}-${name}.conf"
+    > "$(dropin_of "${inst}")/${order}-${name}.conf"
   systemctl daemon-reload
   printf '%s' "${pw}"
 }
@@ -1179,9 +1258,9 @@ cmd_reap() {
   now="$(date +%s)"
   [ -r "${SLOTS}" ] || return 0
 
-  while read -r idx inst; do
+  while read -r idx inst _; do
     case "${idx}" in ''|\#*) continue;; esac
-    [ "$(systemctl is-active "hdw4s@${inst}.service" 2>/dev/null)" = 'active' ] ||
+    [ "$(systemctl is-active "$(unit_of "${inst}")" 2>/dev/null)" = 'active' ] ||
       continue
     # Per instance, not once for the whole run: a session that should never be
     # reaped is a per-session decision, and reading the global here meant
@@ -1238,7 +1317,7 @@ cmd_reap() {
     reap_say '  Its files and settings are untouched, and the next connection'
     reap_say '  starts it again.'
     systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
-    systemctl stop "hdw4s@${inst}.service" 2>/dev/null || :
+    systemctl stop "$(unit_of "${inst}")" 2>/dev/null || :
     stopped=$(( stopped + 1 ))
   done < "${SLOTS}"
   [ "${stopped}" -eq 0 ] || reap_say "Stopped ${stopped} idle session(s)."
@@ -1257,7 +1336,7 @@ cmd_auth() {
   echo "  hdw4s proxy ${inst}     prints an nginx block that does this"
   echo
   echo "Restart the session for this to take effect:"
-  echo "  systemctl restart hdw4s@${inst}"
+  echo "  systemctl restart $(unit_of "${inst}")"
   unset pw
 }
 
@@ -1272,7 +1351,7 @@ cmd_noauth() {
       return 0
     }
   rm -f "${ETCDIR}/${inst}.auth.cred" \
-        "${DROPIN}/hdw4s@${inst}.service.d/70-auth.conf"
+        "$(dropin_of "${inst}")/70-auth.conf"
   config_write "${ETCDIR}/${inst}.conf" 'HDW4S_AUTH' 'none'
   systemctl daemon-reload
   echo "Session ${inst} no longer requires a credential."
@@ -1280,7 +1359,7 @@ cmd_noauth() {
   echo '  reasonable choice when the port is reachable only over a filesystem'
   echo '  socket, or from a network nothing untrusted is on. It is not one to'
   echo '  make by accident.'
-  echo "  Restart it to take effect: systemctl restart hdw4s@${inst}"
+  echo "  Restart it to take effect: systemctl restart $(unit_of "${inst}")"
 }
 
 cmd_proxy() {
@@ -1451,8 +1530,8 @@ cmd_seed() {
         "  Run 'hdw4s set ${inst} HDW4S_ISOLATION=profile' first."
 
   # Copying out from under a running desktop would capture half-written state.
-  [ "$(systemctl is-active "hdw4s@${inst}.service" 2>/dev/null)" != 'active' ] ||
-    die "hdw4s: stop ${inst} first: systemctl stop hdw4s@${inst}"
+  [ "$(systemctl is-active "$(unit_of "${inst}")" 2>/dev/null)" != 'active' ] ||
+    die "hdw4s: stop ${inst} first: systemctl stop $(unit_of "${inst}")"
 
   local home profile
   home="$(getent passwd -- "${user}" | cut -d: -f6)"
@@ -1592,7 +1671,7 @@ cmd_keyring() {
   echo "It is separate from the account's login keyring, so passwords saved in"
   echo "one are not visible in the other."
   echo "Restart the session for this to take effect:"
-  echo "  systemctl restart hdw4s@${inst}"
+  echo "  systemctl restart $(unit_of "${inst}")"
 }
 
 cmd_disable() {
@@ -1600,7 +1679,7 @@ cmd_disable() {
   split_instance "${inst}" || fail
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
-  systemctl stop "hdw4s@${inst}.service" 2>/dev/null || :
+  systemctl stop "$(unit_of "${inst}")" 2>/dev/null || :
   echo "Session ${inst} stopped. Its slot is still reserved;"
   echo "use 'hdw4s release ${inst}' to give it up."
 }
@@ -1619,8 +1698,8 @@ cmd_release() {
   # name the rest of the tool refuses.
   split_legacy_name "${inst}" || fail
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
-  systemctl stop "hdw4s-proxy@${inst}.service" "hdw4s@${inst}.service" 2>/dev/null || :
-  rm -rf "${DROPIN}/hdw4s@${inst}.service.d" \
+  systemctl stop "hdw4s-proxy@${inst}.service" "$(unit_of "${inst}")" 2>/dev/null || :
+  rm -rf "$(dropin_of "${inst}")" \
          "${DROPIN}/hdw4s-proxy@${inst}.service.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
   rm -f "${ETCDIR}/${inst}.keyring.cred" "${ETCDIR}/${inst}.auth.cred"
@@ -1655,7 +1734,10 @@ cmd_release() {
 case "${1:-}" in
   list)     shift; cmd_list "$@";;
   show)     shift; [ $# -eq 1 ] || usage_error; cmd_show "$@";;
-  enable)   shift; [ $# -eq 1 ] || usage_error; cmd_enable "$@";;
+  enable)   shift
+            case "$1" in --ephemeral) [ $# -eq 2 ] || usage_error;;
+                         *)           [ $# -eq 1 ] || usage_error;; esac
+            cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || usage_error; cmd_disable "$@";;
   keyring)  shift; [ $# -eq 1 ] || usage_error; cmd_keyring "$@";;
   seed)     shift; [ $# -ge 1 ] || usage_error; cmd_seed "$@";;

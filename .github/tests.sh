@@ -151,7 +151,7 @@ echo '== slot allocation =='
   is 'first slot'  "${a}" '0'
   is 'second slot' "${b}" '1'
   is 'same name is idempotent' "$(alloc_slot alice)" '0'
-  is 'one row per instance' "$(grep -c ' alice$' "${SLOTS}")" '1'
+  is 'one row per instance' "$(awk '$2=="alice"' "${SLOTS}" | wc -l | tr -d ' ')" '1'
 )
 
 echo '== slot allocation is atomic =='
@@ -165,7 +165,7 @@ echo '== slot allocation is atomic =='
   for i in 1 2 3 4 5 6; do ( alloc_slot shared >> "${SB}/same" ) & done
   wait
   is 'repeated name gets one slot' "$(sort -u "${SB}/same" | wc -l)" '1'
-  is 'and one table row'           "$(grep -c ' shared$' "${SLOTS}")" '1'
+  is 'and one table row'           "$(awk '$2=="shared"' "${SLOTS}" | wc -l | tr -d ' ')" '1'
 )
 
 echo '== configuration is validated before it is trusted =='
@@ -725,6 +725,46 @@ echo '== an install rewrites every file that names the payload path =='
   is 'none left after the rewrite' "${after}" '0'
 )
 
+echo '== a slot records what kind of session it is =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  printf '%s\n' '# comment' '0 alice' '1 eph0 ephemeral' > "${SLOTS}"
+  # A row written before the type existed has two fields, and every session was
+  # a desktop when it was written -- so that is what it must still mean.
+  is 'a two-field row means desktop'   "$(type_of alice)"  'desktop'
+  is 'a three-field row is read'       "$(type_of eph0)"   'ephemeral'
+  is 'an unknown instance defaults'    "$(type_of nobody)" 'desktop'
+  is 'the desktop unit'   "$(unit_of alice)" 'hdw4s@alice.service'
+  is 'the ephemeral unit' "$(unit_of eph0)"  'hdw4s-ephemeral@eph0.service'
+  is 'drop-ins follow the unit' "$(dropin_of eph0)" \
+     "${DROPIN}/hdw4s-ephemeral@eph0.service.d"
+
+  rm -f "${SLOTS}"
+  alloc_slot newone ephemeral >/dev/null
+  is 'alloc_slot records the type' "$(awk '$2=="newone"{print $3}' "${SLOTS}")" 'ephemeral'
+  alloc_slot plain >/dev/null
+  is 'and defaults it when not given' "$(awk '$2=="plain"{print $3}' "${SLOTS}")" 'desktop'
+
+  # The trap this field creates: "read -r idx inst" does not drop the third
+  # field, it appends it to the name -- so the slot is indexed under a session
+  # that does not exist. Guard the shape rather than the symptom.
+  is 'no table reader swallows the type into the name' \
+     "$(cat "${ROOT}/hdw4s" "${ROOT}/hdw4s-firewall" | grep -c 'read -r idx inst;' || :)" '0'
+
+  # An ephemeral slot takes settings from its unit, which the conf files cannot
+  # see. Stubbed, because the real answer needs a loaded unit.
+  printf '%s\n' '1 eph0 ephemeral' '0 alice' > "${SLOTS}"
+  printf 'HDW4S_ISOLATION=none\n' > "${CONF}"
+  # Stubbed: the real answer needs a loaded unit. Reached through the function
+  # under test, not called directly.
+  # shellcheck disable=SC2317
+  systemctl() { echo 'HDW4S_ISOLATION=profile HDW4S_PROFILE_DIR=/run/hdw4s'; }
+  r="$(setting_with_source eph0 HDW4S_ISOLATION none)"
+  is 'the unit wins for an ephemeral slot' "${r%%$'\t'*}" 'profile'
+  is 'and is attributed to the unit' "${r#*$'\t'}" 'hdw4s-ephemeral@eph0.service'
+  r="$(setting_with_source alice HDW4S_ISOLATION none)"
+  is 'a desktop session still reads its files' "${r%%$'\t'*}" 'none'
+)
+
 echo '== the relay names no session unit, and enable supplies one =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
 
@@ -735,10 +775,9 @@ echo '== the relay names no session unit, and enable supplies one =='
      "$(grep -c '^\(Requires\|After\)=hdw4s@' "${ROOT}/hdw4s-proxy@.service")" '0'
   is 'and still requires its own socket' \
      "$(grep -c '^Requires=hdw4s-proxy@%i.socket' "${ROOT}/hdw4s-proxy@.service")" '1'
-  # shellcheck disable=SC2016  # the pattern is literal source text, not an expansion
-  case "$(grep -A2 '^unit_of()' "${ROOT}/hdw4s")" in
-    *'hdw4s@${1}.service'*) ok 'one helper names the session unit';;
-    *) bad 'one helper names the session unit' 'unit_of does not';;
+  case "$(sed -n '/^unit_of()/,/^}/p' "${ROOT}/hdw4s")" in
+    *hdw4s-ephemeral@*) ok 'one helper names both session units';;
+    *) bad 'one helper names both session units' 'unit_of does not';;
   esac
   # shellcheck disable=SC2016  # likewise: this matches the literal line in the script
   case "$(sed -n '/hdw4s-proxy@${inst}.service.d\/30-session.conf/p' "${ROOT}/hdw4s")" in
@@ -786,7 +825,7 @@ echo '== the relay names no session unit, and enable supplies one =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=146   # update when tests are added; a wrong number is the point
+EXPECTED=158   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

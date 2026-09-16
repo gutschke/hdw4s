@@ -376,7 +376,7 @@ cmd_check() {
     echo "            session-port rule; run 'hdw4s firewall --apply'"
     rc=1
   elif [ -r "${SLOTS}" ]; then
-    while read -r idx inst; do
+    while read -r idx inst _; do
       case "${idx}" in ''|\#*) continue;; esac
       case "${idx}" in *[!0-9]*) continue;; esac
       n_sessions=$(( n_sessions + 1 ))
