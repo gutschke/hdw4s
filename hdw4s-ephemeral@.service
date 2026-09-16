@@ -96,8 +96,35 @@ Environment=LIBGL_ALWAYS_SOFTWARE=1
 # since hdw4s-session creates the profile unconditionally.
 RuntimeDirectory=hdw4s/%i
 RuntimeDirectoryMode=0700
-Environment=HDW4S_PROFILE_DIR=/run/hdw4s
 Environment=HDW4S_ISOLATION=profile
+
+# The profile is deliberately NOT under XDG_RUNTIME_DIR, though it was and the
+# two were the same directory. They are split because they want opposite things.
+#
+# XDG_RUNTIME_DIR has to stay visible from outside: the session writes its
+# display number there and "hdw4s list" and "hdw4s show" read it from the host to
+# report what is running. It is small -- sockets and a couple of files.
+#
+# The profile is the opposite on both counts. It holds the dconf database, the
+# GNOME state, the keyring and the browser profile with its cache, which is the
+# largest thing a session accumulates and the one that actually grows; and
+# nothing outside has any business reading it. So it gets a tmpfs of its own,
+# sized, mounted inside the namespace, and gone with the last process rather than
+# waiting for systemd to remove a directory.
+#
+# Sized, because a tmpfs with no size takes half of the HOST's memory: /run here
+# is around 100 GB on a 16 GB container, so the session with the browser cache in
+# it had no bound at all while the home beside it was capped at 1 GB. That is the
+# wrong half to protect.
+#
+# The mount line is not here for the same reason the home's is not: it needs the
+# slot's uid as a number, which a template cannot derive from %i. Its mount point
+# is made by the same script, and deliberately NOT by RuntimeDirectory=: the two
+# conflict on one path and RuntimeDirectory wins silently. Measured -- with both
+# set, the session's mount at this path was a bind of the host's /run subtree,
+# 13 GB of it, while `systemctl show` cheerfully reported the 2 GB
+# TemporaryFileSystem= it had been given and never applied.
+Environment=HDW4S_PROFILE_DIR=/run/hdw4s-profile
 
 # The home is the session's own, not an account's on a shared filesystem, so it
 # needs no mount to wait for and gets no 40-home.conf -- the drop-in `hdw4s

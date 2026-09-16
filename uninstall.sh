@@ -122,7 +122,7 @@ for f in /run/userdb/*.user; do
   slot="${f%.user}"
   rm -f "${slot}.user" "${slot}.group"
 done
-rm -rf /run/hdw4s-ns /run/systemd/system/hdw4s-ephemeral@*.service.d
+rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.service.d
 
 systemctl daemon-reload
 echo ' done.'
