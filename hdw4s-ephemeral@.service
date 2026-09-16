@@ -239,12 +239,27 @@ Restart=no
 # blocked the simpler way instead: the slot account is a member of no
 # sudo-capable group, so there is nothing for sudo to authorise.
 # The ceiling on what a setuid-root binary in this session can obtain, and with
-# NoNewPrivileges deliberately off it is the ONLY remaining ceiling -- which is
-# why leaving it unset here was worse than leaving it unset in the base unit.
-# The same three as the base unit: CAP_SYS_ADMIN, CAP_NET_ADMIN and the rest
-# stay out, so mounting, module loading and network reconfiguration remain
-# impossible even for uid 0 inside.
-CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
+# NoNewPrivileges deliberately off it is the ONLY remaining ceiling.
+#
+# One capability, where the base unit has three, and the difference is the point.
+# CAP_SETUID and CAP_SETGID let a process change identity after exec; nothing on
+# a desktop does that except sudo and its relatives, which a named user may
+# legitimately run and this account may not -- it is in no sudo-capable group by
+# design. Measured with .github/live/privileges.py: every operation a session
+# performs behaves identically with and without them, and sudo fails either way,
+# reaching "a password is required" with them and "unable to change to root gid"
+# without. So they buy this session type nothing, while being exactly what would
+# turn a bug in some future setuid binary into a session running as a real user
+# of this machine -- with that user's mail, their on-disk profile, and an
+# autostart file that runs at their next login.
+#
+# CAP_NET_RAW stays and is not decoration: ping carries cap_net_raw as a FILE
+# capability, which the kernel grants only if it is inside this set, and
+# net.ipv4.ping_group_range excludes the slot. Drop it and ping and traceroute
+# stop working, measured. Everything else -- CAP_SYS_ADMIN above all -- stays out,
+# so mounting, module loading and network reconfiguration remain impossible even
+# for uid 0 inside.
+CapabilityBoundingSet=CAP_NET_RAW
 LockPersonality=yes
 # This also sets DevicePolicy=closed, so the base unit's separate line is not
 # repeated here -- verified with `systemctl show -p DevicePolicy`, not assumed.
