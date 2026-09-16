@@ -38,6 +38,29 @@ okif()  { if [ "${fail}" = "${mark}" ]; then note "$1" 'ok'; fi; }
 # "All checks passed" for a check it never performed.
 skip()  { note "$1" "skipped: $2"; }
 
+# The browser-mode word for a private window must not appear in anything that
+# ships. It names privacy from other people using the same machine, which is not
+# what this session type offers -- it keeps one session's state out of the next
+# one, and promises nothing against the administrator. Shipping the browser's
+# word would import the browser's promise. "ephemeral" is the term.
+#
+# A local deployment may still call a hostname whatever it likes; that is
+# configuration, and configuration is not in this tree.
+#
+# The pattern below is bracketed and no comment here spells the word, so this
+# file does not match itself -- the same reason a process search must not
+# contain its own pattern.
+echo '== vocabulary =='
+begin
+banned="$(grep -rIl -i 'inc[o]gnito' . \
+            --exclude-dir=.git --exclude-dir=private --exclude-dir=tmp \
+            --exclude-dir=node_modules 2>/dev/null || true)"
+if [ -n "${banned}" ]; then
+  printf '%s\n' "${banned}"
+  bad 'vocabulary' 'the browser-mode word appears in files above; use "ephemeral"'
+fi
+okif 'no browser-mode word in shipped files'
+
 echo '== shell =='
 begin
 for f in "${SCRIPTS[@]}"; do
