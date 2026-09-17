@@ -35,6 +35,16 @@ PKG='selkies'
 # asset can be withdrawn, and GitHub is not a rollback plan.
 CACHE='/var/lib/hdw4s/selkies'
 
+# A file listing everything the configured patch says it owns, one absolute
+# path per line, as of the last time it ran. Empty when no patch is configured,
+# which is what makes the filtering below a no-op on an ordinary machine.
+#
+# A path to a file rather than the list itself: a single argument to a command
+# is capped at 128KB and this one runs to 2000-odd lines, so passing it inline
+# fails with "Argument list too long" on exactly the installations that have a
+# patch worth filtering.
+PATCH_MANIFEST=''
+
 # Two updaters, or an updater and a hand-run apt, must not interleave. dpkg has
 # its own lock and will refuse the second caller, but by then this script has
 # already downloaded, decided and possibly removed the pre-2.0 tree; the useful
@@ -287,13 +297,118 @@ apply_local_patch() {
     return 1
   fi
   echo -n "  Applying the local patch (${SELKIES_PATCH})..."
-  if out="$("${SELKIES_PATCH}" "${PREFIX}" 2>&1)"; then
+  local errs="${workdir}/patch.err" out rc=0 stray
+  out="$("${SELKIES_PATCH}" "${PREFIX}" 2>"${errs}")" || rc="$?"
+  if [ "${rc}" -ne 0 ]; then
+    echo ' failed.'
+    tail -10 "${errs}" 2>/dev/null | sed 's/^/    /' >&2
+    return 1
+  fi
+  # Anything named outside the prefix is dropped rather than followed. This
+  # list is what a rollback deletes, and a patch that reports a path in /etc
+  # has no business having it removed from there.
+  PATCH_MANIFEST="${workdir}/patch.manifest"
+  printf '%s\n' "${out}" |
+    awk -v p="${PREFIX}/" 'length($0) && index($0, p) == 1' > "${PATCH_MANIFEST}"
+  stray="$(printf '%s\n' "${out}" |
+    awk -v p="${PREFIX}/" 'length($0) && index($0, p) != 1')"
+  if [ -n "${stray}" ]; then
+    echo ' done, with a complaint.'
+    echo '  The patch named files outside the install prefix. Ignored:' >&2
+    printf '%s\n' "${stray}" | head -5 | sed 's/^/    /' >&2
+  else
     echo ' done.'
+  fi
+  if [ ! -s "${PATCH_MANIFEST}" ]; then
+    PATCH_MANIFEST=''
+    echo '  The patch declared no files. It has to print every file it owns,' >&2
+    echo '  one absolute path per line, every time it runs -- not only the' >&2
+    echo '  ones it copied this time. Without that list nothing here can tell' >&2
+    echo '  its work from damage. See SELKIES_PATCH in hdw4s.conf.' >&2
+    return 1
+  fi
+  return 0
+}
+
+# dpkg --verify output, less the changes the configured patch accounts for.
+#
+# Filtering by path rather than by status code is the whole difference between
+# "a patch is configured, so ignore every changed file" and "these files belong
+# to the patch, and anything else changed is somebody editing the prefix behind
+# dpkg's back". The first throws the alarm away; the second keeps it pointed at
+# the only thing it was ever for.
+#
+# A declared file may have a changed checksum and nothing else. Missing, or a
+# changed mode or owner, is not something an overlay does, and is reported
+# whoever the file belongs to.
+#
+# Bytecode is derived rather than declared: patching foo.py invalidates the
+# __pycache__/foo.*.pyc beside it, under whatever tag and optimisation level
+# this interpreter uses, and the next import rewrites it. Only the companions
+# of declared sources are accepted, so a .pyc edited under a source nobody
+# touched -- which the interpreter would load in preference to reading the
+# source -- is still an alarm.
+unexpected_damage() {
+  local verify="$1"
+  [ -n "${verify}" ] || return 0
+  if [ -z "${PATCH_MANIFEST}" ]; then
+    printf '%s\n' "${verify}"
     return 0
   fi
-  echo ' failed.'
-  printf '%s\n' "${out}" | tail -10 | sed 's/^/    /' >&2
-  return 1
+  printf '%s\n' "${verify}" | awk '
+    NR == FNR {
+      if ($0 == "") next
+      owned[$0] = 1
+      if ($0 ~ /\.py$/) {
+        dir = $0;  sub(/\/[^\/]*$/, "", dir)
+        stem = $0; sub(/.*\//, "", stem); sub(/\.py$/, "", stem)
+        companions[++c] = dir "/__pycache__/" stem "."
+      }
+      next
+    }
+    {
+      path = $0
+      sub(/^[^ \t]+[ \t]+/, "", path)
+      if ($1 != "??5??????") { print; next }
+      if (path in owned) next
+      for (i = 1; i <= c; i++)
+        if (index(path, companions[i]) == 1) next
+      print
+    }' "${PATCH_MANIFEST}" -
+}
+
+# Files the patch added that the release does not own, removed after a
+# rollback. dpkg puts back every file it owns, so what survives is exactly what
+# the patch introduced: modules built against the release that has just been
+# taken away. Leaving them produces the one outcome worse than a failed
+# upgrade -- older code with newer modules layered on top, in a combination
+# nothing has ever run.
+strip_local_patch() {
+  [ -n "${SELKIES_PATCH:-}" ] || return 0
+  if [ -z "${PATCH_MANIFEST}" ]; then
+    echo '  A patch is configured but never said which files are its own, so' >&2
+    echo '  anything it had already copied is still there. Check the prefix' >&2
+    echo '  by hand before trusting this installation.' >&2
+    return 0
+  fi
+  local path dir removed=0
+  while IFS= read -r path; do
+    [ -n "${path}" ] || continue
+    [ -e "${path}" ] || continue
+    ! dpkg -S "${path}" >/dev/null 2>&1 || continue
+    rm -f "${path}" || continue
+    removed=$((removed + 1))
+    # Up as far as the prefix and no further, one directory at a time, each
+    # only while it is empty.
+    dir="$(dirname "${path}")"
+    while [ "${dir}" != "${PREFIX}" ] && [ "${dir}" != '/' ]; do
+      rmdir "${dir}" 2>/dev/null || break
+      dir="$(dirname "${dir}")"
+    done
+  done < "${PATCH_MANIFEST}"
+  [ "${removed}" -eq 0 ] ||
+    echo "  Removed ${removed} file(s) the patch had added on top of it." >&2
+  return 0
 }
 
 smoke_test() {
@@ -308,15 +423,11 @@ smoke_test() {
   # Costs under a second for the 5000-odd files in the package.
   local verify
   verify="$(dpkg --verify selkies 2>&1)" || :
-  # A configured patch edits the prefix on purpose, so a file whose checksum has
-  # changed is the patch and not an alarm. A file that is MISSING is still an
-  # alarm: a patch that removes what the release installed has broken it, and the
-  # difference between the two is the difference between this working and this
-  # being quietly wrong. Without a patch configured, nothing is tolerated, which
-  # is what this check was written for.
-  if [ -n "${verify}" ] && [ -n "${SELKIES_PATCH:-}" ]; then
-    verify="$(printf '%s\n' "${verify}" | grep -v '^..5' || :)"
-  fi
+  # A configured patch edits the prefix on purpose, so the files it declares are
+  # not an alarm -- see unexpected_damage, which is where the difference between
+  # the patch's work and somebody else's is drawn. Without a patch configured
+  # nothing is tolerated, which is what this check was written for.
+  verify="$(unexpected_damage "${verify}")"
   if [ -n "${verify}" ]; then
     echo 'dpkg --verify selkies reports files that no longer match:'
     head -10 <<<"${verify}"
@@ -495,6 +606,27 @@ cache_deb() {
     [ -z "${prev}" ] || [ "${name}" != "${prev}" ] || continue
     rm -rf "${old}"
   done
+  prune_cache
+}
+
+# Files in a kept version directory that its own "asset" no longer names.
+#
+# Upstream renames its release asset from time to time, and the prune above
+# only ever removed whole versions -- so the same release published under two
+# names left 54MB behind with nothing that would ever come back for it. Run on
+# every pass rather than only after an install, because the machines that have
+# already leaked one will not otherwise be asked again.
+prune_cache() {
+  local dir keep
+  for dir in "${CACHE}"/*/; do
+    [ -d "${dir}" ] || continue
+    keep="$(cat "${dir}/asset" 2>/dev/null || :)"
+    # A directory with no "asset" is one cache_deb did not finish writing.
+    # Guessing which file it meant would be how the wrong one is kept.
+    [ -n "${keep}" ] || continue
+    find "${dir}" -maxdepth 1 -type f \
+      ! -name "${keep}" ! -name asset ! -name sha256 -delete 2>/dev/null || :
+  done
 }
 
 # --- INSTALLING -------------------------------------------------------------
@@ -599,6 +731,7 @@ rollback() {
       echo '  dpkg cannot configure; fix it with "apt-get -f install".' >&2
       return 1
     }
+    strip_local_patch
     echo "  Rolled back to v${current:-none}." >&2
     return 0
   fi
@@ -622,6 +755,7 @@ if ! wait_for_dpkg; then
 fi
 
 preflight || die
+prune_cache
 
 status="$(pkg_status "${PKG}")"
 current=''
@@ -740,21 +874,16 @@ fi
 # somebody edited the prefix reports neither. Ask both, and reinstall on either
 # answer.
 if [ "${current}" = "${wanted}" ]; then
-  damage="$(dpkg --verify "${PKG}" 2>&1)" || :
-  # A configured patch is applied here whatever dpkg says, and the condition is
-  # not "only when dpkg reports damage" -- that was tried and is wrong. After a
-  # reinstall the tree is pristine, dpkg is happy, and the patch is GONE: exactly
-  # the moment it needs putting back is the moment there is nothing to report.
-  #
-  # Where dpkg does report changed files, that is this working rather than this
-  # being broken, so the report is consumed rather than acted on. The smoke test
-  # below still decides whether the result is any good, which is the same question
-  # asked the same way either route. Re-applying costs a file copy and the patch
-  # has to be safe to run twice, which is documented where it is configured.
+  # The patch runs first, and the condition is not "only when dpkg reports
+  # damage" -- that was tried and is wrong. After a reinstall the tree is
+  # pristine, dpkg is happy, and the patch is GONE: exactly the moment it needs
+  # putting back is the moment there is nothing to report. Asking dpkg
+  # afterwards also means a file the patch has just restored is not reported at
+  # all, rather than reported and then excused.
   if [ -n "${SELKIES_PATCH:-}" ]; then
     apply_local_patch || die
-    damage=''
   fi
+  damage="$(unexpected_damage "$(dpkg --verify "${PKG}" 2>&1 || :)")"
   if [ -z "${damage}" ]; then
     echo -n "Selkies v${wanted} is already installed; checking it still loads..."
     # The nightly run is the only thing that looks at this machine every day,
