@@ -269,6 +269,33 @@ fetch_release() {
 # package marked half-installed, so the binary running proves nothing about the
 # installation. Package state, file integrity and the extension modules are
 # three independent signals and all three are checked.
+# A local change to apply on top of whatever release was just installed.
+#
+# Carrying a patch upstream has not taken yet means fighting this updater: the
+# package it installs is stock, so every run puts the local change back to
+# whatever upstream shipped. The alternative people reach for is switching the
+# updater off, which stops the security updates along with the reverts.
+#
+# So the updater applies the patch itself. SELKIES_PATCH names an executable; it
+# runs after a successful install and before the smoke test, so a patch that
+# breaks the installation is caught by the same check that catches a bad release,
+# and rolled back the same way.
+apply_local_patch() {
+  [ -n "${SELKIES_PATCH:-}" ] || return 0
+  if [ ! -x "${SELKIES_PATCH}" ]; then
+    echo "hdw4s: SELKIES_PATCH is set to '${SELKIES_PATCH}', which is not executable." >&2
+    return 1
+  fi
+  echo -n "  Applying the local patch (${SELKIES_PATCH})..."
+  if out="$("${SELKIES_PATCH}" "${PREFIX}" 2>&1)"; then
+    echo ' done.'
+    return 0
+  fi
+  echo ' failed.'
+  printf '%s\n' "${out}" | tail -10 | sed 's/^/    /' >&2
+  return 1
+}
+
 smoke_test() {
   local status version home rc=0
   status="$(dpkg-query -W -f='${db:Status-Status}' selkies 2>/dev/null || :)"
@@ -281,6 +308,15 @@ smoke_test() {
   # Costs under a second for the 5000-odd files in the package.
   local verify
   verify="$(dpkg --verify selkies 2>&1)" || :
+  # A configured patch edits the prefix on purpose, so a file whose checksum has
+  # changed is the patch and not an alarm. A file that is MISSING is still an
+  # alarm: a patch that removes what the release installed has broken it, and the
+  # difference between the two is the difference between this working and this
+  # being quietly wrong. Without a patch configured, nothing is tolerated, which
+  # is what this check was written for.
+  if [ -n "${verify}" ] && [ -n "${SELKIES_PATCH:-}" ]; then
+    verify="$(printf '%s\n' "${verify}" | grep -v '^..5' || :)"
+  fi
   if [ -n "${verify}" ]; then
     echo 'dpkg --verify selkies reports files that no longer match:'
     head -10 <<<"${verify}"
@@ -705,6 +741,20 @@ fi
 # answer.
 if [ "${current}" = "${wanted}" ]; then
   damage="$(dpkg --verify "${PKG}" 2>&1)" || :
+  # A configured patch is applied here whatever dpkg says, and the condition is
+  # not "only when dpkg reports damage" -- that was tried and is wrong. After a
+  # reinstall the tree is pristine, dpkg is happy, and the patch is GONE: exactly
+  # the moment it needs putting back is the moment there is nothing to report.
+  #
+  # Where dpkg does report changed files, that is this working rather than this
+  # being broken, so the report is consumed rather than acted on. The smoke test
+  # below still decides whether the result is any good, which is the same question
+  # asked the same way either route. Re-applying costs a file copy and the patch
+  # has to be safe to run twice, which is documented where it is configured.
+  if [ -n "${SELKIES_PATCH:-}" ]; then
+    apply_local_patch || die
+    damage=''
+  fi
   if [ -z "${damage}" ]; then
     echo -n "Selkies v${wanted} is already installed; checking it still loads..."
     # The nightly run is the only thing that looks at this machine every day,
@@ -858,6 +908,12 @@ if ! install_deb "${workdir}/${asset}"; then
   die
 fi
 echo ' done.'
+
+if ! apply_local_patch; then
+  echo 'CRITICAL: the local patch did not apply to the new release.' >&2
+  rollback "${previous}" || die
+  die
+fi
 
 echo -n '  Checking that the new installation loads...'
 if out="$(smoke_test)"; then
