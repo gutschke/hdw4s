@@ -35,14 +35,14 @@ PKG='selkies'
 # asset can be withdrawn, and GitHub is not a rollback plan.
 CACHE='/var/lib/hdw4s/selkies'
 
-# A file listing everything the configured patch says it owns, one absolute
-# path per line, as of the last time it ran. Empty when no patch is configured,
-# which is what makes the filtering below a no-op on an ordinary machine.
+# Everything the configured patch says it owns, one absolute path per line, as
+# of the last time it ran. Empty when no patch is configured, which is what
+# makes the filtering below a no-op on an ordinary machine.
 #
-# A path to a file rather than the list itself: a single argument to a command
-# is capped at 128KB and this one runs to 2000-odd lines, so passing it inline
-# fails with "Argument list too long" on exactly the installations that have a
-# patch worth filtering.
+# It reaches the commands that read it down a pipe, never as an argument: a
+# single argument is capped at 128KB whatever ARG_MAX says, and this one runs
+# to 2000-odd lines, so passing it inline fails with "Argument list too long"
+# on exactly the installations that have a patch worth filtering.
 PATCH_MANIFEST=''
 
 # Two updaters, or an updater and a hand-run apt, must not interleave. dpkg has
@@ -307,9 +307,8 @@ apply_local_patch() {
   # Anything named outside the prefix is dropped rather than followed. This
   # list is what a rollback deletes, and a patch that reports a path in /etc
   # has no business having it removed from there.
-  PATCH_MANIFEST="${workdir}/patch.manifest"
-  printf '%s\n' "${out}" |
-    awk -v p="${PREFIX}/" 'length($0) && index($0, p) == 1' > "${PATCH_MANIFEST}"
+  PATCH_MANIFEST="$(printf '%s\n' "${out}" |
+    awk -v p="${PREFIX}/" 'length($0) && index($0, p) == 1')"
   stray="$(printf '%s\n' "${out}" |
     awk -v p="${PREFIX}/" 'length($0) && index($0, p) != 1')"
   if [ -n "${stray}" ]; then
@@ -319,8 +318,7 @@ apply_local_patch() {
   else
     echo ' done.'
   fi
-  if [ ! -s "${PATCH_MANIFEST}" ]; then
-    PATCH_MANIFEST=''
+  if [ -z "${PATCH_MANIFEST}" ]; then
     echo '  The patch declared no files. It has to print every file it owns,' >&2
     echo '  one absolute path per line, every time it runs -- not only the' >&2
     echo '  ones it copied this time. Without that list nothing here can tell' >&2
@@ -374,7 +372,7 @@ unexpected_damage() {
       for (i = 1; i <= c; i++)
         if (index(path, companions[i]) == 1) next
       print
-    }' "${PATCH_MANIFEST}" -
+    }' <(printf '%s\n' "${PATCH_MANIFEST}") -
 }
 
 # Files the patch added that the release does not own, removed after a
@@ -405,7 +403,7 @@ strip_local_patch() {
       rmdir "${dir}" 2>/dev/null || break
       dir="$(dirname "${dir}")"
     done
-  done < "${PATCH_MANIFEST}"
+  done < <(printf '%s\n' "${PATCH_MANIFEST}")
   [ "${removed}" -eq 0 ] ||
     echo "  Removed ${removed} file(s) the patch had added on top of it." >&2
   return 0
