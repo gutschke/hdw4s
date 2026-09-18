@@ -11,7 +11,19 @@ After=local-fs.target
 Before=sockets.target shutdown.target
 Conflicts=shutdown.target
 # /run is tmpfs, so the records are gone at every boot and this is what puts
-# them back. There is nothing to clean up on the way down.
+# them back.
+#
+# RefuseManualStop is load-bearing, not tidiness. hdw4s-ephemeral@.service has
+# Requires= on this unit, and Requires= propagates a stop: "systemctl stop
+# hdw4s-ephemeral-slots" would take down every live ephemeral desktop on the
+# machine, which is not what anybody typing it expects from a unit that only
+# writes some records. An earlier version of this comment said there was
+# nothing to clean up on the way down, which is true and beside the point.
+#
+# The consequence is that the minter cannot be restarted either -- restart is
+# stop plus start -- so a package upgrade cannot refresh what it writes through
+# systemd at all. debian/postinst runs the script directly instead; see the
+# paragraph there.
 RefuseManualStop=yes
 
 [Service]

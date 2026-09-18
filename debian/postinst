@@ -122,6 +122,29 @@ if [ "$1" = 'configure' ]; then
     fi
   fi
 
+  # The ephemeral slots, for exactly the reason spelled out above the firewall.
+  #
+  # hdw4s-ephemeral-slots.service is Type=oneshot with RemainAfterExit=yes and
+  # WantedBy=sysinit.target, so it runs once at boot; debhelper's "start" is a
+  # no-op on an upgrade and "restart" is refused outright, because the unit sets
+  # RefuseManualStop=yes. Until this was added, everything the minter writes --
+  # the userdb records, the namespaced passwd, the drop-ins, and now each slot's
+  # gated web client -- kept whatever the running system happened to have.
+  #
+  # That stopped being cosmetic when the session began to refuse to start
+  # without a gated client. An upgrade left every existing slot without one,
+  # and every ephemeral desktop was dead until the machine was rebooted --
+  # reproduced, not theorised. The minter is idempotent by construction, so
+  # running the script directly is the whole fix; it is not the unit, so
+  # RefuseManualStop does not apply and no live session is stopped.
+  if [ -n "$2" ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    /usr/lib/hdw4s/hdw4s-ephemeral-slots >/dev/null || {
+      echo 'hdw4s: could not refresh the ephemeral slots; existing slots keep' >&2
+      echo '       the previous client and may refuse to start. Run' >&2
+      echo '       "/usr/lib/hdw4s/hdw4s-ephemeral-slots".' >&2
+    }
+  fi
+
   # A compiled copy of a module that no longer exists.
   #
   # Versions before the 2.0 port shipped hdw4s_signalling.py into this

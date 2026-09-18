@@ -62,16 +62,22 @@ cmd_build() {
   # running system rebuilds slots that are already serving, and "rm -rf" first means a
   # generator that fails for any reason leaves a slot with no client at all -- fail-closed
   # at the cost of a working tree it had no reason to destroy.
+  #
+  # Under a lock, because the swap below is not atomic against a second builder and there
+  # is more than one caller: the slot minter rebuilds every slot, and an upgrade now runs
+  # the minter on a system where a slot may already be building. Two unsynchronised
+  # builders are not a race that loses an update -- "rm -rf" then "mv" means the second
+  # one's "mv" finds the directory back in place and moves the staging tree INSIDE it, so
+  # the slot ends up with no index.html at all and refuses to start for a reason nothing
+  # in the message points at.
+  mkdir -p "$(dirname "${root}")"
+  exec 9>"$(dirname "${root}")/.hdw4s-webroot.lock" || die 'could not open the build lock'
+  flock 9 || die 'could not take the build lock'
+
   local stage="${root}.new.$$"
   rm -rf "${stage}"
-  mkdir -p "$(dirname "${root}")"
   cp -a "${src}" "${stage}"
 
-  # The upstream document is the input to the generator and is NOT left in the served
-  # tree. It was, in an early version that fetched it at runtime, and that is a security
-  # hole rather than a convenience: serving an ungated copy beside the gated one hands
-  # the next arrival exactly what the gate exists to prevent, to anyone who knows the
-  # filename. The gate is a control, not an affordance, so there is no debugging copy.
   HDW4S_SESSION_NAME="${name}" \
     "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-gate-index" \
       "${src}/index.html" "${stage}/index.html" || die 'could not build the gated index'
@@ -96,7 +102,9 @@ PY
   # one being served.
   cmd_check "${stage}"
   rm -rf "${root}"
-  mv "${stage}" "${root}"
+  # -T, so that a "${root}" which is somehow still there is an error rather than a
+  # staging tree quietly nested one level down inside it.
+  mv -T "${stage}" "${root}"
   echo "hdw4s-webroot: built ${root} for ${inst} (${name})"
 }
 
