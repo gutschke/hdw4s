@@ -21,6 +21,22 @@ Requires=hdw4s-firewall.service
 # the per-slot drop-in that mounts this session's home.
 Requires=hdw4s-ephemeral-slots.service
 After=hdw4s-ephemeral-slots.service
+
+# Which incarnation of this slot is running, published where the occupant cannot forge
+# it and any page this session serves can read it. Wants=, deliberately, not Requires=:
+# what makes this safe is the postcondition in "hdw4s-webroot check", which refuses to
+# start a session whose token is missing, unchanged, or not the one this generation
+# wrote -- and that catches the unit failing, the unit writing nothing, the unit being
+# skipped, and the file being removed afterwards. Requires= would catch one of those
+# four and charge a stop-propagation footgun for it: stopping a dead RemainAfterExit=no
+# oneshot still propagates, so "systemctl stop hdw4s-incarnation@ephemeral0" -- which
+# reads as a no-op -- would take down a live desktop.
+#
+# After= is what actually orders it. Type=oneshot means systemd will not run this unit's
+# first ExecStartPre until the publisher has exited, so the file is on disk before the
+# streaming server can serve a page that asks for it.
+Wants=hdw4s-incarnation@%i.service
+After=hdw4s-incarnation@%i.service
 # Stops with the last thing that wanted it; the pool's admission unit is what
 # wants it, so a slot nobody is using does not linger.
 StopWhenUnneeded=yes
@@ -70,7 +86,7 @@ InaccessiblePaths=%t/userdb
 # own RuntimeDirectory, and covering it makes the session's own runtime directory
 # inaccessible -- measured. Closing that one means moving XDG_RUNTIME_DIR out of
 # the shared parent, which is where "hdw4s list" reads a session's display from.
-InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s-proxy
+InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s-proxy %t/hdw4s-incarnation
 # systemd fills these from the slot account, which resolves OUTSIDE the
 # namespace and so carries the outside name. They are the last two leaks.
 Environment=USER=user

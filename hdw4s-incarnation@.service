@@ -1,0 +1,43 @@
+[Unit]
+Description=Publish the identity of this start of the HDW4S session %i
+Documentation=man:hdw4s(8)
+# Ordered before the session by an After= on the session unit, not by a Before= here:
+# one relationship stated in one place stays true, two halves drift.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/hdw4s/hdw4s-incarnation %i
+
+# RemainAfterExit=no is load-bearing, not a default left implicit. With "yes" this unit
+# stays active after the first session, Wants= finds it already satisfied on every later
+# start, the hook never runs again, and the token never changes -- which reads to the
+# page as "the same desktop you were using", reinstating exactly the silent-takeover bug
+# this exists to fix, with a green unit state in front of it.
+RemainAfterExit=no
+
+# Deliberately NOT sandboxed the way the session is. It writes into the session's web
+# root under /usr, which ProtectSystem=strict makes read-only -- and an ExecStartPre=+
+# on the session unit cannot do this either: measured, it fails at 226/NAMESPACE,
+# because "+" drops privilege but does not opt out of the unit's mount namespace.
+# Hardened only in ways that leave that write possible.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+LockPersonality=yes
+NoNewPrivileges=yes
+PrivateDevices=no
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=@system-service
+
+TimeoutStartSec=30

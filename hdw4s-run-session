@@ -674,7 +674,11 @@ if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
   # occupant its own served client to edit. hdw4s-ephemeral-slots builds it as
   # root, once per slot, before any session can start; this only verifies it and
   # points the server at it.
-  "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" check "${webroot}" || {
+  # The instance is passed so the check can also assert this start's published identity
+  # (see layer 4 in hdw4s-webroot): present, this generation's, and different from the
+  # last one. Without it a returning tab cannot tell a respawned desktop from the one it
+  # was using, and connects silently to somebody else's.
+  "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" check "${webroot}" "${instance}" || {
     echo 'hdw4s: refusing to start an ephemeral session without a gated client' >&2
     exit 1
   }

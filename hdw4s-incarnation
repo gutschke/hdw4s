@@ -1,0 +1,67 @@
+#!/bin/bash -e
+# Publish a fresh identity for this start of a session, where its own occupant cannot
+# forge it and any page it serves can read it.
+#
+#   hdw4s-incarnation <instance>
+#
+# The problem it solves. A slot's identity is deliberately stable -- same name, same
+# port, same URL, so that a session can be reached again. That stability is exactly what
+# a browser tab cannot see past: a desktop that was logged out and respawned looks
+# identical to the one the tab was using, so a tab that comes back from a restore, or
+# from the client's own reload, silently connects to a DIFFERENT desktop and may evict
+# whoever is now sitting in it. The tab has no way to ask "is this the desktop I had?"
+# unless something says which incarnation is running.
+#
+# Random, not a counter. Slot state lives in /run and is gone at every boot, so a
+# counter would restart at zero and a stale tab's saved value would match a different
+# session -- the same bug with a new mechanism, and one that passes every test that
+# never reboots. Randomness buys non-reuse with nothing to persist.
+#
+# It is NOT a credential. It is served to every unauthenticated page load, so it
+# authenticates nothing; it only distinguishes. The shareable session identifier is a
+# separate value with the opposite property, and neither is derived from the other.
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o pipefail
+
+inst="${1:?usage: hdw4s-incarnation <instance>}"
+root="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${inst}"
+[ -d "${root}" ] || {
+  echo "hdw4s-incarnation: no web root at '${root}'" >&2
+  exit 1
+}
+
+# Written beside the live file and renamed over it. Opening the served file for write
+# truncates it first, and a page that fetches during that window reads an empty body --
+# which the gate cannot distinguish from "no answer", so it would show a card to
+# somebody whose session is fine. rename() is atomic; a reader sees the old value or the
+# new one and never a partial one.
+tmp="${root}/.incarnation.$$"
+trap 'rm -f "${tmp}"' EXIT INT TERM QUIT HUP
+value="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+printf '%s\n' "${value}" > "${tmp}"
+chmod 0644 "${tmp}"
+mv -f "${tmp}" "${root}/hdw4s-incarnation"
+
+# Read back what was actually served, and fail loudly here if it is not what was
+# intended. This is about ATTRIBUTION: without it a failed write shows up three units
+# away as a session refusing to start with a message about a file, and nothing points at
+# the thing that failed. With it, "systemctl --failed" names this unit.
+served="$(cat "${root}/hdw4s-incarnation" 2>/dev/null || :)"
+[ "${served}" = "${value}" ] || {
+  echo "hdw4s-incarnation: wrote '${root}/hdw4s-incarnation' but it reads back differently" >&2
+  exit 1
+}
+
+# Recorded outside the served tree, so that "did this actually change?" can be answered
+# without trusting the file under test. Two names, rotated: the previous start's value
+# has to survive long enough to be compared against this one.
+#
+# /run and not the session's XDG_RUNTIME_DIR: that one lives inside the session's own
+# namespace and is wiped with it, which is the opposite of what a record of "what did
+# the previous start publish" is for.
+state='/run/hdw4s-incarnation'
+install -d -m0700 "${state}"
+[ -e "${state}/${inst}" ] && mv -f "${state}/${inst}" "${state}/${inst}.prev"
+printf '%s\n' "${value}" > "${state}/${inst}"
+chmod 0600 "${state}/${inst}"

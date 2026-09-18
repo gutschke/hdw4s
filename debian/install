@@ -4,6 +4,7 @@ hdw4s-run-session        usr/lib/hdw4s
 hdw4s-firewall           usr/lib/hdw4s
 hdw4s-ephemeral-slots    usr/lib/hdw4s
 hdw4s-refuse             usr/lib/hdw4s
+hdw4s-incarnation        usr/lib/hdw4s
 hdw4s-update             usr/lib/hdw4s
 hdw4s-wait             usr/lib/hdw4s
 hdw4s.xorg.conf          usr/lib/hdw4s
@@ -19,6 +20,7 @@ hdw4s-ephemeral-slots.service usr/lib/systemd/system
 hdw4s-proxy@.socket      usr/lib/systemd/system
 hdw4s-proxy@.service     usr/lib/systemd/system
 hdw4s-refuse@.service    usr/lib/systemd/system
+hdw4s-incarnation@.service usr/lib/systemd/system
 hdw4s.slice              usr/lib/systemd/system
 hdw4s-firewall.service   usr/lib/systemd/system
 hdw4s-firewall-check.service  usr/lib/systemd/system

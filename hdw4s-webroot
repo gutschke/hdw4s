@@ -112,7 +112,7 @@ PY
 # status fails the unit -- so a session that would serve an ungated client does not start
 # at all, rather than starting healthy and quietly missing its only safety property.
 cmd_check() {
-  local root="$1" idx="${1}/index.html"
+  local root="$1" idx="${1}/index.html" inst="${2:-}"
   [ -d "${root}" ]  || die "web root '${root}' does not exist"
   [ -s "${idx}" ]   || die "'${idx}' is missing or empty"
   grep -q "${MARKER}" "${idx}" ||
@@ -136,6 +136,35 @@ cmd_check() {
            grep -vE '^(https?:|//|data:|#|/)' | sed 's|^\./||' | sort -u)
   [ "${missing}" -eq 0 ] ||
     die "the gated index references assets this tree does not contain (upgrade drift?)"
+
+  # Layer 4: this generation's identity. Checked HERE, inside the session, after the
+  # ordering edge and in the namespace the streaming server will actually use -- so it
+  # verifies the layer that matters rather than the layer the writer built. A writer
+  # verifying its own write proves the write; it cannot prove it ran for this start, or
+  # that the file survived until now (a slot re-mint swaps the whole tree).
+  #
+  # Skipped when no instance is named, because "hdw4s-webroot check <dir>" is also run
+  # by hand and by the builder against a staging tree that no session has started yet.
+  [ -n "${inst}" ] || return 0
+  local tok="${root}/hdw4s-incarnation" state="/run/hdw4s-incarnation/${inst}"
+  [ -s "${tok}" ] ||
+    die "'${tok}' is missing or empty: this session has no published identity, so a
+returning tab cannot tell it apart from the one it was using"
+  [ -s "${state}" ] ||
+    die "no record at '${state}': hdw4s-incarnation did not run for this start"
+  [ "$(cat "${tok}")" = "$(cat "${state}")" ] ||
+    die "'${tok}' is not what this start published: the served token is stale"
+  # Changed since last time. The first start of a slot legitimately has no predecessor,
+  # and that case is NAMED rather than left to a comparison against an empty string that
+  # happens to be unequal -- an absent operand passing by luck is how a check that cannot
+  # run reports green.
+  if [ -e "${state}.prev" ]; then
+    [ "$(cat "${state}")" != "$(cat "${state}.prev")" ] ||
+      die "the published identity did not change on this start: a returning tab would
+be told this is the desktop it was using, which is the bug this file exists to prevent"
+  else
+    echo "hdw4s-webroot: first start of ${inst}; no previous identity to compare against"
+  fi
 }
 
 # Layer 2: what is actually SERVED. A correct file is the layer we built; the bytes on
