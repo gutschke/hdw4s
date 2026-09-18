@@ -218,6 +218,21 @@ while [ "${i}" -lt "${HDW4S_EPHEMERAL_SLOTS}" ]; do
   # inside the namespace, and /run is cleared at boot.
   install -d -m 0755 "${PROFILEDIR}/${name}"
 
+  # The gated web client this slot is served from. Built here rather than in the
+  # session because the session's own namespace has /usr read-only -- and because a
+  # tree the occupant could write is a tree the occupant could un-gate. Per slot, as
+  # root, before any socket can fire.
+  #
+  # The name is the slot's number: it reaches the browser tab through the manifest,
+  # which is the only per-session string the packaged client will read, and it is what
+  # lets a person tell two of their own sessions apart.
+  webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${name}"
+  if ! "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" build \
+         "${name}" "${webroot}" "$(( i + 1 )) · Desktop" >/dev/null; then
+    die "could not build the gated web client for ${name}; refusing to mint a slot
+  whose sessions would serve an ungated client and be taken over on arrival."
+  fi
+
   drop="${DROPDIR}/hdw4s-ephemeral@${name}.service.d"
   install -d -m 0755 "${drop}"
   cat > "${drop}/10-home.conf" <<EOF
