@@ -518,17 +518,36 @@ esac
 # no credential for a real host is ever minted, and it travels in the environment
 # rather than argv, where any process could read it.
 #
-# There are other routes to the same place -- a trusted rtc_config_json outranks
-# the shared-secret path, and failing every method falls back to a config with no
-# TURN entry at all -- but this is the one measured here, so it is the one used.
+# The other route to the same place has now been measured, and it went the wrong
+# way: rtc_config_json outranks the shared-secret path, it defaults to
+# /tmp/rtc.json, and /tmp is private to the session and writable by whoever is
+# sitting in it. An occupant who writes that file replaces the whole ICE
+# configuration -- the pin above included -- at the next transport switch, and
+# the session logs "overrides all other STUN/TURN settings" while doing it.
+# Upstream does check the file, but it trusts one "owned by root or the current
+# user", and in a desktop the current user IS the occupant.
+#
+# So the path is pinned somewhere the occupant cannot reach. /usr is read-only
+# inside the session's namespace under ProtectSystem=strict -- measured from
+# inside a live session, not assumed -- and no such file is ever shipped, so the
+# lookup fails at "does it exist" and the shared-secret path below is what
+# decides. An admin who wants a real relay says so with HDW4S_TURN_HOST, which
+# is the supported way and does not involve a file the desktop can write.
 #
 # Google and Cloudflare STUN stay. The config generator appends them whatever is
 # configured, they reflect an address rather than carrying media, and
 # `webrtc-ice-lite` keeps this server from contacting either: only the user's own
 # browser does.
+# A path under a read-only prefix that is never shipped, so it cannot exist and
+# cannot be created from inside a session. Passed in both branches: the "no"
+# branch has no ICE today, and a pin that only holds while a second setting
+# happens to be off is not a pin.
+rtc_config_none='/usr/lib/hdw4s/rtc-config.disabled'
+
 case "${HDW4S_WEBRTC}" in
   yes)
-    webrtc=(--enable-dual-mode='true|locked' --webrtc-ice-lite='true|locked')
+    webrtc=(--enable-dual-mode='true|locked' --webrtc-ice-lite='true|locked'
+            --rtc-config-json="${rtc_config_none}")
     if [ -n "${HDW4S_TURN_HOST}" ]; then
       if [ -z "${HDW4S_TURN_SECRET:-}" ]; then
         echo 'hdw4s: HDW4S_TURN_HOST is set but HDW4S_TURN_SECRET is empty, so the' \
@@ -546,7 +565,8 @@ case "${HDW4S_WEBRTC}" in
   *)
     # No client-initiated switch to WebRTC, so no ICE, STUN, TURN or mDNS socket
     # ever appears, and nothing to hand out if one ever did.
-    webrtc=(--enable-dual-mode='false|locked' --webrtc-ice-lite='true|locked')
+    webrtc=(--enable-dual-mode='false|locked' --webrtc-ice-lite='true|locked'
+            --rtc-config-json="${rtc_config_none}")
     ;;
 esac
 
