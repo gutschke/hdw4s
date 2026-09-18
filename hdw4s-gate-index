@@ -15,6 +15,7 @@ Every behaviour here was put in by a test that caught it missing; the comments s
 because each one looks like an unnecessary special case until it is not.
 """
 import json, os, re, sys
+from html import escape as html_escape
 src, dst = sys.argv[1], sys.argv[2]
 html = open(src, encoding="utf-8").read()
 mods = re.findall(r'<script\b[^>]*type=["\']module["\'][^>]*></script>', html)
@@ -43,7 +44,7 @@ OVERLAY = r"""
  #hdw4s-gate .err{color:#ff8a80;white-space:pre-wrap}
 </style>
 <div id="hdw4s-gate" hidden><div class="card">
-  <h1>Desktop</h1><div id="hdw4s-body"></div>
+  <h1>__NAME__</h1><div id="hdw4s-body"></div>
   <button id="hdw4s-go">Take over and disconnect other sessions</button>
   <p class="err" id="hdw4s-err"></p>
 </div></div>
@@ -189,7 +190,8 @@ OVERLAY = r"""
   show(COLD);
 })();
 </script>
-""".replace("__SRC__", json.dumps(src_attr))
+""".replace("__SRC__", json.dumps(src_attr)) \
+     .replace("__NAME__", html_escape(os.environ.get("HDW4S_SESSION_NAME", "Desktop")))
 html = html.replace("</body>", OVERLAY + "</body>") if "</body>" in html else html + OVERLAY
 open(dst, "w", encoding="utf-8").write(html)
 print("hdw4s-gate-index: built %s (deferred %s)" % (dst, src_attr))

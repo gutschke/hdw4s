@@ -58,9 +58,14 @@ cmd_build() {
   [ -d "${src}" ] || die "packaged web client not found at '${src}'"
   [ -r "${src}/index.html" ] || die "no index.html in '${src}'"
 
-  rm -rf "${root}"
+  # Built beside the live tree and swapped into place, never over it. A re-mint on a
+  # running system rebuilds slots that are already serving, and "rm -rf" first means a
+  # generator that fails for any reason leaves a slot with no client at all -- fail-closed
+  # at the cost of a working tree it had no reason to destroy.
+  local stage="${root}.new.$$"
+  rm -rf "${stage}"
   mkdir -p "$(dirname "${root}")"
-  cp -a "${src}" "${root}"
+  cp -a "${src}" "${stage}"
 
   # The upstream document is the input to the generator and is NOT left in the served
   # tree. It was, in an early version that fetched it at runtime, and that is a security
@@ -69,13 +74,13 @@ cmd_build() {
   # filename. The gate is a control, not an affordance, so there is no debugging copy.
   HDW4S_SESSION_NAME="${name}" \
     "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-gate-index" \
-      "${src}/index.html" "${root}/index.html" || die 'could not build the gated index'
+      "${src}/index.html" "${stage}/index.html" || die 'could not build the gated index'
 
   # The tab's name comes from the manifest, which the client fetches and applies to
   # document.title. It is a generated JSON file in the packaged tree, so a per-session
   # name costs one rewrite and no client change at all.
-  if [ -r "${root}/manifest.json" ]; then
-    python3 - "${root}/manifest.json" "${name}" <<'PY' || die 'could not set the manifest name'
+  if [ -r "${stage}/manifest.json" ]; then
+    python3 - "${stage}/manifest.json" "${name}" <<'PY' || die 'could not set the manifest name'
 import json, sys
 p, name = sys.argv[1], sys.argv[2]
 m = json.load(open(p))
@@ -83,7 +88,15 @@ m["name"] = m["short_name"] = name
 json.dump(m, open(p, "w"))
 PY
   fi
-  cmd_check "${root}"
+  # The upstream document is the generator's INPUT and is not left where the server can
+  # reach it: an ungated copy served beside the gated one hands the next arrival exactly
+  # what the gate exists to prevent, to anyone who knows the filename.
+  rm -f "${stage}/index.upstream.html"
+  # Checked while it is still a staging tree, so a tree that fails never becomes the
+  # one being served.
+  cmd_check "${stage}"
+  rm -rf "${root}"
+  mv "${stage}" "${root}"
   echo "hdw4s-webroot: built ${root} for ${inst} (${name})"
 }
 
@@ -118,9 +131,14 @@ cmd_check() {
 }
 
 # Layer 2: what is actually SERVED. A correct file is the layer we built; the bytes on
-# the wire are the layer a person gets, and Selkies' fallback is exactly a place where a
-# correct file is not served -- a web root the session's namespace cannot read looks
-# empty to it, and the packaged client goes out instead with one line in a log.
+# the wire are the layer a person gets, and Selkies' fallback is a place where the two
+# can differ -- it declines a web root it does not like and serves the packaged client
+# with one line in a log.
+#
+# Honest limit: the case usually cited for this -- a web root the session cannot read --
+# is caught by "check" instead, which runs in the same namespace as the server and sees
+# what it sees. No divergence between the file and the served bytes has been reproduced.
+# This is cheap insurance against a silent one, not a check with a catch to its name.
 cmd_serving() {
   local url="$1"; shift
   local body

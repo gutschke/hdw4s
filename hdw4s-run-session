@@ -677,6 +677,42 @@ fi
 children+=($!)
 stream_pid="$!"
 
+# The third check, and the only one that can see what is actually SERVED. The two
+# before it look at the file we generated; this one asks the running server for its
+# index and looks for the gate in the bytes that come back.
+#
+# What it is for: Selkies decides at startup whether to use the configured web root,
+# and if it declines -- it logs a single warning and serves the packaged client -- the
+# session still comes up, notifies ready, and every state check in this product reports
+# health while the gate is simply absent.
+#
+# What is NOT established, and the comment should not pretend otherwise: no case has
+# been constructed where this fires and the file check above does not. The obvious
+# candidate, a web root the server cannot read, is caught by that check instead, because
+# it runs in this same namespace and sees exactly what the server sees. So this is
+# defence against a served/file divergence that has not been reproduced -- kept because
+# it costs one request and the failure it guards against is silent, not because it has
+# ever caught anything.
+#
+# In the background, because the server is not listening yet and the session must not
+# wait on its own front door to come up.
+if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+  (
+    for _ in $(seq 1 60); do
+      (exec 3<>"/dev/tcp/127.0.0.1/${HDW4S_PORT}") 2>/dev/null && break
+      sleep 1
+    done
+    if ! "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" serving \
+           "http://127.0.0.1:${HDW4S_PORT}/" \
+           -u "${SELKIES_BASIC_AUTH_USER:-}:${SELKIES_BASIC_AUTH_PASSWORD:-}"; then
+      echo 'hdw4s: this session is serving an UNGATED client; stopping it rather than' >&2
+      echo '  handing the next arrival a desktop that is not theirs.' >&2
+      kill "${stream_pid}" 2>/dev/null || :
+    fi
+  ) &
+  children+=($!)
+fi
+
 # Report ready only once the stream is actually accepting connections, so that
 # "systemctl start" blocks until the session can be reached and a dependent
 # unit or a provisioning script has something real to wait on.
