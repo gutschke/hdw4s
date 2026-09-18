@@ -1,0 +1,53 @@
+[Unit]
+Description=Refusal for the HDW4S front door of %i
+Documentation=man:hdw4s(8)
+# Named by OnFailure= on hdw4s-proxy@%i.service, never started on its own.
+
+[Service]
+Type=oneshot
+# Sockets= is what makes this work: it hands this unit the SAME listening socket
+# the relay would have been given, so the connection already queued there can be
+# accepted and answered. Measured, because it was not obvious: naming the socket
+# here adds this unit to the socket's Triggers= list but does NOT make an
+# incoming connection start it -- a healthy slot's connections still go to the
+# relay and this unit stays dead. Only the failure edge starts it.
+#
+# It belongs in [Service], and this is the second time that has cost a day. In
+# [Unit] systemd parses the file without complaint, ignores the setting, and the
+# process starts with LISTEN_FDS unset -- so the responder runs, finds nothing to
+# answer, reports success, and the door latches exactly as if it were not there.
+# "systemctl show -p TriggeredBy" is the cheap way to tell: it names the socket
+# when this is right and is empty when it is not.
+Sockets=hdw4s-proxy@%i.socket
+ExecStart=/usr/lib/hdw4s/hdw4s-refuse
+
+# It reads a socket and writes a fixed string. Nothing else is needed, and the
+# unit runs at the moment a slot is already misbehaving, which is the worst time
+# to be running an unconfined process as root.
+DynamicUser=yes
+CapabilityBoundingSet=
+LockPersonality=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+# AF_UNIX is not for talking to anything; it is what an inherited socket needs
+# to be counted as permitted at all. PrivateNetwork=yes above means this process
+# cannot open a connection of its own regardless.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallFilter=@system-service
+
+# A responder that cannot finish is worse than no responder: it holds the door.
+TimeoutStartSec=30

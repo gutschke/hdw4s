@@ -9,6 +9,18 @@ Documentation=man:hdw4s(8)
 # instance, exactly as it already writes the port, and for the same reason.
 Requires=hdw4s-proxy@%i.socket
 After=hdw4s-proxy@%i.socket
+# A relay that fails to start leaves the connection that woke it in the accept
+# queue, so systemd starts the relay again at once, and keeps doing so until a
+# rate limit fires and the front door latches off -- after which that desktop is
+# unreachable until an admin intervenes. Measured: sixty arrivals at a slot whose
+# relay fails instantly ended in "failed / service-start-limit-hit", and with the
+# service's start limit disarmed the socket's trigger limit latches it instead,
+# so raising either one only moves the latch.
+#
+# The queue therefore has to be drained rather than rate-limited, and draining it
+# is the same act as telling the person on the other end what happened. With this
+# line the same sixty arrivals each got a 503 page and the socket stayed active.
+OnFailure=hdw4s-refuse@%i.service
 
 [Service]
 # systemd's own relay, so there is no new daemon and nothing of ours in the

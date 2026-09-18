@@ -21,6 +21,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait}
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
          hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index
+         hdw4s-refuse hdw4s-refuse@.service
          hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-firewall.service
          hdw4s-firewall-check.service hdw4s-firewall.timer
@@ -161,7 +162,7 @@ if [ "${src}" != "${dst}" ]; then
 fi
 chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
            "${dst}"/hdw4s-ephemeral-slots "${dst}"/hdw4s-webroot \
-           "${dst}"/hdw4s-gate-index \
+           "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse \
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*
 # Imported, not executed.
 chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
@@ -245,7 +246,7 @@ echo ' done.'
 echo -n 'Linking...'
 ln -sf "${dst}/hdw4s" "${sys}/sbin/hdw4s"
 for u in hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service hdw4s.slice hdw4s-firewall.service \
-         hdw4s-proxy@.socket hdw4s-proxy@.service \
+         hdw4s-proxy@.socket hdw4s-proxy@.service hdw4s-refuse@.service \
          hdw4s-firewall-check.service hdw4s-firewall.timer \
          hdw4s-updater.service hdw4s-updater.timer \
          hdw4s-reaper.service hdw4s-reaper.timer; do

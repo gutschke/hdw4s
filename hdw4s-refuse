@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Answer the connections a front door could not hand to a session.
+
+Started by OnFailure= on hdw4s-proxy@%i.service, with Sockets= naming that
+instance's socket, so systemd passes the SAME listening socket the relay would
+have used -- Accept=no, so it arrives as fd 3 and this process does its own
+accept().
+
+Why it exists at all. When a relay fails to start, the connection that woke it
+is still sitting in the accept queue, so systemd starts the relay again
+immediately, and again, until a rate limit fires and the front door latches off.
+Measured: sixty arrivals at a slot whose relay fails instantly put the socket in
+"failed / service-start-limit-hit", after which that desktop is unreachable
+until an admin intervenes -- and with the service's start limit disarmed the
+socket's own trigger limit latches it instead. Raising either limit moves the
+latch to the other one; removing both turns a latch into a spin, which is what
+the limits are for.
+
+So the queue has to be drained rather than rate-limited, and draining it is the
+same act as telling the person on the other end what happened. One 503 per
+queued connection, then exit -- promptly, because a responder that lingers holds
+the door and would answer for a slot that has meanwhile recovered.
+"""
+
+import os
+import socket
+import sys
+import time
+
+# Long enough that connections arriving together are all answered by one pass,
+# short enough that a slot which recovers is not shadowed by a stale responder.
+IDLE_GRACE = 1.0
+
+PAGE = b"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop unavailable</title>
+<style>
+  :root { color-scheme: light dark }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center;
+         justify-content: center; font: 16px/1.5 system-ui, sans-serif }
+  main { max-width: 26rem; padding: 2rem }
+  h1 { font-size: 1.25rem; margin: 0 0 .5rem }
+  p { margin: 0; opacity: .8 }
+</style></head>
+<body><main>
+<h1>This desktop could not be started</h1>
+<p>Nothing was lost &mdash; no session had begun. Reload in a moment to try again.</p>
+</main></body></html>
+"""
+
+RESPONSE = (
+    b"HTTP/1.1 503 Service Unavailable\r\n"
+    b"Retry-After: 5\r\n"
+    b"Content-Type: text/html; charset=utf-8\r\n"
+    b"Content-Length: " + str(len(PAGE)).encode() + b"\r\n"
+    b"Cache-Control: no-store\r\n"
+    b"Connection: close\r\n"
+    b"\r\n" + PAGE
+)
+
+
+def main():
+    if int(os.environ.get("LISTEN_FDS", "0")) < 1:
+        # Not a failure: systemd starts this on the failure edge whether or not
+        # anything is waiting, and nothing waiting is the good case.
+        print("hdw4s-refuse: no socket was passed; nothing to answer")
+        return 0
+
+    listener = socket.socket(fileno=3)
+    listener.setblocking(False)
+
+    answered = 0
+    quiet_since = time.monotonic()
+    while time.monotonic() - quiet_since < IDLE_GRACE:
+        try:
+            conn, _ = listener.accept()
+        except (BlockingIOError, OSError):
+            time.sleep(0.05)
+            continue
+        try:
+            conn.sendall(RESPONSE)
+        except OSError:
+            # The client gave up first. It still came out of the queue, which is
+            # the part that matters.
+            pass
+        finally:
+            conn.close()
+        answered += 1
+        quiet_since = time.monotonic()
+
+    print("hdw4s-refuse: answered %d connection(s)" % answered)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
