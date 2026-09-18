@@ -125,16 +125,28 @@ OVERLAY = r"""
   // available in both configurations. Note this does NOT race the banner-hiding any
   // more: quietBanner() is called only from lost(), after the decision, never on a
   // timer -- which is what made v2 miss a takeover.
+  //
+  // Polled as well as observed, and the polling is the part that matters. A
+  // MutationObserver only fires on a CHANGE, and upstream does not clear this text
+  // on a successful reconnect: after a tab takes the session back, #status-display
+  // still reads "Connection Terminated: ...". So when that same tab loses the
+  // session a SECOND time, the text it would be set to is the text already there --
+  // no mutation, no callback, and the card came back only via the ~10 s stall
+  // backstop. Measured across two losses of one tab: first lost=status, second
+  // lost=stalled, sameElement=True both times, so this is not a detached observer.
+  // It is a signal that only exists on the edge, used to detect a level.
+  var statusEl = null;
+  function checkStatus(){
+    if (!statusEl) return;
+    var t = statusEl.textContent || '';
+    if (/terminated|superseded|opened elsewhere/i.test(t)) lost('status');
+  }
   function watchStatus(){
-    var el = document.getElementById('status-display');
-    if (!el) return setTimeout(watchStatus, 500);
-    var check = function(){
-      var t = el.textContent || '';
-      if (/terminated|superseded|opened elsewhere/i.test(t)) lost('status');
-    };
-    new MutationObserver(check).observe(el,
+    statusEl = document.getElementById('status-display');
+    if (!statusEl) return setTimeout(watchStatus, 500);
+    new MutationObserver(checkStatus).observe(statusEl,
       {childList:true, characterData:true, subtree:true, attributes:true});
-    check();
+    checkStatus();
   }
   watchStatus();
 
@@ -148,6 +160,10 @@ OVERLAY = r"""
   var last = -1, still = 0, everMoved = false;
   setInterval(function(){
     if (SECONDARY || !booted || !gate.hidden) { still = 0; return; }
+    // Cheap, and it is what makes a repeat loss show the card at once rather than
+    // ten seconds later: lost() no-ops once the card is up, so this costs one
+    // regexp against a short string twice a second.
+    checkStatus();
     var n = window.videoChunksReceived || 0;
     if (n > 0) everMoved = true;
     still = (n === last) ? still + 1 : 0; last = n;
