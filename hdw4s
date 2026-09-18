@@ -679,10 +679,30 @@ cmd_enable() {
   # ephemeral slot is served by a different unit, and a dependency in a template
   # cannot be overridden by a drop-in -- an empty "Requires=" does not reset the
   # list. So the relay names no session unit and this supplies it.
+  #
+  # BindsTo=, not Requires=, and the difference is only visible on the path a
+  # person actually takes. Requires= ends the relay when the session is STOPPED;
+  # it does not when the session EXITS ON ITS OWN, which is what logging out of
+  # GNOME does. Measured on a logout, both ways:
+  #
+  #   Requires=  session=failed  relay=ACTIVE    next connection: HTTP 000
+  #   BindsTo=   session=failed  relay=inactive  next connection: HTTP 200 in 1s
+  #
+  # With Requires= the relay survives its session and goes on forwarding to a
+  # loopback port nothing is listening on, so every later visitor gets a dropped
+  # connection and the slot never comes back without an administrator. That is
+  # the "it briefly tried, failed to connect to the stream, and brought me back
+  # to the prompt" report, and no amount of work in the browser fixes it.
+  #
+  # An earlier test of this directive was driven by "systemctl stop", where the
+  # two are indistinguishable, and concluded there was nothing to choose between
+  # them. The 61-second race that test warned about does not occur on the logout
+  # path; a logout is a clean exit and the slot is back in about a second, with
+  # the tmpfs home wiped.
   printf '%s\n' \
     '# Written by "hdw4s enable": the session unit behind this relay.' \
     '[Unit]' \
-    "Requires=$(unit_of "${inst}")" \
+    "BindsTo=$(unit_of "${inst}")" \
     "After=$(unit_of "${inst}")" \
     > "${DROPIN}/hdw4s-proxy@${inst}.service.d/30-session.conf"
   # Only the port. The wait that goes with it lives in the unit, because a

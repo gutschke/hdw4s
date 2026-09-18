@@ -836,17 +836,44 @@ echo '== the relay names no session unit, and enable supplies one =='
 
   # Run the shipped block against a fixture, rather than a copy of it.
   mkdir -p "${SB}/etc/hdw4s" "${SB}/units/hdw4s-proxy@alice.service.d" \
-           "${SB}/units/hdw4s-proxy@bob.service.d"
-  printf '%s\n' '# comment' '0 alice' '1 bob' '2 carol' > "${SB}/etc/hdw4s/instances"
+           "${SB}/units/hdw4s-proxy@bob.service.d" \
+           "${SB}/units/hdw4s-proxy@dave.service.d" \
+           "${SB}/units/hdw4s-proxy@eve.service.d"
+  printf '%s\n' '# comment' '0 alice' '1 bob' '2 carol' '3 dave ephemeral' '4 eve' \
+    > "${SB}/etc/hdw4s/instances"
   printf 'keep me\n' > "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf"
+  # A drop-in from before the BindsTo fix. An upgrade has to correct it, because
+  # nothing else rewrites the file -- "hdw4s enable" is not re-run on a machine
+  # that is already enabled, so skipping it would leave every existing
+  # installation with a relay that outlives its session.
+  printf '%s\n' '[Unit]' 'Requires=hdw4s@eve.service' 'After=hdw4s@eve.service' \
+    > "${SB}/units/hdw4s-proxy@eve.service.d/30-session.conf"
   blk="$(pick "${ROOT}/debian/postinst")"
   # Stubbed because the shipped block calls it; reached only through the eval.
   # shellcheck disable=SC2317
   systemctl() { :; }
   ( ETCDIR="${SB}/etc/hdw4s" UNITDIR="${SB}/units"; eval "${blk}" )
   case "$(cat "${SB}/units/hdw4s-proxy@alice.service.d/30-session.conf" 2>/dev/null)" in
-    *'Requires=hdw4s@alice.service'*) ok 'an instance with no drop-in gets one';;
+    *'BindsTo=hdw4s@alice.service'*) ok 'an instance with no drop-in gets one';;
     *) bad 'an instance with no drop-in gets one' 'missing or wrong';;
+  esac
+  # BindsTo=, not Requires=: Requires= does not end a relay whose session exits on
+  # its own, which is what a GNOME logout does, and the relay then forwards to a
+  # dead port for every later visitor. Measured HTTP 000 against HTTP 200.
+  case "$(cat "${SB}/units/hdw4s-proxy@alice.service.d/30-session.conf" 2>/dev/null)" in
+    *'Requires='*) bad 'the drop-in binds rather than requires' 'still Requires=';;
+    *) ok 'the drop-in binds rather than requires';;
+  esac
+  # The third field of the instances file is the type. Ignoring it named the
+  # desktop unit for an ephemeral slot, and the relay then failed every start
+  # with result 'dependency' while the front door went on listening.
+  case "$(cat "${SB}/units/hdw4s-proxy@dave.service.d/30-session.conf" 2>/dev/null)" in
+    *'BindsTo=hdw4s-ephemeral@dave.service'*) ok 'an ephemeral slot names the ephemeral unit';;
+    *) bad 'an ephemeral slot names the ephemeral unit' 'missing or wrong';;
+  esac
+  case "$(cat "${SB}/units/hdw4s-proxy@eve.service.d/30-session.conf" 2>/dev/null)" in
+    *'BindsTo=hdw4s@eve.service'*) ok 'an old Requires= drop-in is migrated';;
+    *) bad 'an old Requires= drop-in is migrated' 'not migrated';;
   esac
   is 'an existing drop-in is left alone' \
      "$(cat "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf")" 'keep me'
@@ -857,7 +884,7 @@ echo '== the relay names no session unit, and enable supplies one =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=167   # update when tests are added; a wrong number is the point
+EXPECTED=170   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

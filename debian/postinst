@@ -58,16 +58,34 @@ if [ "$1" = 'configure' ]; then
   : "${ETCDIR:=/etc/hdw4s}"
   : "${UNITDIR:=/etc/systemd/system}"
   if [ -r "${ETCDIR}/instances" ]; then
-    while read -r idx inst; do
+    # The third field is the type. Reading only two of them wrote
+    # "Requires=hdw4s@ephemeral0.service" for an ephemeral slot -- a named unit
+    # that does not exist -- and the relay then failed every start with
+    # "result 'dependency'" while the front door went on listening. A slot that
+    # accepts connections and can never serve one is the worst shape available.
+    while read -r idx inst type; do
       case "${idx}" in ''|\#*) continue;; esac
       d="${UNITDIR}/hdw4s-proxy@${inst}.service.d"
       [ -d "${d}" ] || continue
-      [ -e "${d}/30-session.conf" ] && continue
+      case "${type}" in
+        ephemeral) sunit="hdw4s-ephemeral@${inst}.service";;
+        *)         sunit="hdw4s@${inst}.service";;
+      esac
+      # Existing drop-ins are migrated, not skipped. They were written with
+      # "Requires=", which does not end a relay whose session EXITS ON ITS OWN --
+      # the GNOME logout path -- leaving the relay forwarding to a dead port and
+      # every later visitor getting a dropped connection. Measured: HTTP 000 with
+      # Requires=, HTTP 200 in one second with BindsTo=. An upgrade has to correct
+      # this, because nothing else rewrites the file: "hdw4s enable" is not re-run
+      # on a machine that is already enabled.
+      if [ -e "${d}/30-session.conf" ]; then
+        grep -q '^Requires=' "${d}/30-session.conf" 2>/dev/null || continue
+      fi
       printf '%s\n' \
         '# Written by "hdw4s enable": the session unit behind this relay.' \
         '[Unit]' \
-        "Requires=hdw4s@${inst}.service" \
-        "After=hdw4s@${inst}.service" \
+        "BindsTo=${sunit}" \
+        "After=${sunit}" \
         > "${d}/30-session.conf"
     done < "${ETCDIR}/instances"
   fi
