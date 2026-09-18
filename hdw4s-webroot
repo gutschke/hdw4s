@@ -1,0 +1,141 @@
+#!/bin/bash -e
+# Build the web root an ephemeral session is served from, and refuse to hand over one
+# that is not gated.
+#
+# The product needs a handful of things the packaged web client cannot be asked for: a
+# session that is not taken over the instant a second tab loads, a name in the browser
+# tab, and something to say when a session is taken away. Selkies has a supported seam
+# for this -- "--web-root <dir>" serves that directory instead of the packaged one -- so
+# none of it needs a patched package or an upstream change.
+#
+# THE TREE IS BUILT BY COPY-PLUS-OVERLAY, NEVER BY HAND. The packaged tree carries files
+# this script does not know about -- icons, a manifest, jsdb/ -- and upstream adds more.
+# A handcrafted directory silently drops whatever was not enumerated, and breaks one
+# release later when something new appears. So: copy all of it, then replace exactly two
+# files.
+#
+# The gate itself is made by SUBTRACTION. Upstream's index.html is taken as-is and only
+# its module <script> is removed; that removal IS the gate, because both transports evict
+# on connect and a client that never loads never connects. Everything else upstream ships
+# stays byte for byte.
+#
+# WHY SELKIES' OWN FALLBACK IS NOT ENOUGH. If the directory is missing or unreadable,
+# stream_server.py logs one warning and serves the packaged client. The session then
+# starts, notifies ready, the relay comes up, and every state check in this product
+# reports health -- while the gate is simply absent and the next arrival silently takes
+# somebody's desktop, which is the whole thing it exists to prevent. A feature that fails
+# open to the defect it fixes has to be checked by us, loudly, before the session is
+# declared up. That is what --check is for.
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+MARKER='hdw4s-gate'
+die() { echo "hdw4s-webroot: $*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<EOF
+usage: hdw4s-webroot build   <instance> <web-root> [<session name>]
+       hdw4s-webroot check   <web-root>
+       hdw4s-webroot serving <url> [<curl auth args>...]
+EOF
+  exit 2
+}
+
+# The packaged client, asked of the interpreter that will serve it rather than guessed
+# from a path: a venv, a distribution package and a wheel put it in different places, and
+# the one that matters is the one the running server imports.
+packaged_web() {
+  "${HDW4S_SELKIES_PY:-/opt/selkies/bin/python3}" - <<'PY' 2>/dev/null
+import os, selkies
+print(os.path.join(os.path.dirname(selkies.__file__), "selkies_web"))
+PY
+}
+
+cmd_build() {
+  local inst="$1" root="$2" name="${3:-Desktop}" src
+  src="$(packaged_web)" || die 'could not locate the packaged web client'
+  [ -d "${src}" ] || die "packaged web client not found at '${src}'"
+  [ -r "${src}/index.html" ] || die "no index.html in '${src}'"
+
+  rm -rf "${root}"
+  mkdir -p "$(dirname "${root}")"
+  cp -a "${src}" "${root}"
+
+  # The upstream document is the input to the generator and is NOT left in the served
+  # tree. It was, in an early version that fetched it at runtime, and that is a security
+  # hole rather than a convenience: serving an ungated copy beside the gated one hands
+  # the next arrival exactly what the gate exists to prevent, to anyone who knows the
+  # filename. The gate is a control, not an affordance, so there is no debugging copy.
+  HDW4S_SESSION_NAME="${name}" \
+    "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-gate-index" \
+      "${src}/index.html" "${root}/index.html" || die 'could not build the gated index'
+
+  # The tab's name comes from the manifest, which the client fetches and applies to
+  # document.title. It is a generated JSON file in the packaged tree, so a per-session
+  # name costs one rewrite and no client change at all.
+  if [ -r "${root}/manifest.json" ]; then
+    python3 - "${root}/manifest.json" "${name}" <<'PY' || die 'could not set the manifest name'
+import json, sys
+p, name = sys.argv[1], sys.argv[2]
+m = json.load(open(p))
+m["name"] = m["short_name"] = name
+json.dump(m, open(p, "w"))
+PY
+  fi
+  cmd_check "${root}"
+  echo "hdw4s-webroot: built ${root} for ${inst} (${name})"
+}
+
+# Layer 1: the file we generated. Runs before the session is declared up, and its exit
+# status fails the unit -- so a session that would serve an ungated client does not start
+# at all, rather than starting healthy and quietly missing its only safety property.
+cmd_check() {
+  local root="$1" idx="${1}/index.html"
+  [ -d "${root}" ]  || die "web root '${root}' does not exist"
+  [ -s "${idx}" ]   || die "'${idx}' is missing or empty"
+  grep -q "${MARKER}" "${idx}" ||
+    die "'${idx}' carries no ${MARKER} marker: this is not a gated client"
+  # The REMOVAL is the gate, so its absence is the property to assert. Checking only for
+  # the marker would pass a file that had both -- gated markup and an auto-loading
+  # module -- which is an ungated client wearing the marker.
+  if grep -qE '<script[^>]*type=["'"'"']module["'"'"'][^>]*src=' "${idx}"; then
+    die "'${idx}' still auto-loads the client module: the gate would not hold"
+  fi
+  # Layer 3: every asset the document names must exist. Not a file COUNT -- upstream's
+  # asset names are content-hashed and a patched deployment legitimately carries extras,
+  # so counting produces a false alarm on every supported configuration. References are
+  # the thing that breaks across an upgrade, so references are what is asserted.
+  local ref missing=0
+  while read -r ref; do
+    [ -n "${ref}" ] || continue
+    [ -e "${root}/${ref}" ] || { echo "hdw4s-webroot: missing asset '${ref}'" >&2; missing=1; }
+  done < <(grep -oE '(src|href)="[^"]*"' "${idx}" |
+           sed -E 's/^(src|href)="//; s/"$//' |
+           grep -vE '^(https?:|//|data:|#|/)' | sed 's|^\./||' | sort -u)
+  [ "${missing}" -eq 0 ] ||
+    die "the gated index references assets this tree does not contain (upgrade drift?)"
+}
+
+# Layer 2: what is actually SERVED. A correct file is the layer we built; the bytes on
+# the wire are the layer a person gets, and Selkies' fallback is exactly a place where a
+# correct file is not served -- a web root the session's namespace cannot read looks
+# empty to it, and the packaged client goes out instead with one line in a log.
+cmd_serving() {
+  local url="$1"; shift
+  local body
+  body="$(curl -fsS --max-time 30 "$@" "${url}")" ||
+    die "could not fetch '${url}' to verify what is served"
+  case "${body}" in
+    *"${MARKER}"*) ;;
+    *) die "'${url}' is serving a client with no ${MARKER} marker: the web root is not in effect" ;;
+  esac
+}
+
+[ "$#" -ge 1 ] || usage
+case "$1" in
+  build)   shift; [ "$#" -ge 2 ] || usage; cmd_build "$@" ;;
+  check)   shift; [ "$#" -ge 1 ] || usage; cmd_check "$@" ;;
+  serving) shift; [ "$#" -ge 1 ] || usage; cmd_serving "$@" ;;
+  *) usage ;;
+esac

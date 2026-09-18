@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Build the gated index.html from upstream's, by SUBTRACTION.
+
+    hdw4s-gate-index <upstream index.html> <output index.html>
+    HDW4S_SESSION_NAME names the session on the card and in the tab.
+
+Upstream's document is taken as-is; only the module <script> is removed -- that removal
+IS the gate, because both transports evict on connect and a client that never loads
+never connects -- and an overlay is appended. Nothing else upstream ships is touched.
+
+Not a fork and not a monkey patch: upstream publishes this as a host-page seam, and the
+re-entry the card uses, window.selkiesCoreInitialize(), is its documented entry point.
+
+Every behaviour here was put in by a test that caught it missing; the comments say which,
+because each one looks like an unnecessary special case until it is not.
+"""
+import json, os, re, sys
+src, dst = sys.argv[1], sys.argv[2]
+html = open(src, encoding="utf-8").read()
+mods = re.findall(r'<script\b[^>]*type=["\']module["\'][^>]*></script>', html)
+if len(mods) != 1:
+    raise SystemExit("expected exactly one module script, found %d -- refusing to guess"
+                     % len(mods))
+src_attr = re.search(r'src=["\']([^"\']+)["\']', mods[0]).group(1)
+html = html.replace(mods[0], "<!-- hdw4s: module deferred behind the boot gate -->")
+
+OVERLAY = r"""
+<style>
+ /* The [hidden] rule MUST come with the display rule and MUST win. An author
+    `display:flex` beats the user-agent `[hidden]{display:none}` in the cascade, so
+    without this `gate.hidden = true` sets the property, reads back true in every DOM
+    probe, and leaves the card on the screen forever. A 20-case matrix passed against
+    that, because every assertion asked the DOM instead of the picture. */
+ #hdw4s-gate[hidden]{display:none !important}
+ #hdw4s-gate{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;
+   justify-content:center;background:#141414;color:#eee;font:16px/1.55 system-ui,sans-serif}
+ #hdw4s-gate .card{max-width:36rem;padding:2rem 2.25rem;background:#242424;
+   border-radius:12px;box-shadow:0 10px 40px #000a}
+ #hdw4s-gate h1{font-size:1.3rem;margin:0 0 .6rem}
+ #hdw4s-gate p{margin:.45rem 0;color:#b9b9b9}
+ #hdw4s-gate button{margin-top:1.3rem;padding:.65rem 1.15rem;font:inherit;border:0;
+   border-radius:8px;background:#772953;color:#fff;cursor:pointer}
+ #hdw4s-gate .err{color:#ff8a80;white-space:pre-wrap}
+</style>
+<div id="hdw4s-gate" hidden><div class="card">
+  <h1>Desktop</h1><div id="hdw4s-body"></div>
+  <button id="hdw4s-go">Take over and disconnect other sessions</button>
+  <p class="err" id="hdw4s-err"></p>
+</div></div>
+<script>
+(() => {
+  var SRC = __SRC__;
+  var KEY = 'hdw4s_booted_' + location.pathname;
+  var gate = document.getElementById('hdw4s-gate');
+  var body = document.getElementById('hdw4s-body');
+  var booted = false;
+
+  // Two states, kept apart on purpose. Cold: this tab has never connected and cannot
+  // know what is open elsewhere, so the consequence is conditional. Lost: this tab WAS
+  // connected and was disconnected, which is a fact and is stated as one.
+  var COLD = '<p>This tab is not connected.</p>'
+    + '<p>If this desktop is open in another tab or on another device, connecting here '
+    + 'will take it over. That tab will stop streaming and keep showing its last '
+    + 'picture until it is closed.</p>';
+  var LOST = '<p>This tab was disconnected: the desktop was opened somewhere else.</p>'
+    + '<p>Nothing has been lost. The desktop is still running, and you can bring it '
+    + 'back here.</p>';
+
+  function show(k){ body.innerHTML = k; gate.hidden = false; }
+
+  // Second monitors and shared viewers are NEVER offered a takeover. They are not the
+  // primary display, so being closed by the server does not mean somebody took the
+  // desktop -- on this deployment #player2 is refused outright
+  // (--enable-player2=false|locked) and the server KILLs it, which a QA run caught
+  // being rendered as "the desktop was opened somewhere else" with a takeover button.
+  var SECONDARY = /^#(shared|player[2-4]|display2)/.test(location.hash);
+
+  function quietBanner(){
+    // Upstream writes a terminated message and never clears it -- its overlay hides only
+    // on a FIRST painted frame, and this page has had one. Left alone it would sit over
+    // a live desktop after we reconnect. This is a TERMINAL-state substitution, the one
+    // case where covering upstream's status is safe, and nothing we detect depends on
+    // it: v2 hid this banner on a timer and raced its own detector, which is why
+    // detection now comes from the transport instead.
+    var s = document.getElementById('status-display');
+    if (s && /terminated|superseded|disconnected/i.test(s.textContent||''))
+      s.classList.add('hidden');
+  }
+  function lost(why){
+    if (SECONDARY) { window.__hdw4sLost = why; return; }   // recorded, never rendered
+    if (!booted || !gate.hidden) return;
+    window.__hdw4sLost = why; quietBanner(); show(LOST);
+  }
+
+  // --- deterministic detection, from the transport, not from upstream's UI ----------
+  // websockets: a "KILL " text frame. webrtc: the signalling socket closes 4001.
+  var NativeWS = window.WebSocket;
+  function WrappedWS(url, protocols){
+    var ws = (protocols === undefined) ? new NativeWS(url) : new NativeWS(url, protocols);
+    ws.addEventListener('message', function(ev){
+      if (typeof ev.data === 'string' && ev.data.lastIndexOf('KILL ', 0) === 0) lost('kill');
+    });
+    ws.addEventListener('close', function(ev){ if (ev.code === 4001) lost('close4001'); });
+    return ws;
+  }
+  WrappedWS.prototype = NativeWS.prototype;
+  ['CONNECTING','OPEN','CLOSING','CLOSED'].forEach(function(k){ WrappedWS[k] = NativeWS[k]; });
+  window.WebSocket = WrappedWS;
+
+  // The WebRTC core announces an eviction with a NATIVE alert(), which blocks the main
+  // thread until somebody clicks OK -- so nothing of ours can draw while it is up, and
+  // to a person the tab looks frozen. Supplying our own alert() is providing a platform
+  // function, not suppressing upstream's UI, and it turns that modal into our card.
+  window.alert = function(msg){
+    window.__hdw4sAlert = String(msg);
+    if (/superseded|disconnected/i.test(String(msg))) lost('alert');
+    else { try { console.warn('hdw4s: suppressed alert:', msg); } catch(e){} }
+  };
+
+  // The socket is in a WORKER by default (socket_worker=true), where the WebSocket
+  // patch above cannot see the KILL frame -- measured: the card came back in ~15 s via
+  // the backstop instead of ~3 s. Upstream writes its terminated text into
+  // #status-display on every transport, so observing that element is the one signal
+  // available in both configurations. Note this does NOT race the banner-hiding any
+  // more: quietBanner() is called only from lost(), after the decision, never on a
+  // timer -- which is what made v2 miss a takeover.
+  function watchStatus(){
+    var el = document.getElementById('status-display');
+    if (!el) return setTimeout(watchStatus, 500);
+    var check = function(){
+      var t = el.textContent || '';
+      if (/terminated|superseded|opened elsewhere/i.test(t)) lost('status');
+    };
+    new MutationObserver(check).observe(el,
+      {childList:true, characterData:true, subtree:true, attributes:true});
+    check();
+  }
+  watchStatus();
+
+  // Backstop, for a transport that announces nothing. Two guards, both learned from a
+  // QA run where this fired on a page that was working perfectly:
+  //   - never on a secondary viewer. #shared, #player2-4 and #display2 legitimately
+  //     receive no video of their own, so "no frames" is their normal state, and the
+  //     backstop was showing them a takeover button they must never see;
+  //   - never before the stream has moved at least once, so a slow first frame is not
+  //     read as a disconnection.
+  var last = -1, still = 0, everMoved = false;
+  setInterval(function(){
+    if (SECONDARY || !booted || !gate.hidden) { still = 0; return; }
+    var n = window.videoChunksReceived || 0;
+    if (n > 0) everMoved = true;
+    still = (n === last) ? still + 1 : 0; last = n;
+    if (everMoved && still >= 20) lost('stalled');   // ~10 s with no frames at all
+  }, 500);
+
+  function boot(){
+    try { sessionStorage.setItem(KEY,'1'); } catch(e){}
+    gate.hidden = true;
+    if (!booted) {
+      booted = true;
+      // The client picks its transport from window.__SELKIES_STREAMING_MODE__, then
+      // localStorage, then defaults to websockets -- so a fresh browser profile is
+      // ALWAYS websockets. A QA matrix labelled "webrtc" therefore tested websockets
+      // twice and looked green; the colour counts being byte-identical across the two
+      // runs is what gave it away. Honouring an explicit override makes the transport a
+      // variable a test can set.
+      var want = new URLSearchParams(location.search).get('hdw4s_mode');
+      if (want === 'webrtc' || want === 'websockets') window.__SELKIES_STREAMING_MODE__ = want;
+      var s = document.createElement('script');
+      s.type='module'; s.src=SRC; document.body.appendChild(s);
+    } else if (typeof window.selkiesCoreInitialize === 'function') {
+      // Re-entry with no reload: this is what moves a session between tabs instantly.
+      try { window.selkiesCoreInitialize(); }
+      catch(e){ document.getElementById('hdw4s-err').textContent =
+                  'hdw4s: could not reconnect - ' + e; show(LOST); return; }
+    }
+    window.__hdw4sBooted = true; window.__hdw4sLost = null;
+  }
+
+  window.__hdw4sContract = {module: SRC};
+  document.getElementById('hdw4s-go').addEventListener('click', boot);
+
+  var seen=false; try { seen = sessionStorage.getItem(KEY)==='1'; } catch(e){}
+  // A self-reload keeps the tab, and the client reloads itself on its own recovery
+  // paths; re-gating those would turn every recovery into a button nobody is watching.
+  if (seen) return boot();
+  // Second monitors and shared viewers must never be shown a takeover button.
+  if (/^#(shared|player[2-4]|display2)/.test(location.hash)) return boot();
+  show(COLD);
+})();
+</script>
+""".replace("__SRC__", json.dumps(src_attr))
+html = html.replace("</body>", OVERLAY + "</body>") if "</body>" in html else html + OVERLAY
+open(dst, "w", encoding="utf-8").write(html)
+print("hdw4s-gate-index: built %s (deferred %s)" % (dst, src_attr))
