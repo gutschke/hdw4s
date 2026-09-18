@@ -87,6 +87,51 @@ if [ -n "${local_detail}" ]; then
 fi
 okif 'no local machine or account names in shipped files'
 
+# The privileged instruction file is the one thing allowed to carry the detail
+# the scan above forbids. That exemption is only safe while the file is provably
+# outside the repository, so this checks the INDEX rather than the working tree:
+# .gitignore is a convention that `git add -f` overrides, and an ignored file is
+# invisible to `git status`, so nothing else here would notice it drifting in.
+#
+# Note the scan above uses `grep -r`, which does NOT descend into the symlink at
+# CLAUDE.local.md. Changing it to -R would make every run fail on a correctly
+# contained file, and a check that fails on the correct state gets turned off.
+#
+# Fails closed. private/build.sh runs this against a COPY of the tree, which has
+# no .git -- and there "git grep" exits 128 and "git ls-files" fails, both
+# swallowed, both reading as clean. Measured: a file containing a hostname and
+# two account names sat in that copy while this block printed ok, one line under
+# a genuine failure from the scan above. A check that cannot run has to say so,
+# which is what skip() is for.
+begin
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  skip 'containment' 'not a git repository (a build copy) -- the index was NOT checked'
+else
+  for f in CLAUDE.md CLAUDE.local.md; do
+    if git ls-files --error-unmatch "${f}" >/dev/null 2>&1; then
+      bad 'containment' "${f} is TRACKED; it carries estate detail and must never be published"
+    fi
+  done
+  # --cached, because the comment above used to claim this checked the index and it
+  # did not: "git grep" without it reads the WORKING TREE, so a staged leak whose
+  # working copy had been cleaned passed. And no -I: that skips binaries, which
+  # exempts a screenshot with a hostname in its title bar from every scan here.
+  # The pattern list is the check. An earlier version of this scanned only for
+  # account names, container ids and the two internal /16s -- and would NOT have
+  # caught the leak it was written in response to: a committed .pyc carrying
+  # "/home/<user>/src/..." in its co_filename, which CPython embeds at compile
+  # time and no text review can see. A guard whose list omits the class of thing
+  # that motivated it is decoration. Username-bearing paths, the estate's own
+  # domain and its machine names are in scope too.
+  tracked_leak="$(git grep --cached -lE 'ariadn[e]|atticu[s]|ct1[0-9][0-9]|10\.10\.[0-9]|172\.24\.[0-9]|/home/(markus|root)/|gutschke\.com|schlag[e]|van-aake[n]|proxmo[x]' \
+      -- ':(exclude).github/checks.sh' 2>/dev/null || true)"
+  if [ -n "${tracked_leak}" ]; then
+    printf '%s\n' "${tracked_leak}"
+    bad 'containment' 'estate detail appears in the STAGED content of the files above'
+  fi
+  okif 'no privileged file, and no estate detail, in the index'
+fi
+
 echo '== shell =='
 begin
 for f in "${SCRIPTS[@]}"; do

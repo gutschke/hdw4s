@@ -19,6 +19,16 @@
 /debian/debhelper-build-stamp
 /debian/*.debhelper.log
 
+# The privileged project instruction file. CLAUDE.local.md is a SYMLINK into
+# private/, which is this file's real, tracked home -- so `git clean -xfd`
+# removes the link and not the content. It deliberately carries estate detail,
+# and .github/checks.sh FAILS the build if it is ever tracked. Note that
+# ignoring a file does not stop `git add -f`, and an ignored file never appears
+# in `git status`, so it can drift unseen; the check is the real control.
+# If you are about to remove these lines, do not.
+/CLAUDE.md
+/CLAUDE.local.md
+
 # Private engineering notes. NEVER published: contains deployment specifics,
 # live security findings and network details. If you are about to remove this
 # line, do not.
