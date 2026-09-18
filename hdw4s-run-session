@@ -625,15 +625,47 @@ lockdown=(
   --second-screen='true|locked'
   # Branding, partially. This names the sidebar heading and nothing else.
   #
-  # The browser TAB still reads "Selkies", because the client sets its title
-  # from the web manifest, and the manifest now lives inside the package rather
-  # than in a tree we patch. Recovering it means serving a patched copy of the
-  # packaged client through --web-root, which is the supported seam and is not
-  # done here yet. The per-session "Desktop: <host>" form is gone either way: the
+  # The browser TAB is named by the web manifest, which the client fetches and
+  # applies to document.title -- so for an ephemeral session it is set in the
+  # generated web root below rather than here, and needs no client change. A
+  # session that gets no web root keeps the packaged manifest and reads
+  # "Selkies". The per-session "Desktop: <host>" form is gone either way: the
   # old script computed it in the browser, where the hostname is known, and
   # neither a setting nor a manifest can do that.
   --ui-title=Desktop
 )
+
+# An ephemeral session is served a GATED client: one that does not connect, and
+# therefore does not take the desktop away from whoever already has it, until a
+# person presses a button. Both transports evict on connect, so withholding the
+# connection is the whole mechanism -- there is nothing to undo afterwards and
+# nothing to ask upstream for.
+#
+# Only this session type. A named desktop is meant to follow its user between
+# machines and take itself over on arrival, which is the opposite requirement,
+# and HDW4S_SESSION_TYPE is fail-closed: hdw4s-session forces "desktop" unless
+# --ephemeral was passed as an ARGUMENT, which a configuration file cannot
+# reach. So a normal session's command line is byte-identical to what it was
+# before this block existed.
+#
+# If the web root cannot be built, the session does NOT start. Selkies' own
+# behaviour on a missing web root is to log one warning and serve the packaged
+# client, which would come up healthy in every check this product has while
+# silently missing the only thing the gate is for.
+if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+  webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${instance}"
+  # BUILT ELSEWHERE, ON PURPOSE. This script runs inside the session unit, where
+  # ProtectSystem=strict makes /usr read-only -- so generating the tree here
+  # fails, and generating it somewhere the session CAN write would hand the
+  # occupant its own served client to edit. hdw4s-ephemeral-slots builds it as
+  # root, once per slot, before any session can start; this only verifies it and
+  # points the server at it.
+  "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" check "${webroot}" || {
+    echo 'hdw4s: refusing to start an ephemeral session without a gated client' >&2
+    exit 1
+  }
+  stream+=(--web-root="${webroot}")
+fi
 "${stream[@]}" \
   --addr="${HDW4S_ADDR}" \
   --port="${HDW4S_PORT}" \

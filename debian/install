@@ -25,3 +25,5 @@ hdw4s-updater.service    usr/lib/systemd/system
 hdw4s-updater.timer      usr/lib/systemd/system
 hdw4s-reaper.service     usr/lib/systemd/system
 hdw4s-reaper.timer       usr/lib/systemd/system
+hdw4s-webroot            usr/lib/hdw4s
+hdw4s-gate-index         usr/lib/hdw4s
