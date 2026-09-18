@@ -234,6 +234,29 @@ else
   bad 'hdw4s --version' "says ${declared}, changelog says ${version}"
 fi
 
+# The camera and the microphone are asked for with "--webcam-on-start=demand",
+# a value only a streaming server carrying capture-on-demand understands. An
+# older one reads it through parse_bool -- "everything else is false" -- starts
+# normally, and simply never brings the device up. For the microphone that
+# leaves no capture device in the session at all. Nothing fails; the feature is
+# just absent, which is the kind of regression a release ships without noticing.
+#
+# The session script no longer probes for this, deliberately: the flag it used
+# to probe for never existed outside the branch that proposed it, and upstream
+# spelled the merged feature differently. The requirement lives here instead,
+# against the version the updater installs, so that shipping a package whose
+# pinned Selkies cannot do what the session asks of it is something somebody has
+# to walk past on purpose.
+known_good="$(sed -n "s/^KNOWN_GOOD='\([^']*\)'.*/\1/p" hdw4s-update | head -1)"
+case "${known_good}" in
+  2.0.0rc0)
+    skip 'capture floor' "KNOWN_GOOD=${known_good} predates capture-on-demand; bump it once upstream cuts a release carrying it, or the camera and microphone stay dark" ;;
+  '')
+    bad 'capture floor' 'could not read KNOWN_GOOD from hdw4s-update' ;;
+  *)
+    note 'capture floor' "KNOWN_GOOD=${known_good}" ;;
+esac
+
 # Defaults are necessarily repeated between the scripts, the sample config and
 # the man page. They drift silently, and only a user notices.
 begin
