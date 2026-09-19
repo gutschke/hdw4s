@@ -18,7 +18,7 @@ SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
          debian/postinst debian/prerm debian/postrm
          .github/checks.sh .github/tests.sh .github/clean-install-test.sh
-         .github/purge-safety-test.sh)
+         .github/purge-safety-test.sh .github/uid-invariant.sh)
 UNITS=(hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
        hdw4s-proxy@.socket hdw4s-proxy@.service
        hdw4s-firewall.service hdw4s-firewall-check.service
@@ -29,7 +29,20 @@ UNITS=(hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
 fail=0
 mark=0
 note() { printf '%-28s %s\n' "$1" "$2"; }
-bad()  { note "$1" "FAIL: $2"; fail=1; }
+# Counts, rather than latching at 1, and that is the whole of a bug fix.
+# With "fail=1" the flag could not rise again once it was set, so `begin` in
+# any later section took a mark of 1, `bad` set it to 1 again, the comparison
+# in `okif` held, and EVERY SECTION AFTER THE FIRST FAILURE PRINTED "ok" NO
+# MATTER WHAT IT FOUND -- beside its own FAIL lines. Reproduced in four lines
+# away from this file, and seen here for real: a run whose unit verification
+# had already failed went on to print "uid invariant  ok" directly under two
+# uid-invariant failures.
+#
+# The exit status was always right. Only the report lied, which is the half a
+# person reads -- and it is a regression against the intent stated in the
+# comment directly above, which was written to stop a summary claiming success
+# the loop did not have.
+bad()  { note "$1" "FAIL: $2"; fail=$((fail + 1)); }
 # A summary line after a loop must not claim success the loop did not have.
 # These used to print "ok" unconditionally, so a run that had already reported
 # a failure went on to say the same check passed two lines later. The exit
@@ -227,6 +240,46 @@ for u in "${UNITS[@]}"; do
   [ -z "${out}" ] || { printf '%s\n' "${out}"; bad "${u}" 'verify reported the above'; }
 done
 okif 'systemd-analyze verify'
+
+echo
+echo '== uid invariant =='
+# A logical session identity dies with its session; the PHYSICAL uid goes back
+# to a pool and is handed to a stranger. .github/uid-invariant.sh is the two
+# properties that make that harmless, as a check rather than as a paragraph, and
+# "selftest" is it breaking each of its own assertions on purpose and watching
+# them go red.
+#
+# THIRTEEN of that selftest's twenty arms run here. The other seven need root and
+# a parked slot, so this wiring exercises the static and fixture halves only; the
+# live halves are a hand tool for a disposable box, and the file says so. Quote
+# the number with the claim, or the next summary turns it into twenty.
+#
+# Neither arm needs a GIT REPOSITORY, and that is deliberate rather than
+# incidental. This file runs in two environments -- the repo, and the unpacked
+# copy private/build.sh makes, which has no .git -- and a check that quietly
+# depends on one reports green in the other while never having looked. Verified
+# in that copy in both directions: a planted violation went red there and named
+# itself, and the same tree went green once it was removed.
+#
+# The exit status is not trusted on its own. A red has to NAME what it rejected;
+# a bare non-zero status cannot be told apart from the script failing to start,
+# and that confusion is not hypothetical -- uid-invariant.sh's own selftest
+# scored a crash as a successful rejection until it was made to require the word
+# FAIL, which is why this loop requires it too.
+begin
+for check in static selftest; do
+  if out="$("$(dirname "$0")/uid-invariant.sh" "${check}" . 2>&1)"; then
+    :
+  elif printf '%s\n' "${out}" | grep -q 'FAIL:'; then
+    printf '%s\n' "${out}" | grep 'FAIL:' | sed 's/^/  /'
+    bad "uid-invariant ${check}" 'reported the above'
+  else
+    printf '%s\n' "${out}" | sed 's/^/  /'
+    bad "uid-invariant ${check}" \
+        'exited non-zero without rejecting anything: it did not run'
+  fi
+done
+okif 'uid invariant'
 
 echo
 echo '== documentation =='
