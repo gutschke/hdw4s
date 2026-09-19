@@ -45,7 +45,7 @@ OVERLAY = r"""
 </style>
 <div id="hdw4s-gate" hidden><div class="card">
   <h1>__NAME__</h1><div id="hdw4s-body"></div>
-  <button id="hdw4s-go">Take over and disconnect other sessions</button>
+  <button id="hdw4s-go">Connect</button>
   <p class="err" id="hdw4s-err"></p>
 </div></div>
 <script>
@@ -54,6 +54,7 @@ OVERLAY = r"""
   var KEY = 'hdw4s_booted_' + location.pathname;
   var gate = document.getElementById('hdw4s-gate');
   var body = document.getElementById('hdw4s-body');
+  var go   = document.getElementById('hdw4s-go');
   var booted = false;
 
   // WHAT AN EVICTED PAGE ACTUALLY DOES, measured on both transports at upstream
@@ -95,7 +96,23 @@ OVERLAY = r"""
     + '<p>Nothing has been lost. The desktop is still running, and you can bring it '
     + 'back here.</p>';
 
-  function show(k){ body.innerHTML = k; gate.hidden = false; }
+  // The button's words are part of the state, not decoration around it. It used to
+  // read "Take over and disconnect other sessions" in static markup, on every state
+  // including COLD -- where the comment four lines above says this tab CANNOT know
+  // what is open elsewhere. So the button asserted as fact the one thing the body
+  // was careful to state as a condition, and it did so on the common path.
+  //
+  // Each label reuses the verb its own body text just used: COLD says "connecting
+  // here", LOST says "bring it back here". That is what makes this screen and the
+  // session directory siblings -- shared vocabulary, not a shared palette.
+  var COLD_GO = 'Connect';
+  var LOST_GO = 'Bring it back here';
+
+  function show(k, label){
+    body.innerHTML = k;
+    go.textContent = label;
+    gate.hidden = false;
+  }
 
   // Second monitors and shared viewers are NEVER offered a takeover. They are not the
   // primary display, so being closed by the server does not mean somebody took the
@@ -118,7 +135,7 @@ OVERLAY = r"""
   function lost(why){
     if (SECONDARY) { window.__hdw4sLost = why; return; }   // recorded, never rendered
     if (!booted || !gate.hidden) return;
-    window.__hdw4sLost = why; quietBanner(); show(LOST);
+    window.__hdw4sLost = why; quietBanner(); show(LOST, LOST_GO);
   }
 
   // --- deterministic detection, from the transport, not from upstream's UI ----------
@@ -217,13 +234,13 @@ OVERLAY = r"""
       // Re-entry with no reload: this is what moves a session between tabs instantly.
       try { window.selkiesCoreInitialize(); }
       catch(e){ document.getElementById('hdw4s-err').textContent =
-                  'hdw4s: could not reconnect - ' + e; show(LOST); return; }
+                  'hdw4s: could not reconnect - ' + e; show(LOST, LOST_GO); return; }
     }
     window.__hdw4sBooted = true; window.__hdw4sLost = null;
   }
 
   window.__hdw4sContract = {module: SRC};
-  document.getElementById('hdw4s-go').addEventListener('click', boot);
+  go.addEventListener('click', boot);
 
   var seen=false; try { seen = sessionStorage.getItem(KEY)==='1'; } catch(e){}
   // A self-reload keeps the tab, and the client reloads itself on its own recovery
@@ -231,7 +248,7 @@ OVERLAY = r"""
   if (seen) return boot();
   // Second monitors and shared viewers must never be shown a takeover button.
   if (/^#(shared|player[2-4]|display2)/.test(location.hash)) return boot();
-  show(COLD);
+  show(COLD, COLD_GO);
 })();
 </script>
 """.replace("__SRC__", json.dumps(src_attr)) \
