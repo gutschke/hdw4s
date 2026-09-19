@@ -199,12 +199,44 @@ OVERLAY = r"""
     // Upstream writes a terminated message and never clears it -- its overlay hides only
     // on a FIRST painted frame, and this page has had one. Left alone it would sit over
     // a live desktop after we reconnect. This is a TERMINAL-state substitution, the one
-    // case where covering upstream's status is safe, and nothing we detect depends on
-    // it: v2 hid this banner on a timer and raced its own detector, which is why
-    // detection now comes from the transport instead.
+    // case where covering upstream's status is safe: v2 hid this banner on a timer and
+    // raced its own detector, which is why detection now comes from the transport
+    // instead.
+    //
+    // CORRECTION, and it is the sentence that hid a bug for a week: this comment used
+    // to end "and nothing we detect depends on it." That stopped being true when
+    // checkStatus() was added below, which detects on exactly this element -- and
+    // because what follows only adds a CLASS, the text it reads is left behind for the
+    // poller to find again. clearStaleStatus() is the other half; see boot().
     var s = document.getElementById('status-display');
     if (s && /terminated|superseded|disconnected/i.test(s.textContent||''))
       s.classList.add('hidden');
+  }
+
+  // The previous loss's residue, cleared before the card comes down.
+  //
+  // Measured, end to end: the recovery button works. selkiesCoreInitialize() is
+  // present, the branch runs, the stream returns -- 179 decoded chunks in six seconds.
+  // What fails is what the person sees. quietBanner() adds a class; checkStatus()
+  // reads textContent, which a class does not touch, and upstream never clears that
+  // text on a successful reconnect. So the poller, twice a second, reads the old
+  // "Connection Terminated" the instant boot() sets gate.hidden = true -- at which
+  // point lost() no longer no-ops, because the card is down -- and puts the card
+  // straight back over a desktop that is streaming perfectly.
+  //
+  // CLEARED, not ignored, and the difference is the whole safety of it. A flag saying
+  // "disregard the status for a while" would also disregard a REAL second loss
+  // arriving inside that window, which is the defect this file exists to prevent. An
+  // empty element cannot be read as a terminal state, and the next real terminal
+  // message writes into it and is detected exactly as before.
+  //
+  // The class quietBanner() added is deliberately left on. Our card is what tells a
+  // person their session ended; re-showing upstream's banner is a second change with
+  // its own reasons, and doing two things here would make the test's verdict say
+  // nothing about which one worked.
+  function clearStaleStatus(){
+    var s = document.getElementById('status-display');
+    if (s) s.textContent = '';
   }
   function lost(why){
     if (SECONDARY) { window.__hdw4sLost = why; return; }   // recorded, never rendered
@@ -371,6 +403,9 @@ OVERLAY = r"""
 
   function boot(){
     try { sessionStorage.setItem(KEY,'1'); } catch(e){}
+    // Before the card comes down, never after: between hiding it and clearing the
+    // text there is a window the 500 ms poller can land in.
+    clearStaleStatus();
     gate.hidden = true;
     if (!booted) {
       booted = true;
