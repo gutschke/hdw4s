@@ -3,7 +3,63 @@ bare session host where nothing but python3 is guaranteed."""
 import base64, json, os, socket, ssl, struct, urllib.parse
 
 
-def connect(base_url, path="/api/websockets", timeout=20):
+def credentials(base_url, password_file=None):
+    """The user and password to offer, or None.
+
+    A password FILE, not a password argument and not an environment variable.
+    What that buys, precisely, and no more:
+
+      * argv is out. /proc/<pid>/cmdline is world-readable, so a credential
+        passed as an argument is visible to every account on the box for as
+        long as the process lives. Measured on a session host: 68 same-uid
+        processes, all 68 command lines readable.
+      * the environment is out for the same reason. ProtectProc=invisible does
+        NOT hide a process from its own uid, so /proc/<pid>/environ is readable
+        by anything running as that user. On a box where the untrusted party
+        shares the uid -- which is exactly a desktop session -- an environment
+        variable is a marginal improvement on argv, not a fix.
+
+    What it does NOT buy, and no comment here should be read as claiming it:
+    the file itself is only as private as its mode and the account that can
+    read it, and anything running as this uid can still read our memory, our
+    /proc/<pid>/fd and our open descriptors. This is hygiene against casual
+    disclosure, not a security boundary against a hostile same-uid process.
+    """
+    u = urllib.parse.urlsplit(base_url)
+    if u.username is not None:
+        return u.username, (u.password or "")
+    if not password_file:
+        return None
+    with open(password_file) as f:
+        raw = f.read().strip()
+    if not raw:
+        raise RuntimeError(f"{password_file} is empty; no credential to offer")
+    # "user:password", or a bare password for the conventional account.
+    if ":" in raw:
+        user, pw = raw.split(":", 1)
+    else:
+        user, pw = "hdw4s", raw
+    return user, pw
+
+
+def challenges(base_url, path="/api/websockets", timeout=20):
+    """True if the endpoint refuses an unauthenticated upgrade.
+
+    The positive control for the credential path. Without it, a probe that
+    "connected fine" proves nothing about the password it was handed: an
+    endpoint with authentication switched off accepts a wrong password, an
+    empty one, and no header at all, and every one of them reads as success.
+    """
+    try:
+        sock, _ = connect(base_url, path=path, timeout=timeout, _no_auth=True)
+    except RuntimeError as e:
+        return "401" in str(e) or "403" in str(e)
+    sock.close()
+    return False
+
+
+def connect(base_url, path="/api/websockets", timeout=20,
+            password_file=None, _no_auth=False):
     u = urllib.parse.urlsplit(base_url)
     secure = u.scheme in ("https", "wss")
     host = u.hostname
@@ -20,9 +76,10 @@ def connect(base_url, path="/api/websockets", timeout=20):
         f"Sec-WebSocket-Key: {key}",
         "Sec-WebSocket-Version: 13",
     ]
-    if u.username is not None:
+    cred_pair = None if _no_auth else credentials(base_url, password_file)
+    if cred_pair is not None:
         cred = base64.b64encode(
-            f"{u.username}:{u.password or ''}".encode()).decode()
+            f"{cred_pair[0]}:{cred_pair[1]}".encode()).decode()
         req.append(f"Authorization: Basic {cred}")
     sock.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
     buf = b""
@@ -143,9 +200,9 @@ def send(sock, data, opcode=0x1):
     sock.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
 
 
-def server_settings(base_url, limit=40):
+def server_settings(base_url, limit=40, password_file=None):
     """Return the server_settings payload the session pushes on connect."""
-    sock, rest = connect(base_url)
+    sock, rest = connect(base_url, password_file=password_file)
     try:
         for i, text in enumerate(frames(sock, rest)):
             if text is None:
@@ -165,5 +222,17 @@ def server_settings(base_url, limit=40):
 
 
 if __name__ == "__main__":
-    import sys
-    print(json.dumps(server_settings(sys.argv[1]), indent=2, sort_keys=True))
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("url")
+    ap.add_argument("--password-file", help="file holding 'user:password'")
+    ap.add_argument("--require-auth", action="store_true",
+                    help="fail unless the endpoint refuses an unauthenticated "
+                         "upgrade -- the positive control for the credential")
+    a = ap.parse_args()
+    if a.require_auth and not challenges(a.url):
+        raise SystemExit("wsprobe: %s does not challenge an unauthenticated "
+                         "upgrade; a success here would say nothing about the "
+                         "credential" % a.url)
+    print(json.dumps(server_settings(a.url, password_file=a.password_file),
+                     indent=2, sort_keys=True))
