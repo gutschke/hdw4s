@@ -334,9 +334,27 @@ session_pid="$!"
 # have it. The user never sees it, so there is still no login screen.
 #
 # The secret is passed in the environment rather than on the command line,
-# where it would be visible to every account on the machine through ps. It is
-# readable by this session's own user, which is not a concern: it is their
-# desktop and their proxy credential.
+# where it would be visible to every account on the machine through ps.
+#
+# It is ALSO readable by this session's own user, and whether that is a concern
+# depends on which session type this is -- the sentence that used to stand here
+# said it was not, and that stopped being true when hdw4s-ephemeral@ was added:
+#
+#   hdw4s@          their desktop, their proxy credential. Not a concern.
+#   hdw4s-ephemeral@ the occupant is a stranger and runs as this uid. He can
+#                   read it out of /proc/<pid>/environ and straight out of
+#                   $CREDENTIALS_DIRECTORY/hdw4s-auth, which is mode 0400 owned
+#                   by him. Both were measured, not reasoned about.
+#
+# There is no way to keep it from him: the streaming server has no interface for
+# this credential other than SELKIES_BASIC_AUTH_PASSWORD in its environment, and
+# it runs as him. So the property this credential can still have is not secrecy
+# from the occupant but a SHORT LIFE -- it must not open the next occupant's
+# session. "hdw4s auth" mints once and deliberately never rotates, which means
+# today it does. That is recorded as the repair; this comment is the warning
+# until it lands.
+#
+# What is fixed here is only the gratuitous copy: no credential goes in argv.
 if [ "${HDW4S_AUTH:-none}" = 'basic' ] &&
    [ -n "${CREDENTIALS_DIRECTORY:-}" ] &&
    [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ]; then
@@ -720,9 +738,46 @@ if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
       (exec 3<>"/dev/tcp/127.0.0.1/${HDW4S_PORT}") 2>/dev/null && break
       sleep 1
     done
-    if ! "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" serving \
-           "http://127.0.0.1:${HDW4S_PORT}/" \
-           -u "${SELKIES_BASIC_AUTH_USER:-}:${SELKIES_BASIC_AUTH_PASSWORD:-}"; then
+    # The credential goes down a PIPE, never in argv. "-u user:pass" here put it
+    # in /proc/<pid>/cmdline of both this helper and its curl, readable by every
+    # process of this uid -- and in an ephemeral session that uid is the
+    # occupant's, so it was published to exactly the party it exists to keep out.
+    # printf is a shell builtin, so the value never becomes a process argument;
+    # hdw4s-webroot passes its own stdin straight to "curl --config -" without
+    # reading it, so the bytes live in one pipe and one process, not on disk and
+    # not in a file name.
+    #
+    # This closes the argv hole and nothing more. The same secret is still in
+    # this process's environment -- the streaming server is configured through
+    # SELKIES_BASIC_AUTH_PASSWORD and there is no other way to tell it -- and
+    # still in $CREDENTIALS_DIRECTORY/hdw4s-auth, mode 0400 owned by this user.
+    # An occupant who wants it reads it from either. What must not be true is
+    # that the credential outlives the occupant who saw it; see "hdw4s auth".
+    #
+    # curl's config format reads an unquoted value to end of line, which is
+    # exactly right for what "hdw4s auth" mints -- base64 with "=/+" removed,
+    # so [A-Za-z0-9] only -- and wrong for anything carrying a quote, a
+    # backslash or whitespace, which it would re-interpret. Refuse rather than
+    # authenticate with a silently mangled credential: a 401 from a mangled
+    # secret looks identical to an ungated client and would stop the session
+    # for the wrong reason.
+    case "${SELKIES_BASIC_AUTH_USER:-}${SELKIES_BASIC_AUTH_PASSWORD:-}" in
+      *[!A-Za-z0-9_.-]*)
+        # Fail CLOSED. This runs in a background subshell, so "exit" here would
+        # end the subshell and leave the session up with its one safety property
+        # never checked -- the exact shape of failure the rest of this file is
+        # written to avoid. Stop the stream instead, as the ungated branch does.
+        echo 'hdw4s: the basic-auth credential contains characters this check' >&2
+        echo '  cannot pass to curl without quoting ambiguity, so the served' >&2
+        echo '  client cannot be verified; stopping the session rather than' >&2
+        echo '  leaving it up unverified.' >&2
+        kill "${stream_pid}" 2>/dev/null || :
+        exit 1 ;;
+    esac
+    if ! printf 'user = %s:%s\n' \
+           "${SELKIES_BASIC_AUTH_USER:-}" "${SELKIES_BASIC_AUTH_PASSWORD:-}" |
+         "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" serving \
+           "http://127.0.0.1:${HDW4S_PORT}/" --auth-stdin; then
       echo 'hdw4s: this session is serving an UNGATED client; stopping it rather than' >&2
       echo '  handing the next arrival a desktop that is not theirs.' >&2
       kill "${stream_pid}" 2>/dev/null || :

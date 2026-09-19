@@ -37,7 +37,12 @@ usage() {
   cat >&2 <<EOF
 usage: hdw4s-webroot build   <instance> <web-root> [<session name>]
        hdw4s-webroot check   <web-root>
-       hdw4s-webroot serving <url> [<curl auth args>...]
+       hdw4s-webroot serving <url> [--auth-stdin] [<curl args>...]
+
+  --auth-stdin  read a curl config line ("user = <user>:<password>") from stdin
+                and hand it to curl as its own config. Never pass a credential
+                as an argument: /proc/<pid>/cmdline is readable by every process
+                of this uid, and in an ephemeral session that is the occupant.
 EOF
   exit 2
 }
@@ -178,8 +183,18 @@ be told this is the desktop it was using, which is the bug this file exists to p
 # This is cheap insurance against a silent one, not a check with a catch to its name.
 cmd_serving() {
   local url="$1"; shift
+  local auth=()
+  # --auth-stdin: this process's stdin is a pipe carrying a curl config line
+  # ("user = <user>:<password>"). It is handed to curl as ITS config, on ITS
+  # stdin, which curl already inherits -- so this script never reads the bytes
+  # and never names them. The alternative interfaces all publish the secret to
+  # every process of this uid, which in an ephemeral session includes the
+  # occupant: "-u" and "-H" put it in /proc/<pid>/cmdline, "--netrc-file" and
+  # "--config <path>" put a readable path there and the secret on a filesystem,
+  # and a here-string would make bash materialise a temp file for it.
+  if [ "${1:-}" = '--auth-stdin' ]; then shift; auth=(--config -); fi
   local body
-  body="$(curl -fsS --max-time 30 "$@" "${url}")" ||
+  body="$(curl -fsS --max-time 30 "${auth[@]}" "$@" "${url}")" ||
     die "could not fetch '${url}' to verify what is served"
   case "${body}" in
     *"${MARKER}"*) ;;
