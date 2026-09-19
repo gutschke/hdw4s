@@ -28,16 +28,26 @@ if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
     rm -f "${slot}.user" "${slot}.group"
   done
   rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.service.d
-# The settings layer and the policy. Only our own profile and database are
-# touched; /etc/dconf/profile/user belongs to every session on the machine.
+# The settings layer. Only our own profile and database are touched;
+# /etc/dconf/profile/user belongs to every session on the machine.
+#
+# The Chrome policy is NOT here, though it was until a purge test looked. Its
+# one file is a conffile, and dpkg's contract for a conffile is that "remove"
+# leaves it and only "purge" takes it -- which is the whole reason "apt
+# remove" is the command an administrator reaches for when being careful.
+# Deleting the directory here destroyed an edited copy under plain remove,
+# silently, with dpkg still listing the file as present and owned.
 rm -rf /etc/dconf/db/hdw4s-ephemeral.d /etc/dconf/db/hdw4s-ephemeral \
-       /etc/dconf/profile/hdw4s-ephemeral /etc/hdw4s/chrome-policies
+       /etc/dconf/profile/hdw4s-ephemeral
 rmdir --ignore-fail-on-non-empty /etc/opt/chrome/policies/managed \
       /etc/opt/chrome/policies 2>/dev/null || :
 if command -v dconf >/dev/null 2>&1; then dconf update 2>/dev/null || :; fi
 fi
 
 if [ "$1" = 'purge' ]; then
+  # The Chrome policy, whose one file is a conffile: dpkg removes the file
+  # itself on purge, and this takes the directory the package created for it.
+  rm -rf /etc/hdw4s/chrome-policies
   rm -f /etc/hdw4s/nftables.conf
   # Session slots, per-session overrides and the desktop profiles are the
   # administrator's configuration and the users' state. Purge removes ours.
