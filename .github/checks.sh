@@ -14,7 +14,7 @@ set -o nounset -o pipefail
 cd "$(dirname "$0")/.."
 
 SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s-wait
-         hdw4s-ephemeral-slots
+         hdw4s-ephemeral-slots hdw4s-incarnation hdw4s-webroot
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
          debian/postinst debian/prerm debian/postrm
          .github/checks.sh .github/tests.sh .github/clean-install-test.sh
