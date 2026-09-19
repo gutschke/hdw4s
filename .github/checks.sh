@@ -149,6 +149,40 @@ else
   okif 'no privileged file, and no estate detail, in the index'
 fi
 
+# Whether the tree this run describes is the tree that is in git.
+#
+# Nothing asserted this before. It matters most during mutation testing, the
+# one activity that deliberately puts a defect into a file to find out whether
+# a check notices: a mutation left behind is indistinguishable from a real
+# defect to the next reader, and identical to one to the package build. The
+# packaging helper copies whatever is in the tree, so a mutation injected to
+# prove a check CAN fail is one build away from being packaged and installed
+# as a shipped defect. A half-finished edit left behind by an interrupted
+# session does the same thing without anybody having intended it.
+#
+# Reported on every run, and fatal only for --package. A dirty tree during
+# development is the normal case and must not be blocked: a gate that makes
+# ordinary work impossible is bypassed within a day, and a bypassed gate is
+# worse than no gate. What must never happen silently is producing an
+# ARTEFACT from a tree that matches no commit, so the refusal is attached to
+# the build, and --dirty overrides it deliberately and records that it did.
+#
+# Tracked files only. Untracked scratch is normal in this tree and failing on
+# it would make this cry wolf until somebody turned it off; a mutation is by
+# definition an edit to a file that is already tracked.
+dirty=''
+if ! same_repo; then
+  skip 'working tree' 'this tree is not a git repository of its own -- cannot tell whether it matches git'
+else
+  dirty="$(git status --porcelain --untracked-files=no 2>/dev/null || true)"
+  if [ -n "${dirty}" ]; then
+    printf '%s\n' "${dirty}"
+    note 'working tree' "DIRTY: $(printf '%s\n' "${dirty}" | wc -l) tracked file(s) differ from $(git rev-parse --short HEAD 2>/dev/null)"
+  else
+    note 'working tree' "clean at $(git rev-parse --short HEAD 2>/dev/null)"
+  fi
+fi
+
 echo '== shell =='
 begin
 for f in "${SCRIPTS[@]}"; do
@@ -421,6 +455,22 @@ fi
 if [ "${1:-}" = '--package' ]; then
   echo
   echo '== build =='
+  # An artefact built from a tree that matches no commit is one nobody can
+  # reproduce, and during mutation testing it is one that may carry a defect
+  # somebody injected on purpose. Refused rather than warned about, because
+  # this is the step that produces the thing that gets installed.
+  build='yes'
+  case " $* " in
+    *' --dirty '*)
+      [ -z "${dirty}" ] ||
+        note 'build from dirty tree' 'ALLOWED by --dirty; this artefact matches no commit' ;;
+    *)
+      [ -z "${dirty}" ] || {
+        bad 'working tree' 'refusing to build: tracked files differ from HEAD (listed above); commit, stash, or pass --dirty on purpose'
+        build=''
+      } ;;
+  esac
+  if [ -n "${build}" ]; then
   dpkg-buildpackage -us -uc -b >/dev/null
   deb="../hdw4s_${version}_all.deb"
   [ -f "${deb}" ] || bad 'dpkg-buildpackage' "did not produce ${deb}"
@@ -433,6 +483,7 @@ if [ "${1:-}" = '--package' ]; then
     echo
     echo '== lintian (informational) =='
     lintian --fail-on error "${deb}" || bad 'lintian' 'reported an error'
+  fi
   fi
 fi
 
