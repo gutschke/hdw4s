@@ -83,6 +83,26 @@ cmd_build() {
   rm -rf "${stage}"
   cp -a "${src}" "${stage}"
 
+  # Carry the running session's published identity across the swap. The packaged tree
+  # has no hdw4s-incarnation, so the copy above silently drops the one the live tree is
+  # serving -- measured on a live slot, where a re-mint had stripped it and nothing
+  # noticed for a day.
+  #
+  # Preserved rather than regenerated, and that is the whole point: a re-mint rebuilds
+  # the CLIENT, it does not restart the session, so the incarnation has not changed and
+  # the old value is still the true one. Minting a new value here would tell every
+  # returning tab that its desktop had been replaced when it had not. Dropping it
+  # instead leaves a returning tab unable to tell this desktop from a different one,
+  # which is the entire reason the token exists.
+  #
+  # Nothing fails when it goes missing: hdw4s-webroot check only looks for the token
+  # when it is given an instance, which the builder never does, and the next session
+  # start republishes one. So this is silent in both directions and has to be held
+  # here, at the one place that can destroy it.
+  [ ! -s "${root}/hdw4s-incarnation" ] ||
+    cp -a "${root}/hdw4s-incarnation" "${stage}/hdw4s-incarnation" ||
+    die 'could not carry the published identity across the rebuild'
+
   HDW4S_SESSION_NAME="${name}" \
     "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-gate-index" \
       "${src}/index.html" "${stage}/index.html" || die 'could not build the gated index'

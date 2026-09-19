@@ -1004,10 +1004,47 @@ echo '== the arrival and sharing arms are chosen at generation, and a bad one is
     '<script type="module" src='
 )
 
+echo '== a rebuild of a running slot keeps its published identity =='
+# Written from the failure: a re-mint stripped hdw4s-incarnation from a LIVE web root
+# and nothing noticed for a day. Nothing can notice -- the builder never passes an
+# instance, so the token is not one of the things "check" looks at, and the next
+# session start quietly republishes one. The packaged client is stubbed here because
+# it is a build artifact this suite cannot have; what is under test is the swap, not
+# the client.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  mkdir -p "${d}/pkg" "${d}/slot"
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/pkg/index.html"
+  : > "${d}/pkg/x.js"
+  printf '#!/bin/bash\ncat >/dev/null\necho %s\n' "${d}/pkg" > "${d}/py"
+  chmod +x "${d}/py"
+  build() {
+    HDW4S_SELKIES_PY="${d}/py" HDW4S_LIBDIR="${ROOT}" \
+      "${ROOT}/hdw4s-webroot" build probe "${d}/slot" probe >/dev/null 2>"${d}/err"
+  }
+
+  printf '%s\n' 'tok-before-the-rebuild' > "${d}/slot/hdw4s-incarnation"
+  build
+  is 'a rebuild carries the running identity across unchanged' \
+     "$(cat "${d}/slot/hdw4s-incarnation" 2>/dev/null)" 'tok-before-the-rebuild'
+  has 'and still swaps in a freshly gated client' \
+      "$(cat "${d}/slot/index.html" 2>/dev/null)" 'hdw4s-gate'
+
+  # A token is preserved, never minted: a rebuild does not restart the session, so
+  # inventing one here would tell every returning tab its desktop had been replaced.
+  rm -rf "${d}/slot"; mkdir -p "${d}/slot"
+  build && ok 'a first build with no predecessor still succeeds' \
+        || bad 'a first build with no predecessor still succeeds' "$(cat "${d}/err")"
+  [ ! -e "${d}/slot/hdw4s-incarnation" ] \
+    && ok 'and does not invent an identity of its own' \
+    || bad 'and does not invent an identity of its own' 'a token appeared from nowhere'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=190   # update when tests are added; a wrong number is the point
+EXPECTED=194   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
