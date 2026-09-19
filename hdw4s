@@ -60,6 +60,11 @@ ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
 CONF="${ETCDIR}/hdw4s.conf"
 SLOTS="${ETCDIR}/instances"
 DROPIN='/etc/systemd/system'
+# Where the reaper records when it last saw a connection. Overridable for the
+# same reason as the paths above, and it was the one write path that was not:
+# hardcoded, it made every behaviour of cmd_reap untestable, which is why a
+# message that was wrong for half the session types survived unnoticed.
+REAPDIR="${HDW4S_REAP_STAMP_DIR:-/run/hdw4s-reap}"
 
 # Defaults. Every one of these may be overridden in /etc/hdw4s/hdw4s.conf.
 #
@@ -1282,9 +1287,20 @@ clients_of() {
 
 # Stop desktops nobody has connected to for a long time.
 #
-# Safe to do because the socket stays listening: a stopped session is not gone,
-# it is asleep, and the next connection starts it again. What is reclaimed is
-# the memory of a desktop somebody opened once and never came back to.
+# Safe to do FOR A NAMED SESSION because the socket stays listening: it is not
+# gone, it is asleep, its home is on disk and its settings are in StateDirectory=,
+# and the next connection starts it again. What is reclaimed is the memory of a
+# desktop somebody opened once and never came back to.
+#
+# It is NOT that for an ephemeral session, and this comment said it was. An
+# ephemeral slot keeps its home and its profile on a tmpfs under the unit's
+# RuntimeDirectory=, which systemd removes on stop -- on both stop paths,
+# measured, and deliberately, because destruction is meant to be the platform's
+# job rather than ours. Reaping one is therefore not a nap; it discards
+# everything in it. That is still the right thing to do -- an ephemeral session
+# that nobody has connected to for days is exactly what the timeout exists for --
+# but it must not be announced as though nothing were lost. See the two messages
+# below, which are now chosen by session type rather than shared.
 #
 # Idleness is measured by connections, not by input. A desktop with a window
 # open but no typing may be running a long job somebody deliberately left; a
@@ -1292,12 +1308,15 @@ clients_of() {
 # browser client reconnects by itself, so an open tab counts as connected even
 # across a laptop lid being shut.
 cmd_reap() {
-  local idx inst port established last now age days stopped=0
+  local idx inst stype port established last now age days stopped=0
   now="$(date +%s)"
   [ -r "${SLOTS}" ] || return 0
 
-  while read -r idx inst _; do
+  while read -r idx inst stype; do
     case "${idx}" in ''|\#*) continue;; esac
+    # The type was being read into "_" and discarded, which is why one message
+    # served both kinds and was wrong for one of them. Same default as type_of().
+    [ -n "${stype}" ] || stype='desktop'
     [ "$(systemctl is-active "$(unit_of "${inst}")" 2>/dev/null)" = 'active' ] ||
       continue
     # Per instance, not once for the whole run: a session that should never be
@@ -1325,7 +1344,7 @@ cmd_reap() {
     # points at and write a timestamp into it. /etc/shadow, /etc/sudoers, take
     # your pick. The stamp is the reaper's own bookkeeping and belongs somewhere
     # only the reaper can write.
-    local stampdir="/run/hdw4s-reap"
+    local stampdir="${REAPDIR}"
     install -d -m0700 -o root -g root "${stampdir}" 2>/dev/null || :
     [ -d "/run/hdw4s/${inst}" ] || continue
     local stamp="${stampdir}/${inst}"
@@ -1352,8 +1371,13 @@ cmd_reap() {
     [ "${age}" -ge "${days}" ] || continue
 
     reap_say "hdw4s: stopping ${inst}; nothing has connected for ${age} days."
-    reap_say '  Its files and settings are untouched, and the next connection'
-    reap_say '  starts it again.'
+    if [ "${stype}" = 'ephemeral' ]; then
+      reap_say '  This was an ephemeral session: its home and its settings lived'
+      reap_say '  in memory and are now gone. The slot is free for a new session.'
+    else
+      reap_say '  Its files and settings are untouched, and the next connection'
+      reap_say '  starts it again.'
+    fi
     systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
     systemctl stop "$(unit_of "${inst}")" 2>/dev/null || :
     stopped=$(( stopped + 1 ))
