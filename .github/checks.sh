@@ -103,9 +103,26 @@ okif 'no local machine or account names in shipped files'
 # two account names sat in that copy while this block printed ok, one line under
 # a genuine failure from the scan above. A check that cannot run has to say so,
 # which is what skip() is for.
+# The repository has to BE this tree, not merely contain it. The packaging
+# helper copies the tree into a build directory INSIDE this repository, so
+# "git rev-parse --git-dir" succeeds there and every git question below is
+# then answered about the PARENT repository instead of the copy under test.
+# Do not simplify this back to --git-dir: the copy's location inside the repo
+# is the whole reason, and it is invisible from this file.
+#
+# Measured: a copy run from inside the repo printed "no privileged file, and
+# no estate detail, in the index  ok" -- an affirmative clean bill of health
+# about a different tree's index. A skip is honest; an ok about the wrong
+# tree is worse than having no check at all.
+same_repo() {
+  local top
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "${top}" ] && [ "${top}" = "$(pwd -P)" ]
+}
+
 begin
-if ! git rev-parse --git-dir >/dev/null 2>&1; then
-  skip 'containment' 'not a git repository (a build copy) -- the index was NOT checked'
+if ! same_repo; then
+  skip 'containment' 'this tree is not a git repository of its own (a build copy) -- the index was NOT checked'
 else
   for f in CLAUDE.md CLAUDE.local.md; do
     if git ls-files --error-unmatch "${f}" >/dev/null 2>&1; then
@@ -232,9 +249,21 @@ fi
 # deleted, and a missing file used to be skipped here and then reported as
 # parsing, so deleting one outright was a passing run.
 pyfail=''
-pyfiles="$(git -C "$(dirname "$0")/.." ls-files '*.py' 2>/dev/null)"
+# The same guard, for both of the same reasons. Outside a repository this
+# assignment carried git's exit 128 out through "set -e": the run ABORTED
+# here, having printed an unbroken column of ok, never reaching the behaviour
+# tests, the packaging checks or the build, and never printing "Some checks
+# failed". And in a copy that sits inside this repository, git answers about
+# the parent, where the copy is ignored -- so the list came back empty and
+# this reported "no python in this package" with eight Python files present.
+if ! same_repo; then
+  skip 'python syntax' 'this tree is not a git repository of its own -- the file list could not be derived'
+  pyfiles=''
+else
+  pyfiles="$(git ls-files '*.py' 2>/dev/null || true)"
+fi
 if [ -z "${pyfiles}" ]; then
-  note 'python syntax' 'no python in this package'
+  same_repo && note 'python syntax' 'no python in this package'
 else
   for f in ${pyfiles}; do
     if ! python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "${f}" 2>/dev/null; then
