@@ -63,7 +63,9 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
   * `reap` :
     Stop sessions nobody has connected to for `HDW4S_IDLE_DAYS`. Run from a
-    timer; there is no need to invoke it by hand.
+    timer; there is no need to invoke it by hand. Stopping a named session
+    keeps its files and settings; stopping an ephemeral slot destroys the
+    session, because its home and profile are held in memory.
 
   * `release` <instance>:
     Stop a session and give up its slot, so another session may take the port.
@@ -253,6 +255,12 @@ belongs to the copy of the streaming server, of which there is one.
     every few minutes rather than once a day, because a desktop used only
     during working hours has nobody connected to it at any moment a nightly
     check would happen to look. Set it to 0 to never reap.
+
+    The same clock governs an ephemeral slot, where stopping is not
+    reversible: the home and the profile are held in memory and go with the
+    session. Reaping is also the only thing that ever frees such a slot, so it
+    is not exempt; to give one slot a longer window without moving every
+    session, set the value in `/etc/hdw4s/`<slot>`.conf`.
 
   * `HDW4S_MEDIA_PORTS`:
     Either `proxied`, the default, or `direct`. The streaming server scatters

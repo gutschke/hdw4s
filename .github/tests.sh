@@ -13,7 +13,10 @@
 #           ok() is an echo and a printf and does not.
 #   SC1091  setup.sh is written by sandbox() at run time, so there is nothing
 #           on disk for the linter to follow.
-# shellcheck disable=SC2034,SC2154,SC2030,SC2031,SC2015,SC1091
+#   SC2317  the stubs standing in for systemctl and ss are called only from the
+#           code sourced out of hdw4s, which the linter cannot see, so it reads
+#           every branch of them as dead.
+# shellcheck disable=SC2034,SC2154,SC2030,SC2031,SC2015,SC1091,SC2317
 export LC_ALL='C'
 set -o nounset -o pipefail
 
@@ -881,10 +884,93 @@ echo '== the relay names no session unit, and enable supplies one =='
      "$(set -- "${SB}/units"/*carol*; [ -e "$1" ] && echo present || echo absent)" 'absent'
 )
 
+echo '== what the reaper tells someone whose session it just stopped =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # An ephemeral slot keeps its home and its profile in memory, so stopping it
+  # destroys both. The reaper was written for named desktops, where stopping is
+  # reversible, and printed the named-desktop reassurance -- "Its files and
+  # settings are untouched" -- at the moment an ephemeral session's files
+  # stopped existing. Reproduced on a live slot on 2026-09-19: a marker file
+  # written into the home, and read back, was gone after the run that printed
+  # that line; a control run in which the slot was not selected left it there.
+  #
+  # Selecting ephemeral slots is deliberate and stays: the ephemeral unit
+  # carries no RuntimeMaxSec on purpose and names this window as the cap that
+  # frees a slot. What had to become true is the sentence, not the choice.
+  #
+  # Nothing exercised cmd_reap before this, which is why the message was wrong
+  # for half the session types for as long as both types existed.
+  unset JOURNAL_STREAM
+  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
+  printf '%s\n' '0 dora' '1 eph0 ephemeral' > "${SLOTS}"
+  mkdir -p "${RUNDIR}/hdw4s/dora" "${RUNDIR}/hdw4s/eph0" "${REAPDIR}"
+
+  # Nobody is connected: ss reports nothing, and the proxy exists, so that
+  # "nothing" means "nobody there" rather than "we could not look".
+  ss() { :; }
+  STOPPED="${SB}/stopped"; : > "${STOPPED}"
+  # "${3:-}", not "$3". The script under test runs under "set -o nounset", the
+  # stub inherits it, and "systemctl is-active <unit>" has no third argument:
+  # the bare form aborted the stub with an unset-variable error that the
+  # caller's 2>/dev/null swallowed. is-active then answered nothing, every
+  # session was skipped, and this group passed its "nothing was stopped"
+  # assertions while proving nothing whatever. That is why the positive is
+  # asserted before any negative below.
+  systemctl() {
+    case "$1 ${3:-}" in
+      'is-active ') echo 'active';;
+      'show -p')    case "${4:-}" in MainPID) echo 4242;; *) echo '';; esac;;
+      'stop '*)     printf '%s\n' "$2" >> "${STOPPED}";;
+    esac
+  }
+
+  # A slot still inside its window is the control: if this one is stopped too,
+  # the group says nothing about selection.
+  back="$(( $(date +%s) - 86400 ))"
+  printf '%s\n' "${back}" > "${REAPDIR}/eph0"
+  printf '%s\n' "${back}" > "${REAPDIR}/dora"
+  out="$(cmd_reap 2>/dev/null)"
+  is 'a session inside its window is left alone' "${out}" ''
+  is 'and nothing was stopped'                   "$(wc -l < "${STOPPED}")" '0'
+
+  # Now past the window, set per instance -- never on the site default, which
+  # would move every session at once.
+  printf 'HDW4S_IDLE_DAYS=1\n' > "${SB}/etc/eph0.conf"
+  out="$(cmd_reap 2>/dev/null)"
+  has   'the ephemeral slot is now selected'  "${out}" 'stopping eph0'
+  has   'and its unit is the one stopped'     "$(cat "${STOPPED}")" 'hdw4s-ephemeral@eph0.service'
+  hasnt 'the desktop beside it is left alone' "${out}" 'stopping dora'
+
+  # The defect itself. Read out of what the run printed, never grepped out of
+  # the script: the comment recording this failure contains the same string.
+  hasnt 'no promise that an ephemeral home survived' "${out}" 'untouched'
+  hasnt 'and none that it comes back as it was'      "${out}" 'starts it again'
+  has   'it says what was in memory is gone'         "${out}" 'gone'
+
+  # And the reassurance is still given where it is true, so the fix cannot be
+  # "delete the sentence".
+  : > "${STOPPED}"
+  printf 'HDW4S_IDLE_DAYS=1\n' > "${SB}/etc/dora.conf"
+  out="$(cmd_reap 2>/dev/null)"
+  has 'both kinds are reported in one run' "${out}" 'stopping dora'
+  has 'and the ephemeral one still is too' "${out}" 'stopping eph0'
+  is  'two sessions stopped'               "$(wc -l < "${STOPPED}")" '4'
+
+  # That combined transcript carries both messages, so an assertion against it
+  # is satisfied by either session -- swapping the branch over leaves every
+  # string present. A desktop on its own is what pins the reassuring text to
+  # the session type it is true of.
+  printf '%s\n' '0 dora' > "${SLOTS}"
+  out="$(cmd_reap 2>/dev/null)"
+  has   'a desktop alone gets the reassurance' "${out}" 'untouched'
+  has   'and is told it comes back'            "${out}" 'starts it again'
+  hasnt 'and is never told its home is gone'   "${out}" 'gone'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=170   # update when tests are added; a wrong number is the point
+EXPECTED=184   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

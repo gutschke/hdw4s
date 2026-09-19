@@ -65,6 +65,18 @@ DROPIN='/etc/systemd/system'
 # hardcoded, it made every behaviour of cmd_reap untestable, which is why a
 # message that was wrong for half the session types survived unnoticed.
 REAPDIR="${HDW4S_REAP_STAMP_DIR:-/run/hdw4s-reap}"
+# The runtime tree a session publishes its own live state in. Overridable for
+# the same reason, and needed alongside REAPDIR rather than instead of it: the
+# reaper reads the stamp only for an instance whose directory here exists, so
+# pointing the stamps somewhere disposable and leaving this one absolute still
+# leaves every reaper decision unreachable from a test. Two overrides, because
+# the reaper consults two trees.
+#
+# Filesystem paths only. The "/run/..." that appear in text printed for an
+# operator -- the nginx block, the socket named by "hdw4s show" -- stay literal:
+# they describe the machine rather than this process, and a test override must
+# not rewrite what a human is told to type.
+RUNDIR="${HDW4S_RUNDIR:-/run}"
 
 # Defaults. Every one of these may be overridden in /etc/hdw4s/hdw4s.conf.
 #
@@ -471,7 +483,7 @@ cmd_list() {
     fi
     printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
       "${inst}" "${user}" "${port}" "${auth}" "${prof}" "${trans}" "${state}" \
-      "$(cat "/run/hdw4s/${inst}/display" 2>/dev/null || echo '-')"
+      "$(cat "${RUNDIR}/hdw4s/${inst}/display" 2>/dev/null || echo '-')"
   done < <(sort -n "${SLOTS}")
 
   [ "${orphaned}" -eq 0 ] || {
@@ -561,7 +573,7 @@ cmd_show() {
   # unprivileged caller, about sessions that have one.
   [ ! -e "${ETCDIR}/${inst}.keyring.cred" ] ||
     echo 'keyring       its own, unlocked at start'
-  echo "display       $(cat "/run/hdw4s/${inst}/display" 2>/dev/null ||
+  echo "display       $(cat "${RUNDIR}/hdw4s/${inst}/display" 2>/dev/null ||
                         echo 'not running (assigned at start)')"
 }
 
@@ -1346,7 +1358,7 @@ cmd_reap() {
     # only the reaper can write.
     local stampdir="${REAPDIR}"
     install -d -m0700 -o root -g root "${stampdir}" 2>/dev/null || :
-    [ -d "/run/hdw4s/${inst}" ] || continue
+    [ -d "${RUNDIR}/hdw4s/${inst}" ] || continue
     local stamp="${stampdir}/${inst}"
     # "unknown" first: it is not a number, and treating it as one would be an
     # arithmetic error rather than the cautious answer it is meant to be.

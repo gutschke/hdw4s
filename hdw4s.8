@@ -59,7 +59,7 @@ Stop a session and close its front door, so nothing starts it again\. The slot s
 Remove the credential \fBauth\fR added, and explain when running without one is a reasonable choice\. Editing the file by hand is the same decision made quietly; this is the supported way to make it\.
 .TP
 \fBreap\fR
-Stop sessions nobody has connected to for \fBHDW4S_IDLE_DAYS\fR\. Run from a timer; there is no need to invoke it by hand\.
+Stop sessions nobody has connected to for \fBHDW4S_IDLE_DAYS\fR\. Run from a timer; there is no need to invoke it by hand\. Stopping a named session keeps its files and settings; stopping an ephemeral slot destroys the session, because its home and profile are held in memory\.
 .TP
 \fBrelease\fR \fIinstance\fR
 Stop a session and give up its slot, so another session may take the port\. The session's profile directory is left in place\.
@@ -167,6 +167,8 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 \fBHDW4S_SESSION\fR: The desktop to start; defaults to \fBgnome\-session\fR\. Anything that runs on X11 works, and nothing else in a session depends on the choice\. GNOME 50, which Ubuntu 26\.04 ships, removes the X11 session that the current Selkies release needs, whereas Xorg and the lighter desktops have no such plan, so changing this is the whole migration when that matters\.
 .IP "\[ci]" 4
 \fBHDW4S_IDLE_DAYS\fR: How long a session may go with nobody connected before \fBreap\fR stops it\. Defaults to 7\. Measured by connections rather than by typing, so work left running is not mistaken for an idle desktop\. Connections are looked for every few minutes rather than once a day, because a desktop used only during working hours has nobody connected to it at any moment a nightly check would happen to look\. Set it to 0 to never reap\.
+.IP
+The same clock governs an ephemeral slot, where stopping is not reversible: the home and the profile are held in memory and go with the session\. Reaping is also the only thing that ever frees such a slot, so it is not exempt; to give one slot a longer window without moving every session, set the value in \fB/etc/hdw4s/\fR\fIslot\fR\fB\.conf\fR\.
 .IP "\[ci]" 4
 \fBHDW4S_MEDIA_PORTS\fR: Either \fBproxied\fR, the default, or \fBdirect\fR\. The streaming server scatters connection candidates across the ephemeral port range on every address the machine has\. \fBproxied\fR drops new inbound connections to that range, which closes them; \fBdirect\fR leaves them reachable, which is needed only when a browser reaches the streaming server without a proxy in between\.
 .IP "\[ci]" 4
