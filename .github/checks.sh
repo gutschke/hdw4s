@@ -298,6 +298,33 @@ fi
 # Anything reaching the interpreter some third way -- a file with neither,
 # run as "python3 thatfile" or imported by path -- is not in this list, and
 # adding one means changing this derivation.
+#
+# There are two derivations because there are two trees, and the second one
+# is where the package is actually built. A build copy is not a repository of
+# its own, so the git list is empty there and this used to skip -- leaving
+# the release path, the only path that ships anything, parsing no payload at
+# all. The fallback walks the filesystem instead, and it has an assumption of
+# its own that is NOT the git one and has to be stated separately:
+#
+#   it assumes nothing that must parse lives in .git, private, tmp or
+#   node_modules -- the same four the scans at the top of this file already
+#   exclude -- nor in debian's generated trees, which are .debhelper and one
+#   directory per Package: in debian/control.
+#
+# Neither half is decoration, and both were found by running it.
+# debian/<package> is a staging tree holding a COPY of each installed file:
+# private/build/hdw4s/debian/hdw4s/usr/lib/hdw4s/hdw4s-gate-index is exactly
+# the file this check exists for, left over from an earlier build, and
+# parsing that instead of the source would report on a stale duplicate --
+# the same defect this check already had once, looking at something adjacent
+# to the payload and calling it the payload. And the first version of this
+# walk, pruning only .git at the top, descended into tmp/selkies, which is
+# an upstream checkout, and failed the run on fourteen files inside its
+# .git/rr-cache. Another project's tree is not ours to parse.
+#
+# A tree whose generated directories are named some other way needs this
+# list changed -- which is the point of writing the assumption down rather
+# than leaving the next person to rediscover it, as this one was.
 pyfail=''
 # The same guard, for both of the same reasons. Outside a repository this
 # assignment carried git's exit 128 out through "set -e": the run ABORTED
@@ -306,21 +333,40 @@ pyfail=''
 # failed". And in a copy that sits inside this repository, git answers about
 # the parent, where the copy is ignored -- so the list came back empty and
 # this reported "no python in this package" with eight Python files present.
-if ! same_repo; then
-  skip 'python syntax' 'this tree is not a git repository of its own -- the file list could not be derived'
-  pyfiles=''
+pysrc=''
+pyfiles=''
+python_from_stdin() {
+  while IFS= read -r -d '' f; do
+    [ -f "${f}" ] || continue
+    case "${f}" in *.py) printf '%s\n' "${f}"; continue;; esac
+    case "$(head -n1 -- "${f}" 2>/dev/null)" in
+      '#!'*python*) printf '%s\n' "${f}";;
+    esac
+  done
+}
+if same_repo; then
+  pysrc='the git index'
+  pyfiles="$(git ls-files -z 2>/dev/null | python_from_stdin)"
+elif [ -r debian/control ]; then
+  pysrc='a filesystem walk'
+  pyprune=(-name .git -o -name private -o -name tmp -o -name node_modules
+           -o -path ./debian/.debhelper)
+  while read -r pypkg; do
+    [ -n "${pypkg}" ] || continue
+    pyprune+=(-o -path "./debian/${pypkg}")
+  done < <(awk '/^Package:/ {print $2}' debian/control)
+  pyfiles="$(find . \( "${pyprune[@]}" \) -prune -o -type f -print0 |
+             python_from_stdin | sed 's|^\./||')"
 else
-  pyfiles="$(git ls-files -z 2>/dev/null |
-    while IFS= read -r -d '' f; do
-      [ -f "${f}" ] || continue
-      case "${f}" in *.py) printf '%s\n' "${f}"; continue;; esac
-      case "$(head -n1 -- "${f}" 2>/dev/null)" in
-        '#!'*python*) printf '%s\n' "${f}";;
-      esac
-    done)"
+  # The guard stays. It is not unreachable: a tree that is neither a
+  # repository nor a Debian source tree gives this nothing to walk, and
+  # saying so is better than walking an unknown directory. Outside a
+  # repository the git call used to carry exit 128 out through "set -e" and
+  # abort the run mid-column, having printed an unbroken sequence of ok.
+  skip 'python syntax' 'neither a git repository of its own nor a Debian source tree -- the file list could not be derived'
 fi
 if [ -z "${pyfiles}" ]; then
-  same_repo && note 'python syntax' 'no python in this package'
+  [ -z "${pysrc}" ] || note 'python syntax' "no python in this package (from ${pysrc})"
 else
   for f in ${pyfiles}; do
     if ! python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "${f}" 2>/dev/null; then
@@ -328,7 +374,8 @@ else
     fi
   done
   if [ -z "${pyfail}" ]; then
-    note 'python syntax' "$(printf '%s\n' "${pyfiles}" | wc -l) file(s) parse"
+    note 'python syntax' \
+      "$(printf '%s\n' "${pyfiles}" | wc -l) file(s) parse (from ${pysrc})"
   else
     bad 'python syntax' "does not parse:${pyfail}"
   fi
