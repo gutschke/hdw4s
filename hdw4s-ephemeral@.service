@@ -317,6 +317,29 @@ LimitCORE=0
 MemorySwapMax=0
 OOMPolicy=continue
 KillMode=control-group
+# THIS SESSION TYPE TAKES THE FULL STOP TIMEOUT TO DIE -- 91 seconds, measured
+# from the journal, not estimated: "Stopping" to "State 'final-sigterm' timed
+# out. Killing." against the default TimeoutStopUSec of 1min 30s. The cause is
+# not a systemd subtlety and not an ordering bug: several of GNOME's gsd-*
+# helpers do not exit on SIGTERM and have to be SIGKILLed, so the timeout is
+# reached in full every time.
+#
+# Three consequences, all of which have been reasoned about wrongly here
+# before, which is why they are written down rather than left to be re-derived:
+#
+#   - "Logging out destroys the session immediately" is FALSE by up to ninety
+#     seconds. No user-facing string may say "immediately" until this changes.
+#     For that minute and a half everything is still resident and the slot is
+#     neither usable nor free.
+#   - A grace window shorter than the stop timeout cannot free a slot inside
+#     the window, so tuning the window below it buys nothing.
+#   - Anything that reports capacity will report "full" during teardown, i.e. a
+#     state that clears on a timer with no visible cause.
+#
+# An earlier 1.8 s measurement of this path does NOT contradict the above and
+# must not be cited against it: it was taken by stopping the unit explicitly,
+# which is the one path where the interesting directives are indistinguishable,
+# so it never met the case it was written for.
 
 ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
 # The session type arrives as an ARGUMENT, not as an environment variable.

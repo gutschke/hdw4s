@@ -641,6 +641,35 @@ lockdown=(
   # password that cannot match while it is unset -- measured, not assumed.
   # What they widen is what a second viewer may do once here, which in this
   # deployment is anyone the proxy has already let through.
+  #
+  # That reasoning is conditioned on the session type and says so, because it
+  # was nearly reused where it is false: it holds where each person has their
+  # own front door and their own credential, so "past the proxy" means "is that
+  # person". It does NOT hold for a session type reached from one front door
+  # with no identity in front of it, where "past the proxy" means "is on the
+  # network".
+  #
+  # Which of the three is actually consumed is transport-dependent, and it was
+  # got wrong once in the other direction -- a note claiming all three are dead
+  # on the websockets path, generalised from one build, and it is not true of
+  # the tree below. Measured by reading the code at upstream
+  # selkies-project/selkies 2.0.0rc0-188-g8fd2aaef, whole-word matches:
+  #
+  #   enable_sharing  WebRTC ONLY. Nothing on the websockets path reads it, so
+  #                   where websockets is the configured transport this switch
+  #                   is inert and must not be described as a control.
+  #   enable_shared   read on BOTH. On websockets it refuses a client asking for
+  #                   the viewer role. Turning it off does not make sharing
+  #                   read-only -- it removes view-only viewers and leaves the
+  #                   interactive ones, which is the opposite of the intent a
+  #                   reader brings to the name.
+  #   enable_collab   read on BOTH. It is the switch that decides whether a
+  #                   non-controller may hold an input context at all, so it is
+  #                   the one that genuinely separates watching from driving.
+  #
+  # So "turn the sharing flags off" is neither a no-op nor a way to get
+  # read-only sharing, and the flag names do not predict which it is. Check the
+  # transport that is configured before reasoning from any of them.
   --enable-sharing='true|locked'
   --enable-shared='true|locked'
   --enable-collab='true|locked'

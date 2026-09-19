@@ -56,6 +56,34 @@ OVERLAY = r"""
   var body = document.getElementById('hdw4s-body');
   var booted = false;
 
+  // WHAT AN EVICTED PAGE ACTUALLY DOES, measured on both transports at upstream
+  // selkies-project/selkies 2.0.0rc0-188-g8fd2aaef. This differs sharply between the
+  // two, at exactly the moment this overlay depends on, so nothing here may assume one.
+  //
+  //   websockets  the last frame is RETAINED. The video element is still present,
+  //               srcObject still set, same dimensions, and the picture survives with
+  //               and without upstream's status bar, which is drawn on top of it.
+  //   WebRTC      upstream raises a NATIVE alert() on this ordinary lifecycle event
+  //               ("Disconnected: ... Please try again."). A native modal blocks the
+  //               page's main thread, so nothing in the page can respond -- including
+  //               this wrapper -- until a person clicks OK. After dismissal the page is
+  //               completely alive, and upstream's own status then reads "Connected"
+  //               for a session it has just been evicted from.
+  //
+  // RETRACTION, kept because it cost an afternoon and the wrong answer is the reachable
+  // one: that unresponsive WebRTC tab was diagnosed as WEDGED, by three separate probes
+  // that each ruled something out and were each correct in what they measured. They all
+  // asked the page, and the page was behind a modal. There is no wedge. The screenshot
+  // was captured at the start and not looked at. Count nothing you have not looked at.
+  //
+  // AND THE TRANSPORT IS NOT A PROPERTY OF THE SESSION TYPE. It is whatever the
+  // administrator configured; either choice is legitimate. So "named sessions behave
+  // this way and ephemeral ones that way" is false -- both behaviours are reachable for
+  // any session. This overlay must therefore work WITHOUT depending on either
+  // mechanism, which is why it is markup placed behind the video at page load rather
+  // than anything that has to run at the moment of eviction. That is a requirement, not
+  // a convenience: on WebRTC the modal appears before our code gets a turn.
+  //
   // Two states, kept apart on purpose. Cold: this tab has never connected and cannot
   // know what is open elsewhere, so the consequence is conditional. Lost: this tab WAS
   // connected and was disconnected, which is a fact and is stated as one.

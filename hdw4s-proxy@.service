@@ -27,6 +27,56 @@ OnFailure=hdw4s-refuse@%i.service
 # data path. The session listens on loopback only; this is what the outside
 # world reaches, and the port it forwards to comes from a drop-in written by
 # "hdw4s enable", because a template unit cannot work it out from %i.
+#
+# Two measured facts for anyone who replaces this with a front door of ours,
+# because both were expensive and both are counter-intuitive. Kept here rather
+# than in a design note: this is the file whose claim they revise.
+#
+# 1. A CONNECTION-LEVEL SPLICER CANNOT CARRY IDENTITY; A PER-REQUEST ROUTER CAN.
+#    The obvious cheap shape -- read the first request's headers, pick a
+#    backend, then become a byte pipe -- is unsound, and not by a little.
+#    HTTP/1.1 pools connections per ORIGIN, so two sessions on one hostname
+#    under different paths are the same origin and request 2 is delivered to
+#    request 1's backend. Measured with two stand-in backends, one connection
+#    per request as the control: the control routed both correctly and the
+#    pooled case mis-routed, so the failure is the pooling and not a broken rig.
+#    That is a cross-session read, not a cosmetic mis-render.
+#    A second run then bounded the finding, because the first wording had grown
+#    into a general law ("only the address the connection was made to survives
+#    pooling") that would have ruled out the one-hostname model on a false
+#    premise. Three arms, the splicer kept in as a control so a pass could not
+#    come from a broken rig: splicer mis-routed; a per-request router routed
+#    both correctly; an upgrade on one path followed by a plain request on
+#    another connection also routed correctly. So pooling defeats SPLICING, not
+#    path identity. Anything that parses every request sees the path on every
+#    request.
+#    The price is not correctness, it is availability: a component of ours that
+#    parses everything is one component whose failure takes every session, where
+#    a socket-proxyd failure takes exactly one. Keep the listening socket in a
+#    socket unit, as it is today, so a crash loses in-flight connections and
+#    systemd hands the next one to a restarted router.
+#    THE FALSE GREEN THIS NEARLY PRODUCED, and it will catch the next person: a
+#    stand-in reverse proxy at its DEFAULTS opens a fresh upstream connection
+#    per request and does not reproduce this at all. A test of any router that
+#    does not explicitly enable upstream keep-alive passes while the defect is
+#    live behind proxies that pool by default.
+#
+# 2. A PATH PREFIX IS A ROUTING KEY AND A REFUSAL. IT IS NOT A SECRET.
+#    Giving each session its own URL prefix does buy a real refusal, and it is
+#    worth having: a visitor with the hostname but not the prefix gets 404
+#    immediately, where otherwise they get a long hang or somebody's live
+#    desktop. Measured.
+#    But it cannot be the capability. The streaming server runs AS the session's
+#    own uid inside the session's namespace, so every setting it is given sits
+#    in its own /proc/<pid>/environ, which that uid may read by definition, and
+#    which hiding other processes does not touch -- that hides other processes,
+#    not your own. Measured, both the prefix and the proxy credential beside it.
+#    Code running in the desktop can therefore read its own share link and hand
+#    it out, and a path carries no role, so whoever takes it gets interactive
+#    control. Sound where the occupant owns the session; wrong for a session
+#    type whose premise is that the code inside it is untrusted.
+#    So the capability is held and validated by the router, BEFORE any byte
+#    reaches a session, and nothing secret is passed downstream.
 ExecStartPre=/usr/lib/hdw4s/hdw4s-wait %i
 ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:1
 CapabilityBoundingSet=
