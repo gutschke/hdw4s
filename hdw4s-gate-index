@@ -3,6 +3,21 @@
 
     hdw4s-gate-index <upstream index.html> <output index.html>
     HDW4S_SESSION_NAME names the session on the card and in the tab.
+    HDW4S_GATE_MODE   takeover (default) | mint | off -- what arrival does.
+    HDW4S_SHARE_MODE  off (default) | view | control  -- what sharing offers.
+
+Those two are DEFAULTS, not settings. Each is also readable from the query string
+("?gate=off", "?share=view"), and the query string wins. That is deliberate and it is
+the cheaper carrier of the two: changing a baked default means re-running
+"hdw4s-webroot build", which copies a fresh tree from the packaged client and therefore
+removes the live tree's "hdw4s-incarnation" file until the next session start
+republishes it. A URL costs nothing and lets two arms be open side by side, which is
+what comparing them requires.
+
+Neither knob is a product setting. Both exist because two questions -- whether arrival
+should ask before handing over a desktop, and what a sharing link should say it grants
+-- cannot be settled by argument, only by using each answer and comparing. Remove them
+once each is settled: a knob kept past its decision is a decision nobody made.
 
 Upstream's document is taken as-is; only the module <script> is removed -- that removal
 IS the gate, because both transports evict on connect and a client that never loads
@@ -42,12 +57,39 @@ OVERLAY = r"""
  #hdw4s-gate button{margin-top:1.3rem;padding:.65rem 1.15rem;font:inherit;border:0;
    border-radius:8px;background:#772953;color:#fff;cursor:pointer}
  #hdw4s-gate .err{color:#ff8a80;white-space:pre-wrap}
+ /* Same cascade trap as the gate above, and for the same reason: every one of these
+    is toggled with .hidden and every one of them sets its own display. Without the
+    !important rule the property reads back true in the DOM and the element stays on
+    the screen -- which is the exact defect a 20-case matrix once passed against. */
+ #hdw4s-share[hidden],#hdw4s-panel[hidden],#hdw4s-role[hidden]{display:none !important}
+ #hdw4s-share{position:fixed;right:12px;bottom:12px;z-index:2147483646;
+   font:13px/1.5 system-ui,sans-serif}
+ #hdw4s-share>button{padding:.4rem .8rem;border:0;border-radius:6px;background:#772953;
+   color:#fff;font:inherit;cursor:pointer;opacity:.85}
+ #hdw4s-panel{position:absolute;right:0;bottom:2.4rem;width:24rem;padding:.9rem 1rem;
+   background:#242424;color:#ddd;border-radius:10px;box-shadow:0 8px 30px #000b}
+ #hdw4s-panel p{margin:.4rem 0}
+ #hdw4s-panel .lnk{display:block;width:100%;margin:.3rem 0;padding:.35rem;font:12px/1.4
+   ui-monospace,monospace;background:#111;color:#eee;border:1px solid #444;border-radius:4px}
+ #hdw4s-panel .warn{color:#ffcc80}
+ #hdw4s-panel .blind{color:#ff8a80}
+ #hdw4s-panel button{margin-top:.5rem;padding:.3rem .7rem;border:0;border-radius:5px;
+   background:#444;color:#fff;font:inherit;cursor:pointer}
+ #hdw4s-role{position:fixed;left:12px;bottom:12px;z-index:2147483646;max-width:26rem;
+   padding:.45rem .8rem;border-radius:8px;background:#242424e6;color:#ddd;
+   font:13px/1.45 system-ui,sans-serif}
+ #hdw4s-role b{color:#fff}
 </style>
 <div id="hdw4s-gate" hidden><div class="card">
   <h1>__NAME__</h1><div id="hdw4s-body"></div>
   <button id="hdw4s-go">Connect</button>
   <p class="err" id="hdw4s-err"></p>
 </div></div>
+<div id="hdw4s-share" hidden>
+  <div id="hdw4s-panel" hidden></div>
+  <button id="hdw4s-share-btn">Share</button>
+</div>
+<div id="hdw4s-role" hidden></div>
 <script>
 (() => {
   var SRC = __SRC__;
@@ -56,6 +98,25 @@ OVERLAY = r"""
   var body = document.getElementById('hdw4s-body');
   var go   = document.getElementById('hdw4s-go');
   var booted = false;
+
+  // --- the two knobs, and why a bad one is loud -------------------------------------
+  // CFG is baked at generation; the query string wins over it. A value that is not one
+  // of the arms does NOT quietly fall back: it falls back AND says so, on the screen.
+  // An instrument that ignores its own knob reports on an arm nobody chose, and this
+  // project has already shipped a QA matrix that tested one transport twice because a
+  // mis-set knob was silently ignored.
+  var CFG = __CFG__;
+  var BADKNOB = [];
+  function pick(name, allowed){
+    var v = null;
+    try { v = new URLSearchParams(location.search).get(name); } catch(e){}
+    if (v === null || v === '') return CFG[name];
+    if (allowed.indexOf(v) >= 0) return v;
+    BADKNOB.push(name + '=' + v + ' (not one of ' + allowed.join('/') + ')');
+    return CFG[name];
+  }
+  var GATE  = pick('gate',  ['takeover','mint','off']);
+  var SHARE = pick('share', ['off','view','control']);
 
   // WHAT AN EVICTED PAGE ACTUALLY DOES, measured on both transports at upstream
   // selkies-project/selkies 2.0.0rc0-188-g8fd2aaef. This differs sharply between the
@@ -108,9 +169,22 @@ OVERLAY = r"""
   var COLD_GO = 'Connect';
   var LOST_GO = 'Bring it back here';
 
+  // The THIRD arrival arm, and the reason there are three rather than two. The
+  // committed shape for this product is that arriving always mints a fresh desktop
+  // and never resumes one -- at which point COLD's whole body, a warning about taking
+  // a desktop away from another tab, is a warning about something that will not
+  // happen. Offering only "COLD or nothing" would ask him to rule on a card the design
+  // has already retired. This arm is what arrival says once R1 holds; it is text, it
+  // costs nothing, and without it the comparison is between the wrong two things.
+  var MINT = '<p>This will start a fresh desktop.</p>'
+    + '<p>Nothing from anyone else is in it, and nothing in it survives being closed.</p>';
+  var MINT_GO = 'Start a fresh desktop';
+
   function show(k, label){
     body.innerHTML = k;
     go.textContent = label;
+    if (BADKNOB.length)
+      document.getElementById('hdw4s-err').textContent = 'ignored: ' + BADKNOB.join('; ');
     gate.hidden = false;
   }
 
@@ -215,6 +289,86 @@ OVERLAY = r"""
     if (everMoved && still >= 20) lost('stalled');   // ~10 s with no frames at all
   }, 500);
 
+  // --- what a page is, said on the page --------------------------------------------
+  // Measured, and every line below is a measurement rather than an intention:
+  //   #shared    cannot type or point -- refused by the SERVER's input authority, not
+  //              by its own page -- and RECEIVES the desktop's clipboard.
+  //   #display2  full pointer, keyboard and clipboard both ways, with no card.
+  //   both       are invisible to the primary, and outlive both the primary's tab and
+  //              the desktop being replaced. There is no revocation.
+  // Today a viewer is told none of this: those fragments boot ungated and the page
+  // looks like any other. The badge is the half of "show an overlay when a session is
+  // shared" that can honestly be done in the client. The other half -- telling the
+  // PRIMARY somebody is there -- is measured NOT available to a page, and the panel
+  // below says so instead of pretending.
+  var ROLES = {
+    shared:  '<b>You are watching someone’s desktop.</b> You cannot type or move '
+           + 'the pointer. What they copy is shared with you. They are not told you '
+           + 'are here.',
+    display2:'<b>You have full control of someone’s desktop.</b> Keyboard, pointer '
+           + 'and clipboard, both ways. They are not told you are here.',
+    other:   '<b>You are a second display for someone’s desktop.</b>'
+  };
+  function roleOf(){
+    var m = /^#(shared|display2|player[2-4])/.exec(location.hash);
+    if (!m) return null;
+    return ROLES[m[1]] || ROLES.other;
+  }
+  function notice(html){
+    var el = document.getElementById('hdw4s-role');
+    el.innerHTML = html; el.hidden = false;
+  }
+
+  var PANELS = {
+    view: {
+      frag: '#shared',
+      html: '<p>Anyone with this link can <b>watch</b> this desktop.</p>'
+          + '<p>They cannot type or move the pointer: the server refuses their input, '
+          + 'not just their page.</p>'
+          + '<p class="warn">They <b>do</b> receive this desktop’s clipboard. '
+          + 'Everything you copy goes to them.</p>'
+    },
+    control: {
+      frag: '#display2',
+      html: '<p>Anyone with this link gets the <b>keyboard, pointer and clipboard</b> '
+          + 'of this desktop, both ways.</p>'
+          + '<p class="warn">They arrive with no announcement and no card.</p>'
+    }
+  };
+  // Said on both panels, because it is the thing he is actually being asked to rule
+  // on and it is the thing a screenshot of a working share would hide.
+  var PANEL_TAIL =
+      '<p class="blind">This tab cannot tell you whether anyone is connected, or who. '
+    + 'That is measured, not an omission.</p>'
+    + '<p class="blind">The link keeps working after you close this tab and after this '
+    + 'desktop is replaced. Nothing takes it back.</p>'
+    + '<p>Copying puts the link on your own clipboard — which this desktop also '
+    + 'syncs, so the link can reach anyone already watching. Read it here instead if '
+    + 'that matters.</p>';
+
+  function mountShare(){
+    if (SHARE === 'off' || roleOf()) return;   // never offered to a viewer
+    var wrap  = document.getElementById('hdw4s-share');
+    var panel = document.getElementById('hdw4s-panel');
+    var btn   = document.getElementById('hdw4s-share-btn');
+    var spec  = PANELS[SHARE];
+    var url   = location.origin + location.pathname + location.search + spec.frag;
+    panel.innerHTML = spec.html
+      + '<input class="lnk" readonly value="' + url.replace(/"/g,'&quot;') + '">'
+      + PANEL_TAIL
+      + '<button type="button" id="hdw4s-copy">Copy link</button>';
+    panel.querySelector('#hdw4s-copy').addEventListener('click', function(){
+      var i = panel.querySelector('.lnk');
+      i.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch(e){}
+      if (!ok && navigator.clipboard) navigator.clipboard.writeText(url).catch(function(){});
+      this.textContent = 'Copied';
+    });
+    btn.addEventListener('click', function(){ panel.hidden = !panel.hidden; });
+    wrap.hidden = false;
+  }
+
   function boot(){
     try { sessionStorage.setItem(KEY,'1'); } catch(e){}
     gate.hidden = true;
@@ -237,9 +391,15 @@ OVERLAY = r"""
                   'hdw4s: could not reconnect - ' + e; show(LOST, LOST_GO); return; }
     }
     window.__hdw4sBooted = true; window.__hdw4sLost = null;
+    var r = roleOf();
+    if (r) notice(r); else mountShare();
+    if (BADKNOB.length && !r) notice('ignored: ' + BADKNOB.join('; '));
   }
 
   window.__hdw4sContract = {module: SRC};
+  // Published so a check can assert which arm is in force against the bytes the
+  // browser actually ran, rather than against the file somebody meant to serve.
+  window.__hdw4sArms = {gate: GATE, share: SHARE, bad: BADKNOB};
   go.addEventListener('click', boot);
 
   var seen=false; try { seen = sessionStorage.getItem(KEY)==='1'; } catch(e){}
@@ -248,10 +408,29 @@ OVERLAY = r"""
   if (seen) return boot();
   // Second monitors and shared viewers must never be shown a takeover button.
   if (/^#(shared|player[2-4]|display2)/.test(location.hash)) return boot();
+  // gate=off is about ARRIVAL and nothing else. lost() still shows its card: a tab
+  // that is taken away silently is worse than one that was never asked, and that is
+  // not the question being decided here.
+  if (GATE === 'off') return boot();
+  if (GATE === 'mint') return show(MINT, MINT_GO);
   show(COLD, COLD_GO);
 })();
 </script>
-""".replace("__SRC__", json.dumps(src_attr)) \
+"""
+
+# Refused at GENERATION, not clamped. A default nobody chose is how a whole build
+# quietly serves the wrong arm, and the person who mistyped it is standing right here
+# with the message, whereas at page-load time they are not.
+ARMS = {"gate": ("takeover", "mint", "off"), "share": ("off", "view", "control")}
+cfg = {}
+for knob, allowed in ARMS.items():
+    env = "HDW4S_%s_MODE" % knob.upper()
+    cfg[knob] = os.environ.get(env) or allowed[0]
+    if cfg[knob] not in allowed:
+        raise SystemExit("%s=%r is not one of %s" % (env, cfg[knob], "/".join(allowed)))
+
+OVERLAY = OVERLAY.replace("__SRC__", json.dumps(src_attr)) \
+     .replace("__CFG__", json.dumps(cfg)) \
      .replace("__NAME__", html_escape(os.environ.get("HDW4S_SESSION_NAME", "Desktop")))
 html = html.replace("</body>", OVERLAY + "</body>") if "</body>" in html else html + OVERLAY
 open(dst, "w", encoding="utf-8").write(html)

@@ -967,10 +967,47 @@ echo '== what the reaper tells someone whose session it just stopped =='
   hasnt 'and is never told its home is gone'   "${out}" 'gone'
 )
 
+echo '== the arrival and sharing arms are chosen at generation, and a bad one is refused =='
+# Written from the failure: a QA matrix once tested one transport twice because a
+# mis-set knob was silently ignored, so the generator must REFUSE a value it does not
+# know rather than fall back to a default nobody chose. The input here is a synthetic
+# one-line document, not the packaged client: what is under test is the generator's
+# choice of arm, and the packaged tree is a build artifact this suite cannot have.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+  gen() { "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/out.html" >/dev/null 2>"${d}/err"; }
+
+  HDW4S_GATE_MODE=mint  gen && has 'the gate arm reaches the page' \
+    "$(cat "${d}/out.html")" '"gate": "mint"'
+  HDW4S_SHARE_MODE=view gen && has 'the share arm reaches the page' \
+    "$(cat "${d}/out.html")" '"share": "view"'
+
+  # The default must be the behaviour that already shipped, so that installing this
+  # changes nothing until somebody asks for an arm.
+  gen; a="$(cat "${d}/out.html")"
+  HDW4S_GATE_MODE=takeover HDW4S_SHARE_MODE=off gen; b="$(cat "${d}/out.html")"
+  is 'the default is the shipped behaviour' "${a}" "${b}"
+
+  # Seen to go red, in both knobs, with the positive control above proving the same
+  # command succeeds when the arm is one it knows.
+  HDW4S_GATE_MODE=banana gen && bad 'a bad gate arm is refused' 'it was accepted' \
+    || has 'a bad gate arm is refused' "$(cat "${d}/err")" 'is not one of'
+  HDW4S_SHARE_MODE=banana gen && bad 'a bad share arm is refused' 'it was accepted' \
+    || has 'a bad share arm is refused' "$(cat "${d}/err")" 'is not one of'
+
+  # The arms are markup and script only. Restoring an auto-loading module tag would
+  # un-gate every arm at once, and hdw4s-webroot would then refuse the tree.
+  HDW4S_GATE_MODE=off gen
+  hasnt 'no arm restores an auto-loading module tag' "$(cat "${d}/out.html")" \
+    '<script type="module" src='
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=184   # update when tests are added; a wrong number is the point
+EXPECTED=190   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
