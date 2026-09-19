@@ -283,6 +283,21 @@ fi
 # than written out: a named list went stale the moment the server module was
 # deleted, and a missing file used to be skipped here and then reported as
 # parsing, so deleting one outright was a passing run.
+#
+# Deriving it is not enough on its own. This asked git for "*.py", and the two
+# Python files this package actually INSTALLS -- hdw4s-refuse and
+# hdw4s-gate-index, in /usr/lib/hdw4s -- are commands and carry no extension.
+# So the eight files it reported were all test harnesses under .github/live,
+# and a deliberate syntax error in hdw4s-gate-index left the whole suite at
+# "8 file(s) parse" and "All checks passed". A hand-written list goes stale
+# when a file is added; a derived one goes stale when its derivation encodes
+# an assumption nobody rechecks, which is quieter and lasted longer.
+#
+# So the assumption is written down rather than left to be rediscovered: a
+# Python file here either ends in .py or says python on its first line.
+# Anything reaching the interpreter some third way -- a file with neither,
+# run as "python3 thatfile" or imported by path -- is not in this list, and
+# adding one means changing this derivation.
 pyfail=''
 # The same guard, for both of the same reasons. Outside a repository this
 # assignment carried git's exit 128 out through "set -e": the run ABORTED
@@ -295,7 +310,14 @@ if ! same_repo; then
   skip 'python syntax' 'this tree is not a git repository of its own -- the file list could not be derived'
   pyfiles=''
 else
-  pyfiles="$(git ls-files '*.py' 2>/dev/null || true)"
+  pyfiles="$(git ls-files -z 2>/dev/null |
+    while IFS= read -r -d '' f; do
+      [ -f "${f}" ] || continue
+      case "${f}" in *.py) printf '%s\n' "${f}"; continue;; esac
+      case "$(head -n1 -- "${f}" 2>/dev/null)" in
+        '#!'*python*) printf '%s\n' "${f}";;
+      esac
+    done)"
 fi
 if [ -z "${pyfiles}" ]; then
   same_repo && note 'python syntax' 'no python in this package'
