@@ -1075,10 +1075,49 @@ echo '== every path the session hides must be one something creates first =='
   is 'and every one of them is created by the slot minter' "${missing}" ''
 )
 
+echo '== a unit with an [Install] section is no use until something enables it =='
+# Written from the failure: hdw4s-ephemeral-slots.service declares
+# WantedBy=sysinit.target and was enabled by neither installer -- install.sh only
+# symlinked it into /etc/systemd/system, which makes a unit loadable and not enabled,
+# and debian/rules passed --no-enable for it along with the templates, which is right
+# for a template and wrong for this. The unit read "linked" and never ran at boot, so
+# after a reboot there were no slot accounts and no runtime directories at all. Both
+# installers ran the minter directly at install time, which repaired it until the next
+# boot and hid it behind itself.
+#
+# Derived from the unit files rather than from a list, because a list is the thing
+# that drifted: this unit was missing from the same enumeration in two places.
+(
+  units=''
+  for u in "${ROOT}"/*.service "${ROOT}"/*.socket "${ROOT}"/*.timer; do
+    b="$(basename "${u}")"
+    case "${b}" in *@*) continue;; esac
+    grep -qE '^WantedBy=' "${u}" || continue
+    units="${units} ${b}"
+  done
+
+  # A harness that selects nothing passes every negative.
+  n="$(printf '%s' "${units}" | wc -w)"
+  [ "${n}" -ge 4 ] && ok "units with an [Install] section were found (${n})" \
+    || bad "units with an [Install] section were found" "found ${n}, expected at least 4"
+
+  missing=''
+  for b in ${units}; do
+    grep -qE "systemctl enable( --now)? ${b}\$" "${ROOT}/install.sh" || missing="${missing} ${b}"
+  done
+  is 'install.sh enables every one of them' "${missing}" ''
+
+  noenable=''
+  for b in ${units}; do
+    grep -qE -- "--no-enable[^#]*${b}\$" "${ROOT}/debian/rules" && noenable="${noenable} ${b}"
+  done
+  is 'and the package does not ship one disabled' "${noenable}" ''
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=196   # update when tests are added; a wrong number is the point
+EXPECTED=199   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

@@ -319,6 +319,22 @@ systemctl enable --now hdw4s-firewall.service
 systemctl enable --now hdw4s-firewall.timer
 systemctl enable --now hdw4s-updater.timer
 systemctl enable --now hdw4s-reaper.timer
+# The ephemeral slots, and this one was missing from this list for as long as the
+# feature has existed. Linking a unit into /etc/systemd/system makes it LOADABLE;
+# it does not make it run. This unit declares WantedBy=sysinit.target, and that
+# section does nothing at all until a sysinit.target.wants symlink exists, which
+# only "systemctl enable" creates.
+#
+# Measured on a box installed this way: the unit read "linked", the minter never
+# ran at boot, and /run/userdb, /run/hdw4s-ns, /run/hdw4s-profile, /run/hdw4s-proxy
+# and /run/hdw4s-incarnation were all absent -- along with the slot accounts
+# themselves, so "id ephemeral0" said no such user. The whole ephemeral feature was
+# dead from the first reboot onward, and looked healthy until then only because
+# installing runs the minter directly.
+#
+# Not one of the templates above it: those cannot be enabled without an instance
+# name, and "hdw4s enable <account>" is what turns those on.
+systemctl enable --now hdw4s-ephemeral-slots.service
 
 # Deliberately no session is started: which accounts get a desktop is a
 # decision for the administrator, not for an installer.

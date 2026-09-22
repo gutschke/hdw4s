@@ -143,7 +143,13 @@ if [ "$1" = 'configure' ]; then
   # The ephemeral slots, for exactly the reason spelled out above the firewall.
   #
   # hdw4s-ephemeral-slots.service is Type=oneshot with RemainAfterExit=yes and
-  # WantedBy=sysinit.target, so it runs once at boot; debhelper's "start" is a
+  # WantedBy=sysinit.target, so it runs once at boot -- which was written here
+  # while debian/rules still passed --no-enable for it, and was therefore false.
+  # An [Install] section is inert until enabling creates the wants symlink, so the
+  # unit never ran at boot at all, and this block was the only thing that ever ran
+  # the minter: a repair that lasted until the next reboot and hid the defect
+  # behind itself. The rules file enables it now; this block stays, for the
+  # refresh an upgrade needs. debhelper's "start" is a
   # no-op on an upgrade and "restart" is refused outright, because the unit sets
   # RefuseManualStop=yes. Until this was added, everything the minter writes --
   # the userdb records, the namespaced passwd, the drop-ins, and now each slot's

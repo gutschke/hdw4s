@@ -3,10 +3,23 @@
 %:
 	dh $@
 
-# The firewall table and the updater timer are the only units the package turns
-# on by itself. hdw4s@.service is a template and cannot be enabled without an
-# instance name; which accounts get a desktop is the administrator's decision,
-# made with "hdw4s enable".
+# The firewall table, the timers and the ephemeral slot minter are the units the
+# package turns on by itself. hdw4s@.service is a template and cannot be enabled
+# without an instance name; which accounts get a desktop is the administrator's
+# decision, made with "hdw4s enable".
+#
+# The minter used to be in the --no-enable list below, swept in among the
+# templates although it is not one. The consequence was not that it started late:
+# it never started at all. Its [Install] section says WantedBy=sysinit.target, and
+# that section is inert until enabling creates the wants symlink -- so after every
+# reboot there were no slot accounts, no runtime directories and no per-slot
+# drop-ins, and the whole ephemeral feature was dead. It looked fine in between
+# only because postinst runs the script directly on install, which is a repair
+# that lasts until the next boot.
+#
+# Enabled, but not stopped or restarted on upgrade: it is Type=oneshot with
+# RemainAfterExit=yes and RefuseManualStop=yes, so a restart is refused outright,
+# and postinst re-runs the script itself for the refresh an upgrade needs.
 override_dh_installsystemd:
 	dh_installsystemd --no-stop-on-upgrade hdw4s-firewall.service
 	dh_installsystemd hdw4s-firewall.timer
@@ -17,6 +30,6 @@ override_dh_installsystemd:
 	dh_installsystemd --no-enable --no-start hdw4s-updater.service
 	dh_installsystemd --no-enable --no-start hdw4s@.service
 	dh_installsystemd --no-enable --no-start hdw4s-ephemeral@.service
-	dh_installsystemd --no-enable --no-start hdw4s-ephemeral-slots.service
+	dh_installsystemd --no-stop-on-upgrade --no-restart-after-upgrade hdw4s-ephemeral-slots.service
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.socket
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.service
