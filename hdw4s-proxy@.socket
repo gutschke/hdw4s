@@ -19,16 +19,38 @@ Documentation=man:hdw4s(8)
 # default here, and "hdw4s transport ... tcp" replaces it with an empty
 # ListenStream= followed by the port. Nothing binds this path when it does.
 ListenStream=/run/hdw4s-proxy/%i.sock
-# The runtime directory is shared by every instance, so it must outlive any one
-# of them. systemd removes the innermost RuntimeDirectory= when a unit stops,
-# and that directory is the shared parent here -- so without this, "hdw4s
-# disable bob" unlinks alice.sock too. Alice's socket unit goes on reporting
-# that it is listening, because its fd still holds the unlinked inode, while
-# the reverse proxy gets ENOENT for as long as it keeps trying. RemoveOnStop=
-# below already takes care of the one socket that really is per-instance.
-RuntimeDirectoryPreserve=yes
-RuntimeDirectory=hdw4s-proxy
-RuntimeDirectoryMode=0755
+# RETRACTION, and it is the defect this file caused. Three lines used to stand here:
+#
+#     RuntimeDirectoryPreserve=yes
+#     RuntimeDirectory=hdw4s-proxy
+#     RuntimeDirectoryMode=0755
+#
+# with a comment explaining that they kept the shared parent directory alive across
+# one instance stopping. NONE OF IT DID ANYTHING. RuntimeDirectory= is a systemd.exec
+# setting: it is applied while building an execution environment for a command, and a
+# socket unit with no Exec= line never builds one. Measured on systemd 255, with a
+# service carrying the same directive as the positive control -- the service got its
+# directory, this unit never got one.
+#
+# What created /run/hdw4s-proxy was the ListenStream= below it, binding a socket
+# INSIDE the directory: measured again with the directive deleted outright, and the
+# directory still appeared. The directive was being credited with work the bind was
+# doing, which is why nobody questioned it for as long as every deployment was on the
+# filesystem transport.
+#
+# The consequence is the sentence four lines down, which was written here and never
+# followed through: "hdw4s transport ... tcp" replaces this bind with a port, and
+# NOTHING then creates the directory. The session unit hides it with
+# InaccessiblePaths=, which is fatal when the path is absent, so every ephemeral
+# session on a TCP deployment dies 226/NAMESPACE after the first reboot -- naming a
+# directory, and pointing at neither this unit nor anything that failed.
+#
+# The directory is now made by hdw4s-ephemeral-slots, at boot, beside the four it
+# already made. Stopping a unit does not remove it: measured both with and without
+# the old directive, before and after stop, and it survived every time -- so the
+# hazard the deleted comment described is not one this shape has.
+# RemoveOnStop= below takes care of the one socket that really is per-instance, and
+# that one is real: it is the bound socket file, not a directory.
 SocketMode=0660
 RemoveOnStop=yes
 # A desktop takes a while to come up, and the browser reconnects on its own, so

@@ -1041,10 +1041,44 @@ echo '== a rebuild of a running slot keeps its published identity =='
     || bad 'and does not invent an identity of its own' 'a token appeared from nowhere'
 )
 
+echo '== every path the session hides must be one something creates first =='
+# Written from the failure: InaccessiblePaths= carries no "-" prefix, so a path that
+# does not exist is FATAL -- the session dies 226/NAMESPACE naming a directory, which
+# points at neither the unit nor whatever was supposed to create it. One of these was
+# being created by a side effect of the filesystem transport and by nothing else, so
+# switching a slot to TCP and rebooting took the whole feature down.
+#
+# What this can and cannot say: it resolves the paths the minter's "install -d" lines
+# name, and compares them against the paths the session hides. It does not run the
+# minter -- that writes userdb records and reloads systemd, so it belongs on a real
+# machine. This catches the drift; a reboot catches the behaviour.
+(
+  unit="${ROOT}/hdw4s-ephemeral@.service"
+  minter="${ROOT}/hdw4s-ephemeral-slots"
+  created="$( grep -hE '^install -d' "${minter}" | grep -oE '[{][A-Z0-9_]+[}]' | tr -d '{}' |
+             while read -r v; do
+               sed -n "s|^${v}=\"[$]{[A-Z0-9_]*:-\([^}]*\)}\"|\\1|p" "${minter}"
+             done)"
+  hidden="$(grep -hE '^InaccessiblePaths=' "${unit}" | sed 's/^InaccessiblePaths=//' |
+            tr ' ' '\n' | grep '^%t/' | sed 's|^%t|/run|')"
+
+  # A harness that selects nothing passes every negative, so say what was selected
+  # before saying it was fine.
+  n="$(printf '%s\n' "${hidden}" | grep -c . || :)"
+  [ "${n}" -ge 2 ] && ok "the unit's hidden runtime paths were found (${n})" \
+    || bad "the unit's hidden runtime paths were found" "found ${n}, expected at least 2"
+
+  missing=''
+  for h in ${hidden}; do
+    printf '%s\n' "${created}" | grep -qxF "${h}" || missing="${missing} ${h}"
+  done
+  is 'and every one of them is created by the slot minter' "${missing}" ''
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=194   # update when tests are added; a wrong number is the point
+EXPECTED=196   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

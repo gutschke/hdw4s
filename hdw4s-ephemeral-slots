@@ -37,6 +37,15 @@ USERDB="${HDW4S_USERDB_DIR:-/run/userdb}"
 NSDIR="${HDW4S_NS_DIR:-/run/hdw4s-ns}"
 PROFILEDIR="${HDW4S_PROFILE_ROOT:-/run/hdw4s-profile}"
 DROPDIR="${HDW4S_DROPIN_DIR:-/run/systemd/system}"
+# The two directories the session unit hides with InaccessiblePaths=. They are named
+# here, and not only where each is otherwise used, because InaccessiblePaths= without
+# a "-" prefix is FATAL when the path is absent: the session dies 226/NAMESPACE naming
+# a directory, which points at neither the unit nor whatever was supposed to create it.
+#
+# They belong to this script for the same reason USERDB does -- it is the one thing
+# ordered early enough that nothing can run before it. See the install -d below.
+PROXYDIR="${HDW4S_PROXY_RUNDIR:-/run/hdw4s-proxy}"
+INCARNDIR="${HDW4S_INCARNATION_DIR:-/run/hdw4s-incarnation}"
 # shellcheck source=/dev/null
 [ ! -r "${ETCDIR}/hdw4s.conf" ] || . "${ETCDIR}/hdw4s.conf"
 
@@ -107,7 +116,29 @@ if [ "${HDW4S_EPHEMERAL_UID_BASE}" -lt "${UID_MIN}" ] || [ "${last}" -gt "${UID_
   die "uids ${HDW4S_EPHEMERAL_UID_BASE}-${last} fall outside the ${UID_MIN}-${UID_MAX} window."
 fi
 
-install -d -m 0755 "${USERDB}" "${NSDIR}" "${DROPDIR}" "${PROFILEDIR}"
+# Everything the session needs to ALREADY EXIST, made in one place, at boot, before
+# any socket can listen -- this unit is WantedBy=sysinit.target, and sockets.target is
+# two targets later, so nothing can accept a connection before this line has run.
+#
+# /run/hdw4s-proxy is here because nothing else creates it, which is not what its own
+# unit says. Measured on systemd 255, three arms with a positive control: a socket unit
+# declaring RuntimeDirectory= and carrying no Exec= line creates NOTHING -- the
+# directive is a systemd.exec setting and there is no execution context to attach it
+# to -- while the same directive on a service with an ExecStart= works. What actually
+# made the directory was the UNIX ListenStream= binding a socket INSIDE it, measured
+# again with the directive removed entirely. So "hdw4s transport ... tcp", which
+# replaces that bind with a port, silently removes the only thing that was creating it,
+# and the feature then works until the next reboot.
+#
+# /run/hdw4s-incarnation is a different failure with the same symptom, and is here so
+# that it cannot happen at all: hdw4s-incarnation makes it itself, but at the END of a
+# script that exits early when the web root is missing, and the session only Wants=
+# that unit -- so the script failing for any reason leaves the session to die on the
+# directory instead of on the thing that failed.
+install -d -m 0755 "${USERDB}" "${NSDIR}" "${DROPDIR}" "${PROFILEDIR}" "${PROXYDIR}"
+# 0700, not 0755: this one holds a token per live slot, so its listing is a list of
+# which slots exist. Made separately rather than loosened into the line above.
+install -d -m 0700 "${INCARNDIR}"
 
 # Set when a slot's unit has already been loaded, which is the only case that
 # needs a reload; see the note beside the drop-in below.
