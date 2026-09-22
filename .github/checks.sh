@@ -19,12 +19,40 @@ SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s
          debian/postinst debian/prerm debian/postrm
          .github/checks.sh .github/tests.sh .github/clean-install-test.sh
          .github/purge-safety-test.sh .github/uid-invariant.sh)
-UNITS=(hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
-       hdw4s-proxy@.socket hdw4s-proxy@.service
-       hdw4s-firewall.service hdw4s-firewall-check.service
-       hdw4s-firewall.timer hdw4s-updater.service hdw4s-updater.timer
-       hdw4s-reaper.service hdw4s-reaper.timer
-       hdw4s.slice)
+# Every unit in the tree, found rather than listed. The list this replaces named
+# thirteen of the fifteen: hdw4s-incarnation@.service and hdw4s-refuse@.service
+# were never handed to systemd-analyze verify, so a syntax error in either would
+# have shipped and surfaced only when a session tried to start. Both are started
+# by another unit -- one by Wants=, one by OnFailure= -- which is exactly the
+# shape a hand-written list forgets, because nothing ever names them out loud.
+#
+# Globbed against the tree, so adding a unit file is the whole of adding it here.
+UNITS=()
+for u in hdw4s*.service hdw4s*.socket hdw4s*.timer hdw4s*.slice; do
+  [ -e "${u}" ] && UNITS+=("${u}")
+done
+# A glob that matches nothing expands to itself, and an empty UNITS would make
+# every unit check below a silent no-op that still prints "ok". This file is run
+# from the repository root and from the unpacked copy private/build.sh makes, so
+# the wrong working directory is the way that happens.
+[ "${#UNITS[@]}" -gt 0 ] || {
+  echo 'checks.sh: no unit files found; wrong working directory?' >&2
+  exit 1
+}
+
+# Units that debian/rules deliberately does not name, with the reason. Anything
+# not listed here has to appear in an override_dh_installsystemd line, because a
+# unit debhelper is never told about gets no maintainer-script handling at all:
+# no enable, no disable on removal, and no record in deb-systemd-helper's state.
+#
+# Each entry is checked to still name a unit that exists, so a renamed unit takes
+# its exemption with it instead of leaving one behind that silently covers
+# nothing.
+RULES_EXEMPT=(
+  # dh_installsystemd handles service, socket, target, path, timer, mount, swap
+  # and busname. It does not handle .slice, and passing it one is an error.
+  hdw4s.slice
+)
 
 fail=0
 mark=0
@@ -240,6 +268,77 @@ for u in "${UNITS[@]}"; do
   [ -z "${out}" ] || { printf '%s\n' "${out}"; bad "${u}" 'verify reported the above'; }
 done
 okif 'systemd-analyze verify'
+
+echo
+echo '== unit manifests =='
+# Four independent places used to name a subset of the units, by hand, and they
+# drifted. hdw4s-incarnation@.service and hdw4s-refuse@.service were in
+# debian/install and install.sh and in neither debian/rules nor uninstall.sh --
+# found once, still there a week later, because nothing compares the lists.
+#
+# Two of the four are gone now: install.sh derives its symlink loop from the
+# file list it already has, and uninstall.sh finds the links it planted instead
+# of reciting them. What is left is debian/rules, which cannot be derived
+# because it IS the policy -- which unit is enabled, which is started, which is
+# left for "hdw4s enable" -- and install.sh's SOURCES, which is the file list.
+#
+# So this is the oracle for the two that remain. It is deliberately about
+# COMPLETENESS and not about correctness: it cannot tell whether a unit was
+# given the right flags, only that somebody had to decide. That is the failure
+# that has actually happened here twice -- the slot minter swept into the
+# --no-enable list was a wrong decision and this would not have caught it; a
+# unit nobody ever mentioned is the one this catches.
+begin
+# install.sh's own list, evaluated rather than parsed: it is a bash array with
+# brace expansion in it, and a regexp over the source would have to reimplement
+# the shell to read it. Evaluated in a subshell that defines nothing else, so a
+# stray command in that block would fail here rather than run.
+sources="$(sed -n '/^SOURCES=(/,/)$/p' install.sh)"
+if [ -z "${sources}" ]; then
+  bad 'install.sh SOURCES' 'could not find the SOURCES array'
+else
+  # shellcheck disable=SC2016  # the array is expanded by the subshell, not here
+  installed_names="$(bash -c "${sources}"$'\nprintf "%s\\n" "${SOURCES[@]}"')" || {
+    bad 'install.sh SOURCES' 'the array does not evaluate'
+    installed_names=''
+  }
+  for u in "${UNITS[@]}"; do
+    printf '%s\n' "${installed_names}" | grep -qxF "${u}" ||
+      bad "${u}" 'is not in install.sh SOURCES, so install.sh would not copy it'
+  done
+fi
+
+# debian/rules. Every unit gets a line, or an exemption with a reason above.
+rules_named="$(grep -oE 'hdw4s[^[:space:]]*\.(service|socket|timer|slice)' debian/rules |
+               sort -u)"
+for u in "${UNITS[@]}"; do
+  case " ${RULES_EXEMPT[*]} " in *" ${u} "*) continue;; esac
+  printf '%s\n' "${rules_named}" | grep -qxF "${u}" ||
+    bad "${u}" 'is not named in debian/rules, so debhelper never sees it'
+done
+# And an exemption that no longer names anything is an exemption nobody will
+# notice has stopped applying.
+for u in "${RULES_EXEMPT[@]}"; do
+  [ -e "${u}" ] || bad "${u}" 'is exempted in RULES_EXEMPT but no such unit exists'
+done
+
+# debian/install, which is what actually puts the file on disk. Its unit lines
+# are globs now, so this expands them the same way dh_install will and checks
+# that every unit falls into one.
+shipped="$(awk '$2 == "usr/lib/systemd/system" {print $1}' debian/install)"
+if [ -z "${shipped}" ]; then
+  bad 'debian/install' 'ships no units into usr/lib/systemd/system'
+else
+  for u in "${UNITS[@]}"; do
+    hit=''
+    for pat in ${shipped}; do
+      # shellcheck disable=SC2254  # pat is a glob on purpose
+      case "${u}" in ${pat}) hit='yes'; break;; esac
+    done
+    [ -n "${hit}" ] || bad "${u}" 'is not matched by any debian/install line'
+  done
+fi
+okif 'every unit is in every manifest'
 
 echo
 echo '== uid invariant =='
@@ -598,6 +697,25 @@ if [ "${1:-}" = '--package' ]; then
   deb="../hdw4s_${version}_all.deb"
   [ -f "${deb}" ] || bad 'dpkg-buildpackage' "did not produce ${deb}"
   note 'built' "$(basename "${deb}")"
+
+  # What the recipient actually receives. Everything above reasons about the
+  # manifests; this reads the artefact. A glob in debian/install that matched
+  # nothing, a unit renamed in the tree but not in the file that copies it, a
+  # dh_install failure swallowed by the build -- none of those are visible from
+  # the source, and all of them end as a package that installs cleanly and is
+  # missing a unit. That is precisely the shape found on a live box: the file
+  # was absent, so "systemctl cat" did not answer, and nothing anywhere failed.
+  begin
+  contents="$(dpkg-deb -c "${deb}" 2>/dev/null | awk '{print $NF}')"
+  if [ -z "${contents}" ]; then
+    bad 'package contents' 'dpkg-deb -c produced nothing'
+  else
+    for u in "${UNITS[@]}"; do
+      printf '%s\n' "${contents}" | grep -qxF "./usr/lib/systemd/system/${u}" ||
+        bad "${u}" 'is not in the built package'
+    done
+  fi
+  okif 'every unit is in the .deb'
 
   # Lintian's findings are shown but do not fail the run. It exits 0 on
   # warnings, and some of its checks are sensitive to the version of groff on

@@ -33,3 +33,14 @@ override_dh_installsystemd:
 	dh_installsystemd --no-stop-on-upgrade --no-restart-after-upgrade hdw4s-ephemeral-slots.service
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.socket
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.service
+# Named here although neither can be enabled and neither is ever started by
+# hand: the incarnation publisher is pulled in by Wants= on the session, and the
+# refusal responder by OnFailure= on the relay. The reason to name them is that
+# a unit debhelper is never told about gets no maintainer-script handling at
+# all -- nothing disables it on removal and nothing records it in
+# deb-systemd-helper's state -- and, more to the point here, a unit that appears
+# in no policy line is a unit nobody decided anything about. Both of these had
+# been absent from this file since they were written; ".github/checks.sh"
+# now fails the build if a unit file exists with no line of its own.
+	dh_installsystemd --no-enable --no-start hdw4s-incarnation@.service
+	dh_installsystemd --no-enable --no-start hdw4s-refuse@.service

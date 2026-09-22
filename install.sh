@@ -247,12 +247,16 @@ echo ' done.'
 
 echo -n 'Linking...'
 ln -sf "${dst}/hdw4s" "${sys}/sbin/hdw4s"
-for u in hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service hdw4s.slice hdw4s-firewall.service \
-         hdw4s-proxy@.socket hdw4s-proxy@.service hdw4s-refuse@.service \
-         hdw4s-incarnation@.service \
-         hdw4s-firewall-check.service hdw4s-firewall.timer \
-         hdw4s-updater.service hdw4s-updater.timer \
-         hdw4s-reaper.service hdw4s-reaper.timer; do
+# The units to link, taken from the list of files this script already copied
+# rather than written out a second time. Two lists in one file is two lists: the
+# copy above and the loop below disagreed about nothing for months and then a
+# unit was added to one of them only. Anything in SOURCES that ends in a unit
+# suffix is a unit, and there is nothing else for that test to catch.
+for u in "${SOURCES[@]}"; do
+  case "${u}" in
+    *.service|*.socket|*.timer|*.slice) ;;
+    *) continue;;
+  esac
   ln -sf "${dst}/${u}" "/etc/systemd/system/${u}"
 done
 echo ' done.'

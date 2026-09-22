@@ -78,19 +78,29 @@ fi
 echo ' done.'
 
 echo -n 'Removing units...'
-rm -f /etc/systemd/system/hdw4s@.service \
-      /etc/systemd/system/hdw4s-ephemeral@.service \
-      /etc/systemd/system/hdw4s-ephemeral-slots.service \
-      /etc/systemd/system/hdw4s-proxy@.service \
-      /etc/systemd/system/hdw4s-proxy@.socket \
-      /etc/systemd/system/hdw4s.slice \
-      /etc/systemd/system/hdw4s-firewall.service \
-      /etc/systemd/system/hdw4s-firewall-check.service \
-      /etc/systemd/system/hdw4s-firewall.timer \
-      /etc/systemd/system/hdw4s-updater.service \
-      /etc/systemd/system/hdw4s-updater.timer \
-      /etc/systemd/system/hdw4s-reaper.service \
-      /etc/systemd/system/hdw4s-reaper.timer
+# The units install.sh linked, found rather than listed. The list this replaces
+# named thirteen of the fifteen: hdw4s-incarnation@.service and
+# hdw4s-refuse@.service were linked by install.sh and never unlinked here, so an
+# uninstall left two units behind pointing into a directory it had just deleted
+# -- "systemctl cat" still answering for software that is gone. Nothing failed,
+# which is why it survived a week after being spotted.
+#
+# Only our own symlinks are touched, and the test is what the link POINTS AT: a
+# link into some .../hdw4s/<same name> is one this installer planted, whatever
+# path the administrator chose and whatever an earlier install chose before it.
+# A regular file of the same name is somebody else's and is left alone, as are
+# the drop-in directories "hdw4s enable" writes -- those end in ".service.d"
+# and ".socket.d" and are removed by name below.
+for u in /etc/systemd/system/hdw4s*.service /etc/systemd/system/hdw4s*.socket \
+         /etc/systemd/system/hdw4s*.timer /etc/systemd/system/hdw4s*.slice; do
+  [ -L "${u}" ] || continue
+  name="$(basename -- "${u}")"
+  # readlink, not readlink -f: the target directory has usually been removed by
+  # a previous run or is about to be by this one, and -f on a dangling link
+  # still resolves but drops the very component being tested for.
+  target="$(readlink -- "${u}")"
+  [ "${target}" = "${target%"/hdw4s/${name}"}" ] || rm -f -- "${u}"
+done
 # Per-instance state. The glob below never matched anything -- hdw4s@.service
 # has no [Install] section, so nothing is ever linked into multi-user.target --
 # while the drop-ins and the socket links that "hdw4s enable" really does write

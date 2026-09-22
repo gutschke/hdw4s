@@ -14,20 +14,12 @@ dconf/profile            usr/share/hdw4s/dconf
 dconf/10-policy          usr/share/hdw4s/dconf
 dconf/locks/10-policy    usr/share/hdw4s/dconf/locks
 chrome-policies/hdw4s-ephemeral.json  etc/hdw4s/chrome-policies
-hdw4s@.service           usr/lib/systemd/system
-hdw4s-ephemeral@.service usr/lib/systemd/system
-hdw4s-ephemeral-slots.service usr/lib/systemd/system
-hdw4s-proxy@.socket      usr/lib/systemd/system
-hdw4s-proxy@.service     usr/lib/systemd/system
-hdw4s-refuse@.service    usr/lib/systemd/system
-hdw4s-incarnation@.service usr/lib/systemd/system
-hdw4s.slice              usr/lib/systemd/system
-hdw4s-firewall.service   usr/lib/systemd/system
-hdw4s-firewall-check.service  usr/lib/systemd/system
-hdw4s-firewall.timer     usr/lib/systemd/system
-hdw4s-updater.service    usr/lib/systemd/system
-hdw4s-updater.timer      usr/lib/systemd/system
-hdw4s-reaper.service     usr/lib/systemd/system
-hdw4s-reaper.timer       usr/lib/systemd/system
+# Every unit file, by glob. The list this replaces was one of four places that
+# each named a subset of the units by hand, and the four disagreed. A glob
+# cannot: adding a unit file to the tree is the whole of shipping it.
+hdw4s*.service           usr/lib/systemd/system
+hdw4s*.socket            usr/lib/systemd/system
+hdw4s*.timer             usr/lib/systemd/system
+hdw4s*.slice             usr/lib/systemd/system
 hdw4s-webroot            usr/lib/hdw4s
 hdw4s-gate-index         usr/lib/hdw4s
