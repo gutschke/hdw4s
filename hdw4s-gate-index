@@ -122,6 +122,14 @@ OVERLAY = r"""
   // selkies-project/selkies 2.0.0rc0-188-g8fd2aaef. This differs sharply between the
   // two, at exactly the moment this overlay depends on, so nothing here may assume one.
   //
+  // NOT RE-MEASURED, AND NO LONGER RE-MEASURABLE AT THAT BUILD. It was a branch tip
+  // upstream has since squashed and force-pushed, so that revision exists nowhere any
+  // more. What the updater now installs is 2.0.0rc1, which renamed webrtc_mode.py and
+  // websockets_mode.py and moved selkies-ws-core.js -- exactly the files this paragraph
+  // is about. Nobody has watched a page get evicted on rc1. Read the two behaviours
+  // below as the reason this code has the shape it has, not as a statement about the
+  // build in front of you; measure them again before relying on either.
+  //
   //   websockets  the last frame is RETAINED. The video element is still present,
   //               srcObject still set, same dimensions, and the picture survives with
   //               and without upstream's status bar, which is drawn on top of it.

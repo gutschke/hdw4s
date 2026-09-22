@@ -615,15 +615,73 @@ fi
 # against the version the updater installs, so that shipping a package whose
 # pinned Selkies cannot do what the session asks of it is something somebody has
 # to walk past on purpose.
+#
+# Upstream cut 2.0.0rc1 on 2026-09-20 carrying the merged feature, so this is an
+# assertion again rather than the placeholder it stood as for two days. The arm
+# below names the releases that are known NOT to carry it; it cannot know that
+# about a release that does not exist yet, which is why raising KNOWN_GOOD stays
+# a decision somebody makes with the release in front of them.
 known_good="$(sed -n "s/^KNOWN_GOOD='\([^']*\)'.*/\1/p" hdw4s-update | head -1)"
 case "${known_good}" in
-  2.0.0rc0)
-    skip 'capture floor' "KNOWN_GOOD=${known_good} predates capture-on-demand; bump it once upstream cuts a release carrying it, or the camera and microphone stay dark" ;;
+  1.*|2.0.0rc0)
+    bad 'capture floor' "KNOWN_GOOD=${known_good} predates capture-on-demand: hdw4s-run-session passes --webcam-on-start=demand and --microphone-on-start=demand unconditionally, and a release without the feature reads 'demand' as false, so the camera and the microphone stay dark with nothing reported" ;;
   '')
     bad 'capture floor' 'could not read KNOWN_GOOD from hdw4s-update' ;;
   *)
     note 'capture floor' "KNOWN_GOOD=${known_good}" ;;
 esac
+
+# The overlay guard, exercised rather than read.
+#
+# SELKIES_PATCH copies one upstream tree's files onto whatever release is
+# installed, and raising KNOWN_GOOD above moves that release. Nothing used to
+# connect the two. hdw4s-update now refuses the combination, and a refusal
+# nobody has watched happen is not known to happen -- so both arms run here:
+# the ones that must be refused, and the ones that must be allowed. Without the
+# second kind a guard that refuses everything would pass this.
+#
+# Three operands, so the answer comes from what is passed and not from whatever
+# /etc/hdw4s/hdw4s.conf on the build machine happens to say.
+begin
+probe() {
+  local want="$1" desc="$2"; shift 2
+  local out rc=0
+  out="$(./hdw4s-update --check-patch "$@" 2>&1)" || rc="$?"
+  case "${want}" in
+    refuse)
+      if [ "${rc}" -eq 0 ]; then
+        bad 'overlay guard' "allowed ${desc}"
+      elif ! printf '%s' "${out}" | grep -q 'Nothing has been changed'; then
+        bad 'overlay guard' "refused ${desc} without saying nothing was changed"
+      fi ;;
+    allow)
+      [ "${rc}" -eq 0 ] ||
+        bad 'overlay guard' "refused ${desc}: $(printf '%s' "${out}" | head -1)" ;;
+  esac
+}
+probe refuse 'an overlay built for another release' \
+      2.0.0rc1 /etc/hdw4s/selkies-patch 2.0.0rc0
+probe refuse 'an overlay that does not say what it was built for' \
+      2.0.0rc1 /etc/hdw4s/selkies-patch ''
+probe allow  'an overlay built for the release being installed' \
+      2.0.0rc1 /etc/hdw4s/selkies-patch 2.0.0rc1
+probe allow  'a machine with no overlay at all' \
+      2.0.0rc1 '' ''
+# The message has to name the release the overlay was built for. A refusal that
+# does not is a machine somebody has to reverse-engineer at the wrong hour.
+#
+# Into a variable, not down a pipe: the producer exits non-zero here by design,
+# and under "pipefail" that is the status of the whole pipeline however well
+# grep did -- so the test would report a missing version string that is right
+# there in the output.
+guard_says="$(./hdw4s-update --check-patch \
+                2.0.0rc1 /etc/hdw4s/selkies-patch 2.0.0rc0 2>&1 || :)"
+case "${guard_says}" in
+  *2.0.0rc0*) ;;
+  *) bad 'overlay guard' 'the refusal does not name the release the overlay was built for' ;;
+esac
+unset -f probe
+okif 'overlay guard refuses and allows'
 
 # Defaults are necessarily repeated between the scripts, the sample config and
 # the man page. They drift silently, and only a user notices.

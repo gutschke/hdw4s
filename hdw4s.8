@@ -65,7 +65,7 @@ Stop sessions nobody has connected to for \fBHDW4S_IDLE_DAYS\fR\. Run from a tim
 Stop a session and give up its slot, so another session may take the port\. The session's profile directory is left in place\.
 .TP
 \fBtransport\fR \fIinstance\fR \fBtcp\fR|\fBunix\fR
-Choose how the reverse proxy reaches this session\. See \fBTRANSPORTS\fR\.
+Choose how the reverse proxy reaches this session\. See \fBTRANSPORTS\fR\. An ephemeral slot is not offered the choice: it is always reached over its Unix socket, and \fBtcp\fR is refused for one\.
 .TP
 \fBauth\fR \fIinstance\fR
 Require the proxy to present a secret as well as an acceptable address\. Generated here, sealed to this machine, and never shown to the user, so there is still no login screen\.
@@ -158,7 +158,7 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "\[ci]" 4
 \fBHDW4S_ALLOW_SYSTEM_USER\fR: Set to \fByes\fR to permit a session for an account below UID 1000\.
 .IP "\[ci]" 4
-\fBHDW4S_TRANSPORT\fR: \fBtcp\fR or \fBunix\fR\. Set with \fBhdw4s transport\fR, which also arranges the units that go with it, rather than by hand\.
+\fBHDW4S_TRANSPORT\fR: \fBtcp\fR or \fBunix\fR\. Set with \fBhdw4s transport\fR, which also arranges the units that go with it, rather than by hand\. It applies to named desktops only: an ephemeral slot is always \fBunix\fR, whatever this says, because nothing outside the machine addresses one\.
 .IP "\[ci]" 4
 \fBHDW4S_PROXY_GROUP\fR: The group allowed to open a session's Unix socket, i\.e\. the group the reverse proxy runs as\. Defaults to \fBwww\-data\fR\.
 .IP "\[ci]" 4
@@ -288,7 +288,7 @@ How the reverse proxy reaches a session, in decreasing order of how much the mac
 \fBUnix socket\fR (\fBhdw4s transport\fR \fIinstance\fR \fBunix\fR)
 The session listens only on loopback, and systemd exposes it at \fB/run/hdw4s\-proxy/<instance>\.sock\fR, owned by the group named in \fBHDW4S_PROXY_GROUP\fR\. Who may connect is then a question of file permissions: a process that cannot open the socket cannot reach the session at all, whatever address it comes from and whatever it claims to be\. There is no shared secret to leak and no address to spoof\.
 .IP
-This is the right answer whenever it is available\. It requires the proxy to be on the same machine, or to be able to see the same filesystem\.
+This is the right answer whenever it is available\. It requires the proxy to be on the same machine, or to be able to see the same filesystem\. For an ephemeral slot it is the only answer: a visitor reaches one well\-known hostname and a front door on this machine chooses the slot, so there is no caller outside the machine for a port to serve \-\- and a port would be open to every account in the container, which is not a caller the session has\.
 .IP
 Two containers on one host can share a socket if the same directory is bind\-mounted into both and they use the same user\-id mapping, which is the usual default\. It then behaves exactly as it would locally: file permissions decide who may connect, and \fBSO_PEERCRED\fR reports the peer's identity translated correctly into the reading side's namespace\. Containers with \fIdifferent\fR id mappings see different ownership on the same file, and that is where the arrangement stops working\.
 .TP

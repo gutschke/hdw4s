@@ -64,8 +64,11 @@ LEGACY="${PREFIX}.pre-2.0"
 
 # The last release whose packaging this script understands, as upstream's own
 # version string -- what "selkies --version" prints. Raise it only together
-# with the code, and record the hash below in the same commit.
-KNOWN_GOOD='2.0.0rc0'
+# with the code, and record the hash below in the same commit. Raising it also
+# moves the tree a SELKIES_PATCH overlay would be copied onto, which is what
+# patch_provenance below is for: an overlay built for the release this line
+# used to name is not a smaller version of the new one, it is damage.
+KNOWN_GOOD='2.0.0rc1'
 
 # What the release asset must hash to, and which asset that is.
 #
@@ -81,15 +84,22 @@ KNOWN_GOOD='2.0.0rc0'
 # saw, so an asset replaced under an existing tag is caught. It is not a
 # signature and it does not establish that upstream's release was honest when
 # it was made.
-# Upstream re-uploaded every asset of this already-published tag on 2026-09-15,
-# renaming them from the Debian-ish "selkies_<version>.<platform>_<arch>.deb" to
-# "selkies-<version>-<platform>-<arch>.deb". The bytes did not change -- the
-# pinned digest below still matches, which is exactly what it is for and the
-# reason that rename cost an afternoon rather than a re-test. A fresh install
-# could not find the package at all until the name was updated; an installed one
-# never noticed, because it had nothing left to fetch.
-KNOWN_GOOD_ASSET='selkies-2.0.0rc0-ubuntu24.04-amd64.deb'
-KNOWN_GOOD_SHA256_DEB='5d4ce06caa9ba251747384207da4450f33e4c2fd2b214846dba8cb946fadeaca'
+# Upstream re-uploaded every asset of the already-published 2.0.0rc0 tag on
+# 2026-09-15, renaming them from the Debian-ish "selkies_<version>.<platform>_<arch>.deb"
+# to "selkies-<version>-<platform>-<arch>.deb". The bytes did not change -- the
+# digest pinned for rc0 went on matching, which is exactly what it is for and
+# the reason that rename cost an afternoon rather than a re-test. A fresh
+# install could not find the package at all until the name was updated; an
+# installed one never noticed, because it had nothing left to fetch. 2.0.0rc1
+# carries the new spelling from the start.
+#
+# The digest below is GitHub's published one for that asset, and it was also
+# taken from the downloaded bytes rather than believed: 62185984 bytes fetched
+# from the release URL hash to it. The same check applied to rc0 reproduces the
+# digest this file carried before, which is how the "digest" field is known to
+# be the right place to read.
+KNOWN_GOOD_ASSET='selkies-2.0.0rc1-ubuntu24.04-amd64.deb'
+KNOWN_GOOD_SHA256_DEB='43d95fc97a774737cb2514b2252ce4d00497eef1ebba40de09a5aef94c66bc14'
 
 # Set SELKIES_VERSION in /etc/hdw4s/hdw4s.conf to pin a specific release and
 # stop tracking upstream entirely.
@@ -118,6 +128,86 @@ fi
 # noticing. The unit is meant to show as failed; it is meant to say why.
 refused=''
 die() { refused='yes'; exit 1; }
+
+# --- IS THE LOCAL OVERLAY STILL FOR THIS RELEASE? ---------------------------
+# SELKIES_PATCH copies files onto the install prefix, and which files those are
+# is decided by the upstream tree it was built against. Upstream renames
+# modules between releases: 2.0.0rc1 renamed rtc.py to webrtc_engine.py and
+# folded mic_demand.py into capture_demand.py. An rc0-era overlay copied onto
+# an rc1 prefix therefore overwrites rc1's own modules with older code --
+# removing the very feature a bump was made for -- and leaves the modules it
+# does not overwrite importing names that are no longer there.
+#
+# Nothing downstream of this notices. dpkg --verify is filtered by the patch's
+# own manifest, so every file it broke is excused by name; the smoke test
+# imports the package, which succeeds until the path that needs the missing
+# name is taken; and a session then fails at the camera, or in the middle of a
+# connection, on a machine whose updater reported success.
+#
+# So the two have to be coupled, and this is the coupling: KNOWN_GOOD above and
+# SELKIES_PATCH in hdw4s.conf used to move independently, which made "raise one
+# and forget the other" a way to install a tree nobody has ever run. It refuses
+# rather than warns, because by the time a warning is read the files have been
+# copied. It is checked before anything is downloaded, so a refusal leaves the
+# machine exactly as it was.
+#
+# Silence is not consent here either: an overlay that does not say what it was
+# built for is refused too. "It worked last night" is a statement about the
+# release that was installed last night.
+patch_provenance() {
+  local wanted="$1" patch="$2" built_for="$3"
+  [ -n "${patch}" ] || return 0
+  if [ -z "${built_for}" ]; then
+    echo "hdw4s: SELKIES_PATCH=${patch} is configured, but SELKIES_PATCH_FOR" >&2
+    echo '  does not say which Selkies release it was built against, so' >&2
+    echo "  nothing can tell whether it fits v${wanted}, the tree it would be" >&2
+    echo '  copied onto. Set SELKIES_PATCH_FOR in /etc/hdw4s/hdw4s.conf, or --' >&2
+    echo '  if the change it carries has since been released upstream -- remove' >&2
+    echo '  SELKIES_PATCH and the files it applies. Nothing has been changed.' >&2
+    return 1
+  fi
+  [ "${built_for}" != "${wanted}" ] || return 0
+  echo "hdw4s: the local patch ${patch} was built for Selkies" >&2
+  echo "  v${built_for}, and v${wanted} is what would be installed. Applying it" >&2
+  echo '  across releases overwrites the new release with the old files the' >&2
+  echo '  overlay carries, and upstream renames modules between releases, so' >&2
+  echo '  what is left imports names that are no longer there.' >&2
+  echo '  Rebuild the overlay against the release and raise SELKIES_PATCH_FOR,' >&2
+  echo '  or remove SELKIES_PATCH if upstream now carries the change.' >&2
+  echo '  Nothing has been changed.' >&2
+  return 1
+}
+
+# Ask the question without doing anything: "may the overlay this machine is
+# configured with be applied to <release>?" With no operands it asks about the
+# release this hdw4s was built against, which is the question somebody has
+# before they upgrade. The three-operand form names all of it explicitly, takes
+# nothing from the configuration, and is how the check in .github/checks.sh
+# watches this refuse -- a guard nobody has seen say no is not known to say it.
+case "${1:-}" in
+  --check-patch)
+    check_for="${2:-${KNOWN_GOOD}}"
+    check_for="${check_for#v}"
+    if [ "$#" -ge 4 ]; then
+      patch_provenance "${check_for}" "$3" "$4" || die
+    elif [ "$#" -ge 3 ]; then
+      echo 'hdw4s-update --check-patch takes a release, or a release, a patch' >&2
+      echo '  and the release that patch was built for. Not two.' >&2
+      die
+    else
+      patch_provenance "${check_for}" "${SELKIES_PATCH:-}" "${SELKIES_PATCH_FOR:-}" ||
+        die
+    fi
+    echo "The configured patch, if any, may be applied to v${check_for}."
+    exit 0
+    ;;
+  '') ;;
+  *)
+    echo "hdw4s-update: unknown argument '$1'." >&2
+    echo '  Usage: hdw4s-update [--check-patch [release [patch built-for]]]' >&2
+    die
+    ;;
+esac
 
 [ "$(id -u)" -eq 0 ] || {
   echo 'This script must be run as "root"' >&2
@@ -814,10 +904,11 @@ else
   # entry rather than a fleet of desktops that no longer start.
   #
   # Note what this does NOT do: it does not ask whether the release is newer.
-  # "releases/latest" today answers v2.0.0rc0 with prerelease false, so a gate
-  # that skipped pre-releases would never install the only 2.0 there is, and a
-  # gate that compared version numbers would have to order "2.0.0rc0" against
-  # "2.0.0" -- which it would get wrong in the direction that matters. The
+  # "releases/latest" answers v2.0.0rc1 with prerelease false (as it answered
+  # v2.0.0rc0 before it), so a gate that skipped pre-releases would never
+  # install the only 2.0 there is, and a gate that compared version numbers
+  # would have to order "2.0.0rc1" against "2.0.0" -- which it would get wrong
+  # in the direction that matters. The
   # question worth asking is the narrow one: is this the release whose layout
   # was tested?
   if [ "${wanted}" != "${KNOWN_GOOD}" ]; then
@@ -866,6 +957,12 @@ if [ ! -s "${release}" ] ||
     exit 0
   fi
 fi
+
+# The overlay is judged against the release that is actually going to be
+# installed, not against KNOWN_GOOD: SELKIES_VERSION can pin something else,
+# and the tree the files land on is the only thing that decides whether they
+# fit. Nothing has been downloaded yet, so a refusal here changes nothing.
+patch_provenance "${wanted}" "${SELKIES_PATCH:-}" "${SELKIES_PATCH_FOR:-}" || die
 
 # Whether the right version is installed is one question; whether the files are
 # still the ones dpkg put there is another, and a session that fails because

@@ -169,6 +169,43 @@ if [ "$1" = 'configure' ]; then
     }
   fi
 
+  # Move any ephemeral slot this machine already has off TCP.
+  #
+  # The code change alone does not repair a deployment: "hdw4s enable" writes
+  # the listener drop-in once, and nothing re-reads it. So an upgraded machine
+  # would keep every slot it already has on a port -- which is the defect, not
+  # a leftover. Measured on the test container 2026-09-22: ports 7304 and 7305
+  # answered HTTP 200 to an anonymous caller and started a real GNOME session.
+  #
+  # Only ephemeral rows, and only on an upgrade. A named desktop keeps its
+  # transport: its reverse proxy is routinely on another machine, where a
+  # filesystem socket cannot be reached, and changing that underneath a running
+  # deployment would take somebody's desktop away.
+  #
+  # Each slot's front door goes down and comes back during this, which for an
+  # ephemeral session means the desktop behind it ends -- its home is a tmpfs
+  # and goes with it. That is what stopping an ephemeral session always means,
+  # and it is the cost of not leaving the port open.
+  if [ -n "$2" ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ] &&
+     [ -r /etc/hdw4s/instances ]; then
+    # The comment marker is in the FIRST field, which is the slot index, so
+    # that is the field the skip tests. Reading the type into its own variable
+    # rather than letting it land in the name is the shape every other reader
+    # of this table uses, and for the same reason.
+    while read -r idx inst type; do
+      case "${idx}" in ''|\#*) continue;; esac
+      [ "${type:-desktop}" = 'ephemeral' ] || continue
+      if grep -qs '^[[:space:]]*HDW4S_TRANSPORT=.*unix' \
+              "/etc/hdw4s/${inst}.conf"; then
+        continue
+      fi
+      hdw4s transport "${inst}" unix >/dev/null || {
+        echo "hdw4s: could not move ${inst} off TCP; it is still reachable on" >&2
+        echo "       its port. Run \"hdw4s transport ${inst} unix\"." >&2
+      }
+    done < /etc/hdw4s/instances
+  fi
+
   # A compiled copy of a module that no longer exists.
   #
   # Versions before the 2.0 port shipped hdw4s_signalling.py into this

@@ -655,6 +655,13 @@ lockdown=(
   # the tree below. Measured by reading the code at upstream
   # selkies-project/selkies 2.0.0rc0-188-g8fd2aaef, whole-word matches:
   #
+  # That revision cannot be read again: upstream squashed and force-pushed the
+  # branch it names. WHICH file reads which flag was re-checked against
+  # 2.0.0rc1, the release the updater now installs, and still holds -- the
+  # WebRTC/websockets split below is right. WHAT each flag then does was not
+  # re-read there, so those three sentences are from the vanished build and are
+  # unverified against rc1.
+  #
   #   enable_sharing  WebRTC ONLY. Nothing on the websockets path reads it, so
   #                   where websockets is the configured transport this switch
   #                   is inert and must not be described as a control.

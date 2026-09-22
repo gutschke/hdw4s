@@ -18,6 +18,12 @@ Documentation=man:hdw4s(8)
 # cannot rescue a unit that will not load -- so the filesystem socket is the
 # default here, and "hdw4s transport ... tcp" replaces it with an empty
 # ListenStream= followed by the port. Nothing binds this path when it does.
+#
+# An EPHEMERAL instance never takes that branch: "hdw4s transport" refuses tcp
+# for one, so the line below is the address every ephemeral slot is reached at.
+# That is not a hardening option, it is the shape -- nothing outside the machine
+# addresses an ephemeral session, so a port would serve no caller it has and
+# every caller it must not have.
 ListenStream=/run/hdw4s-proxy/%i.sock
 # RETRACTION, and it is the defect this file caused. Three lines used to stand here:
 #

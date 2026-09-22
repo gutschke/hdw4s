@@ -748,10 +748,33 @@ cmd_enable() {
   # The instance's own setting, not the global default: "enable" is documented
   # as safe to re-run, and reading the global here would quietly move a session
   # that had deliberately been put on a filesystem socket back onto the network.
-  cmd_transport "${inst}" "$(setting_of "${inst}" HDW4S_TRANSPORT tcp)" >/dev/null
+  #
+  # An ephemeral slot is not offered that choice, and this is the line that
+  # takes it away. Nobody provisions an ephemeral session and nothing outside
+  # this machine addresses one: a visitor arrives at one well-known hostname
+  # and a front door running HERE decides which slot they get. So the slot has
+  # no caller that a port would serve, and a port has callers the slot must not
+  # serve -- every other account in the container, which is what made
+  # "curl 127.0.0.1:7304" answer 200 with somebody's live desktop. A filesystem
+  # socket has no such caller: reachability becomes the mode and the owner of
+  # /run/hdw4s-proxy, which the session unit already hides with
+  # InaccessiblePaths=. The question is removed rather than guarded.
+  local want='tcp'
+  if [ "${type}" = 'ephemeral' ]; then
+    want='unix'
+  else
+    want="$(setting_of "${inst}" HDW4S_TRANSPORT tcp)"
+  fi
+  cmd_transport "${inst}" "${want}" >/dev/null
 
-  echo "Session ${inst} is listening on port $(port_of "${idx}")."
-  echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
+  if [ "${want}" = 'unix' ]; then
+    echo "Session ${inst} is reachable at ${RUNDIR}/hdw4s-proxy/${inst}.sock."
+    echo 'It does not listen on the network. The front door that reaches it has'
+    echo "to run on this machine; see 'hdw4s proxy ${inst}' for its configuration."
+  else
+    echo "Session ${inst} is listening on port $(port_of "${idx}")."
+    echo "Point the reverse proxy at this machine's address, port $(port_of "${idx}")."
+  fi
   echo 'The desktop starts on the first connection, not now.'
 
   # A site can make this automatic by setting HDW4S_AUTH=basic in the shared
@@ -1204,6 +1227,21 @@ cmd_transport() {
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
   port="$(port_of "${idx}")"
   dir="${DROPIN}/hdw4s-proxy@${inst}.socket.d"
+
+  # The one place that could put an ephemeral slot on the network, so the
+  # refusal is here rather than in the caller: "hdw4s enable" already asks for
+  # 'unix' unconditionally, and a second copy of the rule there would not stop
+  # an administrator typing this command. A named desktop is a different thing
+  # and keeps the choice -- its reverse proxy is routinely on another machine.
+  if [ "${mode}" = 'tcp' ] && [ "$(type_of "${inst}")" = 'ephemeral' ]; then
+    die "hdw4s: ${inst} is an ephemeral slot and cannot be put on TCP." \
+        '  Nothing outside this machine addresses an ephemeral session: a' \
+        '  visitor reaches one well-known hostname and a front door running' \
+        '  here chooses the slot. A port would therefore serve no caller the' \
+        '  slot has, and every caller it must not have -- any account in this' \
+        "  container could open it. It stays on ${RUNDIR}/hdw4s-proxy/${inst}.sock."
+  fi
+
   install -d -m0755 "${dir}"
 
   case "${mode}" in
@@ -1452,6 +1490,13 @@ cmd_proxy() {
   [ ! -r "${ETCDIR}/${inst}.conf" ] ||
     transport="$(sed -n "s/^[[:space:]]*HDW4S_TRANSPORT=[\"']\{0,1\}\([a-z]*\).*/\1/p" \
                  "${ETCDIR}/${inst}.conf" | tail -n1)"
+  # An ephemeral slot has no other answer -- "hdw4s transport" refuses to put
+  # one on TCP -- so it is decided here rather than read, and it overrides the
+  # file rather than defaulting under it. Two cases the file gets wrong: a slot
+  # minted but not yet enabled has no file at all, and one enabled by an older
+  # version has a file still saying "tcp". Either would print a port block for
+  # a session that does not listen on one.
+  [ "$(type_of "${inst}")" != 'ephemeral' ] || transport='unix'
   if [ "${transport}" = 'unix' ]; then
     upstream="        # A filesystem socket: who may connect is a question of
         # permissions, not of source address. Add nginx's user to the group

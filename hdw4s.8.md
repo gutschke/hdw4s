@@ -73,6 +73,8 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
   * `transport` <instance> `tcp`|`unix`:
     Choose how the reverse proxy reaches this session. See **TRANSPORTS**.
+    An ephemeral slot is not offered the choice: it is always reached over its
+    Unix socket, and `tcp` is refused for one.
 
   * `auth` <instance>:
     Require the proxy to present a secret as well as an acceptable address.
@@ -225,7 +227,9 @@ belongs to the copy of the streaming server, of which there is one.
 
   * `HDW4S_TRANSPORT`:
     `tcp` or `unix`. Set with `hdw4s transport`, which also arranges the units
-    that go with it, rather than by hand.
+    that go with it, rather than by hand. It applies to named desktops only:
+    an ephemeral slot is always `unix`, whatever this says, because nothing
+    outside the machine addresses one.
 
   * `HDW4S_PROXY_GROUP`:
     The group allowed to open a session's Unix socket, i.e. the group the
@@ -540,7 +544,11 @@ machine itself can guarantee.
     be. There is no shared secret to leak and no address to spoof.
 
     This is the right answer whenever it is available. It requires the proxy
-    to be on the same machine, or to be able to see the same filesystem.
+    to be on the same machine, or to be able to see the same filesystem. For an
+    ephemeral slot it is the only answer: a visitor reaches one well-known
+    hostname and a front door on this machine chooses the slot, so there is no
+    caller outside the machine for a port to serve -- and a port would be open
+    to every account in the container, which is not a caller the session has.
 
     Two containers on one host can share a socket if the same directory is
     bind-mounted into both and they use the same user-id mapping, which is the

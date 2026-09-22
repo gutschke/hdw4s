@@ -340,6 +340,25 @@ systemctl enable --now hdw4s-reaper.timer
 # name, and "hdw4s enable <account>" is what turns those on.
 systemctl enable --now hdw4s-ephemeral-slots.service
 
+# And any ephemeral slot this machine already has comes off TCP, because the
+# code change alone does not repair a deployment: the listener drop-in is
+# written once by "hdw4s enable" and nothing re-reads it. The same block runs
+# from the package's postinst; an install over an existing tree has the same
+# slots and the same defect. Named desktops are left alone -- their reverse
+# proxy is routinely on another machine, which cannot open a filesystem socket.
+if [ -r /etc/hdw4s/instances ]; then
+  while read -r idx inst type; do
+    case "${idx}" in ''|\#*) continue;; esac
+    [ "${type:-desktop}" = 'ephemeral' ] || continue
+    if grep -qs '^[[:space:]]*HDW4S_TRANSPORT=.*unix' \
+            "/etc/hdw4s/${inst}.conf"; then
+      continue
+    fi
+    "${sys}/sbin/hdw4s" transport "${inst}" unix >/dev/null ||
+      echo "Warning: ${inst} is still on a port; run 'hdw4s transport ${inst} unix'." >&2
+  done < /etc/hdw4s/instances
+fi
+
 # Deliberately no session is started: which accounts get a desktop is a
 # decision for the administrator, not for an installer.
 cat <<EOF

@@ -768,6 +768,48 @@ echo '== a slot records what kind of session it is =='
   is 'a desktop session still reads its files' "${r%%$'\t'*}" 'none'
 )
 
+echo '== an ephemeral slot cannot be put on the network =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # The defect this closes was measured, not imagined: on 2026-09-22 ports 7304
+  # and 7305 on the test container answered HTTP 200 to an anonymous caller and
+  # started a real GNOME session. The cause was not a missing credential, it was
+  # a transport -- "hdw4s enable" put every slot on TCP, because HDW4S_TRANSPORT
+  # defaults to it -- and a credential would have been the wrong repair. There is
+  # no caller outside the machine for an ephemeral slot to have.
+  me="$(id -un)"
+  printf '%s\n' "0 ${me} ephemeral" > "${SLOTS}"
+
+  # Run in a subshell: die() exits, and taking the group's subshell with it
+  # would skip every assertion below while recording nothing.
+  out="$( ( cmd_transport "${me}" tcp ) 2>&1 )"; rc=$?
+  is 'tcp is refused for an ephemeral slot' "${rc}" '1'
+  has 'and says which slot and why' "${out}" "${me} is an ephemeral slot"
+  # The refusal must be a refusal, not a diagnostic printed on the way through.
+  [ ! -e "${DROPIN}/hdw4s-proxy@${me}.socket.d/50-listen.conf" ] &&
+    ok 'and writes no listener drop-in' ||
+    bad 'and writes no listener drop-in' 'the port drop-in was written anyway'
+
+  # The control, and it is the half that makes the refusal mean something: the
+  # same call on a desktop slot must still succeed, or the test above passes
+  # for any broken cmd_transport at all.
+  printf '%s\n' "0 ${me}" > "${SLOTS}"
+  out="$( ( cmd_transport "${me}" tcp ) 2>&1 )"; rc=$?
+  is 'a desktop slot still may' "${rc}" '0'
+  [ -e "${DROPIN}/hdw4s-proxy@${me}.socket.d/50-listen.conf" ] &&
+    ok 'and gets its listener drop-in' ||
+    bad 'and gets its listener drop-in' 'nothing was written'
+
+  # And "hdw4s proxy" must not describe a port for a slot that has none. It
+  # reads the instance's conf file, which for an ephemeral slot may be absent
+  # or may be a stale one written by a version that put it on TCP -- so the
+  # stale file is what is put in front of it here.
+  printf '%s\n' "0 ${me} ephemeral" > "${SLOTS}"
+  printf 'HDW4S_TRANSPORT=tcp\n' > "${ETCDIR}/${me}.conf"
+  out="$( ( cmd_proxy "${me}" ) 2>&1 )"
+  has 'the proxy block names the socket'   "${out}" "proxy_pass http://unix:"
+  hasnt 'and no longer names a port'       "${out}" "HOST_RUNNING_HDW4S"
+)
+
 echo '== a slot table written by an older version still works =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   # The deployed machines have a two-field table written by 2.2.0, and the
@@ -1117,7 +1159,7 @@ echo '== a unit with an [Install] section is no use until something enables it =
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=199   # update when tests are added; a wrong number is the point
+EXPECTED=206   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
