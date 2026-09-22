@@ -340,6 +340,44 @@ else
 fi
 okif 'every unit is in every manifest'
 
+# Which units are turned ON is the other half, and it is a different list again:
+# debian/rules decides it for the package, install.sh for a source install, and
+# uninstall.sh is supposed to be install.sh's inverse. All three are policy and
+# none can be derived from the tree -- but they have to agree with each other,
+# and twice now they have not. The slot minter was enabled by install.sh and
+# shipped --no-enable by debian/rules, so the feature died at the first reboot
+# of a packaged machine and nobody could see it, because both installers also
+# run the minter directly. Then it was enabled by install.sh and disabled by
+# nothing, so every uninstall left a dangling sysinit.target.wants symlink.
+#
+# Set comparison, not a spelling check: it says the three disagree and about
+# which unit, and it has nothing to say about whether the shared answer is right.
+begin
+rules_on="$(grep -E '^[[:space:]]*dh_installsystemd' debian/rules |
+            grep -v -- '--no-enable' |
+            grep -oE 'hdw4s[^[:space:]]*\.(service|socket|timer)' | sort -u)"
+install_on="$(grep -oE 'systemctl enable --now [^[:space:]]+' install.sh |
+              awk '{print $NF}' | sort -u)"
+uninstall_off="$(grep -oE 'systemctl disable --now [a-z0-9@._-]+' uninstall.sh |
+                 awk '{print $NF}' | sort -u)"
+if [ -z "${rules_on}" ] || [ -z "${install_on}" ] || [ -z "${uninstall_off}" ]; then
+  # An empty side compares equal to nothing and would pass silently, which is
+  # the failure this whole section exists to stop happening elsewhere.
+  bad 'enable policy' 'one of the three lists came back empty; the parse is wrong'
+else
+  d="$(comm -3 <(printf '%s\n' "${rules_on}") <(printf '%s\n' "${install_on}"))"
+  [ -z "${d}" ] || {
+    printf '%s\n' "${d}" | sed 's/^/  /'
+    bad 'enable policy' 'debian/rules and install.sh enable different units (above)'
+  }
+  d="$(comm -3 <(printf '%s\n' "${install_on}") <(printf '%s\n' "${uninstall_off}"))"
+  [ -z "${d}" ] || {
+    printf '%s\n' "${d}" | sed 's/^/  /'
+    bad 'enable policy' 'install.sh enables units uninstall.sh does not disable (above)'
+  }
+fi
+okif 'the three enable lists agree'
+
 echo
 echo '== uid invariant =='
 # A logical session identity dies with its session; the PHYSICAL uid goes back

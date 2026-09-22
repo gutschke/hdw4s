@@ -58,11 +58,22 @@ echo -n 'Stopping sessions...'
 mapfile -t units < <(systemctl list-units --plain --no-legend --all \
                        'hdw4s@*' 'hdw4s-ephemeral@*' | awk '{print $1}')
 [ "${#units[@]}" -eq 0 ] || systemctl disable --now "${units[@]}" >/dev/null 2>&1 || :
+# Everything install.sh turned on, in the same order and with nothing left out.
+# hdw4s-ephemeral-slots.service was enabled by install.sh from the day the
+# feature existed and disabled by nothing, so every uninstall left a dangling
+# sysinit.target.wants symlink into a directory it had just deleted -- measured,
+# not deduced. That costs a warning at every boot for software that is gone, and
+# it is the same defect as the two units below it: two lists that are supposed to
+# be each other's inverse, kept by hand, differing by one entry.
+#
+# .github/checks.sh now fails when this set and the one install.sh enables are
+# not the same, and the sweep after the units are removed catches whatever a
+# future edit still manages to forget.
 systemctl disable --now hdw4s-updater.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-firewall.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-reaper.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-firewall.service >/dev/null 2>&1 || :
-systemctl disable --now hdw4s-updater.timer >/dev/null 2>&1 || :
+systemctl disable --now hdw4s-ephemeral-slots.service >/dev/null 2>&1 || :
 # The relay sockets, which hold the public ports open until they are stopped.
 for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 2>/dev/null |
            awk '{print $1}'); do
@@ -98,6 +109,18 @@ for u in /etc/systemd/system/hdw4s*.service /etc/systemd/system/hdw4s*.socket \
   # readlink, not readlink -f: the target directory has usually been removed by
   # a previous run or is about to be by this one, and -f on a dangling link
   # still resolves but drops the very component being tested for.
+  target="$(readlink -- "${u}")"
+  [ "${target}" = "${target%"/hdw4s/${name}"}" ] || rm -f -- "${u}"
+done
+# And the enable state, by the same rule. "systemctl disable" above unlinks a
+# unit systemd can still load; once the unit file itself is gone, systemd does
+# not know the name any more and disable is a no-op, so a link missed by the
+# list is a link nothing will ever remove. This runs after the units precisely
+# so that it catches those, and it is the part that does not have to be kept in
+# step with anything.
+for u in /etc/systemd/system/*.target.wants/hdw4s*; do
+  [ -L "${u}" ] || continue
+  name="$(basename -- "${u}")"
   target="$(readlink -- "${u}")"
   [ "${target}" = "${target%"/hdw4s/${name}"}" ] || rm -f -- "${u}"
 done
