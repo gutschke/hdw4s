@@ -24,6 +24,18 @@ TARGET="$1"; INST="$2"
 
 remote() { ssh -o ConnectTimeout=8 "${TARGET}" "$@"; }
 
+# Drift first, always. A probe that reports confidently on a machine running
+# something other than the tree is how a fix gets tested before it is deployed --
+# which has now happened four times, each time reported back to us as the old
+# bug. The private checker is not shipped, so its absence is not an error here;
+# where it exists, it gates.
+if [ -x "$(dirname "$0")/../../private/check-drift.sh" ]; then
+  "$(dirname "$0")/../../private/check-drift.sh" "${TARGET}" >/dev/null 2>&1 || {
+    echo "WARNING: this machine is NOT running the tree -- readings below describe" >&2
+    echo "         something else. Run private/check-drift.sh for the detail." >&2
+  }
+fi
+
 remote "bash -s" <<REMOTE
 set -u
 INST='${INST}'
