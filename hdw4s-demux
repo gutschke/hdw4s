@@ -250,36 +250,31 @@ def socket_path(instance):
     return os.path.join(PROXY_RUNDIR, "%s.sock" % instance)
 
 
-_slot_cred_cache = {}
+def slot_carries_own_credential(instance):
+    """True when a slot was configured with a Basic credential of its own.
 
+    Existence, not content. The file is a systemd-creds ENCRYPTED blob, not a
+    password -- reading it raw and presenting it upstream produces "Invalid
+    Credentials" and a 401 on that slot alone, which reads as a routing fault
+    and is not one. That was built here first and it was wrong.
 
-def slot_credential(instance):
-    """A slot's own Basic credential, if it was configured with one.
+    Nothing decrypts it here, because on a filesystem transport it should not
+    exist: reachability is already decided by the socket's mode and its
+    directory's permissions, before any HTTP exchange. A credential checked
+    after that adds nothing -- anyone who could present it could already
+    connect, and anyone who could not connect never gets to present it.
 
-    Existence, not readability: the file is root-only by design, so asking
-    whether we can read it would answer "no credential" for every unprivileged
-    caller. Compared and forwarded, never printed, and never placed in argv
-    where /proc/<pid>/cmdline would expose it.
+    So this exists only to say so loudly at startup, because the alternative is
+    one slot in the pool silently refusing every request.
     """
-    if instance in _slot_cred_cache:
-        return _slot_cred_cache[instance]
-    path = credential_path("%s.auth.cred" % instance)
-    try:
-        with open(path, "rb") as f:
-            raw = f.read().strip()
-        value = base64.b64encode(b"%s:%s" % (instance.encode(), raw)) \
-            if b":" not in raw else base64.b64encode(raw)
-    except OSError:
-        value = None
-    _slot_cred_cache[instance] = value
-    return value
+    d, _ = credential_dir()
+    return os.path.exists(os.path.join(d, "%s.auth.cred" % instance))
 
 
 def available_slots():
-    """The slots this box actually has, read from the authority that defines
-    the set -- the sockets themselves -- rather than from a configured count.
-    A count in a file is a claim; a bound socket is the thing a request can
-    reach."""
+    """The slots this box actually has, read from the authority that defines the
+    set -- the bound sockets -- rather than from a configured count. A count in a
+    file is a claim; a socket a request can reach is the thing itself."""
     try:
         names = os.listdir(PROXY_RUNDIR)
     except OSError as e:
@@ -289,9 +284,13 @@ def available_slots():
 
 
 def pick_slot(own):
-    """A slot nobody owns, or None. 'Free' means unminted capacity: under the
-    identity ruling every session that has been arrived at is owned, so there is
-    no pool of free sessions to balance across."""
+    """A slot nobody owns, or None.
+
+    "Free" means UNMINTED CAPACITY, not an idle desktop: under the identity
+    ruling every session that has been arrived at is owned by the browser that
+    arrived, so there is no pool of free sessions to balance across. "Pick a free
+    one" and "mint one" are the same act here.
+    """
     taken = own.instances_in_use()
     for name in available_slots():
         if name not in taken:
@@ -572,15 +571,6 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock):
         # rewriting either one here would break the stream and would do it only
         # at upgrade time, long after the page looked fine.
         out.append(h)
-    # A slot configured with its own Basic credential still wants one. Reaching
-    # it is already gated by the socket's mode, so this is redundant rather than
-    # load-bearing -- but a slot that HAS one answers 401 to everything,
-    # including the index, and the demultiplexer is now the only caller. So
-    # present it where it exists rather than requiring every slot be
-    # reconfigured. Never built, only consumed: no new credential is minted here.
-    slot_cred = slot_credential(instance)
-    if slot_cred:
-        out.append(b"Authorization: Basic %s\r\n" % slot_cred)
     out.append(b"\r\n")
     up.sendall(b"".join(out))
 
@@ -798,6 +788,19 @@ def main():
         log("no session sockets in %s; nothing to route to." % PROXY_RUNDIR)
     else:
         log("routing to %d slot(s): %s" % (len(slots), ", ".join(slots)))
+        # A slot with its own Basic credential answers 401 to EVERYTHING that
+        # comes through here, including its index -- and it does so alone, while
+        # its neighbours work, which reads as a routing fault rather than as
+        # configuration. Say it at startup instead of letting one slot in the
+        # pool fail silently.
+        for name in slots:
+            if slot_carries_own_credential(name):
+                log("WARNING: %s has a credential of its own, so it will refuse"
+                    " every request routed to it." % name)
+                log("  On a filesystem socket that credential protects nothing:"
+                    " reachability is already")
+                log("  decided by the socket's mode. Turn it off with"
+                    " 'hdw4s noauth %s'." % name)
 
     srv = listening_socket()
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
