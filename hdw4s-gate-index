@@ -194,8 +194,42 @@ OVERLAY = r"""
   // happen. Offering only "COLD or nothing" would ask him to rule on a card the design
   // has already retired. This arm is what arrival says once R1 holds; it is text, it
   // costs nothing, and without it the comparison is between the wrong two things.
-  var MINT = '<p>This will start a fresh desktop.</p>'
-    + '<p>Nothing from anyone else is in it, and nothing in it survives being closed.</p>';
+  //
+  // WHAT THIS CARD SAYS ABOUT LIFETIME IS THE PRODUCT'S ONLY STATEMENT ABOUT IT, and
+  // it was false in the dangerous direction until 2026-09-23. It read "nothing in it
+  // survives being closed". Closing the tab does not stop the desktop: the session is
+  // held alive and is reclaimed later, after a period with nobody connected, so a
+  // person who signed into webmail and closed the tab believing it was gone was still
+  // signed in. A promise that something is destroyed is the one kind of promise where
+  // being wrong costs the reader rather than us, so it is now stated the other way
+  // round -- the desktop OUTLIVES the tab -- and the sign-out is named as the act that
+  // actually ends the exposure, because it is the only one the person can perform.
+  //
+  // NO NUMBER APPEARS HERE, DELIBERATELY. The reclaim period is a per-instance setting
+  // an administrator changes with "set", the page is generated once per web-root build,
+  // and a rebuild is not triggered by changing the setting. A figure baked in here
+  // would therefore be a claim that goes stale silently and breaks nothing -- and it
+  // would be wrong for every instance that overrides the default, since one built tree
+  // is served for the name it was built for. "for a while" is weaker and stays true.
+  // If a number is ever wanted on this card it has to arrive at page load from the
+  // session that is actually serving it, not from generation time.
+  //
+  // THE LAST LINE IS NOT DECORATION. Reachability is per browser per device, so a
+  // person who starts a desktop on a phone and opens the same address on a laptop gets
+  // a different one. Unexplained that is a fault report; stated once in advance it is
+  // a rule, and rules are forgivable.
+  //
+  // NOTHING HERE TELLS THE PERSON TO CLOSE THE DESKTOP THEMSELVES: measured on this
+  // tree, no visitor-facing control ends a session, so that instruction would be a
+  // documented act that cannot be performed. Signing out can be.
+  var MINT = '<p>This will start a fresh desktop. Nothing from anyone else is in it.</p>'
+    + '<p><b>Closing this tab does not end it.</b> It keeps running, still signed in to '
+    + 'whatever you sign in to, and you can come back to it in this browser. Sign out of '
+    + 'anything that matters before you walk away.</p>'
+    + '<p>It is not kept: once nobody has connected to it for a while it ends by itself, '
+    + 'and everything in it is destroyed then. Nothing in it is backed up.</p>'
+    + '<p>This browser on this device is what reaches it. Another browser, or another '
+    + 'device, gets a different desktop.</p>';
   var MINT_GO = 'Start a fresh desktop';
 
   function show(k, label){
@@ -554,5 +588,46 @@ OVERLAY = OVERLAY.replace("__SRC__", json.dumps(src_attr)) \
      .replace("__CFG__", json.dumps(cfg)) \
      .replace("__NAME__", html_escape(os.environ.get("HDW4S_SESSION_NAME", "Desktop")))
 html = html.replace("</body>", OVERLAY + "</body>") if "</body>" in html else html + OVERLAY
+
+# THE LIFETIME STATEMENT IS GUARDED HERE, IN BOTH DIRECTIONS, AND THE GUARD RUNS ON THE
+# BYTES THAT ARE ABOUT TO BE WRITTEN rather than on the template above -- a check that
+# passes at the layer we authored says nothing about what the browser is handed.
+#
+# Why a guard at all, when this is prose and prose cannot be proved true by a machine:
+# the defect being prevented is not a wrong word, it is a SILENT DELETION. The sentence
+# this replaced was false for as long as it shipped and nothing failed, because a page
+# that promises destruction and does not destroy behaves identically to a correct one.
+# Nothing in the suite, the build or the runtime could have gone red. The one mechanical
+# thing available is this: if the warning that the desktop outlives the tab is taken out
+# of the card, or if the retracted promise comes back, refuse to build the page at all,
+# where the person who did it is standing.
+#
+# Its direction is worth stating, because a checker that only ever fires one way has
+# already landed a defect on this project: this catches the clause going MISSING and the
+# old claim RETURNING. It cannot catch the clause being reworded into something equally
+# false, and it is not evidence that the card is true -- only that it still says the
+# thing a person decided was true.
+#
+# The span is DERIVED from the generated document, not asserted about the file as a
+# whole. Checking the whole page would make the retraction comment a few hundred lines
+# above -- which quotes the old sentence on purpose, so that grepping for it finds the
+# reason it went -- trip the guard against itself, and the repair for that would be to
+# stop quoting it, which is the wrong half to give up.
+_card = re.search(r"var MINT = (.*?);\n", html, re.S)
+if _card is None:
+    raise SystemExit("hdw4s-gate-index: the fresh-desktop card could not be found in the "
+                     "generated page, so its wording cannot be checked -- refusing to "
+                     "ship a lifetime claim nothing has read")
+_card = _card.group(1)
+if "Closing this tab does not end it" not in _card:
+    raise SystemExit("hdw4s-gate-index: the fresh-desktop card no longer warns that the "
+                     "desktop outlives the tab. Closing a tab does not stop a session, "
+                     "and a person who believes otherwise leaves a logged-in desktop "
+                     "running -- refusing to build")
+if re.search(r"survives? being closed|survive being closed", _card):
+    raise SystemExit("hdw4s-gate-index: the fresh-desktop card promises again that "
+                     "nothing survives being closed. That was measured false on this "
+                     "build and is false in the dangerous direction -- refusing to build")
+
 open(dst, "w", encoding="utf-8").write(html)
 print("hdw4s-gate-index: built %s (deferred %s)" % (dst, src_attr))
