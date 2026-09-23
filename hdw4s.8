@@ -6,6 +6,8 @@
 .SH "SYNOPSIS"
 \fBhdw4s\fR \fBlist\fR
 .br
+\fBhdw4s\fR \fBcheck\fR
+.br
 \fBhdw4s\fR \fBshow\fR \fIinstance\fR
 .br
 \fBhdw4s\fR \fBenable\fR \fIinstance\fR
@@ -45,6 +47,9 @@ Sessions are expected to sit behind a reverse proxy that terminates TLS and iden
 .TP
 \fBlist\fR
 Print every configured session with its user, port, whether it has a credential of its own, whether it keeps its settings apart from the home directory, its transport, its unit state and its current display\.
+.TP
+\fBcheck\fR
+Report any running session that is not publishing the identity a returning browser tab compares itself against, and exit non\-zero if there is one\. Nothing is restarted: the point is that somebody is told which session and why\. See DIAGNOSTICS\.
 .TP
 \fBshow\fR \fIinstance\fR
 Print one session's settings and, for each of them, which file it came from\.
@@ -379,12 +384,19 @@ It restarts only sessions nobody is connected to\. A session in use keeps the ve
 .SH "DIAGNOSTICS"
 .nf
 hdw4s list                       what exists and whether it is running
+hdw4s check                      whether every running session is sound
 hdw4s show <instance>            effective settings and their source
 hdw4s firewall \-\-check           whether the table is loaded and what it covers
 hdw4s \-\-version                  which version this is
 systemctl status hdw4s@<i>       includes the display and port when running
 journalctl \-xeu hdw4s@<i>        session output, including the X server
 .fi
+.P
+\fBhdw4s check\fR asks one question of every session that is running now: is it serving the incarnation token its own start published? A returning browser tab compares its saved token against the served one to decide whether it is looking at the desktop it had\. A session serving nothing makes that comparison empty on both sides, which reads as "unchanged" \-\- so the tab resumes into whichever session now holds the slot, instead of asking\.
+.P
+That state is not caused by a broken session\. It is caused by a session that was already running when something below it changed: a slot started before the publisher unit first ran, and never restarted, goes on running without it and is reported \fBactive\fR by everything that looks\. A restart fixes one; the check is what notices the next one\.
+.P
+It is run every fifteen minutes by \fBhdw4s\-check\.timer\fR, which marks \fBhdw4s\-check\.service\fR failed when it finds one, so \fBsystemctl \-\-failed\fR names it\. Run as root: the record it compares against is readable by root only, and asked by anyone else the command reports that it could not tell rather than that nothing was wrong\.
 .P
 The X server's log is kept in the session's runtime directory rather than the home directory, so it disappears with the session instead of accumulating\.
 .SH "LIMITATIONS"

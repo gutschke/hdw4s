@@ -29,6 +29,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait}
          dconf/profile dconf/10-policy dconf/locks/10-policy
          chrome-policies/hdw4s-ephemeral.json
          hdw4s-updater.{service,timer} hdw4s-reaper.{service,timer}
+         hdw4s-check.{service,timer}
          install.sh uninstall.sh LICENSE)
 
 for f in "${SOURCES[@]}"; do
@@ -323,6 +324,7 @@ systemctl enable --now hdw4s-firewall.service
 systemctl enable --now hdw4s-firewall.timer
 systemctl enable --now hdw4s-updater.timer
 systemctl enable --now hdw4s-reaper.timer
+systemctl enable --now hdw4s-check.timer
 # The ephemeral slots, and this one was missing from this list for as long as the
 # feature has existed. Linking a unit into /etc/systemd/system makes it LOADABLE;
 # it does not make it run. This unit declares WantedBy=sysinit.target, and that

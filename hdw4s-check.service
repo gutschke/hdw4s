@@ -1,0 +1,19 @@
+[Unit]
+Description=Check that every running HDW4S session publishes its own identity
+Documentation=man:hdw4s(8)
+
+[Service]
+ExecStart=/usr/lib/hdw4s/hdw4s check
+Type=oneshot
+
+# Deliberately no LogLevelMax=, unlike hdw4s-reaper.service. That one runs every
+# few minutes and says nothing worth keeping; this one says nothing at all until
+# something is wrong, and the text it prints then names the slot and the repair.
+# Filtering it to warning would drop exactly the output this unit exists to
+# produce, and leave only "failed", which points at no slot.
+#
+# The failure IS the signal: "hdw4s check" exits non-zero, systemd marks the
+# unit failed, and "systemctl --failed" names it. Nothing here restarts a
+# session -- a check that quietly repaired what it found would be one nobody
+# ever read, and the thing worth knowing is that a slot was running without the
+# publisher for two hours, not that it has now been bounced.
