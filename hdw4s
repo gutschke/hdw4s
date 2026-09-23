@@ -1,7 +1,12 @@
 #!/bin/bash -e
 export LC_ALL='C'
 export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-set -o nounset -o pipefail
+# errtrace, so the ERR trap below fires inside FUNCTIONS too. Without it bash
+# does not inherit an ERR trap into a function body, and every command this
+# program runs is in one -- so the line recorder stayed unset and the diagnosis
+# read "line ?", which is what the first version of this fix actually shipped
+# until it was tested against a fault injected into a function.
+set -o nounset -o pipefail -o errtrace
 
 # An unexpected fault reports itself at ERROR priority, not at the default.
 #
@@ -21,17 +26,33 @@ set -o nounset -o pipefail
 # arguments with it, and this program handles credentials; a diagnostic that
 # helpfully copies a secret into the journal is a worse bug than the one it is
 # helping with. The line number is enough to find the command in the source.
+# The failing line is captured by a trap of its OWN, because "${LINENO}" read
+# inside a trap body describes the trap's own text and not the fault: measured,
+# it reports line 1 for a command that failed on line 1532, which would send the
+# next reader to the shebang. "${BASH_LINENO[0]}" reports 0 here and is no better.
+# A separate ERR trap is the one place the real line is visible. It must not share
+# a handler with the reporting trap below, since bash keeps only one per signal --
+# which is why ERR is deliberately absent from that trap's list. Under "set -e" a
+# failing command fires ERR and then exits, so EXIT still does the reporting.
+# Latched at the FIRST ERR, not the last. With errtrace the trap fires once per
+# frame as the failure propagates outward, so assigning unconditionally records
+# the CALL SITE rather than the fault -- measured: line 9 for a command failing
+# on line 7. Under "set -e" the first unhandled failure is the fatal one, and a
+# failure that is handled ("|| :") never fires ERR at all, so the first sighting
+# is the right one.
+__errln='?'
+trap '[ "${__errln}" != "?" ] || __errln="${LINENO}"' ERR
 # shellcheck disable=SC2154  # rc is assigned inside the trap itself
-trap 'rc="$?"; ln="${LINENO}"
+trap 'rc="$?"
       trap "" INT TERM QUIT HUP EXIT ERR
       if [ "${rc}" -ne 0 ]; then
         if [ -n "${JOURNAL_STREAM:-}" ]; then
-          printf "<3>%s\n" "${0}: failed unexpectedly (status ${rc}, line ${ln})" >&2
+          printf "<3>%s\n" "${0}: failed unexpectedly (status ${rc}, line ${__errln})" >&2
         else
           echo "Script ${0} failed unexpectedly" >&2
         fi
       fi
-      exit "${rc}"' INT TERM QUIT HUP EXIT ERR
+      exit "${rc}"' INT TERM QUIT HUP EXIT
 
 # Exit with an explanation rather than the trap's generic complaint. The trap
 # is for faults nobody anticipated; anything diagnosed here has already been
