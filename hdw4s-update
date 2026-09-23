@@ -547,8 +547,22 @@ import sys
 import pixelflux        # video encoders; links libva-x11, libva-drm, libdrm
 import pcmflux          # audio capture and playback; links libpulse
 import selkies
-import selkies.input_handler, selkies.stream_server, selkies.signaling_server
-import selkies.webrtc_signaling, selkies.audio_control, selkies.display_utils
+import selkies.__main__   # the entry point hdw4s actually runs
+
+# DELIBERATELY NOT a list of upstream's internal modules. It used to be, and it
+# turned a good release into a failed install: 2.0.0rc1 renamed
+# signaling_server -> webrtc_signaling_server and webrtc_signaling ->
+# webrtc_signaling_client, so this block raised ModuleNotFoundError, the
+# verification declared the new installation broken, and the updater rolled
+# back to rc0 -- correctly, on an expectation that was wrong rather than a
+# package that was. Upstream owes us no stability in its private layout, and a
+# check that asserts one fails on every refactor and tells us nothing about
+# whether the product works.
+#
+# What this must prove is what the next few lines and the caller already cover:
+# the package imports, its native dependencies link, the entry point resolves,
+# and the programs shelled out to at runtime exist. Add a module here only if
+# hdw4s imports it by name itself -- which today it does not.
 
 # Shelled out to at runtime, so nothing above notices them missing. xdotool is
 # the fallback for every keysym XTEST cannot inject directly, and xset and
