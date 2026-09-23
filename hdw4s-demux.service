@@ -34,8 +34,19 @@ SupplementaryGroups=www-data
 # LoadCredential= at /etc/hdw4s exits 243 before the service runs, because the
 # import refuses the subdirectory in there. Measured on this build, after this
 # comment had first asserted the opposite. So credentials are named one file at
-# a time: the front door's here, and the slots' in a drop-in written by
-# hdw4s-ephemeral-slots, which is where the slot names are known.
+# a time.
+#
+# ONE credential is loaded here: the front door's. This used to go on to say
+# "and the slots' in a drop-in written by hdw4s-ephemeral-slots", which was read
+# as an inventory of what the router holds and is FALSE -- no such drop-in is
+# written anywhere in this package, and the service has no drop-in directory at
+# all. Measured 2026-09-22: DropInPaths empty, no .d directory on disk.
+#
+# The correction matters beyond tidiness, because a reader who believes that
+# sentence draws the wrong conclusion about credentials on slots: the router
+# holds NO per-slot secret and cannot present one, so a slot configured with its
+# own credential answers 401 to everything routed to it, alone, while its
+# neighbours work. That is the field failure the startup warning exists for.
 #
 # No "-" on this one. A front door with no credential must not start.
 LoadCredential=demux.auth.cred:/etc/hdw4s/demux.auth.cred

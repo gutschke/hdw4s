@@ -272,9 +272,24 @@ def slot_carries_own_credential(instance):
 
 
 def available_slots():
-    """The slots this box actually has, read from the authority that defines the
-    set -- the bound sockets -- rather than from a configured count. A count in a
-    file is a claim; a socket a request can reach is the thing itself."""
+    """The names in the socket directory. NOT the slots this box can serve.
+
+    This docstring used to claim it read "the authority that defines the set --
+    the bound sockets -- rather than from a configured count", and ended "a count
+    in a file is a claim; a socket a request can reach is the thing itself". It
+    reads neither. It lists a DIRECTORY and filters on a suffix, which is a third
+    thing: a filename. The author rejected the weaker evidence and then
+    implemented something weaker still, and the sentence stopped anyone noticing.
+
+    Measured 2026-09-22, three ways it is wrong at once. A regular file made with
+    "touch zz-probe.sock" is enumerated. A socket with nothing bound to it is
+    enumerated, handed to a visitor, and consumes a slot permanently. A named
+    session's leftover socket is enumerated into the ephemeral pool.
+
+    Reachability is now reported at startup by slot_unreachable(), which does ask
+    the kernel -- but this function still answers the filesystem question, so
+    callers must not read its result as "these can be served".
+    """
     try:
         names = os.listdir(PROXY_RUNDIR)
     except OSError as e:
