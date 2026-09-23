@@ -554,6 +554,36 @@ itself and reports it back, which is the only way to claim one without a race.
 Nothing outside the machine ever sees the display number, so it does not need to
 be predictable.
 
+## THE EPHEMERAL POOL
+
+There are two kinds of session to configure: **named sessions**, one per person,
+each with its own hostname; and **the ephemeral pool**, which grows as it is
+used and whose sessions nobody provisions.
+
+The pool is configured as **one thing**, not slot by slot. Visitors arrive at a
+single hostname for the whole pool and are given a session from it.
+
+  * **One hostname for the pool.** Slots have no hostnames of their own. Giving
+    one its own name and pointing a proxy at it defeats the arrangement.
+
+  * **The pool chooses, and remembers.** A returning visitor is given back the
+    session they already have rather than a new desktop on every arrival, and
+    where that cannot be decided safely the visitor is asked rather than acted
+    on. Reaching a slot directly skips that decision entirely.
+
+  * **A slot must not be reached directly.** Not by a reverse proxy, not by
+    anything else. The sockets under `/run/hdw4s-proxy/` belong to the pool.
+
+  * **The credential belongs to the pool, not to a slot.** A reverse proxy
+    presents one credential to reach the pool; individual slots have none and
+    cannot be given one, which is why `auth` refuses for a slot.
+
+Run `proxy` against any slot to print the reverse-proxy configuration for the
+pool. It is the same for every slot.
+
+The pool is served by a unit named `hdw4s-demux`, which is where it appears in
+`systemctl` output and in the journal. Nothing else requires that name.
+
 ## TRANSPORTS
 
 How the reverse proxy reaches a session, in decreasing order of how much the
@@ -570,8 +600,8 @@ machine itself can guarantee.
     This is the right answer whenever it is available. It requires the proxy
     to be on the same machine, or to be able to see the same filesystem. For an
     ephemeral slot it is the only answer: a visitor reaches one well-known
-    hostname and a front door on this machine chooses the slot, so there is no
-    caller outside the machine for a port to serve -- and a port would be open
+    hostname and the demultiplexer on this machine chooses the slot, so there is
+    no caller outside the machine for a port to serve -- and a port would be open
     to every account in the container, which is not a caller the session has.
 
     Two containers on one host can share a socket if the same directory is

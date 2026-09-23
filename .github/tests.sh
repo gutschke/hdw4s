@@ -811,15 +811,29 @@ echo '== an ephemeral slot cannot be put on the network =='
     ok 'and gets its listener drop-in' ||
     bad 'and gets its listener drop-in' 'nothing was written'
 
-  # And "hdw4s proxy" must not describe a port for a slot that has none. It
-  # reads the instance's conf file, which for an ephemeral slot may be absent
-  # or may be a stale one written by a version that put it on TCP -- so the
-  # stale file is what is put in front of it here.
+  # And "hdw4s proxy" must describe the POOL for a slot, never that slot.
+  #
+  # The assertion this replaced required the block to contain
+  # "proxy_pass http://unix:" -- pointing nginx straight at one slot's socket,
+  # which is the bypass. It was correct when a session's own socket was the only
+  # kind there was, and it went on passing after the pool shipped, pinning the
+  # defect in place exactly as the auth group's assertion pinned the dead end.
+  #
+  # The stale conf is still put in front of it: an ephemeral slot's file may be
+  # absent, or may say "tcp" because an older version wrote it.
   printf '%s\n' "0 ${me} ephemeral" > "${SLOTS}"
   printf 'HDW4S_TRANSPORT=tcp\n' > "${ETCDIR}/${me}.conf"
   out="$( ( cmd_proxy "${me}" ) 2>&1 )"
-  has 'the proxy block names the socket'   "${out}" "proxy_pass http://unix:"
+  hasnt 'the block does NOT point nginx at a slot socket' \
+        "${out}" "proxy_pass http://unix:"
   hasnt 'and no longer names a port'       "${out}" "HOST_RUNNING_HDW4S"
+  # One line, not a phrase that spans one. The first version of this assertion
+  # searched for "a pool is not configured slot by slot", which the block wraps
+  # across a newline -- so it could never match, and the failure read as the
+  # branch not firing rather than as the search being wrong.
+  has 'and says it is one slot of a pool' \
+      "${out}" 'is one slot of the ephemeral pool'
+  has 'and speaks of the pool, not our internals' "${out}" 'the pool chooses'
 )
 
 echo '== a slot table written by an older version still works =='
@@ -1433,7 +1447,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=240   # update when tests are added; a wrong number is the point
+EXPECTED=242   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

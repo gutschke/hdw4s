@@ -1807,9 +1807,107 @@ cmd_noauth() {
   echo "  Restart it to take effect: systemctl restart $(unit_of "${inst}")"
 }
 
+# The port the front door listens on, read from the socket unit rather than
+# printed as a constant. A comment in that unit promises "hdw4s demux port" for
+# changing it; that command has never existed, so a constant here would be a
+# number nobody can change and nothing would say so.
+demux_port() {
+  local v
+  v="$(systemctl show 'hdw4s-demux.socket' -p Listen --value 2>/dev/null |
+       sed -n 's/^Stream \(.*\)$/\1/p' | tail -n1)"
+  v="${v##*:}"
+  case "${v}" in ''|*[!0-9]*) echo 'THE_FRONT_DOOR_PORT';; *) echo "${v}";; esac
+}
+
 cmd_proxy() {
   local inst="$1" idx port cred user pw
   split_instance "${inst}" || fail
+
+  # BEFORE the slot lookup, deliberately. A slot that has been minted but not
+  # yet enabled has no row, and that is exactly the machine whose operator most
+  # needs this answer -- so looking the row up first would kill the command on
+  # the only occasion it matters.
+  #
+  # And this is a REDIRECTION, not a refusal. What it used to print was a
+  # working server block that proxy_pass'd straight at one slot's socket,
+  # bypassing the front door that picks slots and enforces the arrival rule,
+  # together with the instruction to add nginx's user to the group that owns
+  # it -- the precise change that opens the bypass. That text was correct when
+  # a session's socket was the only kind there was; it became a recipe the day
+  # the pool shipped, and nothing failed and no test noticed.
+  # type_of() reads the slot table, so it cannot answer for a slot that has been
+  # minted and not yet enabled -- which is the very case this branch was moved up
+  # to serve. So ask the MACHINE as well: minting creates a runtime profile
+  # directory per slot, and that exists before any row does.
+  local looks_ephemeral='no'
+  [ "$(type_of "${inst}")" != 'ephemeral' ] || looks_ephemeral='yes'
+  [ ! -d "/run/hdw4s-profile/${inst}" ] || looks_ephemeral='yes'
+  if [ "${looks_ephemeral}" = 'yes' ]; then
+    cat <<EOF
+# ${inst} is one slot of the ephemeral pool, and a pool is not configured slot
+# by slot. Visitors arrive at ONE hostname for the whole pool; the pool chooses
+# which slot each visitor gets, and gives a returning visitor back the session
+# they already have. A block pointing nginx at this slot's own socket would bypass
+# that -- every visitor would land on ${inst}, and the arrival rule that decides
+# whether to resume, gate or mint would never run.
+#
+# So the configuration below is for the POOL. It is the same for every slot, and
+# running this command against a different slot prints the same thing.
+#
+# The facts behind it, which outlive this block:
+#
+#   * one hostname serves the whole pool; slots have no hostnames of their own
+#   * the pool answers on 127.0.0.1:$(demux_port), and that is the ONLY
+#     address a visitor may be sent to
+#   * the credential belongs to the pool, not to a slot; slots have none and
+#     cannot be given one
+#   * a slot's own socket under /run/hdw4s-proxy must NOT be reached directly,
+#     by nginx or by anything else
+#
+# See hdw4s(8), "THE EPHEMERAL POOL".
+
+server {
+    listen 443 ssl;
+    server_name ephemeral.example.com;
+
+    # ssl_certificate     /etc/ssl/certs/...;
+    # ssl_certificate_key /etc/ssl/private/...;
+
+    # ... your own authentication here: auth_request, OIDC, client certs ...
+    # The pool performs none. Whatever reaches it gets a desktop.
+
+    location / {
+        proxy_pass http://127.0.0.1:$(demux_port);
+        proxy_http_version 1.1;
+
+        # The stream is a WebSocket; without these it will connect and then
+        # sit there.
+        proxy_set_header Upgrade    \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       \$host;
+        proxy_set_header X-Real-IP  \$remote_addr;
+
+        # A desktop is idle for long stretches and must not be timed out.
+        proxy_read_timeout  86400s;
+        proxy_send_timeout  86400s;
+        proxy_buffering     off;
+
+        # REVALIDATE THE SERVED CLIENT. Do not drop these two lines. The page
+        # carries the arrival gate, and a cached copy silently serves a client
+        # without one -- invisible from the server, which is busy serving the
+        # correct page to everyone whose cache happens to be cold.
+        proxy_hide_header   Cache-Control;
+        add_header          Cache-Control "no-cache" always;
+
+        # The pool's credential goes here. It is the proxy's, not a
+        # user's, so there is still no login screen.
+        # proxy_set_header Authorization "Basic <see /etc/hdw4s/demux.auth.cred>";
+    }
+}
+EOF
+    return 0
+  fi
+
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
   port="$(port_of "${idx}")"
@@ -1939,7 +2037,9 @@ EOF
     cat <<'EOF'
 
         # This session has no credential of its own, so the firewall is the
-        # only thing protecting it. Run "hdw4s auth <instance>" to add one.
+        # only thing protecting it. Run "hdw4s auth" on this session to add
+        # one. (An ephemeral slot never reaches this line: it cannot be given
+        # a credential, and its configuration is printed above instead.)
 EOF
   fi
   cat <<'EOF'
