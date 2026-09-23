@@ -1117,6 +1117,45 @@ echo '== every path the session hides must be one something creates first =='
   is 'and every one of them is created by the slot minter' "${missing}" ''
 )
 
+echo '== the ephemeral unit may not run a command with the "+" prefix =='
+# Written from the failure: "ExecStartPre=+/usr/lib/hdw4s/hdw4s-webroot gate %i" took
+# every ephemeral session on a test container down with
+#   Failed to set up mount namespacing: /home/user: No such file or directory
+#   Control process exited, code=exited, status=226/NAMESPACE
+#
+# The manual says "+" skips "the various file system namespacing options", which reads
+# as "this command gets no namespace". It is narrower than that, measured on systemd
+# 255.4-1ubuntu8.17 with findmnt from inside a transient unit: "+" drops ProtectHome=
+# and ProtectSystem=, and KEEPS BindPaths= and TemporaryFileSystem=. So the per-slot
+# drop-in's TemporaryFileSystem=/home/user is still applied -- but with the real /home
+# underneath it instead of the tmpfs ProtectHome= would have put there, and the mount
+# point has to be created on the real home filesystem. On an NFS home that squashes
+# root, it cannot be, and the unit dies before the desktop exists. On a machine with a
+# local /home it silently succeeds and leaves an empty /home/user behind, which is a
+# filesystem trace this session type promises not to leave -- which is exactly why the
+# line passed its first test and failed in production.
+#
+# "!" is the prefix that works here: elevated privilege, namespace intact.
+(
+  unit="${ROOT}/hdw4s-ephemeral@.service"
+  minter="${ROOT}/hdw4s-ephemeral-slots"
+
+  # The reason has to still be true, or this test outlives it as a rule nobody can
+  # explain. If the minter stops mounting under /home, revisit this, do not delete it.
+  grep -qE '^TemporaryFileSystem=/home/' "${minter}" \
+    && ok 'the slot minter still mounts a tmpfs under /home' \
+    || bad 'the slot minter still mounts a tmpfs under /home' \
+           'the reason this test exists has moved; re-derive it before editing'
+
+  # A harness that greps for something absent from every unit proves nothing, so show
+  # it can see a "+" at all before reporting that there is none.
+  probe="$(printf 'ExecStartPre=+/bin/true\n' | grep -cE '^Exec[A-Za-z]*=[+]')"
+  is 'the probe can see a "+"-prefixed Exec line' "${probe}" '1'
+
+  found="$(grep -nE '^Exec[A-Za-z]*=[+]' "${unit}" || :)"
+  is 'and the ephemeral unit carries none' "${found}" ''
+)
+
 echo '== a unit with an [Install] section is no use until something enables it =='
 # Written from the failure: hdw4s-ephemeral-slots.service declares
 # WantedBy=sysinit.target and was enabled by neither installer -- install.sh only
