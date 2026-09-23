@@ -1131,17 +1131,242 @@ declare -A SETTABLE=(
   [HDW4S_THUMBNAILS]='off|on'
   [HDW4S_HIDPI]='scale|native'
   [HDW4S_LANG]='any'
-  [HDW4S_IDLE_DAYS]='number'
+  [HDW4S_IDLE_DAYS]='duration'
   [HDW4S_MEDIA_PORTS]='proxied|direct'
   [HDW4S_ENCODER]='any'
   [SELKIES_VERSION]='any'
 )
+
+# --- the idle window --------------------------------------------------------
+
+# HDW4S_IDLE_DAYS is a duration, and a bare number in it still means DAYS.
+#
+# THE NAME IS DELIBERATE. DO NOT "TIDY" IT BY RENAMING THE KEY. It names the
+# setting and its default unit, and the awkwardness of writing "60s" against a
+# key spelled DAYS is doing work: a development value cannot then be mistaken
+# for a production one at a glance. Renaming to HDW4S_IDLE would make a bare
+# number arbitrary -- nothing in the name would say days -- so the nudge toward
+# days would be removed rather than relocated. Revisit only when there are real
+# configurations to look at.
+#
+# The unit letters are systemd's, so that an administrator who knows one knows
+# the other: s m h d w M y. CASE MATTERS -- "m" is minutes and "M" is months --
+# and a letter that is neither is rejected rather than folded to the one that
+# looks closest. Nothing here guesses.
+#
+# There is no fallback. This replaced
+#
+#     case "${days}" in ''|*[!0-9]*) days=7;; esac
+#
+# which turned anything it could not read into a week with no message at all --
+# so "30m", meant as thirty minutes, became seven days silently, and the unit
+# ambiguity above could not have been noticed by anybody. Teaching the parser
+# units WITHOUT removing that line is what would have let it bite for the first
+# time, so the two belong in one change.
+
+# Whole seconds below which a non-zero window is refused.
+#
+# An ephemeral session takes the full stop timeout to die -- 91 seconds,
+# measured from the journal and recorded in hdw4s-ephemeral@.service, because
+# several of GNOME's helpers ignore SIGTERM and have to be SIGKILLed. A window
+# shorter than the teardown cannot free a slot inside the window, so it is not
+# an aggressive setting, it is an incoherent one: the slot is still occupied
+# when the next window has already elapsed.
+#
+# Sampling is the second reason, and it is the one an administrator meets
+# first: hdw4s-reaper.timer runs every five minutes, so nothing is noticed
+# sooner than that whatever this says. The floor is set at the teardown rather
+# than at the sampling interval because the teardown is what makes a value
+# incoherent rather than merely coarse -- but the refusal says both, since an
+# administrator who sets 120s and watches for two minutes would otherwise
+# conclude the setting was ignored.
+IDLE_MIN_SECONDS=120
+
+# The two answers from idle_seconds: the window in whole seconds when it
+# succeeds, and why it refused when it does not.
+#
+# RETURNED IN VARIABLES RATHER THAN ON STDOUT, and that is not a style choice.
+# A command substitution runs in a subshell, so a caller written as
+#
+#     window="$(idle_seconds "${raw}")" || echo "${IDLE_WHY}"
+#
+# reads the reason back as EMPTY every time -- the assignment happened in a
+# child that has already exited. The refusal would print a key, a colon and
+# nothing, on exactly the path nobody tests. There is no call site that can get
+# this wrong now, because there is no stdout to capture.
+IDLE_SECONDS=''
+IDLE_WHY=''
+
+# Sets IDLE_SECONDS to the window in whole seconds, or fails with the reason in
+# IDLE_WHY.
+#
+# Zero is a legal answer and means "never reap" -- a person typed a zero and
+# that is a statement. A NON-ZERO value that computes to less than a second is
+# refused instead, because reading it as "disabled" would silently invert what
+# was asked for.
+#
+# Failing rather than dying, so both callers can be loud in their own way: "set"
+# dies on the spot, and the reaper has other sessions to get to and must not
+# exit in the middle of the list. NEITHER may fall back to a default.
+idle_seconds() {
+  local raw="$1" num unit mult secs
+  IDLE_SECONDS=''
+  IDLE_WHY=''
+
+  # Split the trailing unit off by removing the longest run that ends in a
+  # digit or a decimal point. "30s" -> "s"; "30" -> ""; "0.5h" -> "h"; and
+  # "1h30m" -> "m" with "1h30" left over, which fails the number test below.
+  # Compound durations are refused on purpose: systemd accepts them, nothing
+  # here needs them, and "90m" says the same thing with one way to read it.
+  unit="${raw##*[0-9.]}"
+  num="${raw%"${unit}"}"
+  if ! [[ "${num}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    IDLE_WHY="'${raw}' is not a duration."
+    return 1
+  fi
+
+  case "${unit}" in
+    ''|d)  mult=86400;;
+    s)     mult=1;;
+    m)     mult=60;;
+    h)     mult=3600;;
+    w)     mult=604800;;
+    # systemd's own lengths for the two units that have no fixed one: a month
+    # is 30.44 days and a year is 365.25. Spelled out rather than computed so
+    # that they can be compared against systemd's documentation by eye.
+    M)     mult=2629800;;
+    y)     mult=31557600;;
+    *)     IDLE_WHY="'${unit}' is not a unit of time."; return 1;;
+  esac
+
+  # awk, because 0.5h has to be 1800 and bash has no fractions. Truncating
+  # toward zero is safe here precisely because the representation is seconds:
+  # the only way to reach zero from a non-zero value is to be smaller than a
+  # second, and that is refused two lines below rather than read as "disabled".
+  secs="$(awk -v n="${num}" -v m="${mult}" 'BEGIN { printf "%d", int(n * m) }')"
+  case "${secs}" in ''|*[!0-9]*)
+    IDLE_WHY="'${raw}' is too large to be a duration."; return 1;;
+  esac
+
+  if [ "${secs}" -eq 0 ]; then
+    # Zero seconds from a zero. Disabled, and said so explicitly.
+    if awk -v n="${num}" 'BEGIN { exit !(n + 0 == 0) }'; then
+      IDLE_SECONDS='0'
+      return 0
+    fi
+    IDLE_WHY="'${raw}' is less than a second."
+    return 1
+  fi
+
+  if [ "${secs}" -lt "${IDLE_MIN_SECONDS}" ]; then
+    IDLE_WHY="'${raw}' is ${secs} seconds, and the shortest window is ${IDLE_MIN_SECONDS}."
+    return 1
+  fi
+
+  IDLE_SECONDS="${secs}"
+}
+
+# The remedy, printed under every refusal above. Every form named here is one
+# the parser accepts; a refusal that names a spelling the tool then rejects is
+# worse than one that names none.
+idle_syntax_help() {
+  printf '%s\n' \
+    '  Write a number with one of systemd'"'"'s unit letters, or a bare number' \
+    '  for days. Case matters: m is minutes, M is months.' \
+    '      s seconds   m minutes   h hours   d days   w weeks   M months   y years' \
+    '  For example: 7 (seven days), 30d, 12h, 90m, 0.5h.' \
+    '  0 disables reaping altogether.' \
+    "  The shortest window is ${IDLE_MIN_SECONDS} seconds: an ephemeral session takes up to 91" \
+    '  seconds to shut down, so a shorter window cannot free a slot inside' \
+    '  itself. Connections are sampled every five minutes, so nothing shorter' \
+    '  than that is noticed any sooner either.'
+}
+
+# How long ago, in words, for a message a person reads. Whole units only: the
+# reaper is announcing that it stopped something, and "nothing has connected
+# for 8 days" is the sentence, not a duration to compute against.
+duration_words() {
+  local s="$1"
+  if   [ "${s}" -ge 172800 ]; then printf '%s days'    "$(( s / 86400 ))"
+  elif [ "${s}" -ge 86400  ]; then printf '1 day'
+  elif [ "${s}" -ge 7200   ]; then printf '%s hours'   "$(( s / 3600 ))"
+  elif [ "${s}" -ge 3600   ]; then printf '1 hour'
+  elif [ "${s}" -ge 120    ]; then printf '%s minutes' "$(( s / 60 ))"
+  else                             printf '%s seconds' "${s}"
+  fi
+}
+
+# Whether this machine has an ephemeral pool at all, read from the slot table
+# rather than from a setting: the table is what every other reader uses to
+# decide what a slot is, and a machine with the pool size configured but no
+# slots minted has nothing to protect yet.
+has_ephemeral_slots() {
+  [ -r "${SLOTS}" ] || return 1
+  awk '$1 !~ /^#/ && $3 == "ephemeral" { found = 1 }
+       END { exit !found }' "${SLOTS}"
+}
+
+# "Never reap" is a defensible administrative choice for a named session and an
+# incoherent one for an ephemeral slot, so it is refused where it is written
+# rather than discovered months later.
+#
+# Stopping a named session is a nap: its files and settings stay, and the next
+# connection starts it again. Nothing is lost by never doing it. An ephemeral
+# slot has no such second state -- reaping is the ONLY thing that ever frees
+# one, because a visitor who closes the tab never tells anything -- so a zero
+# there means unattended desktops accumulate until the pool is full, and every
+# visitor after that gets a 503 from the front door. One configuration line, no
+# error anywhere, and a symptom that looks like a routing fault.
+#
+# Refused rather than warned about: a warning at "set" time is read once, by
+# somebody who has already decided.
+guard_never_reap() {
+  local inst="$1" value="$2"
+  # A value this cannot parse is somebody else's refusal; say nothing twice.
+  idle_seconds "${value}" || return 0
+  [ "${IDLE_SECONDS}" -eq 0 ] || return 0
+
+  if [ -n "${inst}" ]; then
+    [ "$(type_of "${inst}")" = 'ephemeral' ] || return 0
+    die "hdw4s: ${inst} is an ephemeral slot, and 0 would never free it." \
+        '  Reaping is the only thing that ever frees a slot: a visitor who' \
+        '  closes the tab tells nothing, so with no window the slot stays' \
+        '  occupied until the machine reboots. Once every slot is held, the' \
+        '  next visitor gets a 503 and nothing anywhere reports why.' \
+        '  Set a long window instead of none:' \
+        "    hdw4s set ${inst} HDW4S_IDLE_DAYS=30d" \
+        '  0 is still accepted for a named session, where stopping one is a' \
+        '  nap and the next connection starts it again.'
+  fi
+
+  # Machine-wide, and only on a machine that has a pool: without one, 0 is the
+  # named-session choice above and there is nothing to protect. Derived from
+  # the table rather than assumed, so this does not refuse on a machine the
+  # rule does not apply to -- a check that fails on a correct state is a check
+  # somebody turns off.
+  has_ephemeral_slots || return 0
+  die 'hdw4s: 0 here would stop this machine reaping its ephemeral slots.' \
+      '  This value is read by every session, including the slots of the' \
+      '  ephemeral pool, and reaping is the only thing that ever frees one.' \
+      '  With no window they fill up and stay full, and every visitor after' \
+      '  that gets a 503 with nothing reporting why.' \
+      '  Set it on the named sessions that should never be stopped:' \
+      '    hdw4s set <session> HDW4S_IDLE_DAYS=0' \
+      '  or give the whole machine a long window instead of none:' \
+      '    hdw4s set HDW4S_IDLE_DAYS=30d'
+}
 
 check_value() {
   local key="$1" value="$2" rule="${SETTABLE[$1]}"
   case "${rule}" in
     number) case "${value}" in ''|*[!0-9]*)
               die "hdw4s: ${key} takes a number, not '${value}'";; esac;;
+    # Typed as a plain number, this setting rejected "24h" outright -- and the
+    # refusal read as the parser failing rather than as the validator refusing
+    # a form the parser would have taken. The type ships with the parser.
+    duration)
+            idle_seconds "${value}" ||
+              die "hdw4s: ${key}: ${IDLE_WHY}" "$(idle_syntax_help)";;
     # A bare number, or the "N,LOW-HIGH" form. The range has to be settable:
     # hdw4s-run-session turns a bare number into "N,8-N" precisely so the
     # setting caps the rate rather than merely starting there, and passes an
@@ -1304,6 +1529,9 @@ cmd_set() {
           '    hdw4s noauth <session>   to remove one'
     fi
     check_value "${key}" "${value}"
+    # After check_value, so an unparseable value is refused as bad syntax
+    # rather than as a policy violation it is not.
+    [ "${key}" != 'HDW4S_IDLE_DAYS' ] || guard_never_reap "${inst}" "${value}"
     config_write "${file}" "${key}" "$(quote_value "${value}")"
     echo "${file}: ${key}=${value}"
   done
@@ -1635,7 +1863,7 @@ clients_of() {
 # browser client reconnects by itself, so an open tab counts as connected even
 # across a laptop lid being shut.
 cmd_reap() {
-  local idx inst stype port established last now age days stopped=0
+  local idx inst stype port established last now age raw window stopped=0
   now="$(date +%s)"
   [ -r "${SLOTS}" ] || return 0
 
@@ -1649,9 +1877,27 @@ cmd_reap() {
     # Per instance, not once for the whole run: a session that should never be
     # reaped is a per-session decision, and reading the global here meant
     # setting it on an instance did nothing at all.
-    days="$(setting_of "${inst}" HDW4S_IDLE_DAYS 7)"
-    case "${days}" in ''|*[!0-9]*) days=7;; esac
-    [ "${days}" -gt 0 ] || continue
+    raw="$(setting_of "${inst}" HDW4S_IDLE_DAYS 7)"
+    # No fallback. What was here turned anything it could not read into seven
+    # days without a word, which is how "30m" became a week and why nobody
+    # could have noticed that "m" was ambiguous. Skipping is the cautious
+    # answer and reaping on a guess is not: one leaves a desktop running, the
+    # other destroys an ephemeral session on a number nobody wrote.
+    if ! idle_seconds "${raw}"; then
+      reap_say "hdw4s: ${inst} not considered: HDW4S_IDLE_DAYS: ${IDLE_WHY}"
+      reap_say '  Nothing will stop this session until the value is fixed.'
+      reap_say "  Fix it with: hdw4s set ${inst} HDW4S_IDLE_DAYS=7"
+      continue
+    fi
+    window="${IDLE_SECONDS}"
+    if [ "${window}" -eq 0 ]; then
+      # Legal for a named session and refused at "set" time for a slot, so
+      # reaching this with a slot means the file was edited by hand. Say so
+      # every run: the pool filling up has no other symptom to trace back.
+      [ "${stype}" != 'ephemeral' ] ||
+        reap_say "hdw4s: ${inst} has HDW4S_IDLE_DAYS=0, so this slot will never be freed."
+      continue
+    fi
     # The internal port, not the one the socket unit binds: the external port
     # has no connections at all when the session is on a filesystem socket,
     # which once made the reaper stop desktops that were in constant use.
@@ -1694,10 +1940,13 @@ cmd_reap() {
       printf '%s\n' "${last}" > "${stamp}" 2>/dev/null || :
     fi
     case "${last}" in ''|*[!0-9]*) continue;; esac
-    age=$(( (now - last) / 86400 ))
-    [ "${age}" -ge "${days}" ] || continue
+    # Seconds throughout. The day-granularity arithmetic this replaces was what
+    # made a sub-day value truncate to zero and read as "never reap"; with
+    # seconds there is nothing left to truncate.
+    age=$(( now - last ))
+    [ "${age}" -ge "${window}" ] || continue
 
-    reap_say "hdw4s: stopping ${inst}; nothing has connected for ${age} days."
+    reap_say "hdw4s: stopping ${inst}; nothing has connected for $(duration_words "${age}")."
     if [ "${stype}" = 'ephemeral' ]; then
       reap_say '  This was an ephemeral session: its home and its settings lived'
       reap_say '  in memory and are now gone. The slot is free for a new session.'
