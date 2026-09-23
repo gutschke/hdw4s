@@ -732,10 +732,29 @@ if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
   # (see layer 4 in hdw4s-webroot): present, this generation's, and different from the
   # last one. Without it a returning tab cannot tell a respawned desktop from the one it
   # was using, and connects silently to somebody else's.
-  "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" check "${webroot}" "${instance}" || {
-    echo 'hdw4s: refusing to start an ephemeral session without a gated client' >&2
-    exit 1
-  }
+  # THE GATE IS NOT RUN HERE, AND IT CANNOT BE. It used to be, and the call was
+  # unsatisfiable by construction -- which went unnoticed because the incarnation
+  # layer had never actually run on any machine until 2026-09-22.
+  #
+  # Layer 4 asserts that hdw4s-incarnation published an identity for THIS start,
+  # by reading /run/hdw4s-incarnation/<instance>. That record is root-owned and
+  # mode 0600 on purpose: the occupant must not be able to forge it. But this
+  # script is the session, and the unit sets User=%i, so everything here runs AS
+  # the occupant -- which cannot read it. Measured, with a control: as the slot
+  # uid the read is EACCES; as root it succeeds. The unit also listed that path in
+  # InaccessiblePaths= at the time, so the namespace hid it as well -- two
+  # independent barriers, both deliberate, both aimed at the same process that
+  # had to pass. That second barrier is gone now: it was redundant with the 0700
+  # mode and is no longer in the unit.
+  #
+  # So the gate moved to "ExecStartPre=!hdw4s-webroot gate %i" in the unit, which
+  # runs as root with the session's own mount namespace intact. It still runs at
+  # this start and after the incarnation unit, so it still proves this generation
+  # rather than a stale one -- which was the property the in-session call was
+  # reaching for and never achieved. Do not move it back here to "test what the
+  # session sees": the session cannot see the evidence, and a check the occupant
+  # could satisfy is not a gate against the occupant. Do not change that "!" to a
+  # "+" either; the unit says at length what that cost.
   stream+=(--web-root="${webroot}")
 fi
 "${stream[@]}" \

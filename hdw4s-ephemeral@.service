@@ -86,7 +86,15 @@ InaccessiblePaths=%t/userdb
 # own RuntimeDirectory, and covering it makes the session's own runtime directory
 # inaccessible -- measured. Closing that one means moving XDG_RUNTIME_DIR out of
 # the shared parent, which is where "hdw4s list" reads a session's display from.
-InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s-proxy %t/hdw4s-incarnation
+# %t/hdw4s-incarnation is deliberately NOT in this list, though it was until the
+# measurement below. It is created "install -d -m0700" by root, and each record
+# inside it is 0600 root, so an occupant -- who is never root here -- can neither
+# list it nor read it: measured on a test container with a control, an unprivileged uid gets EACCES on
+# both the directory and the file while uid 0 reads both. The entry therefore
+# added nothing that the mode did not already provide, and it cost the gate: it
+# applies to the namespace rather than to a uid, so the one command that has to
+# read that record was locked out by it too.
+InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s-proxy
 # systemd fills these from the slot account, which resolves OUTSIDE the
 # namespace and so carries the outside name. They are the last two leaks.
 Environment=USER=user
@@ -341,6 +349,42 @@ KillMode=control-group
 # which is the one path where the interesting directives are indistinguishable,
 # so it never met the case it was written for.
 
+# The gate, and the "!" is load-bearing rather than stylistic -- as is the fact
+# that it is "!" and NOT "+". It lived inside hdw4s-run-session until 2026-09-22
+# and was unsatisfiable the whole time, unnoticed because the incarnation layer
+# had never run anywhere: layer 4 reads /run/hdw4s-incarnation/%i, that record is
+# root-owned 0600 so the occupant cannot forge it, and User= above means every
+# unprivileged part of this unit runs AS the occupant.
+#
+# "!" raises privilege and nothing else: measured, it runs as uid 0 with the
+# unit's mount namespace intact, which is both what the check needs and what it
+# should want -- layer 4 is asserting what the session's own namespace will
+# serve, so checking it from a different namespace would verify the wrong tree.
+#
+# "+" was tried first and is WRONG here, for a reason worth recording because it
+# is not what the manual leads you to expect. "+" is documented to skip "the
+# various file system namespacing options", and it does skip ProtectHome= and
+# ProtectSystem= -- but it does NOT skip BindPaths= or TemporaryFileSystem=.
+# Measured on systemd 255.4-1ubuntu8.17 with findmnt from inside: under "+" this
+# unit's /home is the real one while the per-slot drop-in's
+# TemporaryFileSystem=/home/user is still applied, so systemd has to create that
+# mount point on the REAL /home. Where /home is an NFS mount that squashes root
+# -- which is how every machine in this estate gets its homes -- it cannot, and
+# every start dies before the desktop exists:
+#
+#   (-webroot)[...]: Failed to set up mount namespacing: /home/user: No such
+#                    file or directory
+#   Control process exited, code=exited, status=226/NAMESPACE
+#
+# Where /home IS writable the same line succeeds and quietly leaves an empty
+# /home/user behind on the host, which is its own defect on a session type whose
+# whole promise is that it leaves no filesystem trace. Reproduced and cleared
+# deliberately, in transient units, on both kinds of machine.
+#
+# Ordering: After= on the incarnation unit is above, so the record exists before
+# this line runs. Refusing here rather than in the session is also strictly
+# better -- nothing of the desktop has been started yet when it fails.
+ExecStartPre=!/usr/lib/hdw4s/hdw4s-webroot gate %i
 ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
 # The session type arrives as an ARGUMENT, not as an environment variable.
 # EnvironmentFile= overrides Environment= regardless of the order they appear in

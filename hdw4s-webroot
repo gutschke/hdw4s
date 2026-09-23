@@ -36,7 +36,8 @@ die() { echo "hdw4s-webroot: $*" >&2; exit 1; }
 usage() {
   cat >&2 <<EOF
 usage: hdw4s-webroot build   <instance> <web-root> [<session name>]
-       hdw4s-webroot check   <web-root>
+       hdw4s-webroot check   <web-root> [<instance>]
+       hdw4s-webroot gate    <instance>
        hdw4s-webroot serving <url> [--auth-stdin] [<curl args>...]
 
   --auth-stdin  read a curl config line ("user = <user>:<password>") from stdin
@@ -226,6 +227,13 @@ cmd_serving() {
 case "$1" in
   build)   shift; [ "$#" -ge 2 ] || usage; cmd_build "$@" ;;
   check)   shift; [ "$#" -ge 1 ] || usage; cmd_check "$@" ;;
+  # "gate" is "check" with the web root derived rather than passed, and it exists
+  # because the only caller that CAN run it is a systemd ExecStartPre= line, which
+  # has no shell and therefore no ${VAR:-default}. Deriving it here keeps the
+  # default in one place instead of duplicating it into a unit file, where it
+  # would silently diverge the first time it moved.
+  gate)    shift; [ "$#" -ge 1 ] || usage
+           cmd_check "${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${1}" "${1}" ;;
   serving) shift; [ "$#" -ge 1 ] || usage; cmd_serving "$@" ;;
   *) usage ;;
 esac

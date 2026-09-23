@@ -1,3 +1,18 @@
+hdw4s (2.3.0) unstable; urgency=medium
+
+  * Ephemeral sessions survive a reboot: the slot minter is enabled by both
+    installers, and the runtime directories a session cannot start without are
+    created by the unit whose job is preconditions rather than by a directive
+    that could never have created them.
+
+  * The reaper says what it destroys. An ephemeral slot keeps its home in
+    memory, so stopping one discards it; the message claimed otherwise.
+
+  * A gate state carries its own button text, so the card no longer offers to
+    take over a desktop it cannot know about.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Tue, 22 Sep 2026 16:21:36 -0700
+
 hdw4s (2.2.0) unstable; urgency=medium
 
   * The camera and microphone can be switched on and off from the side menu
