@@ -1072,6 +1072,69 @@ echo '== the arrival and sharing arms are chosen at generation, and a bad one is
     '<script type="module" src='
 )
 
+echo '== the fresh-desktop card tells the truth about how long the desktop lasts =='
+# Written from the failure: the card said "nothing in it survives being closed" and that
+# was false for as long as it shipped. Closing a tab does not stop a session -- it is
+# held alive and reclaimed later -- so a person who signed into webmail and closed the
+# tab left it signed in. Nothing could have gone red: a page that promises destruction
+# and does not destroy behaves exactly like a correct one, which is why the guard is at
+# generation and why it is tested from both sides here.
+#
+# What this can and cannot see: it catches the warning being DELETED and the old claim
+# RETURNING. It cannot tell whether a reworded card is true. It is a guard on a decision
+# somebody made, not a proof about the product.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+
+  # The positive control comes first, so that the three refusals below are known to be
+  # refusals of the thing under test rather than of the input.
+  HDW4S_GATE_MODE=mint "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/out.html" \
+    >/dev/null 2>"${d}/err" \
+    && has 'the card warns that closing the tab does not end the desktop' \
+       "$(cat "${d}/out.html")" 'Closing this tab does not end it' \
+    || bad 'the card warns that closing the tab does not end the desktop' \
+       "the generator refused a good page: $(cat "${d}/err")"
+
+  # No duration is baked into the page. The reclaim period is a per-instance setting an
+  # administrator changes with "set", while this page is generated once per web-root
+  # build and no rebuild follows that change -- so a figure here would be a claim that
+  # goes stale silently and breaks nothing, which is this project's commonest defect.
+  hasnt 'the card names no number of days' "$(cat "${d}/out.html")" ' days'
+
+  # Three red arms, each broken on purpose in a COPY, each seen to refuse and to write
+  # no page. The third is the one that matters most: it proves the guard cannot pass by
+  # failing to find the thing it checks.
+  #
+  # EACH PATTERN IS SCOPED SO THAT IT CANNOT EDIT THE GUARD ITSELF, and that is not
+  # fussiness -- it is how these arms first came up green against a broken build. The
+  # guard names the words it requires, so a blunt substitution across the file rewrites
+  # the card AND the sentence the guard looks for, leaving the two agreeing with each
+  # other about the wrong thing. Two of the three arms passed that way. So each pattern
+  # below matches only the card's markup, which the guard's own literals do not carry:
+  # the card writes "<b>Closing ..." and "var MINT = '", the guard writes them bare.
+  red() { sed "$1" "${ROOT}/hdw4s-gate-index" > "${d}/red"
+          python3 "${d}/red" "${d}/in.html" "${d}/redout.html" >/dev/null 2>"${d}/rederr"; }
+
+  rm -f "${d}/redout.html"
+  red 's|<b>Closing this tab does not end it\.</b>|<b>It is yours alone.</b>|' \
+    && bad 'a card without the warning is refused' 'it was accepted' \
+    || has 'a card without the warning is refused' "$(cat "${d}/rederr")" \
+       'no longer warns'
+  hasnt 'a refused card writes no page' "$(ls "${d}")" 'redout.html'
+
+  red "s/Nothing from anyone else is in it\./Nothing from anyone else is in it, and nothing in it survives being closed./" \
+    && bad 'the retracted promise is refused if it comes back' 'it was accepted' \
+    || has 'the retracted promise is refused if it comes back' "$(cat "${d}/rederr")" \
+       'survives being closed'
+
+  red "s/var MINT = '/var MINT_CARD = '/" \
+    && bad 'a card the guard cannot find is refused' 'it was accepted' \
+    || has 'a card the guard cannot find is refused' "$(cat "${d}/rederr")" \
+       'could not be found'
+)
+
 echo '== a rebuild of a running slot keeps its published identity =='
 # Written from the failure: a re-mint stripped hdw4s-incarnation from a LIVE web root
 # and nothing noticed for a day. Nothing can notice -- the builder never passes an
@@ -1447,7 +1510,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=242   # update when tests are added; a wrong number is the point
+EXPECTED=248   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
