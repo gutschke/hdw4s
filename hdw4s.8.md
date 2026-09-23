@@ -4,6 +4,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 ## SYNOPSIS
 
 `hdw4s` `list`<br>
+`hdw4s` `check`<br>
 `hdw4s` `show` <instance><br>
 `hdw4s` `enable` <instance><br>
 `hdw4s` `disable` <instance><br>
@@ -44,6 +45,12 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     credential of its own, whether it keeps its settings apart from the home
     directory, its transport, its unit state and its current display.
 
+  * `check`:
+    Report any running session that is not publishing the identity a returning
+    browser tab compares itself against, and exit non-zero if there is one.
+    Nothing is restarted: the point is that somebody is told which session and
+    why. See DIAGNOSTICS.
+
   * `show` <instance>:
     Print one session's settings and, for each of them, which file it came from.
 
@@ -80,6 +87,14 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Require the proxy to present a secret as well as an acceptable address.
     Generated here, sealed to this machine, and never shown to the user, so
     there is still no login screen.
+
+    Refused for a session on the `unix` transport, where a credential excludes
+    nobody: the socket is group-owned by the reverse proxy and open to nothing
+    else, so the only caller that can reach it is the one that would be given
+    the secret. What it would do instead is answer that proxy with 401 until the
+    proxy is configured with it, so one session refuses connections its
+    neighbours accept for a reason no listing explains. Move the session to
+    `tcp` first if a credential is really wanted there.
 
   * `proxy` <instance>:
     Print an nginx configuration for this session, matching whichever
@@ -722,11 +737,31 @@ working in, at an hour chosen by a timer, is an updater that gets switched off.
 ## DIAGNOSTICS
 
     hdw4s list                       what exists and whether it is running
+    hdw4s check                      whether every running session is sound
     hdw4s show <instance>            effective settings and their source
     hdw4s firewall --check           whether the table is loaded and what it covers
     hdw4s --version                  which version this is
     systemctl status hdw4s@<i>       includes the display and port when running
     journalctl -xeu hdw4s@<i>        session output, including the X server
+
+`hdw4s check` asks one question of every session that is running now: is it
+serving the incarnation token its own start published? A returning browser tab
+compares its saved token against the served one to decide whether it is looking
+at the desktop it had. A session serving nothing makes that comparison empty on
+both sides, which reads as "unchanged" -- so the tab resumes into whichever
+session now holds the slot, instead of asking.
+
+That state is not caused by a broken session. It is caused by a session that was
+already running when something below it changed: a slot started before the
+publisher unit first ran, and never restarted, goes on running without it and is
+reported `active` by everything that looks. A restart fixes one; the check is
+what notices the next one.
+
+It is run every fifteen minutes by `hdw4s-check.timer`, which marks
+`hdw4s-check.service` failed when it finds one, so `systemctl --failed` names
+it. Run as root: the record it compares against is readable by root only, and
+asked by anyone else the command reports that it could not tell rather than that
+nothing was wrong.
 
 The X server's log is kept in the session's runtime directory rather than the
 home directory, so it disappears with the session instead of accumulating.

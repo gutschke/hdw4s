@@ -1195,10 +1195,170 @@ echo '== a unit with an [Install] section is no use until something enables it =
   is 'and the package does not ship one disabled' "${noenable}" ''
 )
 
+echo '== a credential is refused where it can exclude nobody =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # Written from the failure, measured on the test container on 2026-09-22:
+  # ephemeral0 carried HDW4S_AUTH=basic in /etc/hdw4s/ephemeral0.conf while
+  # ephemeral1 and ephemeral2 did not, all three on the filesystem socket. A
+  # demultiplexer opening ephemeral0.sock got a 401 and its two neighbours
+  # answered, so the same routing test passed against one slot of a pool and
+  # failed against the next -- a real, reproducible failure attributed to the
+  # thing under test rather than to the slot.
+  #
+  # The credential itself is stood in for: sealing one needs root and
+  # /var/lib/systemd/credential.secret, which this suite has neither of. What is
+  # under test is which calls reach that point, so standing it in is the point
+  # rather than a compromise.
+  # shellcheck disable=SC2317
+  require_slot() { :; }
+  # shellcheck disable=SC2317
+  make_credential() { echo 'stub-secret'; }
+  printf '%s\n' '0 eph0 ephemeral' '1 alice' > "${SLOTS}"
+
+  # The positive control FIRST, because a guard that refuses everything looks
+  # exactly like one that refuses the right thing. A session on the network is
+  # where a credential has something to keep out, and it must still be written.
+  printf 'HDW4S_TRANSPORT=tcp\n' > "${ETCDIR}/alice.conf"
+  out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
+  is 'a session on the network may still have one' "${rc}" '0'
+  has 'and the setting is written' \
+      "$(cat "${ETCDIR}/alice.conf")" 'HDW4S_AUTH=basic'
+
+  # Now the refusal.
+  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/eph0.conf"
+  out="$( ( cmd_auth eph0 ) 2>&1 )"; rc=$?
+  is 'a session on a filesystem socket may not' "${rc}" '1'
+  has 'and is told why the secret would keep nobody out' "${out}" 'excludes nobody'
+  has 'and what to do if it is really wanted' "${out}" 'hdw4s transport eph0 tcp'
+  # A refusal, not a diagnostic printed on the way through. This is the whole
+  # defect: the message would have been fine, the written line is what 401s.
+  hasnt 'and nothing was written to its file' \
+        "$(cat "${ETCDIR}/eph0.conf")" 'HDW4S_AUTH'
+
+  # The transport is what decides, not the session type -- so a NAMED desktop
+  # that has been moved onto a socket is refused too. Without this the guard
+  # could be satisfied by testing the name, which is the thing the tree has
+  # already learned not to do.
+  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/alice.conf"
+  out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
+  is 'a named desktop on a socket is refused as well' "${rc}" '1'
+
+  # And the site default reaches the same answer, since setting_of falls back to
+  # it: a machine that puts every session on a socket must not be able to arm
+  # this per session by leaving the instance file empty.
+  : > "${ETCDIR}/alice.conf"
+  printf 'HDW4S_TRANSPORT=unix\n' > "${CONF}"
+  out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
+  is 'the site default decides it too' "${rc}" '1'
+)
+
+echo '== a running session that publishes no identity is a failure, not a quiet pass =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # Written from the failure, measured on the test container on 2026-09-22:
+  # ephemeral2 was active with no token in its web root and none recorded under
+  # /run/hdw4s-incarnation, while ephemeral0 and ephemeral1 had both. The wiring
+  # was right on all three -- Wants= and After= name the publisher -- and the
+  # slot had simply started at 15:08, before the publisher first ran at 16:26,
+  # and had never been restarted. Nothing was broken; something was old. Every
+  # listing called it active, because it was.
+  #
+  # What makes it worth a check rather than a restart: the arrival rule says an
+  # unknown input must gate, and in code that becomes a comparison. A slot
+  # publishing nothing makes both sides of that comparison empty, which reads as
+  # "unchanged" -- so the riskiest input takes the quietest path.
+  RUNDIR="${SB}/run"
+  HDW4S_INCARNATION_DIR="${SB}/run/hdw4s-incarnation"
+  HDW4S_WEBROOT_DIR="${SB}/webroot"
+  mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}/eph0" "${HDW4S_WEBROOT_DIR}/eph1"
+  # A running NAMED desktop in the table throughout, and it is not decoration.
+  # Only hdw4s-ephemeral@.service pulls in the publisher, and only an ephemeral
+  # slot gets a web root to publish into, so a named desktop can never satisfy
+  # this check. Without the restriction the command reported every running
+  # desktop as broken -- measured against a real machine, where it buried the
+  # one slot that was actually wrong among rows that never could be right.
+  printf '%s\n' '0 eph0 ephemeral' '1 eph1 ephemeral' '2 alice desktop' > "${SLOTS}"
+
+  # Every slot running. "${2:-}" rather than "$2": the script runs under
+  # nounset, the stub inherits it, and a bare positional aborts the stub with an
+  # unset-variable error the caller's redirection swallows -- after which every
+  # session looks inactive and the group passes while checking nothing.
+  # shellcheck disable=SC2317
+  systemctl() { case "$1 ${2:-}" in 'show -p') echo 'active';; esac; }
+
+  # The positive control first: a check that cannot pass proves nothing when it
+  # fails. Both slots sound.
+  printf '%s\n' 'aaaa' > "${HDW4S_WEBROOT_DIR}/eph0/hdw4s-incarnation"
+  printf '%s\n' 'aaaa' > "${HDW4S_INCARNATION_DIR}/eph0"
+  printf '%s\n' 'bbbb' > "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation"
+  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a sound pool passes'            "${rc}" '0'
+  # Two, not three: the named desktop beside them is running and is not counted.
+  # The number is the whole control here -- a restriction that skipped everything
+  # would pass this group just as quietly, and would say "0".
+  has 'and says how many it looked at' "${out}" '2 running ephemeral session(s)'
+  hasnt 'the running named desktop is not accused' "${out}" 'alice'
+
+  # The defect itself: a live slot publishing nothing.
+  rm -f "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation" "${HDW4S_INCARNATION_DIR}/eph1"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is    'a live slot with no token fails'   "${rc}" '1'
+  has   'and the message names the slot'    "${out}" 'eph1 is running and publishes no incarnation token'
+  has   'and names the repair'              "${out}" 'systemctl restart hdw4s-ephemeral@eph1.service'
+  hasnt 'and does not accuse the sound one' "${out}" 'eph0 is running and publishes'
+  # Which way it fails is the property. It reports; it does not restart, because
+  # a check that repairs what it finds is one nobody reads, and the fact worth
+  # having is that a slot ran for two hours without a publisher.
+  has   'it counts the failures against the total' "${out}" '1 of 2 running session(s) failed'
+
+  # Pinned independently of the half below it. With the record left in place the
+  # served file is the only thing missing, so this cannot be satisfied by the
+  # "recorded nothing" branch -- which is what happened: blinding the served
+  # check alone left every assertion above this one green, because both halves
+  # were absent together and the second branch caught what the first no longer
+  # did. One sufficient cause is not the cause.
+  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a missing served token fails on its own' "${rc}" '1'
+  has 'and is named as the published half'      "${out}" 'publishes no incarnation token'
+
+  # An empty file is not a token, and is the shape a truncating write leaves
+  # behind for as long as it takes to finish.
+  : > "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation"
+  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is 'an empty published file is not a token' "${rc}" '1'
+
+  # Serving a value nobody recorded is its own failure: it is what a slot looks
+  # like when the previous session's token was left in a rebuilt web root.
+  printf '%s\n' 'bbbb' > "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation"
+  rm -f "${HDW4S_INCARNATION_DIR}/eph1"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a served token this start did not record fails' "${rc}" '1'
+  has 'and says which half is missing' "${out}" 'recorded no incarnation token'
+
+  # And a mismatch, which is the same bug one step further along: the tab is
+  # told this is the desktop it had, and it is not.
+  printf '%s\n' 'cccc' > "${HDW4S_INCARNATION_DIR}/eph1"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a token that does not match the record fails' "${rc}" '1'
+  has 'and says so in those terms' "${out}" 'did not publish'
+
+  # A slot that is not running is not this command's business: it publishes
+  # nothing because nothing is there to publish, and reporting it would bury
+  # the one row that matters.
+  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  # shellcheck disable=SC2317
+  systemctl() { case "$1 ${2:-}" in 'show -p') echo 'inactive';; esac; }
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a stopped pool passes'             "${rc}" '0'
+  has 'having looked at no running slots' "${out}" '0 running ephemeral session(s)'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=209   # update when tests are added; a wrong number is the point
+EXPECTED=234   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

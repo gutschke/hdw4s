@@ -1,0 +1,23 @@
+[Unit]
+Description=Notice a running HDW4S session that publishes no identity
+Documentation=man:hdw4s(8)
+
+[Timer]
+# Minutes, not days, and the reason is what the defect looks like rather than
+# how urgent it feels. The state this catches is created by a session that was
+# already running when something below it changed -- a package upgrade, a unit
+# that first ran after the slot did -- so it appears at the moment of a
+# deployment and not gradually. Sampled nightly it would be found by whoever
+# hit it first, which is the outcome this unit exists to prevent.
+#
+# It costs one systemctl query and two small reads per running session, so the
+# rate is set by how long a bad slot may serve rather than by what asking costs.
+OnBootSec=10min
+OnUnitActiveSec=15min
+# A session takes a moment to publish after it starts; sampling on the tick a
+# slot came up would report a token that is about to exist. Nothing downstream
+# cares about the exact minute.
+RandomizedDelaySec=60s
+
+[Install]
+WantedBy=timers.target

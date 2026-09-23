@@ -124,6 +124,8 @@ usage() {
 Usage: hdw4s <command> [arguments]
 
   list                    show every configured session and its current state
+  check                   report any running session that is not publishing the
+                          identity a returning browser tab compares against
   show <instance>         show one session's settings and where each came from
   enable <instance>       allocate a slot for a session and arm its front door
   disable <instance>      stop a session and keep its slot reserved
@@ -512,6 +514,136 @@ cmd_list() {
   }
 }
 
+# Whether every running session is publishing the identity a returning tab
+# compares itself against.
+#
+# Written from the failure, which is duller than a bug and is why it needs a
+# check rather than a fix: on 2026-09-22 ephemeral2 started at 15:08,
+# hdw4s-incarnation@.service first ran at 16:26, and that slot was never
+# restarted. The wiring was correct the whole time -- Wants= and After= name the
+# unit on every slot -- and the slot simply predated it. "hdw4s list" called it
+# active, because it was. A live thing that predates a fix goes on running
+# without it, and every listing shows it healthy.
+#
+# Why this one is worth a check of its own. The arrival rule says an unknown
+# input must GATE; in code a rule like that becomes a comparison, and
+# "stored != current" resumes SILENTLY when both sides are empty. A slot
+# publishing nothing is exactly that state, so the riskiest input takes the
+# safest-looking path and nobody is asked anything.
+#
+# It reports and returns non-zero. It restarts nothing: a check that repairs
+# what it finds is one nobody reads, and this one's whole value is that somebody
+# is told which slot and why.
+cmd_check() {
+  local idx inst state served recorded live=0 bad=0
+  local incarn="${HDW4S_INCARNATION_DIR:-${RUNDIR}/hdw4s-incarnation}"
+  local webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}"
+  local readable='yes'
+  # That directory is 0700 and owned by root, so an unprivileged caller cannot
+  # see into it. Asked once, up front, because the alternative is that every
+  # unreadable file reads as an absent one -- which would turn "I am not allowed
+  # to look" into "the token is missing" for some callers and, worse, could turn
+  # into "nothing to report" if the comparison were ever relaxed. Which way a
+  # check fails is the property; this one fails toward saying so.
+  [ -d "${incarn}" ] && [ -x "${incarn}" ] || readable='no'
+
+  [ -r "${SLOTS}" ] || {
+    echo 'hdw4s: no slot table, so no sessions to check.'
+    return 0
+  }
+
+  while read -r idx inst _; do
+    case "${idx}" in ''|\#*) continue;; esac
+    # A legacy second session and an orphaned slot are "list"'s business: the
+    # first cannot be looked up by the readers below and the second has no
+    # account to run. This command is about sessions that are running now.
+    case "${inst}" in *:*) continue;; esac
+    # Ephemeral slots only, and this is a restriction rather than a shortcut.
+    # Only hdw4s-ephemeral@.service Wants= the publisher, and only an ephemeral
+    # slot is given a web root of its own to publish into -- a named desktop has
+    # neither, so it can never satisfy this check. Run without the restriction
+    # against a real machine it reported every running named desktop as broken,
+    # which is the same as reporting nothing: a check that is always red is read
+    # as noise, and the one row that mattered was in the middle of it.
+    #
+    # The property is an ephemeral-pool property in the first place. A returning
+    # tab has to ask "is this the desktop I had" because a slot is REUSED behind
+    # one well-known hostname; a named desktop is one person's, at their own
+    # name, and is not handed to somebody else when it restarts.
+    [ "$(type_of "${inst}")" = 'ephemeral' ] || continue
+    state="$(systemctl show -p ActiveState --value "$(unit_of "${inst}")" \
+             2>/dev/null || echo unknown)"
+    [ "${state}" = 'active' ] || continue
+    live=$(( live + 1 ))
+
+    served=''
+    [ ! -r "${webroot}/${inst}/hdw4s-incarnation" ] ||
+      served="$(head -n1 "${webroot}/${inst}/hdw4s-incarnation" 2>/dev/null || :)"
+    if [ -z "${served}" ]; then
+      printf '%s\n' \
+        "hdw4s: ${inst} is running and publishes no incarnation token." \
+        "  Nothing at ${webroot}/${inst}/hdw4s-incarnation." \
+        '  A returning tab compares its saved value against this one to decide' \
+        '  whether it is looking at the desktop it had. With nothing published,' \
+        '  that comparison has an empty value on both sides, which reads as' \
+        '  "unchanged" -- so the tab resumes into whoever is in the slot now,' \
+        '  instead of being asked.' \
+        "  Restart it: systemctl restart $(unit_of "${inst}")" >&2
+      bad=$(( bad + 1 ))
+      continue
+    fi
+
+    if [ "${readable}" = 'no' ]; then
+      printf '%s\n' \
+        "hdw4s: ${inst} publishes a token, and whether it is the one this start" \
+        "  recorded cannot be told from here: ${incarn} is readable by root only." \
+        '  Reported as a failure rather than passed over, because "I could not' \
+        '  look" and "I looked and it was fine" are not the same answer.' \
+        '  Re-run this as root.' >&2
+      bad=$(( bad + 1 ))
+      continue
+    fi
+
+    recorded=''
+    [ ! -r "${incarn}/${inst}" ] ||
+      recorded="$(head -n1 "${incarn}/${inst}" 2>/dev/null || :)"
+    if [ -z "${recorded}" ]; then
+      printf '%s\n' \
+        "hdw4s: ${inst} is running and this start recorded no incarnation token." \
+        "  Nothing at ${incarn}/${inst}, although a value is being served." \
+        '  The served copy is what a tab reads; the recorded copy is what says' \
+        '  which start published it. Without the second, a token left behind by' \
+        '  the previous session cannot be told from this one.' \
+        "  Restart it: systemctl restart $(unit_of "${inst}")" >&2
+      bad=$(( bad + 1 ))
+      continue
+    fi
+
+    if [ "${served}" != "${recorded}" ]; then
+      printf '%s\n' \
+        "hdw4s: ${inst} serves an incarnation token this start did not publish." \
+        "  ${webroot}/${inst}/hdw4s-incarnation does not match ${incarn}/${inst}." \
+        '  Every tab still holding the served value will be told this is the' \
+        '  desktop it had, and it is not.' \
+        "  Restart it: systemctl restart $(unit_of "${inst}")" >&2
+      bad=$(( bad + 1 ))
+      continue
+    fi
+  done < <(sort -n "${SLOTS}")
+
+  if [ "${bad}" -gt 0 ]; then
+    printf '%s\n' '' \
+      "hdw4s: ${bad} of ${live} running session(s) failed this check." >&2
+    trap '' INT TERM QUIT HUP EXIT ERR
+    exit 1
+  fi
+  # Says how many were looked at, not just that nothing was wrong. A check that
+  # examined nothing reports the same clean bill of health as one that examined
+  # everything, and the number is the only thing that tells them apart.
+  echo "hdw4s: ${live} running ephemeral session(s); each publishes the identity" \
+       'its own start recorded.'
+}
+
 cmd_show() {
   local inst="$1" idx port
   # Handled here rather than left to -e: an unhandled failure also trips the
@@ -788,6 +920,32 @@ cmd_enable() {
     # does not come back up refusing to start for want of a file it already
     # has the secret for.
     link_credential "${inst}" 'auth' 70
+    # Kept, and said out loud, because keeping it is the right call and having
+    # it is not. "enable" is documented as safe to re-run: a session that came
+    # in with a credential its reverse proxy already presents must go out with
+    # the same one, or re-running this takes somebody's desktop away. So the
+    # existing combination is reported rather than repaired, and the repair is
+    # named for whoever decides to make it.
+    if auth_is_meaningless "${inst}"; then
+      echo
+      echo "Session ${inst} has a credential and is reachable over a filesystem"
+      echo '  socket, where a credential excludes nobody -- the only caller that can'
+      echo '  open the socket is the reverse proxy that would present the secret.'
+      echo '  It is not removed here, because a proxy configured with it would start'
+      echo '  getting 401s from a session that had just been re-enabled.'
+      echo "  Remove it when the proxy is ready: hdw4s noauth ${inst}"
+    fi
+  elif auth_is_meaningless "${inst}"; then
+    # The producer this guard exists to close. Both branches below generate a
+    # credential, and for an ephemeral slot "want" is forced to unix a few lines
+    # above -- so a fresh slot came out of "enable" with HDW4S_AUTH=basic on a
+    # socket where it means nothing, every time, with nothing said.
+    echo
+    echo 'No credential is generated for this session: it is reachable over a'
+    echo '  filesystem socket, which is an access decision already. The socket is'
+    echo '  group-owned by the reverse proxy and open to nothing else, so a secret'
+    echo '  would keep nobody out and would answer that proxy with 401 until it'
+    echo '  was configured with it.'
   elif [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ]; then
     echo
     echo 'Generating the credential this session is configured to require...'
@@ -1278,6 +1436,19 @@ cmd_transport() {
       systemctl restart "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
       echo "Session ${inst} is reachable at /run/hdw4s-proxy/${inst}.sock,"
       echo "readable by group ${group} only. It does not listen on the network."
+      # The third way the combination is reached, and the only one that is not a
+      # refusal. Moving a session onto the socket is the safer direction and must
+      # not be blocked -- but it leaves behind a credential that was meaningful
+      # on a port and is not here, and nothing else will ever mention it again.
+      # Said after the success line rather than instead of it: the move happened.
+      if has_auth "${inst}"; then
+        echo
+        echo "Session ${inst} still has a credential of its own, which now excludes"
+        echo '  nobody: the only caller that can open the socket is the reverse proxy'
+        echo '  that would present it. Until that proxy is configured with the secret'
+        echo '  this session answers 401 while its neighbours answer.'
+        echo "  Remove it: hdw4s noauth ${inst}"
+      fi
       ;;
     *)
       die "hdw4s: transport must be 'tcp' or 'unix', not '${mode}'"
@@ -1435,8 +1606,44 @@ cmd_reap() {
   [ "${stopped}" -eq 0 ] || reap_say "Stopped ${stopped} idle session(s)."
 }
 
+# Whether a credential can mean anything for this session, i.e. whether anything
+# it does not already exclude could present one.
+#
+# On a filesystem socket the answer is no, and that is the owner's ruling rather
+# than a judgement made here: the socket is group-owned by the reverse proxy and
+# readable by nobody else, so the only caller that can open it is the one that
+# would be handed the secret. Adding a credential there excludes nothing and
+# costs a 401.
+auth_is_meaningless() {
+  [ "$(setting_of "$1" HDW4S_TRANSPORT tcp)" = 'unix' ]
+}
+
 cmd_auth() {
   local inst="$1" pw
+  # Refused, not warned about, and refused HERE because this is the only thing
+  # in the tree that writes HDW4S_AUTH=basic for one session -- "hdw4s enable"
+  # reaches the same shape by calling this function, so one refusal covers both.
+  #
+  # Written from the failure: ephemeral0 on the test container carried
+  # HDW4S_AUTH=basic while ephemeral1 and ephemeral2 did not, all three on the
+  # filesystem socket. A demultiplexer connecting to ephemeral0.sock got a 401
+  # and the other two answered, so a routing test passed against one slot of a
+  # pool and failed against its neighbour. That is the expensive kind of wrong:
+  # the failure is real, reproducible, and attributed to the thing being tested.
+  if auth_is_meaningless "${inst}"; then
+    die "hdw4s: ${inst} is reachable over a filesystem socket, where a credential" \
+        '  excludes nobody. The socket is mode 0660 and group-owned by the reverse' \
+        '  proxy, so the only caller that can open it is the one that would be' \
+        '  given the secret; there is no second caller for it to keep out.' \
+        '' \
+        '  What it would do instead is answer that proxy with 401 until the proxy' \
+        '  is configured with the secret -- so one session refuses connections its' \
+        '  neighbours accept, for a reason the transport column does not explain.' \
+        '' \
+        '  If this is really wanted, put the session on the network first, where' \
+        '  a credential has something to do:' \
+        "    hdw4s transport ${inst} tcp"
+  fi
   require_slot "${inst}"
   pw="$(make_credential "${inst}" 'auth' 70)"
   config_write "${ETCDIR}/${inst}.conf" 'HDW4S_AUTH' 'basic'
@@ -1852,6 +2059,7 @@ cmd_release() {
 
 case "${1:-}" in
   list)     shift; cmd_list "$@";;
+  check)    shift; [ $# -eq 0 ] || usage_error; cmd_check "$@";;
   show)     shift; [ $# -eq 1 ] || usage_error; cmd_show "$@";;
   enable)   shift
             case "${1:-}" in --ephemeral) [ $# -eq 2 ] || usage_error;;

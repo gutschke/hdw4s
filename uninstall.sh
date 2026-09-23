@@ -72,6 +72,7 @@ mapfile -t units < <(systemctl list-units --plain --no-legend --all \
 systemctl disable --now hdw4s-updater.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-firewall.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-reaper.timer >/dev/null 2>&1 || :
+systemctl disable --now hdw4s-check.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-firewall.service >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-ephemeral-slots.service >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-demux.socket >/dev/null 2>&1 || :
