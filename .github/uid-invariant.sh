@@ -4,7 +4,10 @@
 #
 #   .github/uid-invariant.sh static [<tree>]   the directives, on the tree
 #   .github/uid-invariant.sh distinct          no two live sessions share a uid
-#   .github/uid-invariant.sh clean <slot>...   a parked slot owns nothing
+#   .github/uid-invariant.sh clean <slot>...   nothing still refers to a parked slot
+#
+# HDW4S_CLEAN_ROOTS overrides the directories "clean" sweeps. It defaults to the
+# full list; narrowing it narrows the claim, so the roots used are printed.
 #   .github/uid-invariant.sh selftest [<tree>] break each one on purpose, watch it go red
 #
 # WHERE EACH ONE RUNS, because the answer is not "everywhere" and a check
@@ -18,12 +21,12 @@
 #                      directions: a planted violation went red and named itself,
 #                      and the same tree went green once it was removed.
 #
-#                      THIRTEEN of the selftest's twenty arms run there. The other
-#                      seven need root and a parked slot, so CI exercises the
+#                      THIRTEEN of the selftest's twenty-three arms run there. The
+#                      other ten need root and a parked slot, so CI exercises the
 #                      static and fixture halves only. Keep that number attached to
 #                      any claim about what CI covers here; it is the qualifier that
 #                      disappears first in a summary, and then somebody believes
-#                      twenty arms run in CI.
+#                      twenty-three arms run in CI.
 #
 #   distinct, clean    a HAND TOOL for a disposable machine, and deliberately not
 #                      wired into any tier. They need root, and "clean" needs a
@@ -310,18 +313,136 @@ check_clean() {
   if [ "${n}" = 'no' ] || [ -z "${n}" ]; then note "clean ${slot} preserve" "ok (${n:-no})"
   else bad "clean ${slot} preserve" "RuntimeDirectoryPreserve=${n} as loaded, drop-ins included"; fi
 
-  # Anything at all, anywhere writable, still owned by the uid. This is the part
-  # that does not depend on having thought of the right channel: the previous
-  # rounds each found a new one, so the last check asks the filesystem instead of
-  # asking a list. -xdev on each root keeps it off the NFS home and off /proc.
-  local found=''
-  for n in /run /tmp /var/tmp /dev/shm /var/lib /var/log /etc /home /srv /usr; do
+  # Anything under these roots that still REFERS to the identity.
+  #
+  # THE PREDICATE WAS THE BUG, NOT THE LIST. Until 2026-09-23 this arm swept the
+  # same roots asking "what does this uid OWN", and its comment called itself the
+  # part that does not depend on having thought of the right channel. It was
+  # neither. Ownership is one of several ways a filesystem hands an identity
+  # something, and the artefact that prompted the rewrite uses a different one: a
+  # file owned by ROOT that grants the uid access through a POSIX ACL. Measured:
+  # with such a file planted in a swept root, the old arm printed "ok" and the
+  # script exited 0. No number of extra directories would ever have returned it,
+  # because the list was not what could not see it.
+  #
+  # So the question asked now is whether anything still refers to the identity:
+  #
+  #   (1) owned by its uid, or group-owned by its PRIVATE gid;
+  #   (2) named in a POSIX ACL, default ACLs included, whoever owns the file;
+  #   (3) carrying its name or its uid as a whole token in a path, AND not being
+  #       world-readable.
+  #
+  # (3) is not an access grant. It is how every channel found so far announces
+  # itself -- user-<uid>.journal, /run/user/<uid>, a linger stamp, a crontab --
+  # it costs nothing on a walk already being done, and it still works where
+  # getfacl is missing, which (2) does not.
+  #
+  # The world-readable half of (3) is not tidiness, it is what makes the arm
+  # usable, and it was added after watching the version without it. MEASURED on
+  # an ordinary machine with a low stand-in uid: matching the uid as a bare token
+  # returned /etc/grub.d/41_custom, every object under /var/lib/flatpak/repo/
+  # objects/41/, cryptography-41.0.7.dist-info and srfi-41.scm -- pages of them,
+  # none of them anything. That is the report nobody reads twice, and an unread
+  # check protects nothing. Every one of those is world-readable; none of the
+  # channels this arm is for is. Filtering on that turns a useless report into an
+  # empty one without giving up a single known channel.
+  #
+  # WHAT THIS DELIBERATELY DOES NOT COUNT. A check that fires on the ordinary
+  # state of a running machine gets switched off, and then it guards nothing;
+  # that failure is as real as the one above and this project has met both. So:
+  #
+  #   * World-accessible objects are not counted. Every occupant gets those
+  #     equally, so they carry nothing from one to the next -- and they are most
+  #     of the filesystem.
+  #   * SHARED supplementary groups are not counted. A grant handed to every
+  #     occupant alike is not inheritance. Only the slot's PRIVATE gid counts.
+  #     The groups skipped are PRINTED rather than assumed away, because the
+  #     quiet half of a check is where its blind spot hides, and this is the one
+  #     place this rewrite knowingly leaves one: a file group-owned by a shared
+  #     group and mode g+rw does carry data from occupant to occupant, and is
+  #     not reported here. Whoever closes it needs a different instrument -- a
+  #     per-group sweep, run once per machine rather than once per slot.
+  #   * ACL entries naming any OTHER identity are not counted. This is what keeps
+  #     the arm quiet: ACLs and root-owned files referencing accounts are
+  #     ordinary, but on a pool uid that no surviving account shares, the honest
+  #     answer is zero, so any hit at all is worth a look.
+  #
+  # The ACL mask is NOT applied. An entry masked to nothing grants nothing today,
+  # but on a parked slot nothing should name the uid at all, and a mask is one
+  # chmod away from being back. The perms are printed so the reader can judge.
+  #
+  # -xdev stops the walk descending into SUB-mounts. It does NOT keep it off a
+  # filesystem that is itself one of the roots: where the shared home is mounted
+  # AT /home, "find /home -xdev" walks all of it. That is a cost, not a
+  # correctness problem, and HDW4S_CLEAN_ROOTS exists so a run can be aimed
+  # somewhere bounded. It defaults to the full list; a narrowed run is a narrowed
+  # claim, and the roots actually swept are printed for that reason.
+  local gid namepat roots found='' broke=''
+  gid="$(getent passwd "${slot}" | cut -d: -f4)"
+  roots="${HDW4S_CLEAN_ROOTS:-/run /tmp /var/tmp /dev/shm /var/lib /var/log /etc /home /srv /usr}"
+  # Whole-token, so slot "s1" does not match "s10" and uid 900 does not match 9004.
+  namepat="(^|[^[:alnum:]])(${slot}|${id})([^[:alnum:]]|\$)"
+  note "clean ${slot} roots" "${roots}"
+  note "clean ${slot} groups not swept" \
+       "$(id -Gn "${slot}" 2>/dev/null | tr ' ' '\n' | grep -vx "$(id -gn "${slot}" 2>/dev/null)" |
+          tr '\n' ' ' || true)"
+
+  for n in ${roots}; do
     [ -d "${n}" ] || continue
-    found="${found}$(find "${n}" -xdev -uid "${id}" -print 2>/dev/null | head -20)"$'\n'
+    # find's own exit status travels IN BAND. It is not a pipefail problem to be
+    # silenced: a find that could not read a directory swept less than it was
+    # asked to, and an empty answer from an incomplete sweep is not a negative.
+    # Silencing it with "|| true" is what the first version of this fix did, and
+    # it turns "I could not look" into "I looked and there was nothing".
+    # The trailing "|| true" is about SIGPIPE, not about find's status: awk stops
+    # at twenty hits and the walk upstream of it dies 141, which under pipefail
+    # and -e would end the script mid-arm. find's own status is already in band
+    # above and is not what is being discarded here.
+    found="${found}$(
+      { { find "${n}" -xdev -printf '%U %G %m %p\n' 2>/dev/null; printf 'FINDRC %s\n' "$?"; } |
+      awk -v id="${id}" -v gid="${gid}" -v pat="${namepat}" -v root="${n}" '
+        /^FINDRC / { rc = $2; next }
+        { p = $0; sub(/^[0-9]+ [0-9]+ [0-7]+ /, "", p)
+          # Low octal digit of the mode: >= 4 means the world can read it, and a
+          # world-readable object is not this identity being singled out.
+          oth = int(substr($3, length($3), 1))
+          if      ($1 == id)          { print "uid   " p; n++ }
+          else if ($2 == gid)         { print "gid   " p; n++ }
+          else if (p ~ pat && oth < 4) { print "name  " p; n++ }
+          if (n >= 20) { print "...   more under " root ", truncated at 20"; trunc = 1; exit } }
+        END { if (!trunc && rc != 0)
+                print "!walk find could not read all of " root " (exit " rc \
+                      "): an empty answer here is not a negative" }
+      '; } || true)"$'\n'
   done
+
+  # The ACL pass. getfacl -s prints only files that HAVE a non-base ACL, so on an
+  # ordinary machine this produces almost nothing to filter; -n keeps the ids
+  # numeric, because a uid whose passwd entry has already been removed is exactly
+  # the case that matters and it has no name to print.
+  if command -v getfacl >/dev/null 2>&1; then
+    for n in ${roots}; do
+      [ -d "${n}" ] || continue
+      found="${found}$( {
+        getfacl -R -s -n -p --absolute-names "${n}" 2>/dev/null |
+        awk -v id="${id}" -v gid="${gid}" '
+          /^# file: / { f = substr($0, 9); next }
+          /^(default:)?user:[0-9]+:/  { split($0, a, ":"); if (a[length(a)-1] == id)  print "acl   " $0 "  " f; next }
+          /^(default:)?group:[0-9]+:/ { split($0, a, ":"); if (a[length(a)-1] == gid) print "acl   " $0 "  " f }
+        ' | head -20; } || true)"$'\n'
+    done
+  else
+    broke='getfacl is not installed, so nothing asked whether an ACL names this identity'
+  fi
+
   found="$(echo "${found}" | grep -v '^$' || true)"
-  if [ -z "${found}" ]; then note "clean ${slot} owned files" 'ok'
-  else bad "clean ${slot} owned files" "$(echo "${found}" | tr '\n' ' ')"; fi
+  if [ -n "${broke}" ]; then
+    # Not a skip. A missing instrument reporting green is the failure this whole
+    # rewrite exists to stop, so the run goes red and says which half did not run.
+    bad "clean ${slot} acl pass" "${broke}"
+  fi
+  if [ -z "${found}" ]; then note "clean ${slot} residue" 'ok (nothing refers to this identity)'
+  else bad "clean ${slot} residue" "$(echo "${found}" | tr '\n' '|')"; fi
 }
 
 # -------------------------------------------------------------- selftest ----
@@ -371,6 +492,9 @@ expect() {  # expect <red|green> <label> <command...>
 check_selftest() {
   local tree="${1:-.}" tmp self
   self="$(readlink -f "$0")"
+  # A narrowed root list inherited from the environment would narrow the proof
+  # while the selftest went on reporting the same twenty-three arms.
+  unset HDW4S_CLEAN_ROOTS
   scratch="$(mktemp -d)"; tmp="${scratch}"
   trap 'rm -rf "${scratch}"' EXIT INT TERM QUIT HUP
 
@@ -467,9 +591,53 @@ EOF
     expect red 'clean, runtime directory planted' "${self}" clean ephemeral0
     rm -rf /run/hdw4s/ephemeral0
     : > /tmp/.uid-invariant-selftest && chown "${id}:${id}" /tmp/.uid-invariant-selftest
-    expect red 'clean, one owned file planted' "${self}" clean ephemeral0
+    EXPECT_MATCH="uid   /tmp/.uid-invariant-selftest" \
+      expect red 'clean, one owned file planted' "${self}" clean ephemeral0
+    unset EXPECT_MATCH
     rm -f /tmp/.uid-invariant-selftest
     expect green 'clean, both removed again' "${self}" clean ephemeral0
+
+    # The three arms below are the rewrite of 2026-09-23, and they are planted
+    # with setfacl, chmod and touch -- never by editing this script. An earlier
+    # round elsewhere in this tree wrote a red arm with a blunt substitution that
+    # changed the checker's own literal along with the code, and came up green
+    # against a genuinely broken build. A red arm that mutates the checker proves
+    # nothing, so nothing here touches it.
+    #
+    # First: the channel an OWNERSHIP predicate can never return -- root-owned,
+    # granting the slot uid by ACL. This is the shape a per-uid journal file has.
+    local aclf=/tmp/.uid-invariant-selftest-acl
+    : > "${aclf}"; chmod 0640 "${aclf}"   # root-owned on purpose: NOT chowned
+    if command -v setfacl >/dev/null 2>&1 && setfacl -m "u:${id}:r--" "${aclf}" 2>/dev/null; then
+      EXPECT_MATCH="acl   user:${id}:" \
+        expect red 'clean, root-owned file granting the uid by ACL' "${self}" clean ephemeral0
+      unset EXPECT_MATCH
+    else
+      # Not a silent pass. setfacl refuses a uid outside the container's uid map
+      # -- measured, on a uid above the map's top -- and a filesystem can refuse
+      # POSIX ACLs outright, so this says which it was rather than reporting a
+      # proof it did not obtain.
+      skip 'selftest clean acl' \
+           "setfacl would not set an ACL for uid ${id} here, so this arm proved nothing"
+    fi
+    rm -f "${aclf}"
+
+    # Second: the channel that announces itself by name while owning nothing and
+    # granting nothing.
+    local namef="/tmp/.uid-invariant-selftest-user-${id}.journal"
+    : > "${namef}"; chmod 0640 "${namef}"
+    EXPECT_MATCH="name  ${namef}" \
+      expect red 'clean, a path naming the uid' "${self}" clean ephemeral0
+    unset EXPECT_MATCH
+
+    # Third, and it is the one that keeps the arm usable: the SAME file, world
+    # readable, must NOT be a finding. A check only ever seen to fire is a check
+    # whose quiet half nobody has tested, and the quiet half is why this one will
+    # still be switched on in a year.
+    chmod 0644 "${namef}"
+    expect green 'clean, a world-readable path naming the uid is not a finding' \
+      "${self}" clean ephemeral0
+    rm -f "${namef}"
   else
     skip 'selftest clean' 'needs root and a parked ephemeral0 on this machine'
   fi
