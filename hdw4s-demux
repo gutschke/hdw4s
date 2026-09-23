@@ -163,9 +163,19 @@ COOKIE_FLOOR_DAYS = 30
 # exercise the guards without a network -- never depends on main() having run.
 COOKIE_LIFETIME = COOKIE_FLOOR_DAYS * 86400
 
+# Where the periodic sweep records the last time anything was connected to a
+# slot. Same environment variable the CLI reads, deliberately: two spellings of
+# one path is two paths as soon as either is edited.
+REAP_STAMP_DIR = os.environ.get("HDW4S_REAP_STAMP_DIR", "/run/hdw4s-reap")
+
 ETC_DIR = os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s")
 SITE_CONF = os.path.join(ETC_DIR, "hdw4s.conf")
 SLOTS_FILE = os.path.join(ETC_DIR, "instances")
+
+# How often a slot's own last-request record is rewritten. A record per asset
+# fetch would be a write per image; a minute is far finer than the sweep it
+# stands beside and still costs nothing on a tmpfs.
+TOUCH_EVERY = 60.0
 
 
 def log(msg):
@@ -490,6 +500,139 @@ def socket_path(instance):
     return os.path.join(PROXY_RUNDIR, "%s.sock" % instance)
 
 
+# --------------------------------------------------------------------------
+# When a slot was last used, and by which of two witnesses
+# --------------------------------------------------------------------------
+#
+# There are two records of that, they do not measure the same thing, and the
+# difference between them is itself evidence.
+#
+# The sweep's stamp is written by a poll every few minutes. A client that
+# connects, does something brief and disconnects inside one gap is invisible to
+# every sample it takes -- so the stamp can say "nobody since yesterday" about a
+# desktop somebody used twenty minutes ago, in a confident, well-formed, wrong
+# sentence. Shortening the idle window is exactly what makes that reachable.
+#
+# The record below is written where the connection is actually ACCEPTED, so it
+# cannot miss one: the rate stops mattering and the claim becomes true by
+# construction rather than by the sampler being lucky. It is kept in this
+# service's own runtime directory, which no other component writes, so it costs
+# nobody a permission and cannot be pointed at a file it should not truncate.
+#
+# WHAT IT DOES NOT DO, and this is the honest half: it does not decide when a
+# desktop is reaped. The sweep still does that, from its own stamp. Both are
+# printed side by side on a refusal, because an operator judging the idle window
+# needs the true figure AND the figure the sweep will act on, and a gap between
+# them is the measurement that says the poll is missing connections.
+
+TOUCH_DIR = os.path.join(STATE_DIR, "last-request")
+_touched = {}
+_touch_lock = threading.Lock()
+
+
+def touch_slot(instance, now=None):
+    """Record that a request reached this slot. Rate limited, never required."""
+    now = time.time() if now is None else now
+    with _touch_lock:
+        if now - _touched.get(instance, 0.0) < TOUCH_EVERY:
+            return
+        _touched[instance] = now
+    try:
+        os.makedirs(TOUCH_DIR, mode=0o700, exist_ok=True)
+        tmp = os.path.join(TOUCH_DIR, ".%s.new" % instance)
+        with open(tmp, "w") as f:
+            f.write("%d\n" % int(now))
+        os.replace(tmp, os.path.join(TOUCH_DIR, instance))
+    except OSError:
+        # Bookkeeping, not routing. A failure here must never cost a visitor a
+        # request; it costs the refusal log one column, which says so itself.
+        pass
+
+
+def stamp_age(path, now=None):
+    """(seconds, None) for a readable stamp, or (None, why) -- never a number
+    we made up. An unreadable stamp rendered as "0" or as "never" is the wrong
+    answer wearing the right shape, and the whole point of the refusal log is
+    that somebody sets an idle window from what it prints."""
+    now = time.time() if now is None else now
+    try:
+        with open(path, "r") as f:
+            raw = f.read().strip()
+    except FileNotFoundError:
+        return None, "no record"
+    except OSError as e:
+        return None, "unreadable (%s)" % (e.strerror or e)
+    try:
+        return max(0.0, now - float(raw)), None
+    except ValueError:
+        return None, "unreadable (not a timestamp)"
+
+
+def describe_age(seconds):
+    if seconds is None:
+        return "?"
+    if seconds < 3600:
+        return "%dm" % int(seconds // 60)
+    if seconds < 86400:
+        return "%dh%02dm" % (int(seconds // 3600), int(seconds % 3600 // 60))
+    return "%dd%02dh" % (int(seconds // 86400), int(seconds % 86400 // 3600))
+
+
+def log_refusal(reason, now=None):
+    """The one event that means we turned a person away, said out loud.
+
+    It was silent. Exhaustion rendered a 503 to the visitor and wrote nothing
+    anywhere, so the way an operator learned the pool was full was that somebody
+    told them -- which means the idle window was being set from no evidence at
+    all. This line is the instrument that number is judged by, and it outranks
+    the number: seven days with this line beats a day without it.
+    """
+    now = time.time() if now is None else now
+    # Kept in BOTH shapes on purpose, and the names say which is which. The
+    # first version read the pool once and passed the lookup table to something
+    # that wanted the pairs; it raised inside the request thread, so the visitor
+    # got an empty reply instead of the 503 -- the refusal path made the refusal
+    # worse. Caught by the test that asserts on the log rather than on the
+    # status code, which is the only oracle that could have seen it.
+    pairs = idle_windows()
+    windows = dict(pairs)
+    names = sorted(set(list(windows) + available_slots()))
+    log("turned an arrival away: %s (%d slot(s) configured)"
+        % (reason, len(names)))
+    if not names:
+        log("  no slots are configured, so nothing can be served here.")
+        return
+    for name in names:
+        seen, seen_why = stamp_age(os.path.join(TOUCH_DIR, name), now)
+        swept, swept_why = stamp_age(os.path.join(REAP_STAMP_DIR, name), now)
+        if name not in windows:
+            window = "not in the pool table"
+        elif windows[name] <= 0:
+            window = "none (never reaped)"
+        else:
+            window = "%dd" % windows[name]
+        log("  %s: last request %s; idle sweep last saw %s; idle window %s"
+            % (name,
+               seen_why or ("%s ago" % describe_age(seen)),
+               swept_why or ("%s ago" % describe_age(swept)),
+               window))
+    # A remedy is only worth naming if it can actually be carried out, so this
+    # names the two settings and stops there rather than reciting a procedure
+    # nobody has run. How many slots exist is HDW4S_EPHEMERAL_SLOTS; how long
+    # each is held is HDW4S_IDLE_DAYS, per slot or for the machine.
+    log("  Ages above are what the idle window should be judged against."
+        " A gap between the two columns means the periodic sweep is missing"
+        " connections that this line is not.")
+    # RE-CHECKED HERE, against windows read a moment ago rather than at start.
+    # This is the arm of the derivation that can go red: the lifetime is pinned
+    # and the configuration is not, so a conf file edited after this started --
+    # or a slot added to the pool -- moves one clock without moving the other.
+    # A refusal is also the right moment to say it, because it is the moment
+    # somebody is about to go and change an idle window.
+    for complaint in cookie_policy_complaints(COOKIE_LIFETIME, pairs):
+        log("  WARNING: %s" % complaint)
+
+
 def slot_carries_own_credential(instance):
     """True when a slot was configured with a Basic credential of its own.
 
@@ -797,6 +940,11 @@ def arrival(own, wf, identity, query, new_identity):
     if sid is None:
         instance = pick_slot(own)
         if instance is None:
+            # Logged BEFORE the response, and with the cookie still attached:
+            # refusing a visitor is not a reason to let their identity lapse --
+            # doing that is how a full pool turns into a person locked out of
+            # the desktop they already had.
+            log_refusal("no free slot")
             respond(wf, 503, page(
                 "Every desktop is in use",
                 "This machine has no free slot right now. Close a tab you are "
@@ -872,6 +1020,11 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
             "The session behind this address is not running. Open the front "
             "door again to get a new one."), extra)
         return False
+
+    # The connection was accepted, so this slot is in use NOW. Recorded here
+    # rather than only by the periodic sweep, which cannot see a visit that
+    # begins and ends between two of its samples.
+    touch_slot(instance)
 
     target = rest + (b"?" + query if query else b"")
     out = [b"%s %s HTTP/1.1\r\n" % (method, target)]
@@ -1148,6 +1301,19 @@ def main():
         log("WARNING: %s" % complaint)
         log("  While that holds, a desktop can outlive the identity that owns"
             " it -- and its owner then cannot reach it or close it.")
+
+    # The sweep's record is the second of the two columns the refusal log
+    # prints. Whether it can be read at all is a property of this process, not
+    # of the sweep, so it is settled here rather than discovered by an operator
+    # reading a column of question marks during an outage.
+    if windows:
+        probe = os.path.join(REAP_STAMP_DIR, sorted(windows)[0][0])
+        _, why = stamp_age(probe)
+        if why and why.startswith("unreadable"):
+            log("WARNING: the idle sweep's record under %s cannot be read here"
+                " (%s)." % (REAP_STAMP_DIR, why))
+            log("  Refusals will still be logged, and the last-request column"
+                " is unaffected, but the sweep's own column will be blank.")
 
     slots = available_slots()
     if not slots:

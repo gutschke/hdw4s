@@ -191,6 +191,12 @@ class Rig:
         self.cred = "front:secretpw"
         with open(os.path.join(self.etc, "demux.auth.cred"), "w") as f:
             f.write(self.cred)
+        # Where the periodic sweep would keep its record. Real here, and empty:
+        # the point of the refusal log is partly that it reports what it could
+        # NOT read, so a rig that always has a readable stamp would never show
+        # that column working.
+        self.reapdir = os.path.join(self.tmp, "reap")
+        os.makedirs(self.reapdir)
         # The pool table the CLI keeps, and the idle window each slot is
         # configured with. Written before the router starts, because the
         # lifetime it derives from them is pinned at start.
@@ -214,6 +220,7 @@ class Rig:
                    HDW4S_ETCDIR=self.etc,
                    HDW4S_DEMUX_CRED=os.path.join(self.etc, "demux.auth.cred"),
                    HDW4S_DEMUX_STATE=os.path.join(self.tmp, "state"),
+                   HDW4S_REAP_STAMP_DIR=self.reapdir,
                    HDW4S_DEMUX_BIND="127.0.0.1",
                    HDW4S_DEMUX_PORT=str(self.port),
                    **({"HDW4S_GATE_MODE": gate} if gate is not None else {}))
@@ -599,6 +606,85 @@ def test_cookie_max_age_is_the_derived_lifetime(rig):
         % (age // 86400))
 
 
+def test_refusal_is_logged_with_what_it_takes_to_judge_it(rig):
+    """Pool exhaustion used to be silent.
+
+    It rendered a 503 to the visitor and wrote nothing anywhere, so an operator
+    learned the pool was full by being told by a person -- which means the idle
+    window was being set from no evidence. The oracle here is the LOG, not the
+    status code: the 503 was always right and always mute.
+    """
+    for _ in range(len(rig.slots)):
+        arrive(rig, rig.client())
+    st, _, _ = rig.client().get("/")
+    assert st == 503, "an arrival past capacity was not refused: %d" % st
+    text = rig.stderr_text()
+    assert "turned an arrival away" in text, \
+        "the pool refused a visitor and said nothing:\n%s" % text
+    for s in rig.slots:
+        assert ("  %s:" % s.name) in text, \
+            "the refusal named no age for %s, so the idle window cannot be "\
+            "judged from it:\n%s" % (s.name, text)
+    assert "last request" in text and "idle window" in text, \
+        "the refusal carries no ages and no window:\n%s" % text
+    # The sweep's own record is absent in this rig, and the line must SAY so
+    # rather than render an unread stamp as a number.
+    assert "no record" in text, \
+        "a missing sweep record was reported as something other than missing"
+
+
+def test_last_request_record_is_written_where_the_connection_is_accepted(rig):
+    """The accurate column, and why there are two.
+
+    The sweep polls every few minutes, so a visit that begins and ends inside
+    one gap is invisible to every sample it takes -- and the confident sentence
+    it then writes about a desktop "nobody has used since yesterday" is wrong.
+    This record is written where the connection is accepted, so the poll rate
+    stops mattering. Checked against the FILE, not against the log line, because
+    the log line is what we are trying to make true.
+    """
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    body = a.get("/s/%s/" % sid)[2].decode()
+    slot = body.split("SLOT=")[1].split()[0]
+    path = os.path.join(rig.tmp, "state", "last-request", slot)
+    for _ in range(50):
+        if os.path.exists(path):
+            break
+        time.sleep(0.05)
+    assert os.path.exists(path), \
+        "a request was served through %s and no record of it was written" % slot
+    with open(path) as f:
+        stamp = int(f.read().strip())
+    assert abs(stamp - time.time()) < 60, \
+        "the record is not a current timestamp: %d" % stamp
+
+
+def test_derivation_complains_when_a_window_outgrows_the_pinned_lifetime(rig):
+    """THE DERIVATION, SEEN REFUSING.
+
+    It cannot fail against its own input -- max(30d, 2 x W) is never smaller
+    than W -- so checking it that way proves nothing. What can fail is the
+    relationship over TIME: the lifetime is pinned when the router starts and
+    the configuration is not, so an idle window raised afterwards leaves a
+    desktop able to outlive the identity that owns it. The rig starts with a
+    1-day window, which pins a 30-day identity, and then sets the window to 90
+    days behind the router's back.
+    """
+    for name, _ in rig.windows:
+        with open(os.path.join(rig.etc, name + ".conf"), "w") as f:
+            f.write("HDW4S_IDLE_DAYS=90\n")
+    for _ in range(len(rig.slots)):
+        arrive(rig, rig.client())
+    st, _, _ = rig.client().get("/")
+    assert st == 503
+    text = rig.stderr_text()
+    assert "not shorter than the 30-day identity" in text, (
+        "a 90-day desktop against a 30-day identity was not reported -- the "
+        "owner can be locked out of a session that is still running:\n%s"
+        % text)
+
+
 def test_a_slot_that_is_never_reaped_is_reported_at_start():
     """The unbounded case, which no lifetime can dominate.
 
@@ -753,6 +839,8 @@ def main():
              test_exhaustion, test_ownership_keying_guard,
              test_dead_sid_gates_and_does_not_mint,
              test_cookie_slides_beyond_the_front_door,
+             test_refusal_is_logged_with_what_it_takes_to_judge_it,
+             test_last_request_record_is_written_where_the_connection_is_accepted,
              test_a_session_cannot_set_our_cookie,
              test_cookie_lifetime_guard, test_refresh_rate_limit]
 
@@ -763,6 +851,8 @@ def main():
     configured = [
         (test_cookie_max_age_is_the_derived_lifetime,
          dict(nslots=1, windows=[("ephemeral0", 40)])),
+        (test_derivation_complains_when_a_window_outgrows_the_pinned_lifetime,
+         dict(nslots=1, windows=[("ephemeral0", 1)])),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
