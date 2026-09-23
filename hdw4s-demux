@@ -585,13 +585,35 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock):
         up.connect(path)
     except OSError as e:
         up.close()
-        if e.errno in (errno.ENOENT, errno.ECONNREFUSED):
-            respond(wf, 502, page(
-                "That desktop is not answering",
-                "The session behind this address is not running. Open the front "
-                "door again to get a new one."))
-            return False
-        raise
+        # ANY failure to reach the session is answered, not two named ones.
+        #
+        # This used to allowlist ENOENT and ECONNREFUSED and re-raise the rest.
+        # The failure that actually occurs is neither: a socket left behind by an
+        # earlier configuration is owned by a different user than this service
+        # runs as, so connect() gives EACCES -- which fell through to the raise,
+        # killed the request thread with a traceback, and left the visitor with
+        # an empty reply and no page at all. Measured 2026-09-22, reachable by an
+        # ordinary arrival with no crafted request: the thing this product exists
+        # to serve.
+        #
+        # So the allowlist is gone rather than extended. Adding EACCES to it
+        # would fix the case we happened to hit and leave the next errno to do
+        # the same thing -- and an unhandled exception in a request thread is the
+        # wrong failure mode for ANY of them, because it fails silently to the
+        # person and loudly to nobody.
+        #
+        # The errno goes in the log because the operator needs to tell a leftover
+        # file from a permission problem from a session that is down; the visitor
+        # gets the same page either way, since none of those distinctions are
+        # theirs to act on.
+        log("cannot reach %s at %s: %s (%s)" % (
+            instance, path, e.strerror or e,
+            errno.errorcode.get(e.errno, e.errno)))
+        respond(wf, 502, page(
+            "That desktop is not answering",
+            "The session behind this address is not running. Open the front "
+            "door again to get a new one."))
+        return False
 
     target = rest + (b"?" + query if query else b"")
     out = [b"%s %s HTTP/1.1\r\n" % (method, target)]
