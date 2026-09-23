@@ -1813,9 +1813,15 @@ cmd_noauth() {
 # number nobody can change and nothing would say so.
 demux_port() {
   local v
+  # systemd prints this as "[::]:7280 (Stream)" -- address first, kind in
+  # parentheses after. The first version of this matched "^Stream (.*)$", which
+  # is neither the order nor the syntax, so it silently fell through to the
+  # placeholder and shipped a config block naming no port at all. Measured on a
+  # live unit; do not rewrite this from memory of what systemd "should" print.
   v="$(systemctl show 'hdw4s-demux.socket' -p Listen --value 2>/dev/null |
-       sed -n 's/^Stream \(.*\)$/\1/p' | tail -n1)"
-  v="${v##*:}"
+       grep -F '(Stream)' | tail -n1)"
+  v="${v%% *}"          # drop " (Stream)"
+  v="${v##*:}"        # drop [::] or an address, keep the port
   case "${v}" in ''|*[!0-9]*) echo 'THE_FRONT_DOOR_PORT';; *) echo "${v}";; esac
 }
 
