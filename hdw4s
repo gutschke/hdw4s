@@ -1449,6 +1449,30 @@ cmd_transport() {
 
   case "${mode}" in
     tcp)
+      # STOP THE SOCKET FIRST, while the unit still knows it has a filesystem
+      # address. This ordering is the whole fix for a leak that ran for months.
+      #
+      # It used to write the drop-in, reload, and then restart. "daemon-reload"
+      # replaces the address list, so by the time the unit stopped there was no
+      # UNIX path left for RemoveOnStop= to unlink and the socket file stayed on
+      # disk forever. Measured to the microsecond from the journal: bind at
+      # .744666, drop-in written .761 -- seventeen milliseconds later -- reload
+      # at .947204, stop at .979114 with nothing to remove, rebind on the port at
+      # .979369.
+      #
+      # The leftover is not inert. The demultiplexer builds its slot list by
+      # reading that directory, so an orphan is enumerated, handed to a visitor,
+      # and consumes a slot permanently. /run is a tmpfs, so every previous
+      # instance was erased at boot and no check that reads configuration could
+      # ever have seen it: right config, right unit, stale artefact.
+      #
+      # Stopping first lets systemd unlink its own socket, which is the honest
+      # repair. The explicit rm afterwards is a backstop for the sockets already
+      # on disk from before this change and for a stop that fails -- it is not
+      # the mechanism, and removing the reorder and keeping the rm would leave
+      # the bug in any path that does not come through here.
+      systemctl stop "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
+      rm -f "${RUNDIR}/hdw4s-proxy/${inst}.sock"
       # Replace the filesystem socket the unit defaults to. An empty
       # ListenStream= first, because these accumulate rather than replace.
       printf '%s\n' \
@@ -1459,7 +1483,7 @@ cmd_transport() {
         > "${dir}/50-listen.conf"
       config_write "${ETCDIR}/${inst}.conf" 'HDW4S_TRANSPORT' 'tcp'
       systemctl daemon-reload
-      systemctl restart "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
+      systemctl start "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
       echo "Session ${inst} listens on port ${port}."
       echo '  Who may connect is decided by the firewall; see HDW4S_PROXIES.'
       ;;
@@ -2088,6 +2112,14 @@ cmd_release() {
   split_legacy_name "${inst}" || fail
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" "$(unit_of "${inst}")" 2>/dev/null || :
+  # The filesystem socket, which systemd will not remove for a unit that is
+  # listening on a port: its address list no longer names a path, so there is
+  # nothing for RemoveOnStop= to unlink. Measured -- releasing a session left
+  # its socket behind and the demultiplexer went on enumerating it, now for an
+  # instance with no configuration, no slot row and no unit at all, which is
+  # worse than the orphan it started as because nothing keyed on instance
+  # identity has anything left to match.
+  rm -f "${RUNDIR}/hdw4s-proxy/${inst}.sock"
   rm -rf "$(dropin_of "${inst}")" \
          "${DROPIN}/hdw4s-proxy@${inst}.service.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
