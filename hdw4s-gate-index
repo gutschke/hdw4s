@@ -103,6 +103,7 @@ OVERLAY = r"""
 (() => {
   var SRC = __SRC__;
   var KEY = 'hdw4s_booted_' + location.pathname;
+  var EXPECT = KEY + ':expect-reload';
   var gate = document.getElementById('hdw4s-gate');
   var body = document.getElementById('hdw4s-body');
   var go   = document.getElementById('hdw4s-go');
@@ -436,11 +437,35 @@ OVERLAY = r"""
       if (want === 'webrtc' || want === 'websockets') window.__SELKIES_STREAMING_MODE__ = want;
       var s = document.createElement('script');
       s.type='module'; s.src=SRC; document.body.appendChild(s);
-    } else if (typeof window.selkiesCoreInitialize === 'function') {
-      // Re-entry with no reload: this is what moves a session between tabs instantly.
-      try { window.selkiesCoreInitialize(); }
-      catch(e){ document.getElementById('hdw4s-err').textContent =
-                  'hdw4s: could not reconnect - ' + e; show(LOST, LOST_GO); return; }
+    } else {
+      // RELOAD, rather than re-initialising in place.
+      //
+      // This used to call selkiesCoreInitialize() on the already-loaded client,
+      // with the reasoning that re-entry without a reload moves a session between
+      // tabs INSTANTLY. It is instant-looking and then wrong: measured across a
+      // real handover, the desktop came back at HALF HEIGHT -- 1280x328 against a
+      // 1280x656 window -- and stayed wrong for about sixteen seconds before
+      // correcting itself. The recovery coincides exactly with an orphaned canvas
+      // being disposed: re-entry leaves FOUR canvases where a fresh load has
+      // three, and the size negotiated while the extra one exists is the wrong
+      // one. The owner reported this as "the geometry is all wonky".
+      //
+      // A reload starts from one clean set of elements and is correct from the
+      // first frame: 1280x656 immediately, unchanged at +6s and +16s, three
+      // canvases. It costs a page load, which is the honest version of the wait
+      // that was happening anyway.
+      //
+      // DO NOT "FIX" THIS BY DISPATCHING A RESIZE. That was tried: it makes the
+      // client latch the transient size PERMANENTLY, turning a sixteen-second
+      // annoyance into a defect that never corrects and only appears after a
+      // handover. Measured, not assumed.
+      //
+      // Marked as OURS before it happens, so the reloaded page knows this reload
+      // was the product's own doing and not a person pressing F5. See the arrival
+      // check below: a reload nobody asked for must not walk through the gate.
+      try { sessionStorage.setItem(EXPECT,'1'); } catch(e){}
+      location.reload();
+      return;
     }
     window.__hdw4sBooted = true; window.__hdw4sLost = null;
     var r = roleOf();
@@ -448,16 +473,51 @@ OVERLAY = r"""
     if (BADKNOB.length && !r) notice('ignored: ' + BADKNOB.join('; '));
   }
 
+  // THE GATE'S OWN IDENTITY, so nobody has to remember which version they tested.
+  //
+  // A page already open keeps running the JavaScript it loaded; a deploy does not
+  // reach it, and revalidation only helps the NEXT fetch. That produced a round of
+  // bug reports nobody could place -- the owner's words: "i am not sure if i tested
+  // your final version or an interim state". This makes the question mechanical.
+  //
+  // Read it in a browser console as __hdw4sGate, or from a terminal against the
+  // SERVED page; a harness can compare the two and refuse to report on a stale tab.
+  window.__hdw4sGate = __GATEID__;
   window.__hdw4sContract = {module: SRC};
   // Published so a check can assert which arm is in force against the bytes the
   // browser actually ran, rather than against the file somebody meant to serve.
   window.__hdw4sArms = {gate: GATE, share: SHARE, bad: BADKNOB};
   go.addEventListener('click', boot);
 
-  var seen=false; try { seen = sessionStorage.getItem(KEY)==='1'; } catch(e){}
-  // A self-reload keeps the tab, and the client reloads itself on its own recovery
-  // paths; re-gating those would turn every recovery into a button nobody is watching.
-  if (seen) return boot();
+  // AN ARRIVAL IS GATED UNLESS WE OURSELVES CAUSED IT.
+  //
+  // This used to boot whenever sessionStorage said the tab had passed the gate
+  // once, on the reasoning that a self-reload keeps the tab and re-gating the
+  // client's own recovery paths would turn every recovery into a button nobody is
+  // watching. That reasoning holds for a reload the PRODUCT performs. It does not
+  // hold for one a PERSON performs, and the two were not distinguished.
+  //
+  // The owner found the consequence immediately: "i force a reload of the page.
+  // and while i presumably now have the most recent html, i also managed to steal
+  // the session without a gate." A tab that had been through the gate at some
+  // point in its life could take the desktop from whoever held it now, silently,
+  // with a keypress -- which is precisely the damage the gate exists to prevent.
+  //
+  // So the flag is no longer "has this tab ever passed the gate" but "did WE just
+  // reload this tab". It is consumed on read, so it authorises exactly one
+  // arrival and cannot accumulate.
+  //
+  // Consequence worth knowing, and it is deliberate under the owner's ruling that
+  // unknown input gates and active intent is preferable: a recovery reload the
+  // CLIENT performs by itself is not marked, so it will show the card rather than
+  // reconnecting silently. That is a click where there used to be none, on a path
+  // that is rare, and it is the safe direction of the two.
+  var expected=false;
+  try {
+    expected = sessionStorage.getItem(EXPECT)==='1';
+    sessionStorage.removeItem(EXPECT);
+  } catch(e){}
+  if (expected) return boot();
   // Second monitors and shared viewers must never be shown a takeover button.
   if (/^#(shared|player[2-4]|display2)/.test(location.hash)) return boot();
   // gate=off is about ARRIVAL and nothing else. lost() still shows its card: a tab
@@ -481,7 +541,16 @@ for knob, allowed in ARMS.items():
     if cfg[knob] not in allowed:
         raise SystemExit("%s=%r is not one of %s" % (env, cfg[knob], "/".join(allowed)))
 
+# The identity is a hash of THIS generator, which is where the gate's behaviour
+# lives -- not the package version, which does not change when the logic does, and
+# not a timestamp, which changes when nothing does. Two pages agree if and only if
+# they were built from the same gate.
+import hashlib
+_gate_id = hashlib.sha256(
+    open(__file__, "rb").read()).hexdigest()[:12]
+
 OVERLAY = OVERLAY.replace("__SRC__", json.dumps(src_attr)) \
+     .replace("__GATEID__", json.dumps(_gate_id)) \
      .replace("__CFG__", json.dumps(cfg)) \
      .replace("__NAME__", html_escape(os.environ.get("HDW4S_SESSION_NAME", "Desktop")))
 html = html.replace("</body>", OVERLAY + "</body>") if "</body>" in html else html + OVERLAY
