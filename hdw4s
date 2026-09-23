@@ -3,10 +3,34 @@ export LC_ALL='C'
 export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 set -o nounset -o pipefail
 
+# An unexpected fault reports itself at ERROR priority, not at the default.
+#
+# This used to be a plain echo to stderr, which systemd logs at info -- and
+# hdw4s-reaper.service sets LogLevelMax=warning to keep several hundred routine
+# lines a day out of the journal. So the reaper failed with NOTHING said about
+# why: the unit's own threshold discarded the only explanation. The unit's
+# comment called that an accepted cost and offered "run it by hand" as the
+# mitigation, which is precisely what does not work for an INTERMITTENT fault --
+# by hand it succeeds, which is what makes it intermittent.
+#
+# The rule this is an instance of: AN ERROR MUST NOT BE LOGGED BELOW THE
+# THRESHOLD ITS OWN UNIT SETS, or the unit silences its own diagnosis. "<3>" is
+# the priority systemd reads off the front of a line.
+#
+# The failing command is deliberately NOT included. BASH_COMMAND would carry the
+# arguments with it, and this program handles credentials; a diagnostic that
+# helpfully copies a secret into the journal is a worse bug than the one it is
+# helping with. The line number is enough to find the command in the source.
 # shellcheck disable=SC2154  # rc is assigned inside the trap itself
-trap 'rc="$?"
+trap 'rc="$?"; ln="${LINENO}"
       trap "" INT TERM QUIT HUP EXIT ERR
-      [ "${rc}" -eq 0 ] || echo "Script ${0} failed unexpectedly" >&2
+      if [ "${rc}" -ne 0 ]; then
+        if [ -n "${JOURNAL_STREAM:-}" ]; then
+          printf "<3>%s\n" "${0}: failed unexpectedly (status ${rc}, line ${ln})" >&2
+        else
+          echo "Script ${0} failed unexpectedly" >&2
+        fi
+      fi
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
 # Exit with an explanation rather than the trap's generic complaint. The trap

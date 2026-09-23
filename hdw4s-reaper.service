@@ -16,8 +16,10 @@ Type=oneshot
 # "<N>" prefix on a line as a priority, and "hdw4s reap" writes the few messages
 # worth keeping -- that a desktop was stopped, and why -- at warning.
 #
-# The cost is that an unexpected error from the shell itself is logged as info
-# and therefore dropped too. A failing run is still reported, because systemd
-# logs the failure of a unit above this threshold; what is lost is the text, and
-# running "hdw4s reap" by hand prints it.
+# This used to cost the text of an unexpected error, which the shell wrote at
+# info and this threshold then discarded -- so a failing run reported that it
+# failed and nothing about why. The mitigation offered here was "run it by hand",
+# which is exactly what cannot work for an intermittent fault: by hand it
+# succeeds. "hdw4s" now reports an unexpected fault at ERROR priority, above this
+# threshold, so the diagnosis survives. Do not lower that without raising this.
 LogLevelMax=warning
