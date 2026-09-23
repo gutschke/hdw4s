@@ -1,0 +1,77 @@
+[Unit]
+Description=Demultiplexer routing the front door to ephemeral HDW4S sessions
+Documentation=man:hdw4s(8)
+Requires=hdw4s-demux.socket
+After=hdw4s-demux.socket hdw4s-ephemeral-slots.service
+# The slot sockets live in a directory that hdw4s-ephemeral-slots creates at
+# boot. Ordering after it rather than requiring it: a box with no ephemeral
+# slots configured should get a router that says so, not a failed unit.
+
+[Service]
+ExecStart=/usr/lib/hdw4s/hdw4s-demux
+Type=simple
+Restart=on-failure
+RestartSec=1s
+
+# Runs as its own account, in the www-data group, because that is what the slot
+# sockets are owned by: /run/hdw4s-proxy/<instance>.sock is root:www-data 0660.
+# Connecting to one is a filesystem-permission question, and this group
+# membership is the whole of the answer -- there is no credential below this
+# point and there does not need to be one.
+DynamicUser=yes
+SupplementaryGroups=www-data
+
+# The front-door credential, and the per-slot credentials for slots that were
+# configured with one. Read at start; a live router does not notice a rotation,
+# so rotating one means restarting this unit -- the same three-step shape the
+# per-session credential already has.
+# LoadCredential, not a readable file: systemd opens these AS ROOT before the
+# service drops to its dynamic user, then exposes them in $CREDENTIALS_DIRECTORY
+# readable by that user alone. Loosening the files to a group instead would make
+# every credential on the box readable by anything in www-data, which on this
+# machine includes the thing the ephemeral sessions exist to contain.
+# The DIRECTORY form does not work here and the failure is opaque: pointing
+# LoadCredential= at /etc/hdw4s exits 243 before the service runs, because the
+# import refuses the subdirectory in there. Measured on this build, after this
+# comment had first asserted the opposite. So credentials are named one file at
+# a time: the front door's here, and the slots' in a drop-in written by
+# hdw4s-ephemeral-slots, which is where the slot names are known.
+#
+# No "-" on this one. A front door with no credential must not start.
+LoadCredential=demux.auth.cred:/etc/hdw4s/demux.auth.cred
+RuntimeDirectory=hdw4s-demux
+RuntimeDirectoryMode=0700
+
+# Hardened deliberately rather than maximally. This is a small stdlib HTTP
+# router with no desktop behind it, so it tolerates far more than a session
+# unit does -- but AF_UNIX is not optional here and neither is AF_INET, which is
+# the pairing that makes this component what it is: TCP in, filesystem sockets
+# out, and no TCP between any two of our own components.
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+# No [Install] section, deliberately. This service is started by its socket and
+# by nothing else, so there is nothing to enable: enabling it would start a
+# second router at boot competing for the same port. The absence is load
+# bearing -- the suite derives "which units must be enabled" from exactly this
+# section, so adding one here would silently require an enable line that must
+# not exist.

@@ -24,6 +24,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait}
          hdw4s-refuse hdw4s-refuse@.service
          hdw4s-incarnation hdw4s-incarnation@.service
          hdw4s-proxy@.socket hdw4s-proxy@.service
+         hdw4s-demux hdw4s-demux.socket hdw4s-demux.service
          hdw4s-firewall.service
          hdw4s-firewall-check.service hdw4s-firewall.timer
          dconf/profile dconf/10-policy dconf/locks/10-policy
@@ -339,6 +340,10 @@ systemctl enable --now hdw4s-reaper.timer
 # Not one of the templates above it: those cannot be enabled without an instance
 # name, and "hdw4s enable <account>" is what turns those on.
 systemctl enable --now hdw4s-ephemeral-slots.service
+# The front door, enabled as a SOCKET only. The router behind it is started by
+# the first connection and must not also be enabled, or a second copy races for
+# the port at boot.
+systemctl enable --now hdw4s-demux.socket
 
 # And any ephemeral slot this machine already has comes off TCP, because the
 # code change alone does not repair a deployment: the listener drop-in is

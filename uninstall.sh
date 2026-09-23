@@ -74,6 +74,11 @@ systemctl disable --now hdw4s-firewall.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-reaper.timer >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-firewall.service >/dev/null 2>&1 || :
 systemctl disable --now hdw4s-ephemeral-slots.service >/dev/null 2>&1 || :
+systemctl disable --now hdw4s-demux.socket >/dev/null 2>&1 || :
+# The router itself is socket-activated and never enabled, so there is nothing
+# to disable -- but it may be RUNNING, and leaving it holding the port would
+# outlive the uninstall.
+systemctl stop hdw4s-demux.service >/dev/null 2>&1 || :
 # The relay sockets, which hold the public ports open until they are stopped.
 for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 2>/dev/null |
            awk '{print $1}'); do

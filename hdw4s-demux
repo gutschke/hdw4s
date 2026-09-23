@@ -1,0 +1,816 @@
+#!/usr/bin/python3
+"""Route one TCP front door to many ephemeral sessions on filesystem sockets.
+
+This is the component the reverse proxy talks to. It is the only thing on the
+box listening on TCP, and it is the only leg where a credential does any work:
+below it every session is reached through /run/hdw4s-proxy/<instance>.sock,
+where who may connect is already decided by the socket's mode and its
+directory's permissions, before any HTTP exchange happens.
+
+WHY THIS PARSES EVERY REQUEST INSTEAD OF SPLICING, and it is not a preference.
+The cheap shape -- read the first request's headers, pick a backend, then become
+a byte pipe -- is unsound. HTTP/1.1 pools connections per ORIGIN, so two
+sessions on one hostname under different paths are the same origin, and request
+2 is delivered to request 1's backend. That is a cross-session read, not a
+cosmetic mis-render. It was measured with two stand-in backends and a
+one-connection-per-request control: the control routed both correctly and the
+pooled case mis-routed, so the failure is the pooling and not a broken rig.
+Pooling defeats SPLICING, not path identity -- anything that parses every
+request sees the path on every request.
+
+THE FALSE GREEN THIS INVITES, because it will catch whoever tests this next: a
+stand-in reverse proxy at its DEFAULTS opens a fresh upstream connection per
+request and does not reproduce the defect at all. A test that does not
+explicitly enable upstream keep-alive passes while the defect is live.
+
+The price is availability rather than correctness: one component whose failure
+takes every session, where the per-session socket-proxyd it replaces took
+exactly one. That is why the listening socket stays in a socket unit -- a crash
+loses in-flight connections and systemd hands the next arrival to a restarted
+router, instead of the front door latching off.
+
+THE THREE CARRIERS, and none of them is a capability.
+
+  cookie hdw4s_id   per browser (and per storage partition, so a private window
+                    is a separate identity for free)  -- IDENTITY: what this
+                    browser may own. Minted here. NEVER derived from a request
+                    header: no vhost in this estate strips a client's identity
+                    header, so trusting one would be an auth bypass, and it
+                    would also foreclose sharing with browsers the reverse proxy
+                    never vetted.
+  path /s/<sid>/    per tab, because a tab has one URL -- SELECTION: which of my
+                    sessions this tab is showing. An ADDRESS, not a capability:
+                    a session's own uid can read its own environment, so any
+                    path we hand downstream is in somebody else's access log by
+                    construction. Authorization happens here, before any byte
+                    reaches a session.
+  sessionStorage    per tab -- arrival state, read by the page, never load
+                    bearing for access.
+
+OWNERSHIP KEYS ON THE SESSION INSTANCE, NEVER ON THE SLOT. Sharing is additive
+and never revoked, so the ownership table only grows and nothing collects it.
+Meanwhile a slot is reaped for idleness and its uid and socket are RECYCLED. An
+entry keyed on the slot would therefore route a browser that returns after its
+session was reaped into whatever now occupies that slot -- a stranger's desktop,
+handed over by the ownership check meant to prevent exactly that. The sid is
+minted per session and never reused; the slot name is a value in the record, not
+its key. assert_ownership_keying() below exists to be seen failing.
+"""
+
+import base64
+import errno
+import hmac
+import http.cookies
+import os
+import secrets
+import socket
+import sys
+import threading
+import time
+import urllib.parse
+
+NAME = "hdw4s-demux"
+
+PROXY_RUNDIR = os.environ.get("HDW4S_PROXY_RUNDIR", "/run/hdw4s-proxy")
+STATE_DIR = os.environ.get("HDW4S_DEMUX_STATE", "/run/hdw4s-demux")
+
+def credential_dir():
+    """Where credentials are actually readable from.
+
+    Under the shipped unit this is systemd's $CREDENTIALS_DIRECTORY: the files
+    in /etc/hdw4s are root-only, and this service runs as a dynamic user, so it
+    never opens them itself. systemd opens them as root and hands over a copy
+    only this user can read. Loosening /etc/hdw4s to a group instead would have
+    made every credential on the box readable by everything in www-data, which
+    here includes the population the ephemeral sessions exist to contain.
+
+    Falling back to HDW4S_ETCDIR keeps the component runnable by hand as root,
+    which is what the trial harness does.
+    """
+    d = os.environ.get("CREDENTIALS_DIRECTORY")
+    if d and os.path.isdir(d):
+        return d, True
+    return os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s"), False
+
+
+def credential_path(basename):
+    """A credential file, under whichever of the two shapes is in force.
+
+    systemd's directory import names each credential after the FILE it came
+    from, so "demux.auth.cred" stays "demux.auth.cred" -- but accept the
+    extension-less spelling too rather than depend on which, because getting
+    this wrong fails as "no credential" and that reads as a configuration
+    mistake rather than a lookup mistake.
+    """
+    d, _ = credential_dir()
+    for name in (basename, basename[:-5] if basename.endswith(".cred") else basename):
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(d, basename)
+
+
+CRED_FILE = os.environ.get("HDW4S_DEMUX_CRED") or ""
+BIND = os.environ.get("HDW4S_DEMUX_BIND", "0.0.0.0")
+PORT = int(os.environ.get("HDW4S_DEMUX_PORT", "7280"))
+REALM = "hdw4s"
+
+# The arrival arm. "mint" is what the owner ruled for this milestone -- a new
+# tab always means minting -- with its cost named by him: you lose your session
+# if you reload the tab even accidentally. The other arms are kept working and
+# tested in both positions BECAUSE the end-state gate is still his decision, and
+# a switch nobody exercises gets deleted by the next person as dead weight, at
+# which point the decision has been made by implementation.
+GATE_DEFAULT = os.environ.get("HDW4S_GATE_MODE", "mint")
+GATE_ARMS = ("mint", "takeover", "off")
+
+IDLE_TIMEOUT = 120.0
+
+
+def log(msg):
+    sys.stderr.write("%s: %s\n" % (NAME, msg))
+    sys.stderr.flush()
+
+
+# --------------------------------------------------------------------------
+# Ownership
+# --------------------------------------------------------------------------
+
+class Ownership:
+    """identity -> the sessions it owns, and sid -> the slot behind it.
+
+    Append-only by construction, because the ruling is that sharing is additive
+    and nothing is ever revoked. The only pruning is of sids whose session is
+    gone, and pruning one NEVER hands its slot to the sid's old owner.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        # sid -> {"identity", "instance", "minted"}
+        self._by_sid = {}
+        # identity -> [sid, ...] in mint order
+        self._by_identity = {}
+
+    def mint_identity(self):
+        return secrets.token_hex(16)
+
+    def mint_session(self, identity, instance):
+        sid = secrets.token_hex(16)
+        with self._lock:
+            self._by_sid[sid] = {
+                "identity": identity,
+                "instance": instance,
+                "minted": time.time(),
+            }
+            self._by_identity.setdefault(identity, []).append(sid)
+        return sid
+
+    def lookup(self, sid):
+        with self._lock:
+            rec = self._by_sid.get(sid)
+            return dict(rec) if rec else None
+
+    def owned_by(self, identity):
+        with self._lock:
+            return list(self._by_identity.get(identity, ()))
+
+    def instances_in_use(self):
+        with self._lock:
+            return {r["instance"] for r in self._by_sid.values()}
+
+    def forget(self, sid):
+        """Drop a sid whose session is gone. Its slot is NOT reassigned here."""
+        with self._lock:
+            rec = self._by_sid.pop(sid, None)
+            if rec:
+                owned = self._by_identity.get(rec["identity"])
+                if owned and sid in owned:
+                    owned.remove(sid)
+            return rec
+
+
+def assert_ownership_keying(factory=Ownership):
+    """Prove the recycling guard, in BOTH directions, at every start.
+
+    A guard that has never rejected anything is not known to reject anything --
+    and a guard that refuses everything would also look green, so this asserts
+    the permit arm as well as the refuse arm. It runs at startup rather than
+    only in a test file, because the failure it prevents is silent and
+    unrecoverable: a stranger's desktop handed over by our own ownership check.
+
+    It takes a FACTORY rather than nothing, and that is the whole point. The
+    first version of this function built its own Ownership() and ignored what it
+    was handed, so it could not fail for any implementation but the one it
+    already trusted -- a check that cannot fail by construction, which is the
+    exact defect it exists to catch. It was caught by pointing it at a
+    deliberately slot-keyed table and finding it still green. Keep the
+    parameter: without it this is decoration.
+    """
+    probe = factory()
+
+    a = probe.mint_identity()
+    b = probe.mint_identity()
+    assert a != b, "two identities minted the same value"
+
+    # A owns a session on a slot.
+    sid_a = probe.mint_session(a, "ephemeral0")
+
+    # PERMIT ARM. A's own sid must still resolve to A's session. Without this a
+    # guard that simply refused everything would pass the arm below.
+    rec = probe.lookup(sid_a)
+    assert rec and rec["identity"] == a and rec["instance"] == "ephemeral0", \
+        "the owner of a live session was not routed to it"
+
+    # The session is reaped and the SLOT is recycled to B.
+    probe.forget(sid_a)
+    sid_b = probe.mint_session(b, "ephemeral0")
+
+    # REFUSE ARM. A returns with its cookie and its old address.
+    assert probe.lookup(sid_a) is None, \
+        "a reaped session's address still resolves"
+    assert sid_a not in probe.owned_by(a), \
+        "a reaped session is still listed as owned"
+
+    # And the sharp one: A must not reach B's desktop, although B is now on the
+    # very slot A used to hold. This is the assertion that goes red the moment
+    # anyone keys the table on the slot instead of the session instance.
+    assert sid_b != sid_a, "a recycled slot reissued the same session address"
+    rec_b = probe.lookup(sid_b)
+    assert rec_b["identity"] == b, "the recycled slot's session is not B's"
+    for sid in probe.owned_by(a):
+        assert probe.lookup(sid)["identity"] == a, \
+            "identity A owns a session belonging to someone else"
+
+
+# --------------------------------------------------------------------------
+# Slots
+# --------------------------------------------------------------------------
+
+def socket_path(instance):
+    return os.path.join(PROXY_RUNDIR, "%s.sock" % instance)
+
+
+_slot_cred_cache = {}
+
+
+def slot_credential(instance):
+    """A slot's own Basic credential, if it was configured with one.
+
+    Existence, not readability: the file is root-only by design, so asking
+    whether we can read it would answer "no credential" for every unprivileged
+    caller. Compared and forwarded, never printed, and never placed in argv
+    where /proc/<pid>/cmdline would expose it.
+    """
+    if instance in _slot_cred_cache:
+        return _slot_cred_cache[instance]
+    path = credential_path("%s.auth.cred" % instance)
+    try:
+        with open(path, "rb") as f:
+            raw = f.read().strip()
+        value = base64.b64encode(b"%s:%s" % (instance.encode(), raw)) \
+            if b":" not in raw else base64.b64encode(raw)
+    except OSError:
+        value = None
+    _slot_cred_cache[instance] = value
+    return value
+
+
+def available_slots():
+    """The slots this box actually has, read from the authority that defines
+    the set -- the sockets themselves -- rather than from a configured count.
+    A count in a file is a claim; a bound socket is the thing a request can
+    reach."""
+    try:
+        names = os.listdir(PROXY_RUNDIR)
+    except OSError as e:
+        log("cannot read %s: %s" % (PROXY_RUNDIR, e))
+        return []
+    return sorted(n[:-5] for n in names if n.endswith(".sock"))
+
+
+def pick_slot(own):
+    """A slot nobody owns, or None. 'Free' means unminted capacity: under the
+    identity ruling every session that has been arrived at is owned, so there is
+    no pool of free sessions to balance across."""
+    taken = own.instances_in_use()
+    for name in available_slots():
+        if name not in taken:
+            return name
+    return None
+
+
+# --------------------------------------------------------------------------
+# HTTP
+# --------------------------------------------------------------------------
+
+class Closed(Exception):
+    pass
+
+
+def read_line(rf):
+    line = rf.readline()
+    if not line:
+        raise Closed()
+    return line
+
+
+def read_headers(rf):
+    headers = []
+    while True:
+        line = read_line(rf)
+        if line in (b"\r\n", b"\n"):
+            return headers
+        if len(headers) > 200:
+            raise Closed()
+        headers.append(line)
+
+
+def header_value(headers, name):
+    want = name.lower().encode()
+    for h in headers:
+        if h.lower().startswith(want + b":"):
+            return h.split(b":", 1)[1].strip()
+    return None
+
+
+def respond(wf, status, body=b"", extra=()):
+    reason = {
+        200: "OK", 302: "Found", 400: "Bad Request", 401: "Unauthorized",
+        403: "Forbidden", 404: "Not Found", 410: "Gone",
+        502: "Bad Gateway", 503: "Service Unavailable",
+    }.get(status, "Error")
+    out = [b"HTTP/1.1 %d %s\r\n" % (status, reason.encode())]
+    out.append(b"Content-Length: %d\r\n" % len(body))
+    out.append(b"Content-Type: text/html; charset=utf-8\r\n")
+    for k, v in extra:
+        out.append(b"%s: %s\r\n" % (k.encode(), v.encode()))
+    out.append(b"\r\n")
+    wf.write(b"".join(out))
+    if body:
+        wf.write(body)
+    wf.flush()
+
+
+def gate_page(title, detail, action):
+    """A page that ASKS. The link is the whole mechanism: minting happens only
+    because a person clicked, so a browser restoring twenty tabs produces twenty
+    questions and zero desktops rather than twenty desktops nobody asked for."""
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>"
+            "<body style=\"font:16px/1.5 system-ui;background:#242424;color:#ddd;"
+            "display:flex;align-items:center;justify-content:center;height:100vh\">"
+            "<div style=\"max-width:32rem;padding:2rem\">"
+            "<h1 style=\"font-size:1.3rem\">%s</h1>"
+            "<p style=\"color:#b9b9b9\">%s</p>"
+            "<p><a href=\"/\" style=\"display:inline-block;margin-top:1rem;"
+            "padding:.65rem 1.15rem;background:#772953;color:#fff;"
+            "text-decoration:none;border-radius:.35rem\">%s</a></p></div>"
+            % (title, title, detail, action)).encode()
+
+
+def page(title, detail):
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>"
+            "<body style=\"font:16px/1.5 system-ui;background:#242424;color:#ddd;"
+            "display:flex;align-items:center;justify-content:center;height:100vh\">"
+            "<div style=\"max-width:32rem;padding:2rem\"><h1 style=\"font-size:1.3rem\">%s</h1>"
+            "<p style=\"color:#b9b9b9\">%s</p></div>" % (title, title, detail)).encode()
+
+
+# --------------------------------------------------------------------------
+# Credential
+# --------------------------------------------------------------------------
+
+def load_credential():
+    """user:password, root-only. Absent means REFUSE TO START.
+
+    Failing closed matters more than it looks: this is the one leg where a
+    credential does any work, and a demultiplexer that quietly served without
+    one would present every session on the box to anything that can reach the
+    port, while every green check downstream kept passing.
+    """
+    path = CRED_FILE or credential_path("demux.auth.cred")
+    try:
+        with open(path, "rb") as f:
+            raw = f.read().strip()
+    except OSError as e:
+        log("no credential at %s (%s)." % (path, e.strerror))
+        log("refusing to start: this is the only leg where a credential works.")
+        raise SystemExit(1)
+    if b":" not in raw:
+        log("credential in %s is not user:password; refusing to start." % path)
+        raise SystemExit(1)
+    # Compared, never printed, and never placed in argv.
+    return base64.b64encode(raw)
+
+
+def authorized(headers, expected_b64):
+    got = header_value(headers, "Authorization")
+    if not got or not got.lower().startswith(b"basic "):
+        return False
+    # Constant time, and on the encoded form so no decode can leak by length.
+    return hmac.compare_digest(got.split(None, 1)[1].strip(), expected_b64)
+
+
+# --------------------------------------------------------------------------
+# Routing
+# --------------------------------------------------------------------------
+
+def parse_target(target):
+    """Split a request target into (sid, remainder, query).
+
+    /s/<sid>/rest?q -> (sid, "/rest", "q");  anything else -> (None, path, query)
+    """
+    path, _, query = target.partition(b"?")
+    parts = path.split(b"/")
+    if len(parts) >= 3 and parts[1] == b"s" and parts[2]:
+        sid = parts[2].decode("ascii", "replace")
+        rest = b"/" + b"/".join(parts[3:])
+        return sid, rest, query
+    return None, path, query
+
+
+def needs_trailing_slash(target):
+    """True for /s/<sid> exactly, which must be redirected to /s/<sid>/.
+
+    Not cosmetic, and the failure it prevents is confusing rather than loud: the
+    web client takes its base URL from the DIRECTORY part of its own
+    location.pathname. Loaded from /s/<sid> that base is "/s", so every asset
+    and both WebSocket routes are then requested from the wrong place, and the
+    first symptom is a desktop that never appears rather than a 404 on the page
+    you asked for. Measured: the client computes its prefix from the URL it was
+    loaded from, and the server registers its index at exactly one path.
+    """
+    path = target.partition(b"?")[0]
+    parts = path.split(b"/")
+    return len(parts) == 3 and parts[1] == b"s" and bool(parts[2])
+
+
+def identity_of(headers):
+    raw = header_value(headers, "Cookie")
+    if not raw:
+        return None
+    try:
+        jar = http.cookies.SimpleCookie()
+        jar.load(raw.decode("latin-1"))
+    except Exception:
+        return None
+    m = jar.get("hdw4s_id")
+    if not m or not m.value:
+        return None
+    v = m.value
+    # Our own mint is 32 hex characters. Anything else is somebody's guess.
+    if len(v) != 32 or any(c not in "0123456789abcdef" for c in v):
+        return None
+    return v
+
+
+def gate_arm(query):
+    """The arm for this arrival. The query string wins over the built default,
+    exactly as the page-side gate in hdw4s-gate-index already behaves, so the
+    two layers agree about which arm is in force."""
+    try:
+        q = urllib.parse.parse_qs(query.decode("latin-1"))
+    except Exception:
+        return GATE_DEFAULT
+    want = (q.get("gate") or [GATE_DEFAULT])[0]
+    return want if want in GATE_ARMS else GATE_DEFAULT
+
+
+def set_cookie_header(identity):
+    # Secure is set unconditionally: the browser reaches this through nginx over
+    # TLS, and Chrome treats http://127.0.0.1 as a trustworthy origin, so the
+    # harness's loopback tab accepts it too.
+    return ("hdw4s_id=%s; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"
+            % identity)
+
+
+def arrival(own, wf, identity, query, new_identity):
+    """Decide where this tab goes, and send it there. One place, per §13."""
+    extra = []
+    if new_identity:
+        extra.append(("Set-Cookie", set_cookie_header(identity)))
+
+    arm = gate_arm(query)
+    owned = own.owned_by(identity)
+
+    sid = None
+    if owned and arm in ("takeover", "off"):
+        # Resume the most recent session this identity owns. Not a slot lookup:
+        # the sid is what is resumed, so a reaped session is simply absent here
+        # rather than resolving to whoever now holds its slot.
+        sid = owned[-1]
+    if sid is None:
+        instance = pick_slot(own)
+        if instance is None:
+            respond(wf, 503, page(
+                "Every desktop is in use",
+                "This machine has no free slot right now. Close a tab you are "
+                "finished with, or try again shortly."), extra)
+            return
+        sid = own.mint_session(identity, instance)
+
+    location = "/s/%s/" % sid
+    if query:
+        location += "?" + query.decode("latin-1")
+    extra.append(("Location", location))
+    respond(wf, 302, b"", extra)
+
+
+# --------------------------------------------------------------------------
+# Proxying
+# --------------------------------------------------------------------------
+
+def splice(a, b):
+    try:
+        while True:
+            chunk = a.recv(65536)
+            if not chunk:
+                break
+            b.sendall(chunk)
+    except OSError:
+        pass
+    finally:
+        for s in (a, b):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+
+def forward_request(instance, method, rest, query, headers, rf, wf, sock):
+    """One upstream connection for ONE request. Never one per downstream
+    connection -- that is the pooling defect this component exists to avoid."""
+    path = socket_path(instance)
+    up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    up.settimeout(30)
+    try:
+        up.connect(path)
+    except OSError as e:
+        up.close()
+        if e.errno in (errno.ENOENT, errno.ECONNREFUSED):
+            respond(wf, 502, page(
+                "That desktop is not answering",
+                "The session behind this address is not running. Open the front "
+                "door again to get a new one."))
+            return False
+        raise
+
+    target = rest + (b"?" + query if query else b"")
+    out = [b"%s %s HTTP/1.1\r\n" % (method, target)]
+    for h in headers:
+        low = h.lower()
+        # The front door's credential is for the leg between the reverse proxy
+        # and this component only. It is never passed downstream: nothing below
+        # needs it, and a session's own uid can read whatever it is given.
+        if low.startswith(b"authorization:"):
+            continue
+        # Our identity cookie is ours. The session has no use for it and must
+        # not be able to read other browsers' identities out of its own logs.
+        if low.startswith(b"cookie:"):
+            continue
+        # Host and Origin go through UNCHANGED. Selkies rejects a WebSocket
+        # upgrade whose Origin hostname does not match the Host header, so
+        # rewriting either one here would break the stream and would do it only
+        # at upgrade time, long after the page looked fine.
+        out.append(h)
+    # A slot configured with its own Basic credential still wants one. Reaching
+    # it is already gated by the socket's mode, so this is redundant rather than
+    # load-bearing -- but a slot that HAS one answers 401 to everything,
+    # including the index, and the demultiplexer is now the only caller. So
+    # present it where it exists rather than requiring every slot be
+    # reconfigured. Never built, only consumed: no new credential is minted here.
+    slot_cred = slot_credential(instance)
+    if slot_cred:
+        out.append(b"Authorization: Basic %s\r\n" % slot_cred)
+    out.append(b"\r\n")
+    up.sendall(b"".join(out))
+
+    upf = up.makefile("rb")
+
+    # Request body, if any.
+    clen = header_value(headers, "Content-Length")
+    if clen:
+        left = int(clen)
+        while left > 0:
+            chunk = rf.read(min(left, 65536))
+            if not chunk:
+                break
+            up.sendall(chunk)
+            left -= len(chunk)
+    elif (header_value(headers, "Transfer-Encoding") or b"").lower() == b"chunked":
+        while True:
+            size_line = read_line(rf)
+            up.sendall(size_line)
+            n = int(size_line.strip().split(b";")[0], 16)
+            if n == 0:
+                up.sendall(read_line(rf))
+                break
+            body = rf.read(n + 2)
+            up.sendall(body)
+
+    # Response.
+    status_line = upf.readline()
+    if not status_line:
+        up.close()
+        respond(wf, 502, page("That desktop closed the connection", "Try again."))
+        return False
+    resp_headers = read_headers(upf)
+
+    wf.write(status_line)
+    for h in resp_headers:
+        wf.write(h)
+    wf.write(b"\r\n")
+    wf.flush()
+
+    if status_line.split()[1:2] == [b"101"]:
+        # The upgrade succeeded, so this pair is now dedicated. That is correct:
+        # after a 101 the connection belongs to that WebSocket and carries no
+        # further requests to route.
+        pending = upf.peek(0)
+        if pending:
+            wf.write(upf.read(len(pending)))
+            wf.flush()
+        t = threading.Thread(target=splice, args=(sock, up), daemon=True)
+        t.start()
+        splice(up, sock)
+        t.join(5)
+        return False
+
+    rlen = header_value(resp_headers, "Content-Length")
+    if rlen is not None:
+        left = int(rlen)
+        while left > 0:
+            chunk = upf.read(min(left, 65536))
+            if not chunk:
+                break
+            wf.write(chunk)
+            left -= len(chunk)
+        wf.flush()
+    elif (header_value(resp_headers, "Transfer-Encoding") or b"").lower() == b"chunked":
+        while True:
+            size_line = upf.readline()
+            wf.write(size_line)
+            n = int(size_line.strip().split(b";")[0], 16)
+            if n == 0:
+                wf.write(upf.readline())
+                wf.flush()
+                break
+            wf.write(upf.read(n + 2))
+        wf.flush()
+    else:
+        # No length and no chunking: the body runs to end of connection, so this
+        # downstream connection cannot carry another request either.
+        while True:
+            chunk = upf.read(65536)
+            if not chunk:
+                break
+            wf.write(chunk)
+        wf.flush()
+        up.close()
+        return False
+
+    up.close()
+    return True
+
+
+# --------------------------------------------------------------------------
+# Connection
+# --------------------------------------------------------------------------
+
+def serve(sock, own, expected_b64):
+    sock.settimeout(IDLE_TIMEOUT)
+    rf = sock.makefile("rb")
+    wf = sock.makefile("wb")
+    try:
+        while True:
+            try:
+                line = read_line(rf)
+            except (Closed, socket.timeout, OSError):
+                return
+            bits = line.split()
+            if len(bits) != 3:
+                respond(wf, 400, page("Bad request", "That was not HTTP."))
+                return
+            method, target, _ = bits
+            try:
+                headers = read_headers(rf)
+            except (Closed, OSError):
+                return
+
+            if not authorized(headers, expected_b64):
+                respond(wf, 401, page(
+                    "Not authorised",
+                    "This front door is reached through the reverse proxy."),
+                    [("WWW-Authenticate", 'Basic realm="%s"' % REALM)])
+                return
+
+            if needs_trailing_slash(target):
+                path, _, q = target.partition(b"?")
+                loc = path.decode("latin-1") + "/" + (("?" + q.decode("latin-1")) if q else "")
+                respond(wf, 302, b"", [("Location", loc)])
+                continue
+
+            sid, rest, query = parse_target(target)
+            identity = identity_of(headers)
+            new_identity = False
+            if identity is None:
+                identity = own.mint_identity()
+                new_identity = True
+
+            if sid is None:
+                arrival(own, wf, identity, query, new_identity)
+                continue
+
+            rec = own.lookup(sid)
+            if rec is None:
+                # GATE. Not a mint, and the difference is the whole point.
+                #
+                # A tab presenting an id that no longer exists is by definition
+                # RETURNING rather than arriving -- nothing else produces that
+                # state -- so this needs no clock, no age threshold and no
+                # guess. And MINTING IS A DAMAGE, not a neutral default: a
+                # machine whose tabs are restored lazily after a reboot presents
+                # a dead id from EVERY restored tab, and minting on each one
+                # hands back one unwanted desktop per tab. That is the second of
+                # the two damages the gate exists for, alongside taking over
+                # somebody else's session.
+                #
+                # It must also never fall through to whatever now holds the
+                # slot, which is the recycling hazard the ownership keying
+                # guards.
+                #
+                # The shape to keep: an input we cannot resolve produces a
+                # QUESTION, never an ACTION. A failure that degrades toward
+                # doing something is the same defect as a signal that degrades
+                # toward "safe".
+                respond(wf, 410, gate_page(
+                    "This desktop has ended",
+                    "The session this tab was showing is no longer running. "
+                    "Nothing has been started for you.",
+                    "Start a new desktop"))
+                continue
+            if rec["identity"] != identity:
+                # The invariant, refusing: different identities never see each
+                # other's sessions. This is the negative the close is tested with.
+                respond(wf, 403, page(
+                    "Not your desktop",
+                    "This address belongs to a different browser."))
+                continue
+
+            if not forward_request(rec["instance"], method, rest, query,
+                                   headers, rf, wf, sock):
+                return
+    finally:
+        for f in (rf, wf):
+            try:
+                f.close()
+            except OSError:
+                pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def listening_socket():
+    """systemd's fd if we were socket-activated, otherwise our own bind."""
+    if os.environ.get("LISTEN_FDS") and os.environ.get("LISTEN_PID") == str(os.getpid()):
+        s = socket.socket(fileno=3)
+        s.setblocking(True)
+        log("listening on the socket unit's fd")
+        return s
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind((BIND, PORT))
+    s.listen(128)
+    log("listening on %s:%d" % (BIND, PORT))
+    return s
+
+
+def main():
+    # Both arms, at every start, before anything can arrive.
+    assert_ownership_keying(Ownership)
+
+    expected_b64 = load_credential()
+    own = Ownership()
+
+    slots = available_slots()
+    if not slots:
+        log("no session sockets in %s; nothing to route to." % PROXY_RUNDIR)
+    else:
+        log("routing to %d slot(s): %s" % (len(slots), ", ".join(slots)))
+
+    srv = listening_socket()
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except OSError as e:
+            log("accept failed: %s" % e)
+            continue
+        threading.Thread(target=serve, args=(conn, own, expected_b64),
+                         daemon=True).start()
+
+
+if __name__ == "__main__":
+    main()

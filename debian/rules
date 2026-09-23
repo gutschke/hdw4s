@@ -33,6 +33,11 @@ override_dh_installsystemd:
 	dh_installsystemd --no-stop-on-upgrade --no-restart-after-upgrade hdw4s-ephemeral-slots.service
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.socket
 	dh_installsystemd --no-enable --no-start hdw4s-proxy@.service
+# The front door. The SOCKET is enabled and the service is not: the router is
+# socket-activated, so enabling the service too would start a second copy at
+# boot competing for the same port.
+	dh_installsystemd --no-stop-on-upgrade --no-restart-after-upgrade hdw4s-demux.socket
+	dh_installsystemd --no-enable --no-start hdw4s-demux.service
 # Named here although neither can be enabled and neither is ever started by
 # hand: the incarnation publisher is pulled in by Wants= on the session, and the
 # refusal responder by OnFailure= on the relay. The reason to name them is that

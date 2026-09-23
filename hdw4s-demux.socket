@@ -1,0 +1,32 @@
+[Unit]
+Description=Front door for every ephemeral HDW4S session
+Documentation=man:hdw4s(8)
+
+[Socket]
+# The ONE TCP port on this machine. Everything below it is reached over
+# filesystem sockets in /run/hdw4s-proxy, where who may connect is decided by
+# the socket's mode and its directory's permissions rather than by a credential.
+# That is why authentication lives on this leg and nowhere else: this is the
+# only leg where a credential can do any work.
+#
+# "hdw4s demux port" writes a drop-in when the port is not the default, exactly
+# as "hdw4s enable" already does for a session's own port, because a template
+# cannot work it out for itself.
+ListenStream=7280
+
+# The listening socket is owned by a SOCKET UNIT and not by the router, so a
+# router that crashes loses the connections in flight and systemd hands the next
+# arrival to a restarted one. Without this the front door latches off after a
+# start-limit hit and every desktop on the box is unreachable until an admin
+# intervenes -- measured on the per-session relay this replaces, where sixty
+# arrivals at a failing slot ended in "service-start-limit-hit".
+#
+# Unlike that relay the blast radius here is the whole machine, because one
+# router serves every session. That is the price of routing per request, which
+# is not optional: a connection-level splicer cannot carry identity, since
+# HTTP/1.1 pools connections per origin and request 2 arrives at request 1's
+# backend. Measured, with a per-request router as the control.
+Accept=no
+
+[Install]
+WantedBy=sockets.target
