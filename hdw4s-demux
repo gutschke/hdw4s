@@ -283,6 +283,31 @@ def available_slots():
     return sorted(n[:-5] for n in names if n.endswith(".sock"))
 
 
+def slot_unreachable(instance):
+    """Why this slot cannot be reached, or None if it can.
+
+    Answers the question the enumeration above only appears to answer. A name in
+    the socket directory is a filename; whether a request can be served through
+    it is a fact about the kernel, and the two came apart in the field -- a
+    regular file created with "touch" was enumerated as a slot, and a socket with
+    nothing bound to it was handed to a visitor.
+
+    Deliberately returns the reason rather than a boolean: an operator reading
+    "cannot be reached" wants to know whether it is a leftover file, a permission
+    problem or a session that is down, and those want different actions.
+    """
+    path = socket_path(instance)
+    up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    up.settimeout(2)
+    try:
+        up.connect(path)
+        return None
+    except OSError as e:
+        return "%s (%s)" % (e.strerror or e, errno.errorcode.get(e.errno, e.errno))
+    finally:
+        up.close()
+
+
 def pick_slot(own):
     """A slot nobody owns, or None.
 
@@ -794,7 +819,28 @@ def main():
         # configuration. Say it at startup instead of letting one slot in the
         # pool fail silently.
         for name in slots:
-            if slot_carries_own_credential(name):
+            # REACHABILITY, before anything about credentials. The banner above
+            # names what this router will hand to visitors, and it used to
+            # announce slots it could not open -- a socket left behind by an
+            # earlier configuration, with nothing bound to it, was listed as
+            # routable and then given to the first arrival, which got no
+            # response at all. One connect-and-close per slot at startup says so
+            # in the line that already exists, at the moment the pool is read.
+            #
+            # NOT keyed on a particular errno. The failure measured in the field
+            # was EACCES, not ENOENT or ECONNREFUSED, because the leftover socket
+            # was owned by a different user than the one this runs as. Anything
+            # written against "the file is missing" would have stayed silent
+            # through exactly the case that produced the defect.
+            why = slot_unreachable(name)
+            if why:
+                log("WARNING: %s is listed as a slot but cannot be reached: %s"
+                    % (name, why))
+                log("  A visitor minted onto it gets a failed request and the"
+                    " slot is consumed.")
+                log("  If no session owns this name, the socket is a leftover"
+                    " and can be removed.")
+            elif slot_carries_own_credential(name):
                 log("WARNING: %s has a credential of its own, so it will refuse"
                     " every request routed to it." % name)
                 log("  On a filesystem socket that credential protects nothing:"
