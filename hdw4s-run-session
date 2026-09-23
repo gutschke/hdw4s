@@ -703,60 +703,72 @@ lockdown=(
   --ui-title=Desktop
 )
 
-# An ephemeral session is served a GATED client: one that does not connect, and
+# EVERY session is served a GATED client: one that does not connect, and
 # therefore does not take the desktop away from whoever already has it, until a
 # person presses a button. Both transports evict on connect, so withholding the
 # connection is the whole mechanism -- there is nothing to undo afterwards and
 # nothing to ask upstream for.
 #
-# Only this session type. A named desktop is meant to follow its user between
-# machines and take itself over on arrival, which is the opposite requirement,
-# and HDW4S_SESSION_TYPE is fail-closed: hdw4s-session forces "desktop" unless
-# --ephemeral was passed as an ARGUMENT, which a configuration file cannot
-# reach. So a normal session's command line is byte-identical to what it was
-# before this block existed.
+# NAMED SESSIONS TOO, since 2026-09-22, and the comment that used to stand here
+# said the opposite: that a named desktop "is meant to follow its user between
+# machines and take itself over on arrival, which is the opposite requirement."
+# That was ruled against. The owner opened one named session in two tabs, watched
+# the second take the desktop and freeze-frame the first with no warning, and
+# ruled: gate wherever automatic action could do damage, and stealing a session
+# is damage. It is kept here as a deleted claim rather than silently replaced,
+# because it was the stated justification for withholding the gate and somebody
+# reading only the old line would restore the behaviour.
+#
+# What the gate costs a named session is ONE CLICK PER FRESH TAB, and that was
+# accepted knowingly. It cannot be made cheaper: the gate's arrival decision is
+# per-tab browser storage, so a reload never asks and a new tab always does.
+# There is no signal that removes the click, because any added precision can only
+# push a case TOWARDS asking -- silence has to gate.
+#
+# Note what is NOT consulted: this gate makes no server request, and reads no
+# incarnation token. A long analysis of whether we could prove "nobody else is
+# attached" turned out not to bear on it at all, because the shipped mechanism
+# never asks that question.
 #
 # If the web root cannot be built, the session does NOT start. Selkies' own
 # behaviour on a missing web root is to log one warning and serve the packaged
 # client, which would come up healthy in every check this product has while
 # silently missing the only thing the gate is for.
-if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
-  webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${instance}"
-  # BUILT ELSEWHERE, ON PURPOSE. This script runs inside the session unit, where
-  # ProtectSystem=strict makes /usr read-only -- so generating the tree here
-  # fails, and generating it somewhere the session CAN write would hand the
-  # occupant its own served client to edit. hdw4s-ephemeral-slots builds it as
-  # root, once per slot, before any session can start; this only verifies it and
-  # points the server at it.
-  # The instance is passed so the check can also assert this start's published identity
-  # (see layer 4 in hdw4s-webroot): present, this generation's, and different from the
-  # last one. Without it a returning tab cannot tell a respawned desktop from the one it
-  # was using, and connects silently to somebody else's.
-  # THE GATE IS NOT RUN HERE, AND IT CANNOT BE. It used to be, and the call was
-  # unsatisfiable by construction -- which went unnoticed because the incarnation
-  # layer had never actually run on any machine until 2026-09-22.
-  #
-  # Layer 4 asserts that hdw4s-incarnation published an identity for THIS start,
-  # by reading /run/hdw4s-incarnation/<instance>. That record is root-owned and
-  # mode 0600 on purpose: the occupant must not be able to forge it. But this
-  # script is the session, and the unit sets User=%i, so everything here runs AS
-  # the occupant -- which cannot read it. Measured, with a control: as the slot
-  # uid the read is EACCES; as root it succeeds. The unit also listed that path in
-  # InaccessiblePaths= at the time, so the namespace hid it as well -- two
-  # independent barriers, both deliberate, both aimed at the same process that
-  # had to pass. That second barrier is gone now: it was redundant with the 0700
-  # mode and is no longer in the unit.
-  #
-  # So the gate moved to "ExecStartPre=!hdw4s-webroot gate %i" in the unit, which
-  # runs as root with the session's own mount namespace intact. It still runs at
-  # this start and after the incarnation unit, so it still proves this generation
-  # rather than a stale one -- which was the property the in-session call was
-  # reaching for and never achieved. Do not move it back here to "test what the
-  # session sees": the session cannot see the evidence, and a check the occupant
-  # could satisfy is not a gate against the occupant. Do not change that "!" to a
-  # "+" either; the unit says at length what that cost.
-  stream+=(--web-root="${webroot}")
-fi
+webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${instance}"
+# BUILT ELSEWHERE, ON PURPOSE. This script runs inside the session unit, where
+# ProtectSystem=strict makes /usr read-only -- so generating the tree here
+# fails, and generating it somewhere the session CAN write would hand the
+# occupant its own served client to edit. hdw4s-ephemeral-slots builds it as
+# root, once per slot, before any session can start; this only verifies it and
+# points the server at it.
+# The instance is passed so the check can also assert this start's published identity
+# (see layer 4 in hdw4s-webroot): present, this generation's, and different from the
+# last one. Without it a returning tab cannot tell a respawned desktop from the one it
+# was using, and connects silently to somebody else's.
+# THE GATE IS NOT RUN HERE, AND IT CANNOT BE. It used to be, and the call was
+# unsatisfiable by construction -- which went unnoticed because the incarnation
+# layer had never actually run on any machine until 2026-09-22.
+#
+# Layer 4 asserts that hdw4s-incarnation published an identity for THIS start,
+# by reading /run/hdw4s-incarnation/<instance>. That record is root-owned and
+# mode 0600 on purpose: the occupant must not be able to forge it. But this
+# script is the session, and the unit sets User=%i, so everything here runs AS
+# the occupant -- which cannot read it. Measured, with a control: as the slot
+# uid the read is EACCES; as root it succeeds. The unit also listed that path in
+# InaccessiblePaths= at the time, so the namespace hid it as well -- two
+# independent barriers, both deliberate, both aimed at the same process that
+# had to pass. That second barrier is gone now: it was redundant with the 0700
+# mode and is no longer in the unit.
+#
+# So the gate moved to "ExecStartPre=!hdw4s-webroot gate %i" in the unit, which
+# runs as root with the session's own mount namespace intact. It still runs at
+# this start and after the incarnation unit, so it still proves this generation
+# rather than a stale one -- which was the property the in-session call was
+# reaching for and never achieved. Do not move it back here to "test what the
+# session sees": the session cannot see the evidence, and a check the occupant
+# could satisfy is not a gate against the occupant. Do not change that "!" to a
+# "+" either; the unit says at length what that cost.
+stream+=(--web-root="${webroot}")
 "${stream[@]}" \
   --addr="${HDW4S_ADDR}" \
   --port="${HDW4S_PORT}" \
@@ -787,59 +799,64 @@ stream_pid="$!"
 #
 # In the background, because the server is not listening yet and the session must not
 # wait on its own front door to come up.
-if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
-  (
-    for _ in $(seq 1 60); do
-      (exec 3<>"/dev/tcp/127.0.0.1/${HDW4S_PORT}") 2>/dev/null && break
-      sleep 1
-    done
-    # The credential goes down a PIPE, never in argv. "-u user:pass" here put it
-    # in /proc/<pid>/cmdline of both this helper and its curl, readable by every
-    # process of this uid -- and in an ephemeral session that uid is the
-    # occupant's, so it was published to exactly the party it exists to keep out.
-    # printf is a shell builtin, so the value never becomes a process argument;
-    # hdw4s-webroot passes its own stdin straight to "curl --config -" without
-    # reading it, so the bytes live in one pipe and one process, not on disk and
-    # not in a file name.
-    #
-    # This closes the argv hole and nothing more. The same secret is still in
-    # this process's environment -- the streaming server is configured through
-    # SELKIES_BASIC_AUTH_PASSWORD and there is no other way to tell it -- and
-    # still in $CREDENTIALS_DIRECTORY/hdw4s-auth, mode 0400 owned by this user.
-    # An occupant who wants it reads it from either. What must not be true is
-    # that the credential outlives the occupant who saw it; see "hdw4s auth".
-    #
-    # curl's config format reads an unquoted value to end of line, which is
-    # exactly right for what "hdw4s auth" mints -- base64 with "=/+" removed,
-    # so [A-Za-z0-9] only -- and wrong for anything carrying a quote, a
-    # backslash or whitespace, which it would re-interpret. Refuse rather than
-    # authenticate with a silently mangled credential: a 401 from a mangled
-    # secret looks identical to an ungated client and would stop the session
-    # for the wrong reason.
-    case "${SELKIES_BASIC_AUTH_USER:-}${SELKIES_BASIC_AUTH_PASSWORD:-}" in
-      *[!A-Za-z0-9_.-]*)
-        # Fail CLOSED. This runs in a background subshell, so "exit" here would
-        # end the subshell and leave the session up with its one safety property
-        # never checked -- the exact shape of failure the rest of this file is
-        # written to avoid. Stop the stream instead, as the ungated branch does.
-        echo 'hdw4s: the basic-auth credential contains characters this check' >&2
-        echo '  cannot pass to curl without quoting ambiguity, so the served' >&2
-        echo '  client cannot be verified; stopping the session rather than' >&2
-        echo '  leaving it up unverified.' >&2
-        kill "${stream_pid}" 2>/dev/null || :
-        exit 1 ;;
-    esac
-    if ! printf 'user = %s:%s\n' \
-           "${SELKIES_BASIC_AUTH_USER:-}" "${SELKIES_BASIC_AUTH_PASSWORD:-}" |
-         "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" serving \
-           "http://127.0.0.1:${HDW4S_PORT}/" --auth-stdin; then
-      echo 'hdw4s: this session is serving an UNGATED client; stopping it rather than' >&2
-      echo '  handing the next arrival a desktop that is not theirs.' >&2
+# EVERY session type, since the gate now applies to all of them. This guard is
+# the half that makes the other half real: withholding the web root without
+# this check ships a feature that is GREEN AND ABSENT. A session pointed at a
+# missing or unreadable web root serves the stock ungated client, logs one
+# warning, notifies ready, and passes every health check in this product while
+# the gate -- the entire point -- is simply not there. Do not narrow one of
+# these two without narrowing the other.
+(
+  for _ in $(seq 1 60); do
+    (exec 3<>"/dev/tcp/127.0.0.1/${HDW4S_PORT}") 2>/dev/null && break
+    sleep 1
+  done
+  # The credential goes down a PIPE, never in argv. "-u user:pass" here put it
+  # in /proc/<pid>/cmdline of both this helper and its curl, readable by every
+  # process of this uid -- and in an ephemeral session that uid is the
+  # occupant's, so it was published to exactly the party it exists to keep out.
+  # printf is a shell builtin, so the value never becomes a process argument;
+  # hdw4s-webroot passes its own stdin straight to "curl --config -" without
+  # reading it, so the bytes live in one pipe and one process, not on disk and
+  # not in a file name.
+  #
+  # This closes the argv hole and nothing more. The same secret is still in
+  # this process's environment -- the streaming server is configured through
+  # SELKIES_BASIC_AUTH_PASSWORD and there is no other way to tell it -- and
+  # still in $CREDENTIALS_DIRECTORY/hdw4s-auth, mode 0400 owned by this user.
+  # An occupant who wants it reads it from either. What must not be true is
+  # that the credential outlives the occupant who saw it; see "hdw4s auth".
+  #
+  # curl's config format reads an unquoted value to end of line, which is
+  # exactly right for what "hdw4s auth" mints -- base64 with "=/+" removed,
+  # so [A-Za-z0-9] only -- and wrong for anything carrying a quote, a
+  # backslash or whitespace, which it would re-interpret. Refuse rather than
+  # authenticate with a silently mangled credential: a 401 from a mangled
+  # secret looks identical to an ungated client and would stop the session
+  # for the wrong reason.
+  case "${SELKIES_BASIC_AUTH_USER:-}${SELKIES_BASIC_AUTH_PASSWORD:-}" in
+    *[!A-Za-z0-9_.-]*)
+      # Fail CLOSED. This runs in a background subshell, so "exit" here would
+      # end the subshell and leave the session up with its one safety property
+      # never checked -- the exact shape of failure the rest of this file is
+      # written to avoid. Stop the stream instead, as the ungated branch does.
+      echo 'hdw4s: the basic-auth credential contains characters this check' >&2
+      echo '  cannot pass to curl without quoting ambiguity, so the served' >&2
+      echo '  client cannot be verified; stopping the session rather than' >&2
+      echo '  leaving it up unverified.' >&2
       kill "${stream_pid}" 2>/dev/null || :
-    fi
-  ) &
-  children+=($!)
-fi
+      exit 1 ;;
+  esac
+  if ! printf 'user = %s:%s\n' \
+         "${SELKIES_BASIC_AUTH_USER:-}" "${SELKIES_BASIC_AUTH_PASSWORD:-}" |
+       "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" serving \
+         "http://127.0.0.1:${HDW4S_PORT}/" --auth-stdin; then
+    echo 'hdw4s: this session is serving an UNGATED client; stopping it rather than' >&2
+    echo '  handing the next arrival a desktop that is not theirs.' >&2
+    kill "${stream_pid}" 2>/dev/null || :
+  fi
+) &
+children+=($!)
 
 # Report ready only once the stream is actually accepting connections, so that
 # "systemctl start" blocks until the session can be reached and a dependent

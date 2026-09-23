@@ -14,10 +14,19 @@ removes the live tree's "hdw4s-incarnation" file until the next session start
 republishes it. A URL costs nothing and lets two arms be open side by side, which is
 what comparing them requires.
 
-Neither knob is a product setting. Both exist because two questions -- whether arrival
-should ask before handing over a desktop, and what a sharing link should say it grants
--- cannot be settled by argument, only by using each answer and comparing. Remove them
-once each is settled: a knob kept past its decision is a decision nobody made.
+The two knobs were built to settle two questions by use rather than by argument --
+whether arrival should ask before handing over a desktop, and what a sharing link says
+it grants -- and this paragraph used to end "remove them once each is settled".
+
+THE FIRST IS SETTLED AND THE ANSWER WAS "KEEP IT". Ruled 2026-09-22: gate wherever
+automatic action could do damage, and stealing a session is damage. That makes the gate
+a permanent per-session-type setting rather than scaffolding -- ask on a fresh tab for
+both session kinds, at a cost of one click, accepted knowingly. So DO NOT delete the
+gate arm as tidying-up: the instruction to do so outlived its question, and following it
+would remove a control the owner asked to keep.
+
+The sharing knob is still open and the original reasoning still applies to it: a knob
+kept past its decision is a decision nobody made.
 
 Upstream's document is taken as-is; only the module <script> is removed -- that removal
 IS the gate, because both transports evict on connect and a client that never loads

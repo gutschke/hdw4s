@@ -148,13 +148,21 @@ def main():
         b.start()
         b.open(HOST + "/?socket_worker=false", timeout=120)
         b.pump(8)
+        # Tab 1 must be DRIVEN THROUGH THE GATE, not waited on. Once the gate
+        # exists, a tab that is never clicked correctly never streams -- so a
+        # harness that only waits reports "never streamed" and looks like a
+        # product failure when it is watching the product work.
+        gate1 = b.eval("(()=>{var e=document.getElementById('hdw4s-gate');"
+                       "return e ? !e.hidden : 'no gate element'})()")
+        print("  tab 1 gate on arrival: %r" % gate1)
+        b.eval("(document.getElementById('hdw4s-go')||{click:function(){}}).click()")
         t0 = time.time()
         while time.time() - t0 < 90:
             if (b.eval("window.videoChunksReceived || 0") or 0) > 0:
                 break
             time.sleep(2)
         if not (b.eval("window.videoChunksReceived || 0") or 0):
-            print("  PRECONDITION FAILED: tab 1 never streamed")
+            print("  PRECONDITION FAILED: tab 1 never streamed even after the gate")
             return 2
         iport = internal_port()
         print("  instance %s, internal port %d" % (INSTANCE, iport))

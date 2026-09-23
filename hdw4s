@@ -1813,6 +1813,24 @@ ${upstream}
         proxy_send_timeout  86400s;
         proxy_buffering     off;
 
+        # REVALIDATE THE SERVED CLIENT. Do not drop these two lines.
+        #
+        # The streaming server sends an ETag and a Last-Modified and no
+        # Cache-Control at all, so a browser applies heuristic freshness and
+        # reuses index.html without asking. That page carries the takeover gate,
+        # so a cached copy SILENTLY SERVES A CLIENT WITH NO GATE -- and it is
+        # invisible from the server, which is busy serving the correct page to
+        # everyone whose cache happens to be cold. Found the day the gate
+        # shipped, by a person whose own browser kept the pre-gate client while
+        # every test against a fresh profile passed.
+        #
+        # "no-cache" rather than "no-store": the browser may keep its copy, it
+        # just may not use it without revalidating. With the ETag above, an
+        # unchanged asset costs a 304 and no bytes, so this buys correctness
+        # without giving up the cache.
+        proxy_hide_header   Cache-Control;
+        add_header          Cache-Control "no-cache" always;
+
         # If you add a Content-Security-Policy here -- and a hardened proxy
         # usually does -- script-src must allow blob:. The streaming server
         # plays audio through an AudioWorklet it loads from a blob URL, and a

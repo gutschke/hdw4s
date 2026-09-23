@@ -98,6 +98,21 @@ EnvironmentFile=-/etc/hdw4s/%i.conf
 # populates the host's, so the socket directory has to be created in
 # here. ExecStartPre runs inside the namespace, so this is the private
 # one and no other session can see it.
+# The gated web client this session is served from, built before the session can
+# start. "+" is load-bearing and is NOT a convenience: the build writes under
+# /usr, which ProtectSystem=strict makes read-only for everything else in this
+# unit, and it must run as root because a tree the occupant can write is a tree
+# the occupant can un-gate.
+#
+# Rebuilt at every start rather than once when the account was enabled, because
+# the tree embeds the packaged client: after an upgrade a session provisioned
+# once would serve the previous release's bytes, gated but stale, with nothing
+# saying so. It costs about a fifth of a second.
+#
+# If this fails the session does not start, which is deliberate. Selkies' own
+# answer to a missing web root is one warning and the stock ungated client --
+# healthy in every check this product has, with the gate silently absent.
+ExecStartPre=+/usr/lib/hdw4s/hdw4s-webroot provision %i
 ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
 ExecStart=/usr/lib/hdw4s/hdw4s-session %i
 KillMode=control-group
