@@ -1261,8 +1261,18 @@ echo '== a credential is refused where it can exclude nobody =='
   printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/eph0.conf"
   out="$( ( cmd_auth eph0 ) 2>&1 )"; rc=$?
   is 'a session on a filesystem socket may not' "${rc}" '1'
-  has 'and is told why the secret would keep nobody out' "${out}" 'excludes nobody'
-  has 'and what to do if it is really wanted' "${out}" 'hdw4s transport eph0 tcp'
+  has 'and is told why the secret would keep nobody out' \
+      "${out}" 'nothing can present a credential to it'
+  # The assertion this replaced required the message to contain
+  # "hdw4s transport eph0 tcp" -- a command this same suite asserts exits 1 for
+  # an ephemeral slot, about 470 lines above. Two green groups jointly
+  # certifying a dead end: the tool printed an instruction it refuses to obey,
+  # and the tests held it in place. The refusal must offer no remedy it will
+  # then refuse.
+  hasnt 'and offers no remedy the tool itself refuses' \
+        "${out}" 'hdw4s transport eph0 tcp'
+  has 'and says a named desktop is a different case' \
+      "${out}" 'A named desktop is a different thing'
   # A refusal, not a diagnostic printed on the way through. This is the whole
   # defect: the message would have been fine, the written line is what 401s.
   hasnt 'and nothing was written to its file' \
@@ -1423,7 +1433,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=239   # update when tests are added; a wrong number is the point
+EXPECTED=240   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

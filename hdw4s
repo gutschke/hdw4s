@@ -976,12 +976,13 @@ cmd_enable() {
     # named for whoever decides to make it.
     if auth_is_meaningless "${inst}"; then
       echo
-      echo "Session ${inst} has a credential and is reachable over a filesystem"
-      echo '  socket, where a credential excludes nobody -- the only caller that can'
-      echo '  open the socket is the reverse proxy that would present the secret.'
-      echo '  It is not removed here, because a proxy configured with it would start'
-      echo '  getting 401s from a session that had just been re-enabled.'
-      echo "  Remove it when the proxy is ready: hdw4s noauth ${inst}"
+      echo "Session ${inst} carries a credential, and nothing routes one to it: the"
+      echo '  front door in front of the ephemeral slots holds only its own and has no'
+      echo '  way to be given this one. Every visitor sent here gets a 401 while the'
+      echo '  other slots answer.'
+      echo '  It is kept rather than removed, because re-enabling a session must not'
+      echo '  change what it requires underneath whoever is using it. Nothing is'
+      echo "  waiting on a proxy; remove it when you are ready to: hdw4s noauth ${inst}"
     fi
   elif auth_is_meaningless "${inst}"; then
     # The producer this guard exists to close. Both branches below generate a
@@ -989,11 +990,11 @@ cmd_enable() {
     # above -- so a fresh slot came out of "enable" with HDW4S_AUTH=basic on a
     # socket where it means nothing, every time, with nothing said.
     echo
-    echo 'No credential is generated for this session: it is reachable over a'
-    echo '  filesystem socket, which is an access decision already. The socket is'
-    echo '  group-owned by the reverse proxy and open to nothing else, so a secret'
-    echo '  would keep nobody out and would answer that proxy with 401 until it'
-    echo '  was configured with it.'
+    echo 'No credential is generated for this session, and none can be added: it is'
+    echo '  reachable over a filesystem socket, which is an access decision already.'
+    echo '  The socket is group-owned by the reverse proxy and open to nothing'
+    echo '  else, so a secret would keep nobody out and would answer that proxy'
+    echo '  with 401 until it was configured with it.'
   elif [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ]; then
     echo
     echo 'Generating the credential this session is configured to require...'
@@ -1533,13 +1534,26 @@ cmd_transport() {
       # not be blocked -- but it leaves behind a credential that was meaningful
       # on a port and is not here, and nothing else will ever mention it again.
       # Said after the success line rather than instead of it: the move happened.
+      #
+      # Split by session type, because one message was being given to two
+      # situations that want opposite advice. A named session on a socket with a
+      # credential is a SUPPORTED configuration -- the owner has ruled that the
+      # admin may choose it -- so telling its operator to remove the credential
+      # was advice against something deliberate. Only an ephemeral slot has
+      # nobody who can present one.
       if has_auth "${inst}"; then
         echo
-        echo "Session ${inst} still has a credential of its own, which now excludes"
-        echo '  nobody: the only caller that can open the socket is the reverse proxy'
-        echo '  that would present it. Until that proxy is configured with the secret'
-        echo '  this session answers 401 while its neighbours answer.'
-        echo "  Remove it: hdw4s noauth ${inst}"
+        if auth_is_meaningless "${inst}"; then
+          echo "Session ${inst} still has a credential, and nothing can present it:"
+          echo '  the front door in front of the ephemeral slots holds only its own.'
+          echo '  Every visitor routed here gets a 401 while the other slots answer.'
+          echo "  Remove it: hdw4s noauth ${inst}"
+        else
+          echo "Session ${inst} keeps its credential, which is allowed on this"
+          echo '  transport and is not removed. Whatever connects to the socket must'
+          echo '  still present it, so configure the proxy for this path as well --'
+          echo '  otherwise this session answers 401 while its neighbours answer.'
+        fi
       fi
       ;;
     *)
@@ -1742,18 +1756,19 @@ cmd_auth() {
   # pool and failed against its neighbour. That is the expensive kind of wrong:
   # the failure is real, reproducible, and attributed to the thing being tested.
   if auth_is_meaningless "${inst}"; then
-    die "hdw4s: ${inst} is reachable over a filesystem socket, where a credential" \
-        '  excludes nobody. The socket is mode 0660 and group-owned by the reverse' \
-        '  proxy, so the only caller that can open it is the one that would be' \
-        '  given the secret; there is no second caller for it to keep out.' \
+    die "hdw4s: ${inst} is an ephemeral slot, and nothing can present a credential to it." \
+        '  A visitor arrives at one well-known hostname and a front door on this' \
+        '  machine picks the slot. That front door holds one credential -- its own,' \
+        '  for the leg in front of it -- and there is no per-slot credential and no' \
+        '  way to give it one. This is not a stricter setting with a missing step;' \
+        '  there is no second party, and no configuration finishes it.' \
         '' \
-        '  What it would do instead is answer that proxy with 401 until the proxy' \
-        '  is configured with the secret -- so one session refuses connections its' \
-        '  neighbours accept, for a reason the transport column does not explain.' \
+        '  What it would do is answer 401 to every visitor routed here while the' \
+        '  other slots answer, which reads as a routing fault and is not one.' \
         '' \
-        '  If this is really wanted, put the session on the network first, where' \
-        '  a credential has something to do:' \
-        "    hdw4s transport ${inst} tcp"
+        '  A named desktop is a different thing: its reverse proxy is configured by' \
+        "  hand and can be told a secret, so 'hdw4s auth' is available for one on" \
+        '  either transport.'
   fi
   require_slot "${inst}"
   pw="$(make_credential "${inst}" 'auth' 70)"
