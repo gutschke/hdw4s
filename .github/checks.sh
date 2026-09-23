@@ -80,7 +80,189 @@ begin() { mark="${fail}"; }
 okif()  { if [ "${fail}" = "${mark}" ]; then note "$1" 'ok'; fi; }
 # A check that cannot run has to say so. Silently skipping one means CI prints
 # "All checks passed" for a check it never performed.
-skip()  { note "$1" "skipped: $2"; }
+#
+# Saying so on its own line is not enough, because the line a person reads is
+# the last one. private/build.sh runs this against an unpacked copy where four
+# checks skip at once, and a run with four skips ended in exactly the same
+# "All checks passed." as a run with none. That is a DIFFERENT defect from a
+# truncated run -- here every section ran and the report is complete, it is the
+# SUMMARY that overstates what was covered -- but it corrupts the same line, so
+# it is repaired in the same place: the skips are counted and named at the
+# bottom. A skip is deliberately NOT a failure; ronn missing on a workstation
+# is the normal case, and failing on it is how this check would get turned off.
+skips=0
+SKIPPED=()
+skip()  { note "$1" "skipped: $2"; skips=$((skips + 1)); SKIPPED+=("$1: $2"); }
+
+# ---------------------------------------------------------------------------
+# Did this run reach the end?
+#
+# Nothing asserted this, and it has already gone wrong once for real: the
+# python file list below carried git's exit 128 out through "set -e" and the
+# run ABORTED there, having printed an unbroken column of ok, never reaching
+# the behaviour tests, the packaging checks or the build, and never printing
+# "Some checks failed". The repair at the time was local to that one command.
+# The CLASS was not repaired: any command in any later section can still do
+# it, and a truncated run is indistinguishable from a clean one to a reader,
+# because the failure counter of a run that died before finding anything is
+# zero.
+#
+# Two guards, because they catch different things and neither implies the
+# other:
+#
+#   * `finished` plus an EXIT trap answers "did control reach the summary?".
+#     It covers every cause at once -- "set -e", an unbound variable, an
+#     unexpected `exit` deep in a section, a signal -- without anybody having
+#     to anticipate which command will do it. This is the primary guard.
+#
+#   * SECTIONS is a roster, and it catches the quieter case the trap cannot
+#     see: a section that never ran although the script finished, because it
+#     was wrapped in a condition that turned out false. The trap is happy with
+#     that run; the count is not.
+#
+# The roster names only the sections that are UNCONDITIONAL. The build and
+# lintian sections run only under --package and only when lintian is present,
+# so listing them would make an ordinary run report a hole that is not one --
+# and a check that cries wolf ends unread. A truncation inside those blocks is
+# still caught, by the trap.
+SECTIONS=(vocabulary 'the pool has one name' shell 'systemd units'
+          'unit manifests' 'uid invariant' documentation
+          'behaviour tests' packaging)
+sections_seen=0
+section_now='(before the first section)'
+finished=''
+section() { section_now="$1"; sections_seen=$((sections_seen + 1)); echo "== $1 =="; }
+
+# SC2317 calls this unreachable, which is what a trap handler looks like to a
+# static reader: nothing in the file calls it by name. The `trap` below is the
+# call. Disabled here rather than globally, so the same note elsewhere still
+# means what it says -- and it is not cosmetic: the shell section rejects ANY
+# output from the linter, so an un-silenced note would fail every run.
+#
+# Two traps, both met while writing this. The directive has to be the LAST
+# comment line before the function, so the prose goes above it. And no comment
+# line here may BEGIN with the linter's name, because it then gets parsed as a
+# directive and fails the file with SC1073 -- the self-match trap this file
+# already warns about for process searches, in a new place.
+# shellcheck disable=SC2317
+on_exit() {
+  local status=$?
+  # An `if`, not `&&`: under "set -e" a failing `&&` list exits the trap, and
+  # a guard that returns early on its own failure path reports nothing. Seen
+  # while writing this one.
+  if [ -z "${finished}" ]; then
+    echo >&2
+    echo "checks.sh: RUN TRUNCATED -- died in section '${section_now}', ${sections_seen} of ${#SECTIONS[@]} sections reached, exit status ${status}." >&2
+    echo 'checks.sh: everything after that section did NOT run. This is NOT a pass.' >&2
+    # A run that died is a failure even where the dying command exited 0,
+    # which is what a bare `exit` in the middle of a section does.
+    [ "${status}" -ne 0 ] || status=1
+  fi
+  exit "${status}"
+}
+trap on_exit EXIT
+# Bash does not run the EXIT trap when the default SIGINT or SIGTERM handler
+# kills it, so a Ctrl-C would still leave a column of ok and no verdict. These
+# turn the signal into an ordinary exit, which the trap then sees.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# ---------------------------------------------------------------------------
+# The repository has to BE this tree, not merely contain it. The packaging
+# helper copies the tree into a build directory INSIDE this repository, so
+# "git rev-parse --git-dir" succeeds there and every git question below is
+# then answered about the PARENT repository instead of the copy under test.
+# Do not simplify this back to --git-dir: the copy's location inside the repo
+# is the whole reason, and it is invisible from this file.
+#
+# Measured: a copy run from inside the repo printed "no privileged file, and
+# no estate detail, in the index  ok" -- an affirmative clean bill of health
+# about a different tree's index. A skip is honest; an ok about the wrong
+# tree is worse than having no check at all.
+#
+# Defined here rather than beside its first reader because the file list below
+# needs it too, and that list is built before the first section runs.
+same_repo() {
+  local top
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "${top}" ] && [ "${top}" = "$(pwd -P)" ]
+}
+
+# The directories a filesystem walk of this tree must not descend into, for a
+# tree that is not a repository of its own. Shared by the scans below and by
+# the python list much further down, which discovered every entry the hard way:
+# .git, private, tmp and node_modules are not ours to scan; debian/.debhelper
+# and debian/<package> are staging trees holding COPIES of installed files, and
+# reporting on a stale duplicate is the same defect as not reporting at all.
+walk_prune_args() {
+  local pkg
+  printf '%s\0' -name .git -o -name private -o -name tmp -o -name node_modules \
+                -o -path ./debian/.debhelper
+  while read -r pkg; do
+    [ -n "${pkg}" ] || continue
+    printf '%s\0' -o -path "./debian/${pkg}"
+  done < <(awk '/^Package:/ {print $2}' debian/control 2>/dev/null)
+}
+
+# ---------------------------------------------------------------------------
+# The files the content scans below cover, DERIVED rather than excluded.
+#
+# This used to be "grep -r ." minus four hand-written --exclude-dir names, and
+# the list went stale the way a hand-written list always does. Measured: at a
+# clean HEAD, with nothing wrong with the tree at all, the local-detail scan
+# failed the whole suite on a file inside .claude/worktrees/ -- a dozen stale
+# agent checkouts of THIS repository, each of them carrying a full copy of
+# .github/live. The named file could not ship; it is not in the package, it is
+# not in the index, it is not even in this branch.
+#
+# The damage is not the false positive. It is that containment is one of the
+# few things here that must not break, and the next person to meet it red for
+# a silly reason learns that the containment check fails for silly reasons.
+# After that it protects nothing. And it is invisible to CI, which checks out
+# a clean tree and never has a worktree inside it -- so "green in CI" was not
+# evidence against it.
+#
+# Adding .claude to the exclusion list would have fixed this instance and left
+# the class: the next ignored directory to appear does it again. So the list
+# comes from git, which already knows what is part of this project, and the
+# answer is maintained by the same .gitignore everything else already
+# maintains. Note .claude is ignored via .git/info/exclude rather than
+# .gitignore, which is exactly why CI never saw it; --exclude-standard honours
+# both.
+#
+# --others as well as --cached, deliberately. Restricting this to the index
+# would narrow the check: a leak in a file that has been written but not yet
+# staged is precisely the one worth catching before it is committed. --others
+# keeps those, and --exclude-standard drops only what git is already ignoring.
+SCAN_FILES=()
+scan_src=''
+if same_repo; then
+  scan_src='git (tracked, plus untracked files git does not ignore)'
+  while IFS= read -r -d '' f; do
+    [ -f "${f}" ] && SCAN_FILES+=("${f}")
+  done < <(git ls-files -z --cached --others --exclude-standard 2>/dev/null)
+elif [ -r debian/control ]; then
+  # The build copy has no repository of its own. Walking it is not optional:
+  # this is the only tree that ships anything, so a scan that skipped here
+  # would leave the release path uncovered.
+  scan_src='a filesystem walk'
+  mapfile -d '' scan_prune < <(walk_prune_args)
+  while IFS= read -r -d '' f; do
+    SCAN_FILES+=("${f#./}")
+  done < <(find . \( "${scan_prune[@]}" \) -prune -o -type f -print0)
+fi
+# One place that decides whether the scans can run at all, so that neither of
+# them can quietly scan an empty list and print ok. This is the shape the
+# python check already had to grow for the same reason.
+scan_ok() {
+  if [ -z "${scan_src}" ] || [ "${#SCAN_FILES[@]}" -eq 0 ]; then
+    skip "$1" 'the file list could not be derived (neither a git repository of its own nor a Debian source tree)'
+    return 1
+  fi
+}
+# grep over the derived list. xargs rather than one grep, because the list is
+# longer than a single argv entry is allowed to be on a big tree.
+scan_grep() { xargs -0 -r grep -Il "$@" < <(printf '%s\0' "${SCAN_FILES[@]}") || true; }
 
 # The browser-mode word for a private window must not appear in anything that
 # ships. It names privacy from other people using the same machine, which is not
@@ -94,16 +276,16 @@ skip()  { note "$1" "skipped: $2"; }
 # The pattern below is bracketed and no comment here spells the word, so this
 # file does not match itself -- the same reason a process search must not
 # contain its own pattern.
-echo '== vocabulary =='
+section 'vocabulary'
 begin
-banned="$(grep -rIl -i 'inc[o]gnito' . \
-            --exclude-dir=.git --exclude-dir=private --exclude-dir=tmp \
-            --exclude-dir=node_modules 2>/dev/null || true)"
-if [ -n "${banned}" ]; then
-  printf '%s\n' "${banned}"
-  bad 'vocabulary' 'the browser-mode word appears in files above; use "ephemeral"'
+if scan_ok 'vocabulary'; then
+  banned="$(scan_grep -i 'inc[o]gnito' 2>/dev/null)"
+  if [ -n "${banned}" ]; then
+    printf '%s\n' "${banned}"
+    bad 'vocabulary' 'the browser-mode word appears in files above; use "ephemeral"'
+  fi
+  okif "no browser-mode word in ${#SCAN_FILES[@]} file(s) (from ${scan_src})"
 fi
-okif 'no browser-mode word in shipped files'
 
 # The name of the component that fronts the pool must not appear in anything a
 # user or an administrator READS AS PROSE. The owner ruled it directly: "they
@@ -140,7 +322,7 @@ okif 'no browser-mode word in shipped files'
 #
 # Every pattern below is bracketed so this file does not match itself, the same
 # trap as a process search containing its own pattern.
-echo '== the pool has one name =='
+section 'the pool has one name'
 begin
 
 # Lines of a shell script that can reach a user: everything inside a heredoc,
@@ -222,16 +404,22 @@ okif 'user-facing text says "pool", not the component name'
 # and the licence, and banning it would make this check cry wolf until somebody
 # turned it off.
 begin
-local_detail="$(grep -rIln -E \
-    'ariadn[e]|atticu[s]|ct1[0-9][0-9]|10\.10\.[0-9]|172\.24\.[0-9]' . \
-    --exclude-dir=.git --exclude-dir=private --exclude-dir=tmp \
-    --exclude-dir=node_modules 2>/dev/null || true)"
-local_detail="$(printf '%s\n' "${local_detail}" | grep -v '^\./\.github/checks\.sh$' || true)"
-if [ -n "${local_detail}" ]; then
-  printf '%s\n' "${local_detail}"
-  bad 'local detail' 'a machine or account from this estate appears in the files above'
+if scan_ok 'local detail'; then
+  local_detail="$(scan_grep -E \
+      'ariadn[e]|atticu[s]|ct1[0-9][0-9]|10\.10\.[0-9]|172\.24\.[0-9]' 2>/dev/null)"
+  # This file names the estate in the comments explaining why it must not be
+  # named, so it is exempted from its own scan. The path has NO leading "./"
+  # any more: the list comes from git and from a walk that strips it, where it
+  # used to come from "grep -r .". A self-exclusion that no longer matches
+  # makes the check fail on itself on every run -- which is the cry-wolf
+  # failure this change exists to remove, reintroduced one line lower down.
+  local_detail="$(printf '%s\n' "${local_detail}" | grep -v '^\.github/checks\.sh$' || true)"
+  if [ -n "${local_detail}" ]; then
+    printf '%s\n' "${local_detail}"
+    bad 'local detail' 'a machine or account from this estate appears in the files above'
+  fi
+  okif "no local machine or account names in ${#SCAN_FILES[@]} file(s) (from ${scan_src})"
 fi
-okif 'no local machine or account names in shipped files'
 
 # The privileged instruction file is the one thing allowed to carry the detail
 # the scan above forbids. That exemption is only safe while the file is provably
@@ -249,22 +437,10 @@ okif 'no local machine or account names in shipped files'
 # two account names sat in that copy while this block printed ok, one line under
 # a genuine failure from the scan above. A check that cannot run has to say so,
 # which is what skip() is for.
-# The repository has to BE this tree, not merely contain it. The packaging
-# helper copies the tree into a build directory INSIDE this repository, so
-# "git rev-parse --git-dir" succeeds there and every git question below is
-# then answered about the PARENT repository instead of the copy under test.
-# Do not simplify this back to --git-dir: the copy's location inside the repo
-# is the whole reason, and it is invisible from this file.
-#
-# Measured: a copy run from inside the repo printed "no privileged file, and
-# no estate detail, in the index  ok" -- an affirmative clean bill of health
-# about a different tree's index. A skip is honest; an ok about the wrong
-# tree is worse than having no check at all.
-same_repo() {
-  local top
-  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  [ -n "${top}" ] && [ "${top}" = "$(pwd -P)" ]
-}
+# same_repo() answers "is this tree a repository of its own?", and is defined at
+# the top of this file beside the scan file list, which needs the same answer
+# before the first section runs. Its reasoning -- including why it must not be
+# simplified back to --git-dir -- is written out there.
 
 begin
 if ! same_repo; then
@@ -329,7 +505,7 @@ else
   fi
 fi
 
-echo '== shell =='
+section 'shell'
 begin
 for f in "${SCRIPTS[@]}"; do
   bash -n "$f" 2>/dev/null || bad "${f}" 'bash -n rejected it'
@@ -360,7 +536,7 @@ done
 okif 'dispatch targets exist'
 
 echo
-echo '== systemd units =='
+section 'systemd units'
 begin
 for u in "${UNITS[@]}"; do
   # Unit files reference paths that only exist once installed, and reference
@@ -374,7 +550,7 @@ done
 okif 'systemd-analyze verify'
 
 echo
-echo '== unit manifests =='
+section 'unit manifests'
 # Four independent places used to name a subset of the units, by hand, and they
 # drifted. hdw4s-incarnation@.service and hdw4s-refuse@.service were in
 # debian/install and install.sh and in neither debian/rules nor uninstall.sh --
@@ -483,7 +659,7 @@ fi
 okif 'the three enable lists agree'
 
 echo
-echo '== uid invariant =='
+section 'uid invariant'
 # A logical session identity dies with its session; the PHYSICAL uid goes back
 # to a pool and is handed to a stranger. .github/uid-invariant.sh is the two
 # properties that make that harmless, as a check rather than as a paragraph, and
@@ -523,7 +699,7 @@ done
 okif 'uid invariant'
 
 echo
-echo '== documentation =='
+section 'documentation'
 # A converter that silently writes nothing is the failure mode worth guarding:
 # ronn exits 0 after producing an empty file when it dislikes an argument.
 if [ ! -s hdw4s.8 ]; then
@@ -643,12 +819,10 @@ if same_repo; then
   pyfiles="$(git ls-files -z 2>/dev/null | python_from_stdin)"
 elif [ -r debian/control ]; then
   pysrc='a filesystem walk'
-  pyprune=(-name .git -o -name private -o -name tmp -o -name node_modules
-           -o -path ./debian/.debhelper)
-  while read -r pypkg; do
-    [ -n "${pypkg}" ] || continue
-    pyprune+=(-o -path "./debian/${pypkg}")
-  done < <(awk '/^Package:/ {print $2}' debian/control)
+  # The prune list is walk_prune_args() at the top of this file, shared with the
+  # content scans, which need the identical answer for the identical reason. It
+  # is one list because two copies of it is two lists the moment one is edited.
+  mapfile -d '' pyprune < <(walk_prune_args)
   pyfiles="$(find . \( "${pyprune[@]}" \) -prune -o -type f -print0 |
              python_from_stdin | sed 's|^\./||')"
 else
@@ -676,7 +850,7 @@ else
 fi
 
 echo
-echo '== behaviour tests =='
+section 'behaviour tests'
 if "$(dirname "$0")/tests.sh" > /tmp/hdw4s-tests.$$ 2>&1; then
   printf '%-28s %s\n' 'tests.sh' "$(tail -n1 /tmp/hdw4s-tests.$$)"
 else
@@ -686,7 +860,7 @@ fi
 rm -f /tmp/hdw4s-tests.$$
 echo
 
-echo '== packaging =='
+section 'packaging'
 # The tag, the changelog and the built artifact have to agree, or a release
 # ships a version nobody asked for.
 version="$(dpkg-parsechangelog -S Version)"
@@ -929,9 +1103,32 @@ if [ "${1:-}" = '--package' ]; then
 fi
 
 echo
+# The roster, checked. This is not the truncation guard -- control reached
+# here, so the run did finish -- it is the quieter neighbour: a section that
+# never announced itself although the script ran to the end.
+if [ "${sections_seen}" -ne "${#SECTIONS[@]}" ]; then
+  bad 'sections' "${sections_seen} of ${#SECTIONS[@]} sections ran; the roster at the top of this file names $(printf '%s, ' "${SECTIONS[@]}" | sed 's/, $//')"
+fi
+
+# Set before the summary, not after: `finished` means "control reached the
+# verdict", and anything that dies between here and the last line has already
+# produced the verdict a person will read.
+finished=1
+
 if [ "${fail}" -eq 0 ]; then
-  echo 'All checks passed.'
+  # The census, not a bare claim. A run with four skips used to end in exactly
+  # the same words as a run with none, and the four are the checks that did not
+  # happen -- which is the thing a reader needs and cannot get anywhere else.
+  if [ "${skips}" -eq 0 ]; then
+    echo "All checks passed (${sections_seen} sections, nothing skipped)."
+  else
+    echo "All checks passed (${sections_seen} sections), but ${skips} check(s) did NOT run:"
+    printf '  %s\n' "${SKIPPED[@]}"
+  fi
 else
-  echo 'Some checks failed.' >&2
+  if [ "${skips}" -gt 0 ]; then
+    printf '  %s\n' "${SKIPPED[@]}" >&2
+  fi
+  echo "Some checks failed (${fail} failure(s), ${skips} skipped, ${sections_seen} of ${#SECTIONS[@]} sections)." >&2
 fi
 exit "${fail}"
