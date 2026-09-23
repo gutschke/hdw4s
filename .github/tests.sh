@@ -1246,7 +1246,7 @@ echo '== a credential is refused where it can exclude nobody =='
   require_slot() { :; }
   # shellcheck disable=SC2317
   make_credential() { echo 'stub-secret'; }
-  printf '%s\n' '0 eph0 ephemeral' '1 alice' > "${SLOTS}"
+  printf '%s\n' '0 eph0 ephemeral' '1 alice' '2 bob' > "${SLOTS}"
 
   # The positive control FIRST, because a guard that refuses everything looks
   # exactly like one that refuses the right thing. A session on the network is
@@ -1268,21 +1268,53 @@ echo '== a credential is refused where it can exclude nobody =='
   hasnt 'and nothing was written to its file' \
         "$(cat "${ETCDIR}/eph0.conf")" 'HDW4S_AUTH'
 
-  # The transport is what decides, not the session type -- so a NAMED desktop
-  # that has been moved onto a socket is refused too. Without this the guard
-  # could be satisfied by testing the name, which is the thing the tree has
-  # already learned not to do.
+  # THE ARM THAT SEPARATES THE TWO REASONS. Above, eph0 is BOTH ephemeral and on
+  # a filesystem socket, so its refusal cannot say which fact caused it -- and
+  # the code used to key on the transport, which made a NAMED session on a
+  # socket refuse too.
+  #
+  # The owner ruled that wrong: "if the admin configures named sessions to run
+  # over a unix domain socket, because they installed the reverse proxy in the
+  # same container, then that's a defensible choice and we should make it
+  # possible." A credential there is neither required nor encouraged, but it is
+  # allowed, and refusing it made a supported configuration fail safely instead
+  # of working.
+  #
+  # So the refusal belongs to the session TYPE, not the transport: an ephemeral
+  # slot is refused because the demultiplexer holds no credential and cannot
+  # present one, so a slot carrying one answers 401 alone while its neighbours
+  # work. A named session has a reverse proxy that can be told the secret.
+  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/bob.conf"
+  out="$( ( cmd_auth bob ) 2>&1 )"; rc=$?
+  is 'a NAMED session on a filesystem socket may have one' "${rc}" '0'
+  has 'and the setting is written for it too' \
+      "$(cat "${ETCDIR}/bob.conf")" 'HDW4S_AUTH=basic'
+
+  # BOTH ARMS BELOW ASSERTED THE OPPOSITE and were left to fail before being
+  # rewritten, because the behaviour they encoded is the one the owner ruled
+  # against. They said the TRANSPORT decides, so a named desktop moved onto a
+  # socket was refused and a site-wide transport default refused every session.
+  #
+  # The type decides now. Keeping the arms rather than deleting them, inverted,
+  # because the risk they were written against is real and has not gone away:
+  # the guard must not be satisfiable by testing a NAME. It is satisfied by
+  # asking the instance table what kind of session this is, which is the same
+  # authority "enable" and the slot minter use.
   printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/alice.conf"
   out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
-  is 'a named desktop on a socket is refused as well' "${rc}" '1'
+  is 'a named desktop moved onto a socket may still have one' "${rc}" '0'
 
-  # And the site default reaches the same answer, since setting_of falls back to
-  # it: a machine that puts every session on a socket must not be able to arm
-  # this per session by leaving the instance file empty.
+  # A site-wide transport no longer drags every session into the refusal either.
+  # The ephemeral arm above is the control: it must STILL refuse with this same
+  # site default in place, or this arm is passing because the guard stopped
+  # working rather than because it got narrower.
   : > "${ETCDIR}/alice.conf"
   printf 'HDW4S_TRANSPORT=unix\n' > "${CONF}"
   out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
-  is 'the site default decides it too' "${rc}" '1'
+  is 'a site-wide socket default does not refuse a named session' "${rc}" '0'
+  rm -f "${ETCDIR}/eph0.conf"
+  out="$( ( cmd_auth eph0 ) 2>&1 )"; rc=$?
+  is 'CONTROL: the ephemeral slot still refuses under that same default' "${rc}" '1'
 )
 
 echo '== a running session that publishes no identity is a failure, not a quiet pass =='
@@ -1391,7 +1423,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=236   # update when tests are added; a wrong number is the point
+EXPECTED=239   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

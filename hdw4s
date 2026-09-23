@@ -1706,8 +1706,27 @@ cmd_reap() {
 # readable by nobody else, so the only caller that can open it is the one that
 # would be handed the secret. Adding a credential there excludes nothing and
 # costs a 401.
+# A credential on this session would keep nobody out AND would break it.
+#
+# Keyed on the session TYPE, not the transport. It used to ask whether the
+# session was on a filesystem socket, which refused a NAMED session on one too --
+# and the owner ruled that wrong: "if the admin configures named sessions to run
+# over a unix domain socket, because they installed the reverse proxy in the same
+# container, then that's a defensible choice and we should make it possible."
+# Refusing it made a supported configuration fail safely rather than work.
+#
+# The real reason is narrower and applies to ephemeral slots alone: the
+# demultiplexer in front of them holds NO credential and cannot present one --
+# measured, it loads exactly one, its own front door's, and the per-slot drop-in
+# a comment used to describe exists nowhere. So a slot carrying a credential
+# answers 401 to everything routed to it, alone, while its neighbours work, which
+# reads as a routing fault rather than as configuration.
+#
+# A named session has a reverse proxy that CAN be told the secret. That the owner
+# neither requires nor encourages one there is a separate matter, and it is his
+# to decide per deployment rather than ours to enforce.
 auth_is_meaningless() {
-  [ "$(setting_of "$1" HDW4S_TRANSPORT tcp)" = 'unix' ]
+  [ "$(type_of "$1")" = 'ephemeral' ]
 }
 
 cmd_auth() {
