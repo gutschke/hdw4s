@@ -280,15 +280,44 @@ belongs to the copy of the streaming server, of which there is one.
     How long a session may go with nobody connected before `reap` stops it.
     Defaults to 7. Measured by connections rather than by typing, so work left
     running is not mistaken for an idle desktop. Connections are looked for
-    every few minutes rather than once a day, because a desktop used only
+    every five minutes rather than once a day, because a desktop used only
     during working hours has nobody connected to it at any moment a nightly
-    check would happen to look. Set it to 0 to never reap.
+    check would happen to look.
 
-    The same clock governs an ephemeral slot, where stopping is not
-    reversible: the home and the profile are held in memory and go with the
-    session. Reaping is also the only thing that ever frees such a slot, so it
-    is not exempt; to give one slot a longer window without moving every
-    session, set the value in `/etc/hdw4s/`<slot>`.conf`.
+    A bare number means days, and a unit letter overrides that: `s` seconds,
+    `m` minutes, `h` hours, `d` days, `w` weeks, `M` months, `y` years, as
+    systemd spells them. Case matters, because `m` is minutes and `M` is
+    months. Fractions are allowed, so `0.5h` is thirty minutes. One unit at a
+    time: write `90m` rather than `1h30m`.
+
+    A value this cannot read is an error, and nothing falls back to a default.
+    A session whose setting cannot be read is left running and `reap` says so
+    every time it looks, rather than being stopped on a number nobody wrote.
+
+    The shortest window is 120 seconds. An ephemeral session takes up to 91
+    seconds to shut down, because several of the desktop's helpers have to be
+    killed rather than asked, so a window shorter than that cannot free a slot
+    inside itself. Connections are sampled every five minutes in any case, so a
+    window near the floor is noticed at the next sample rather than on time.
+
+    Set it to 0 to never reap. That is a choice for a named session, where
+    stopping one is a nap: its files and settings stay and the next connection
+    starts it again.
+
+    **It is refused for an ephemeral slot.** The same clock governs one, but
+    stopping it is not reversible — the home and the profile are held in memory
+    and go with the session — and reaping is the only thing that ever frees the
+    slot, because a visitor who closes the tab tells nothing. With no window,
+    unattended desktops accumulate until the pool is full and every visitor
+    after that is refused, from one configuration line and with nothing
+    reporting why. To let one slot sit longer without moving every session, set
+    a longer window in `/etc/hdw4s/`<slot>`.conf`:
+
+        hdw4s set <slot> HDW4S_IDLE_DAYS=30d
+
+    Setting 0 without an instance name is refused too, but only on a machine
+    that has ephemeral slots, since that value reaches them as well. Set 0 on
+    the named sessions that should never be stopped instead.
 
   * `HDW4S_MEDIA_PORTS`:
     Either `proxied`, the default, or `direct`. The streaming server scatters

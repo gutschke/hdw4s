@@ -1035,6 +1035,193 @@ echo '== what the reaper tells someone whose session it just stopped =='
   hasnt 'and is never told its home is gone'   "${out}" 'gone'
 )
 
+echo '== the idle window is a duration, and nothing falls back to a week =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # HDW4S_IDLE_DAYS was typed as a plain number, so "24h" was refused before the
+  # parser ever saw it, and anything the reaper could not read became seven days
+  # through
+  #
+  #     case "${days}" in ''|*[!0-9]*) days=7;; esac
+  #
+  # with no message. The two are one change: teaching the parser units while
+  # leaving that line in place is what would have let the m/M ambiguity bite for
+  # the first time, silently, in the direction of a longer window.
+  #
+  # Asserted through idle_seconds rather than by reading the config back,
+  # because what was wrong was the NUMBER OF SECONDS the reaper compared
+  # against, and a file that records "30m" faithfully says nothing about that.
+  secs() { idle_seconds "$1" >/dev/null 2>&1 && printf '%s' "${IDLE_SECONDS}" || printf 'REFUSED'; }
+
+  is 'a bare number is still days'   "$(secs 7)"     '604800'
+  is 'd is days'                     "$(secs 30d)"   '2592000'
+  is 'h is hours'                    "$(secs 12h)"   '43200'
+  is 'm is MINUTES'                  "$(secs 90m)"   '5400'
+  is 'M is MONTHS, not minutes'      "$(secs 1M)"    '2629800'
+  is 'w is weeks'                    "$(secs 1w)"    '604800'
+  is 'y is years'                    "$(secs 1y)"    '31557600'
+  # The case distinction is the whole reason the owner ruled on the letters. If
+  # these two ever agree again, "30m" means a month and the reaper will not fire
+  # for four weeks on a machine that asked for half an hour.
+  #
+  # 10, not 1: one minute is below the floor and is refused, so "1m" vs "1M"
+  # would compare REFUSED against a month and pass for the wrong reason.
+  is 'm and M are not the same unit' "$(secs 10m)x$(secs 10M)" '600x26298000'
+
+  # Fractions, which is why the representation is seconds. Under the day
+  # arithmetic this replaced, 0.5h truncated to zero and read as "never reap" --
+  # the silent failure that inverted the setting.
+  is 'a fraction is not truncated'   "$(secs 0.5h)"  '1800'
+
+  # The mechanical dependency: this exact value was rejected by the 'number'
+  # type, and the refusal read as the parser failing rather than the validator
+  # refusing a form the parser would have taken.
+  is 'the form that used to be rejected outright' "$(secs 24h)" '86400'
+
+  # Nothing is guessed, and nothing falls back. Each of these used to become a
+  # week without a word.
+  is 'a spelled-out unit is refused'  "$(secs 30sec)" 'REFUSED'
+  is 'the wrong case is refused'      "$(secs 30S)"   'REFUSED'
+  is 'a compound duration is refused' "$(secs 1h30m)" 'REFUSED'
+  is 'a bare word is refused'         "$(secs x)"     'REFUSED'
+  is 'an empty value is refused'      "$(secs '')"    'REFUSED'
+
+  # Zero is a statement and stays one; a NON-ZERO value that computes to less
+  # than a second must not quietly become the same thing.
+  is 'zero disables'                     "$(secs 0)"    '0'
+  is 'zero with a unit disables too'     "$(secs 0s)"   '0'
+  is 'sub-second is refused, not "off"'  "$(secs 0.4s)" 'REFUSED'
+
+  # The floor. An ephemeral session takes up to 91 seconds to shut down, so a
+  # window shorter than its own teardown cannot free a slot inside itself.
+  is 'below the floor is refused'  "$(secs 60s)"  'REFUSED'
+  is 'and just below it too'       "$(secs 119s)" 'REFUSED'
+  is 'the floor itself is allowed' "$(secs 120s)" '120'
+
+  # A refusal that names a spelling the tool then rejects is worse than one that
+  # names none. Every example in the help text is run back through the parser,
+  # so the remedy cannot rot away from the rule.
+  for form in 7 30d 12h 90m 0.5h 0; do
+    case "$(idle_syntax_help)" in
+      *"${form}"*) :;;
+      *) bad "the help text names ${form}"; continue;;
+    esac
+    case "$(secs "${form}")" in
+      REFUSED) bad "the help text offers ${form} and the parser takes it";;
+      *)       ok  "the help text offers ${form} and the parser takes it";;
+    esac
+  done
+
+  # And the reason survives to the caller. The first version of this returned
+  # the seconds on stdout, so every caller written as
+  # window="$(idle_seconds ...)" read the reason back EMPTY -- the assignment
+  # happened in the subshell of a command substitution. The refusal would have
+  # printed a key, a colon and nothing, on the only path that ever prints it.
+  idle_seconds '30sec' >/dev/null 2>&1
+  case "${IDLE_WHY}" in
+    '') bad 'the refusal reason reaches the caller';;
+    *)  ok  'the refusal reason reaches the caller';;
+  esac
+)
+
+echo '== never reaping is a choice for a named session and a leak for a slot =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # 0 means "never reap". For a named session that is defensible: stopping one
+  # is a nap and the next connection starts it again. For an ephemeral slot,
+  # reaping is the ONLY thing that ever frees it -- a visitor who closes the tab
+  # tells nothing -- so 0 means unattended desktops accumulate until the pool is
+  # full and every visitor after that is refused, from one configuration line
+  # with nothing anywhere reporting why.
+  printf '%s\n' '0 dora' '1 eph0 ephemeral' > "${SLOTS}"
+
+  ( cmd_set 'eph0' 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
+    && bad 'a slot may not be told never to reap' \
+    || ok  'a slot may not be told never to reap'
+  out="$( ( cmd_set 'eph0' 'HDW4S_IDLE_DAYS=0' ) 2>&1 )"
+  has 'and the refusal says what would happen' "${out}" '503'
+  # The remedy has to be a command that works, not a sentence that reads well.
+  has 'and names a longer window instead'      "${out}" 'HDW4S_IDLE_DAYS=30d'
+  ( cmd_set 'eph0' 'HDW4S_IDLE_DAYS=30d' ) >/dev/null 2>&1 \
+    && ok  'and that command is accepted' \
+    || bad 'and that command is accepted'
+  # The refusal must leave nothing behind, or the value it refused is in force.
+  hasnt 'and nothing was written' "$(cat "${SB}/etc/eph0.conf" 2>/dev/null)" 'HDW4S_IDLE_DAYS=0'
+
+  # The control, and it is the point of keying this on type rather than banning
+  # the value: a named session may still be told never to stop.
+  ( cmd_set 'dora' 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
+    && ok  'a named session still may' \
+    || bad 'a named session still may'
+
+  # Machine-wide, the value reaches the slots too, so it is refused -- but only
+  # on a machine that HAS slots. A check that fails on a correct state is one
+  # somebody turns off.
+  ( cmd_set 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
+    && bad 'machine-wide is refused where there is a pool' \
+    || ok  'machine-wide is refused where there is a pool'
+  printf '%s\n' '0 dora' > "${SLOTS}"
+  ( cmd_set 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
+    && ok  'and allowed where there is not' \
+    || bad 'and allowed where there is not'
+)
+
+echo '== the reaper works in seconds, and refuses to guess =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  unset JOURNAL_STREAM
+  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
+  printf '%s\n' '0 dora' '1 eph0 ephemeral' > "${SLOTS}"
+  mkdir -p "${RUNDIR}/hdw4s/dora" "${RUNDIR}/hdw4s/eph0" "${REAPDIR}"
+  ss() { :; }
+  STOPPED="${SB}/stopped"; : > "${STOPPED}"
+  systemctl() {
+    case "$1 ${3:-}" in
+      'is-active ') echo 'active';;
+      'show -p')    case "${4:-}" in MainPID) echo 4242;; *) echo '';; esac;;
+      'stop '*)     printf '%s\n' "$2" >> "${STOPPED}";;
+    esac
+  }
+
+  # Idle for an hour. Under the day arithmetic this replaced, the age was
+  # (now - last) / 86400 = 0 and a sub-day window could never fire at all, so a
+  # setting the tool accepted did nothing whatever.
+  back="$(( $(date +%s) - 3600 ))"
+  printf '%s\n' "${back}" > "${REAPDIR}/dora"
+  printf '%s\n' "${back}" > "${REAPDIR}/eph0"
+  printf 'HDW4S_IDLE_DAYS=30m\n' > "${SB}/etc/dora.conf"
+  printf 'HDW4S_IDLE_DAYS=2h\n'  > "${SB}/etc/eph0.conf"
+  out="$(cmd_reap 2>/dev/null)"
+  has   'a window shorter than a day fires'  "${out}" 'stopping dora'
+  hasnt 'and one still inside it does not'   "${out}" 'stopping eph0'
+  # Read back out of the message, so the arithmetic is asserted and not just the
+  # selection: "1 hour", never "0 days".
+  has   'and the age is reported in its own unit' "${out}" 'for 1 hour'
+
+  # The silent fallback. "30m" used to be read as seven days with no message --
+  # the ambiguity the unit letters were ruled on, masked by the very line that
+  # would have made it visible. Anything unreadable must now stop the session
+  # from being considered AND say so, rather than reaping on a number nobody
+  # wrote: one leaves a desktop running, the other destroys an ephemeral
+  # session on a guess.
+  : > "${STOPPED}"
+  printf 'HDW4S_IDLE_DAYS=30sec\n' > "${SB}/etc/dora.conf"
+  rm -f "${SB}/etc/eph0.conf"
+  printf '%s\n' "$(( $(date +%s) - 864000 ))" > "${REAPDIR}/dora"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'an unreadable window does not fall back to a week' "${out}" 'stopping dora'
+  is    'and nothing was stopped'  "$(wc -l < "${STOPPED}")" '0'
+  has   'and the reaper says why'  "${out}" 'not considered'
+  has   'and names a value that works' "${out}" 'HDW4S_IDLE_DAYS=7'
+
+  # A slot hand-edited to 0 is legal to the reaper and invisible otherwise: the
+  # pool filling up has no other symptom to trace back to a configuration line.
+  : > "${STOPPED}"
+  rm -f "${SB}/etc/dora.conf"
+  printf 'HDW4S_IDLE_DAYS=0\n' > "${SB}/etc/eph0.conf"
+  printf '%s\n' "$(( $(date +%s) - 864000 ))" > "${REAPDIR}/eph0"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'a slot set to 0 is not reaped'      "${out}" 'stopping eph0'
+  has   'but the reaper says it never will be' "${out}" 'never be freed'
+)
+
 echo '== the arrival and sharing arms are chosen at generation, and a bad one is refused =='
 # Written from the failure: a QA matrix once tested one transport twice because a
 # mis-set knob was silently ignored, so the generator must REFUSE a value it does not
@@ -1447,7 +1634,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=242   # update when tests are added; a wrong number is the point
+EXPECTED=287   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
