@@ -954,8 +954,11 @@ cmd_enable() {
   fi
   echo 'The desktop starts on the first connection, not now.'
 
-  # A site can make this automatic by setting HDW4S_AUTH=basic in the shared
-  # configuration; otherwise say plainly what is missing. A session with no
+  # Say plainly what is missing. There is deliberately no site-wide switch for
+  # this: HDW4S_AUTH is per-session state the tool writes, and a shared default
+  # for it was removed after two administrators, asked as users rather than as
+  # authors, independently called it a trap -- set once, forgotten, inherited
+  # silently by every session afterwards. A session with no
   # credential is not a smaller version of one with a credential -- it is one
   # where an address is the only thing between a stranger and somebody's
   # desktop, and that deserves more than a line in a manual.
@@ -1007,7 +1010,7 @@ cmd_enable() {
     echo 'Generating a credential for this session...'
     cmd_auth "${inst}" >/dev/null
     echo "  done; see 'hdw4s proxy ${inst}' for the proxy configuration."
-    echo '  Set HDW4S_AUTH=none in /etc/hdw4s/'"${inst}"'.conf to turn it off.'
+    echo "  Turn it off with: hdw4s noauth ${inst}"
   else
     echo
     cat <<EOF
@@ -1025,8 +1028,10 @@ cmd_enable() {
       hdw4s auth ${inst}
 
   adds a secret the reverse proxy presents on every request. The user never
-  sees it, so there is still no login screen. Setting HDW4S_AUTH=basic in
-  /etc/hdw4s/hdw4s.conf does this for every session from the start.
+  sees it, so there is still no login screen. It is a per-session choice: there
+  is no shared setting that turns this on or off for every session, because one
+  that is set once and inherited silently is how a session ends up without a
+  credential that nobody chose to remove.
 EOF
   fi
 }
@@ -1270,18 +1275,36 @@ cmd_set() {
           "  Nothing reads it per session, so writing it into ${file}" \
           '  would parse, pass every check, and do nothing. Set it without' \
           "  an instance name: hdw4s set ${key}=${value}"
+    # HDW4S_AUTH is refused machine-wide as well as per session, so it is the
+    # one key with no "set" form at all. It used to be accepted here, and the
+    # sample configuration and the manual both described that as the way to
+    # choose authentication for a whole site.
+    #
+    # Two administrators, asked as USERS of this tool rather than as its
+    # authors, independently called that a trap: a security-relevant switch set
+    # once, inherited by every session created afterwards, and invisible at the
+    # moment it takes effect -- so the session that ends up without a credential
+    # is not the one anybody decided about. The owner agreed and had it removed.
+    #
+    # It also never worked in the direction people would reach for. A global
+    # "none" was silently overridden, because "enable" writes an explicit
+    # per-session value that shadows it; only "basic" appeared to take, and only
+    # because new sessions already get a credential. One direction ignored, the
+    # other redundant, both documented as working.
+    #
+    # Refused rather than ignored: a setting that parses and does nothing is how
+    # this one survived unnoticed for months.
+    if [ -z "${inst}" ] && [ "${key}" = 'HDW4S_AUTH' ]; then
+      die "hdw4s: ${key} is per-session only; there is no machine-wide form." \
+          '  A shared default for this is set once and inherited silently by' \
+          '  every session made afterwards, so the session that ends up without' \
+          '  a credential is not the one anybody chose. Set it per session:' \
+          '    hdw4s auth <session>     to require a credential' \
+          '    hdw4s noauth <session>   to remove one'
+    fi
     check_value "${key}" "${value}"
     config_write "${file}" "${key}" "$(quote_value "${value}")"
     echo "${file}: ${key}=${value}"
-    # Sessions that already exist have no credential, and a session configured
-    # to require one that does not have one refuses to start. Say so here
-    # rather than let it be discovered the next time one of them is used.
-    if [ -z "${inst}" ] && [ "${key}" = 'HDW4S_AUTH' ] && [ "${value}" = 'basic' ]; then
-      echo "  Sessions created from now on get a credential from 'hdw4s enable'."
-      echo "  Existing ones do not have one yet, and will refuse to start until"
-      echo "  they do. 'hdw4s list' marks them AUTH=NO; give each one:"
-      echo '    hdw4s auth <session>'
-    fi
   done
   set_hint "${inst}" "$@"
 }

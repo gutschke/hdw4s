@@ -292,16 +292,28 @@ echo '== a machine-wide setting is refused per session =='
   out="$( ( cmd_set "${me}" 'HDW4S_TRANSPORT=unix' ) 2>&1 )"
   has 'and says which command does write it' "${out}" 'hdw4s transport'
 
-  # Machine-wide is a different thing and has to keep working: hdw4s.conf and
-  # the manual both document setting HDW4S_AUTH=basic there so that every
-  # session created afterwards gets a credential. Refusing that left the
-  # documented flow with no command behind it.
+  # HDW4S_AUTH has NO machine-wide form -- the one key that is refused both
+  # ways. This test used to assert the opposite, because hdw4s.conf and the
+  # manual documented setting it site-wide so every session created afterwards
+  # got a credential. Two administrators asked as users of the tool called that
+  # a trap and the owner had it removed: a security-relevant switch set once and
+  # inherited silently is how a session ends up without a credential that nobody
+  # decided to drop.
+  #
+  # It never worked in the direction people reach for either. A global "none"
+  # was silently overridden, because "enable" writes a per-session value that
+  # shadows it; only "basic" appeared to take, and only because new sessions get
+  # a credential anyway. One direction ignored, the other redundant.
   ( cmd_set 'HDW4S_AUTH=basic' ) >/dev/null 2>&1 \
-    && ok  'the same setting is accepted machine-wide' \
-    || bad 'the same setting is accepted machine-wide'
+    && bad 'HDW4S_AUTH is refused machine-wide too' \
+    || ok  'HDW4S_AUTH is refused machine-wide too'
   out="$( ( cmd_set 'HDW4S_AUTH=basic' ) 2>&1 )"
-  has 'and warns about sessions that have no credential yet' \
-      "${out}" 'hdw4s auth'
+  has 'and names the per-session command instead' "${out}" 'hdw4s auth <session>'
+  # The control: another key with a legitimate machine-wide form still takes
+  # one, so the refusal above is about this key and not about every global set.
+  ( cmd_set 'HDW4S_IDLE_DAYS=9' ) >/dev/null 2>&1 \
+    && ok  'a key that IS machine-wide still is' \
+    || bad 'a key that IS machine-wide still is'
 
   # "set" was guarded and "unset" was not, so authentication could be turned
   # off in one word while the credential file stayed and "show" went on
@@ -1379,7 +1391,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=235   # update when tests are added; a wrong number is the point
+EXPECTED=236   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

@@ -251,14 +251,24 @@ belongs to the copy of the streaming server, of which there is one.
     reverse proxy runs as. Defaults to `www-data`.
 
   * `HDW4S_AUTH`:
-    `none` or `basic`. Set with `hdw4s auth`, which also generates the secret.
+    `none` or `basic`. **Per-session only**: this is state the tool writes into
+    a session's own file, and putting it in the shared configuration does
+    nothing. Turn it on with `hdw4s auth`, which also generates the secret, and
+    off with `hdw4s noauth`.
+
     `hdw4s enable` turns it on for a session it creates, because the firewall
     filters what arrives from other machines and nothing stands between the
     session and the other accounts on this one: the streaming server listens on
     loopback, and any local account can open a loopback port. The reverse proxy
     presents the secret and the user never sees it, so there is no login
     screen either way. Re-running `hdw4s enable` on a session that already
-    exists leaves the setting alone. Set `none` to turn it off.
+    exists leaves the setting alone.
+
+    There is deliberately no site-wide default. One existed and was removed: a
+    shared switch for a security-relevant setting is chosen once, inherited by
+    every session created afterwards, and invisible at the moment it takes
+    effect -- so the session that ends up without a credential is not the one
+    anybody decided about.
 
   * `HDW4S_SESSION`:
     The desktop to start; defaults to `gnome-session`. Anything that runs on
