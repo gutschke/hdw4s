@@ -31,6 +31,14 @@ export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 set -o nounset -o pipefail
 
 MARKER='hdw4s-gate'
+# Where hdw4s-incarnation records the identity of the current start. A tmpfs, so
+# the record dies with the session while the copy published into the web root
+# does not -- which is the asymmetry the carry-across below depends on.
+# Overridable for the same reason every other written path in this package is:
+# otherwise a test asserting "the session is running" can only simulate it by
+# leaving a token lying about, which is the very conflation that produced the
+# bug this variable exists to let us test.
+INCARNATION_DIR="${HDW4S_INCARNATION_DIR:-/run/hdw4s-incarnation}"
 die() { echo "hdw4s-webroot: $*" >&2; exit 1; }
 
 usage() {
@@ -100,9 +108,30 @@ cmd_build() {
   # when it is given an instance, which the builder never does, and the next session
   # start republishes one. So this is silent in both directions and has to be held
   # here, at the one place that can destroy it.
-  [ ! -s "${root}/hdw4s-incarnation" ] ||
+  #
+  # CARRY IT ONLY IF THE SESSION IT DESCRIBES IS STILL RUNNING, and the /run
+  # record is how that is known: hdw4s-incarnation writes it at each start and
+  # /run is a tmpfs, so the record dies with the session while the published
+  # copy on disk does not. Measured across a reboot on 2026-09-22: two slots
+  # served tokens minted before the boot, with no record left to contradict
+  # them. The published copy is the one a tab reads to decide "this is the
+  # desktop I had" -- so a returning tab compares its remembered token against a
+  # stale one, finds them equal, and takes the silent-resume path for a desktop
+  # that no longer exists. That is the logged-out row collapsing into the resume
+  # row, which is the one outcome the arrival design exists to prevent.
+  #
+  # The reason above is still true and still applies: a rebuild does not restart
+  # the session. It simply stops being true at a boot, and nothing here
+  # distinguished the two because when it was written only one existed.
+  #
+  # "check" below already treats the record as authoritative and dies when the
+  # served token does not match it. This is the same dependency, in the one
+  # place that can create the mismatch rather than the one that reports it.
+  if [ -s "${root}/hdw4s-incarnation" ] &&
+     { [ -z "${inst}" ] || [ -s "${INCARNATION_DIR}/${inst}" ]; }; then
     cp -a "${root}/hdw4s-incarnation" "${stage}/hdw4s-incarnation" ||
-    die 'could not carry the published identity across the rebuild'
+      die 'could not carry the published identity across the rebuild'
+  fi
 
   HDW4S_SESSION_NAME="${name}" \
     "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-gate-index" \
@@ -172,7 +201,7 @@ cmd_check() {
   # Skipped when no instance is named, because "hdw4s-webroot check <dir>" is also run
   # by hand and by the builder against a staging tree that no session has started yet.
   [ -n "${inst}" ] || return 0
-  local tok="${root}/hdw4s-incarnation" state="/run/hdw4s-incarnation/${inst}"
+  local tok="${root}/hdw4s-incarnation" state="${INCARNATION_DIR}/${inst}"
   [ -s "${tok}" ] ||
     die "'${tok}' is missing or empty: this session has no published identity, so a
 returning tab cannot tell it apart from the one it was using"

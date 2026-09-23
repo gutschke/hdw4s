@@ -1061,15 +1061,36 @@ echo '== a rebuild of a running slot keeps its published identity =='
   : > "${d}/pkg/x.js"
   printf '#!/bin/bash\ncat >/dev/null\necho %s\n' "${d}/pkg" > "${d}/py"
   chmod +x "${d}/py"
+  # The run record is what says "this session is RUNNING". It lives on a tmpfs
+  # in production and dies with the session; the published token does not. This
+  # suite used to express "running" by leaving a token in the web root, which
+  # is the same conflation that produced the bug below -- so it now sets the
+  # record explicitly, and the reboot case gets a test of its own.
+  mkdir -p "${d}/run"
   build() {
     HDW4S_SELKIES_PY="${d}/py" HDW4S_LIBDIR="${ROOT}" \
+    HDW4S_INCARNATION_DIR="${d}/run" \
       "${ROOT}/hdw4s-webroot" build probe "${d}/slot" probe >/dev/null 2>"${d}/err"
   }
 
   printf '%s\n' 'tok-before-the-rebuild' > "${d}/slot/hdw4s-incarnation"
+  printf '%s\n' 'tok-before-the-rebuild' > "${d}/run/probe"
   build
   is 'a rebuild carries the running identity across unchanged' \
      "$(cat "${d}/slot/hdw4s-incarnation" 2>/dev/null)" 'tok-before-the-rebuild'
+
+  # THE REBOOT CASE, which had no test and is the bug. /run is a tmpfs, so a
+  # reboot takes the record and leaves the published token -- and the published
+  # copy is the one a returning tab reads to decide "this is the desktop I had".
+  # Carrying it forward makes a dead session look like the live one, which is
+  # the logged-out row of the arrival table collapsing into the resume row.
+  # Measured across a real reboot on a test container before this was fixed.
+  rm -f "${d}/run/probe"
+  printf '%s\n' 'tok-from-before-the-reboot' > "${d}/slot/hdw4s-incarnation"
+  build
+  is 'but DROPS it when the run record is gone, because the session is gone' \
+     "$(cat "${d}/slot/hdw4s-incarnation" 2>/dev/null)" ''
+  printf '%s\n' 'tok-before-the-rebuild' > "${d}/run/probe"
   has 'and still swaps in a freshly gated client' \
       "$(cat "${d}/slot/index.html" 2>/dev/null)" 'hdw4s-gate'
 
@@ -1358,7 +1379,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=234   # update when tests are added; a wrong number is the point
+EXPECTED=235   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
