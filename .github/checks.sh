@@ -105,6 +105,110 @@ if [ -n "${banned}" ]; then
 fi
 okif 'no browser-mode word in shipped files'
 
+# The name of the component that fronts the pool must not appear in anything a
+# user or an administrator READS AS PROSE. The owner ruled it directly: "they
+# don't want to know that a demultiplexer is involved. our cli should reflect
+# that." The model the tool presents is named sessions plus a growable pool of
+# unnamed ephemeral ones, and the machinery that picks a slot out of the pool is
+# an implementation detail of "the pool".
+#
+# THE SCOPE IS THE WHOLE OF THIS CHECK, and getting it wrong in either
+# direction makes it worthless:
+#
+#   * Too narrow and it misses the places the word actually reaches a person --
+#     help output, the manual, the configuration this tool PRINTS for somebody
+#     to paste into nginx, and refusals.
+#
+#   * Too wide and it bans the unit name. An administrator sees hdw4s-demux in
+#     "systemctl status" and in the journal whatever the manual calls it, and a
+#     manual that cannot name the unit it is describing is worse than one that
+#     does. A check that forbids a fact gets turned off, and then it is not
+#     protecting the prose either.
+#
+# So the rule is: the word is allowed only INSIDE AN IDENTIFIER somebody has to
+# type or will see -- the unit, the credential file, the environment, and an
+# internal shell function whose call is substituted away before any reader sees
+# it. As an English word it is banned. Those identifiers are removed from the
+# text first, and whatever survives is prose.
+#
+# Comments in the source are not user-facing and are left alone: they are where
+# the mechanism is supposed to be described accurately. That is why the shell
+# script is filtered rather than grepped, and the filter has to be heredoc-aware
+# -- the nginx block "hdw4s proxy" prints is made of lines beginning with "#"
+# inside a heredoc, so a naive comment-stripper would exempt exactly the
+# generated configuration this check exists to cover.
+#
+# Every pattern below is bracketed so this file does not match itself, the same
+# trap as a process search containing its own pattern.
+echo '== the pool has one name =='
+begin
+
+# Lines of a shell script that can reach a user: everything inside a heredoc,
+# and everything outside one that is not a whole-line comment.
+user_text_of_shell() {
+  awk '
+    # Inside a heredoc every line is text somebody is handed.
+    #
+    # One line in, one line out, always -- a dropped line would shift every
+    # line number after it, and a report that names the wrong line is how a
+    # person concludes the check is broken and stops reading it.
+    delim != "" {
+      t = $0; sub(/^[ \t]+/, "", t)
+      if (t == delim) { delim = ""; print ""; next }
+      print; next
+    }
+    {
+      line = $0
+      # Opening a heredoc. "<<<" is a here-string and is not one; the pattern
+      # cannot match it, because a quote or a letter has to follow the "<<".
+      if (match(line, /<<-?[ ]*("|'"'"')?[A-Za-z_][A-Za-z0-9_]*/)) {
+        d = substr(line, RSTART, RLENGTH)
+        sub(/^<<-?[ ]*/, "", d)
+        gsub(/("|'"'"')/, "", d)
+        delim = d
+      }
+      sub(/^[ \t]*#.*$/, "", line)
+      print line
+    }
+  ' "$1"
+}
+
+# The identifiers the word is allowed to be part of, removed before the search.
+# Each is a thing that exists: a unit systemd prints, a file the service loads,
+# an environment variable, and a shell function whose call is substituted away.
+strip_pool_identifiers() {
+  # The backslash is optional because roff escapes a hyphen: the generated
+  # manual spells the unit "hdw4s\-demux", and without this the check would go
+  # red on a page whose only mention is the unit name it is supposed to allow.
+  # Found by running it, not by reading it.
+  sed -e 's/hdw4s\\\?-[d]emux//g' \
+      -e 's/[d]emux\.auth\.cred//g' \
+      -e 's/HDW4S_[D]EMUX[A-Z_]*//g' \
+      -e 's/[d]emux_port//g'
+}
+
+pool_word='[d]emux\|[d]emultiplex'
+pool_hits=''
+for f in hdw4s hdw4s.conf hdw4s.8.md hdw4s.8 README.md install.sh uninstall.sh; do
+  [ -e "${f}" ] || continue
+  case "${f}" in
+    hdw4s|install.sh|uninstall.sh) text="$(user_text_of_shell "${f}")";;
+    # A sample configuration, a manual and a README are read from end to end;
+    # there is nothing in them that is not user-facing.
+    *)                             text="$(cat "${f}")";;
+  esac
+  hit="$(printf '%s\n' "${text}" | strip_pool_identifiers |
+         grep -n -i "${pool_word}" || true)"
+  [ -z "${hit}" ] || pool_hits="${pool_hits}${f}: ${hit}
+"
+done
+if [ -n "${pool_hits}" ]; then
+  printf '%s' "${pool_hits}"
+  bad 'pool vocabulary' \
+      'the internal component is named in user-facing text above; say "the pool"'
+fi
+okif 'user-facing text says "pool", not the component name'
+
 # Local detail: the addresses, container ids and account names of the machines
 # this happens to be developed on. None of it is useful to anybody who installs
 # the package, and two of them -- a real person's account name and an internal

@@ -600,7 +600,7 @@ machine itself can guarantee.
     This is the right answer whenever it is available. It requires the proxy
     to be on the same machine, or to be able to see the same filesystem. For an
     ephemeral slot it is the only answer: a visitor reaches one well-known
-    hostname and the demultiplexer on this machine chooses the slot, so there is
+    hostname and the pool on this machine chooses the slot, so there is
     no caller outside the machine for a port to serve -- and a port would be open
     to every account in the container, which is not a caller the session has.
 
