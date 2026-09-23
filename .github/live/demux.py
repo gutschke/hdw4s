@@ -71,6 +71,10 @@ class Slot(threading.Thread):
         self.s.bind(path)
         self.s.listen(16)
         self.stop = False
+        # Set by the test that checks a session cannot rewrite its visitor's
+        # identity. A backend is the untrusted side here; it must not be able to
+        # reach the cookie the router owns.
+        self.forge_cookie = None
         # Set when this slot has actually served something. The oracle for "did
         # the router start a desktop" is the SLOT saying it was used, not the
         # router's own account of itself -- a component is not evidence about
@@ -99,9 +103,11 @@ class Slot(threading.Thread):
                         break
                 body = ("SLOT=%s PATH=%s" % (self.name,
                         line.split()[1].decode())).encode()
+                forged = (b"Set-Cookie: " + self.forge_cookie.encode() + b"\r\n"
+                          if self.forge_cookie else b"")
                 c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
-                          b"Content-Type: text/plain\r\n\r\n%s"
-                          % (len(body), body))
+                          b"Content-Type: text/plain\r\n%s\r\n%s"
+                          % (len(body), forged, body))
         except OSError:
             pass
         finally:
@@ -171,7 +177,7 @@ class Client:
 # --------------------------------------------------------------------------
 
 class Rig:
-    def __init__(self, nslots=3, gate="mint"):
+    def __init__(self, nslots=3, gate="mint", windows=None):
         # gate=None means DO NOT SET HDW4S_GATE_MODE, so the module's own default
         # applies. Without this every arm test pinned the mode explicitly and the
         # shipped default was never exercised -- which is exactly how the router
@@ -185,6 +191,23 @@ class Rig:
         self.cred = "front:secretpw"
         with open(os.path.join(self.etc, "demux.auth.cred"), "w") as f:
             f.write(self.cred)
+        # Where the periodic sweep would keep its record. Real here, and empty:
+        # the point of the refusal log is partly that it reports what it could
+        # NOT read, so a rig that always has a readable stamp would never show
+        # that column working.
+        self.reapdir = os.path.join(self.tmp, "reap")
+        os.makedirs(self.reapdir)
+        # The pool table the CLI keeps, and the idle window each slot is
+        # configured with. Written before the router starts, because the
+        # lifetime it derives from them is pinned at start.
+        self.windows = windows
+        if windows is not None:
+            with open(os.path.join(self.etc, "instances"), "w") as f:
+                for i, (name, _) in enumerate(windows):
+                    f.write("%d %s ephemeral\n" % (i, name))
+            for name, days in windows:
+                with open(os.path.join(self.etc, name + ".conf"), "w") as f:
+                    f.write("HDW4S_IDLE_DAYS=%d\n" % days)
         self.slots = []
         for i in range(nslots):
             name = "ephemeral%d" % i
@@ -197,6 +220,7 @@ class Rig:
                    HDW4S_ETCDIR=self.etc,
                    HDW4S_DEMUX_CRED=os.path.join(self.etc, "demux.auth.cred"),
                    HDW4S_DEMUX_STATE=os.path.join(self.tmp, "state"),
+                   HDW4S_REAP_STAMP_DIR=self.reapdir,
                    HDW4S_DEMUX_BIND="127.0.0.1",
                    HDW4S_DEMUX_PORT=str(self.port),
                    **({"HDW4S_GATE_MODE": gate} if gate is not None else {}))
@@ -204,7 +228,31 @@ class Rig:
             env.pop(k, None)
         self.proc = subprocess.Popen([sys.executable, DEMUX], env=env,
                                      stderr=subprocess.PIPE)
+        # Drained continuously, in a thread. Reading the pipe only on failure
+        # was fine while nothing checked the log; now that a test asserts on
+        # what was written, a full pipe would block the thing under test and
+        # the symptom would be a hang rather than a failure.
+        self.err = []
+        threading.Thread(target=self._drain, daemon=True).start()
         self.wait_up()
+
+    def _drain(self):
+        for line in self.proc.stderr:
+            self.err.append(line.decode("utf-8", "replace"))
+
+    def stderr_text(self, settle=1.0):
+        """Everything the router has said. Waits briefly, because the write we
+        are asserting on happens on the router's thread and the assertion runs
+        on ours -- a bare read races it and fails intermittently, which is worse
+        than failing."""
+        deadline = time.time() + settle
+        n = len(self.err)
+        while time.time() < deadline:
+            time.sleep(0.05)
+            if len(self.err) == n:
+                break
+            n = len(self.err)
+        return "".join(self.err)
 
     @staticmethod
     def free_port():
@@ -217,8 +265,8 @@ class Rig:
     def wait_up(self):
         for _ in range(100):
             if self.proc.poll() is not None:
-                raise RuntimeError("demux exited: %s"
-                                   % self.proc.stderr.read().decode())
+                time.sleep(0.2)
+                raise RuntimeError("demux exited: %s" % "".join(self.err))
             try:
                 socket.create_connection(("127.0.0.1", self.port), 0.2).close()
                 return
@@ -505,6 +553,233 @@ def red_converge(rig):
     assert sid_a == sid_b, "the two tabs diverged (which is the milestone)"
 
 
+# --- the identity window, and the one event that means we refused somebody ---
+
+def test_cookie_slides_beyond_the_front_door(rig):
+    """A tab that never revisits the front door must still be kept alive.
+
+    The defect: Set-Cookie was attached only on the arrival that found no valid
+    cookie, and nothing anywhere refreshed it, so Max-Age ran from a browser's
+    first ever contact however much it used the pool since. The closed loop that
+    produces is in the module's own comment. What is checked here is the fix at
+    the place the fix matters -- the session path, where a working tab spends
+    its whole life and which it may never leave.
+    """
+    a = rig.client()
+    st, h, _ = a.get("/")
+    assert st == 302, "arrival did not redirect: %d" % st
+    a.learn_cookie(h)
+    loc = h["location"][0]
+
+    st, h2, _ = a.get(loc)
+    assert st == 200, "the session path did not serve: %d" % st
+    got = [v for v in h2.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    assert got, (
+        "a response from the SESSION PATH carried no identity -- a tab that "
+        "stays put never has its window wound on and ages out in place")
+    assert a.cookie in got[0], \
+        "the session path replaced the identity instead of extending it: %s" \
+        % got[0]
+    assert "Max-Age=" in got[0], "the refreshed cookie carries no lifetime"
+
+    # And it is a rate limit, not a header on every asset fetch.
+    st, h3, _ = a.get(loc)
+    again = [v for v in h3.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    assert not again, \
+        "every response carried a cookie; the rate limit does nothing"
+
+
+def test_cookie_max_age_is_the_derived_lifetime(rig):
+    """The Max-Age on the wire is the derived one, not a constant.
+
+    The rig's pool is configured with a 40-day idle window, so the floor is not
+    what decides: the value must be 80 days. A test against the floor alone
+    would pass against a hard-coded 30 and prove nothing.
+    """
+    c = rig.client()
+    st, h, _ = c.get("/")
+    sc = [v for v in h.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    assert sc, "a fresh browser was given no identity at all"
+    age = int(sc[0].split("Max-Age=")[1].split(";")[0])
+    assert age == 80 * 86400, (
+        "identity lifetime was %d day(s); a 40-day idle window must derive 80"
+        % (age // 86400))
+
+
+def test_refusal_is_logged_with_what_it_takes_to_judge_it(rig):
+    """Pool exhaustion used to be silent.
+
+    It rendered a 503 to the visitor and wrote nothing anywhere, so an operator
+    learned the pool was full by being told by a person -- which means the idle
+    window was being set from no evidence. The oracle here is the LOG, not the
+    status code: the 503 was always right and always mute.
+    """
+    for _ in range(len(rig.slots)):
+        arrive(rig, rig.client())
+    st, _, _ = rig.client().get("/")
+    assert st == 503, "an arrival past capacity was not refused: %d" % st
+    text = rig.stderr_text()
+    assert "turned an arrival away" in text, \
+        "the pool refused a visitor and said nothing:\n%s" % text
+    for s in rig.slots:
+        assert ("  %s:" % s.name) in text, \
+            "the refusal named no age for %s, so the idle window cannot be "\
+            "judged from it:\n%s" % (s.name, text)
+    assert "last request" in text and "idle window" in text, \
+        "the refusal carries no ages and no window:\n%s" % text
+    # The sweep's own record is absent in this rig, and the line must SAY so
+    # rather than render an unread stamp as a number.
+    assert "no record" in text, \
+        "a missing sweep record was reported as something other than missing"
+
+
+def test_last_request_record_is_written_where_the_connection_is_accepted(rig):
+    """The accurate column, and why there are two.
+
+    The sweep polls every few minutes, so a visit that begins and ends inside
+    one gap is invisible to every sample it takes -- and the confident sentence
+    it then writes about a desktop "nobody has used since yesterday" is wrong.
+    This record is written where the connection is accepted, so the poll rate
+    stops mattering. Checked against the FILE, not against the log line, because
+    the log line is what we are trying to make true.
+    """
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    body = a.get("/s/%s/" % sid)[2].decode()
+    slot = body.split("SLOT=")[1].split()[0]
+    path = os.path.join(rig.tmp, "state", "last-request", slot)
+    for _ in range(50):
+        if os.path.exists(path):
+            break
+        time.sleep(0.05)
+    assert os.path.exists(path), \
+        "a request was served through %s and no record of it was written" % slot
+    with open(path) as f:
+        stamp = int(f.read().strip())
+    assert abs(stamp - time.time()) < 60, \
+        "the record is not a current timestamp: %d" % stamp
+
+
+def test_derivation_complains_when_a_window_outgrows_the_pinned_lifetime(rig):
+    """THE DERIVATION, SEEN REFUSING.
+
+    It cannot fail against its own input -- max(30d, 2 x W) is never smaller
+    than W -- so checking it that way proves nothing. What can fail is the
+    relationship over TIME: the lifetime is pinned when the router starts and
+    the configuration is not, so an idle window raised afterwards leaves a
+    desktop able to outlive the identity that owns it. The rig starts with a
+    1-day window, which pins a 30-day identity, and then sets the window to 90
+    days behind the router's back.
+    """
+    for name, _ in rig.windows:
+        with open(os.path.join(rig.etc, name + ".conf"), "w") as f:
+            f.write("HDW4S_IDLE_DAYS=90\n")
+    for _ in range(len(rig.slots)):
+        arrive(rig, rig.client())
+    st, _, _ = rig.client().get("/")
+    assert st == 503
+    text = rig.stderr_text()
+    assert "not shorter than the 30-day identity" in text, (
+        "a 90-day desktop against a 30-day identity was not reported -- the "
+        "owner can be locked out of a session that is still running:\n%s"
+        % text)
+
+
+def test_a_slot_that_is_never_reaped_is_reported_at_start():
+    """The unbounded case, which no lifetime can dominate.
+
+    HDW4S_IDLE_DAYS=0 means the sweep never stops that slot, so its desktop can
+    outlive any identity however long. The derivation cannot fix that and must
+    not pretend to; it says so at start, where somebody can act on it.
+    """
+    rig = Rig(nslots=1, windows=[("ephemeral0", 0)])
+    try:
+        text = rig.stderr_text()
+        assert "never reaped" in text, \
+            "a slot with no idle window at all was not reported:\n%s" % text
+        # And it is reported as a LIMITATION rather than absorbed: the line has
+        # to name the consequence, or the next reader raises the floor and
+        # believes the problem is gone.
+        assert "outlive" in text, \
+            "the unbounded case was named without its consequence:\n%s" % text
+        assert "an identity lasts" in text, \
+            "the derived lifetime was never stated:\n%s" % text
+    finally:
+        rig.stop()
+
+
+def test_a_session_cannot_set_our_cookie(rig):
+    """A desktop must not be able to rewrite the identity of its visitor.
+
+    It cannot read one -- the Cookie header is stripped on the way up -- and if
+    it could write one, a compromised session would reassign the identity of
+    every browser it answers, which is the ownership table defeated from below.
+    """
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    before = a.cookie
+    for s in rig.slots:
+        s.forge_cookie = "hdw4s_id=" + ("f" * 32)
+    st, h, _ = a.get("/s/%s/" % sid)
+    got = [v for v in h.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    assert not any(("f" * 32) in v for v in got), \
+        "a session set our identity cookie: %r" % got
+
+
+# --- guards exercised without a network ------------------------------------
+
+def test_cookie_lifetime_guard(rig=None):
+    """The start-up guard, in BOTH directions.
+
+    The refuse arm is not a contrived mutation: it is the value that SHIPPED --
+    a flat seven days, equal to the default idle window. Two clocks set to the
+    same number, counting from different events, which composes into an identity
+    that expires while the desktop it owns is still running.
+    """
+    m = load_demux()
+
+    # PERMIT ARM: the shipped derivation must pass.
+    m.assert_cookie_outlives_idle(m.derive_cookie_lifetime)
+
+    # REFUSE ARM: the constant that was on the wire before this.
+    try:
+        m.assert_cookie_outlives_idle(lambda windows: 7 * 86400)
+    except AssertionError as e:
+        print("       red arm, as required -- the shipped constant rejected: %s"
+              % e)
+    else:
+        raise AssertionError(
+            "the guard PASSED a seven-day identity against a seven-day idle "
+            "window -- it is not a guard, and a visitor can be locked out of a "
+            "desktop that is still running")
+
+    # And a derivation that is merely EQUAL rather than shorter must also be
+    # refused: equal is the defect, not the boundary of it.
+    try:
+        m.assert_cookie_outlives_idle(
+            lambda windows: max(d for _, d in windows) * 86400 if windows
+            else m.COOKIE_FLOOR_DAYS * 86400)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            "the guard accepted an identity exactly as long as the idle window")
+
+
+def test_refresh_rate_limit(rig=None):
+    """The sliding window winds on, and does not do so on every asset fetch."""
+    m = load_demux()
+    own = m.Ownership()
+    who = own.mint_identity()
+    t = 1000.0
+    assert own.due_for_refresh(who, now=t, every=3600), \
+        "an identity this process has never refreshed was not refreshed"
+    assert not own.due_for_refresh(who, now=t + 60, every=3600), \
+        "every response carried a cookie -- the rate limit does nothing"
+    assert own.due_for_refresh(who, now=t + 3601, every=3600), \
+        "the window did not slide once the interval had passed: it is a fuse"
+
+
 def load_demux():
     import importlib.machinery
     import importlib.util
@@ -562,10 +837,28 @@ def main():
              test_unknown_sid, test_trailing_slash, test_pooled_connection,
              test_pooled_same_identity, test_gate_arms, test_explicit_mint_arm_mints,
              test_exhaustion, test_ownership_keying_guard,
-             test_dead_sid_gates_and_does_not_mint]
+             test_dead_sid_gates_and_does_not_mint,
+             test_cookie_slides_beyond_the_front_door,
+             test_refusal_is_logged_with_what_it_takes_to_judge_it,
+             test_last_request_record_is_written_where_the_connection_is_accepted,
+             test_a_session_cannot_set_our_cookie,
+             test_cookie_lifetime_guard, test_refresh_rate_limit]
+
+    # Tests whose rig is not the default one. A pool with no instance table
+    # derives the floor and nothing else, so a test about the DERIVATION has to
+    # be given windows to derive from -- and a test that the floor is not the
+    # answer has to be given a window long enough to beat it.
+    configured = [
+        (test_cookie_max_age_is_the_derived_lifetime,
+         dict(nslots=1, windows=[("ephemeral0", 40)])),
+        (test_derivation_complains_when_a_window_outgrows_the_pinned_lifetime,
+         dict(nslots=1, windows=[("ephemeral0", 1)])),
+    ]
+
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
     # unpinned -- the shipped default cannot be exercised by a rig that sets it.
-    for fn in (test_shipped_default_resumes_a_returning_browser,):
+    for fn in (test_shipped_default_resumes_a_returning_browser,
+               test_a_slot_that_is_never_reaped_is_reported_at_start):
         try:
             fn()
             check(fn.__name__, True)
@@ -575,6 +868,17 @@ def main():
             check(fn.__name__, False, "error: %r" % e)
     for fn in green:
         rig = Rig()
+        try:
+            fn(rig)
+            check(fn.__name__, True)
+        except AssertionError as e:
+            check(fn.__name__, False, str(e))
+        except Exception as e:
+            check(fn.__name__, False, "error: %r" % e)
+        finally:
+            rig.stop()
+    for fn, kw in configured:
+        rig = Rig(**kw)
         try:
             fn(rig)
             check(fn.__name__, True)
