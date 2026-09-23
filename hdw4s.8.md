@@ -81,6 +81,14 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Generated here, sealed to this machine, and never shown to the user, so
     there is still no login screen.
 
+    Refused for a session on the `unix` transport, where a credential excludes
+    nobody: the socket is group-owned by the reverse proxy and open to nothing
+    else, so the only caller that can reach it is the one that would be given
+    the secret. What it would do instead is answer that proxy with 401 until the
+    proxy is configured with it, so one session refuses connections its
+    neighbours accept for a reason no listing explains. Move the session to
+    `tcp` first if a credential is really wanted there.
+
   * `proxy` <instance>:
     Print an nginx configuration for this session, matching whichever
     transport and authentication it is set up for.

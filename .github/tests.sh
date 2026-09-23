@@ -1195,10 +1195,67 @@ echo '== a unit with an [Install] section is no use until something enables it =
   is 'and the package does not ship one disabled' "${noenable}" ''
 )
 
+echo '== a credential is refused where it can exclude nobody =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # Written from the failure, measured on the test container on 2026-09-22:
+  # ephemeral0 carried HDW4S_AUTH=basic in /etc/hdw4s/ephemeral0.conf while
+  # ephemeral1 and ephemeral2 did not, all three on the filesystem socket. A
+  # demultiplexer opening ephemeral0.sock got a 401 and its two neighbours
+  # answered, so the same routing test passed against one slot of a pool and
+  # failed against the next -- a real, reproducible failure attributed to the
+  # thing under test rather than to the slot.
+  #
+  # The credential itself is stood in for: sealing one needs root and
+  # /var/lib/systemd/credential.secret, which this suite has neither of. What is
+  # under test is which calls reach that point, so standing it in is the point
+  # rather than a compromise.
+  # shellcheck disable=SC2317
+  require_slot() { :; }
+  # shellcheck disable=SC2317
+  make_credential() { echo 'stub-secret'; }
+  printf '%s\n' '0 eph0 ephemeral' '1 alice' > "${SLOTS}"
+
+  # The positive control FIRST, because a guard that refuses everything looks
+  # exactly like one that refuses the right thing. A session on the network is
+  # where a credential has something to keep out, and it must still be written.
+  printf 'HDW4S_TRANSPORT=tcp\n' > "${ETCDIR}/alice.conf"
+  out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
+  is 'a session on the network may still have one' "${rc}" '0'
+  has 'and the setting is written' \
+      "$(cat "${ETCDIR}/alice.conf")" 'HDW4S_AUTH=basic'
+
+  # Now the refusal.
+  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/eph0.conf"
+  out="$( ( cmd_auth eph0 ) 2>&1 )"; rc=$?
+  is 'a session on a filesystem socket may not' "${rc}" '1'
+  has 'and is told why the secret would keep nobody out' "${out}" 'excludes nobody'
+  has 'and what to do if it is really wanted' "${out}" 'hdw4s transport eph0 tcp'
+  # A refusal, not a diagnostic printed on the way through. This is the whole
+  # defect: the message would have been fine, the written line is what 401s.
+  hasnt 'and nothing was written to its file' \
+        "$(cat "${ETCDIR}/eph0.conf")" 'HDW4S_AUTH'
+
+  # The transport is what decides, not the session type -- so a NAMED desktop
+  # that has been moved onto a socket is refused too. Without this the guard
+  # could be satisfied by testing the name, which is the thing the tree has
+  # already learned not to do.
+  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/alice.conf"
+  out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
+  is 'a named desktop on a socket is refused as well' "${rc}" '1'
+
+  # And the site default reaches the same answer, since setting_of falls back to
+  # it: a machine that puts every session on a socket must not be able to arm
+  # this per session by leaving the instance file empty.
+  : > "${ETCDIR}/alice.conf"
+  printf 'HDW4S_TRANSPORT=unix\n' > "${CONF}"
+  out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
+  is 'the site default decides it too' "${rc}" '1'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=209   # update when tests are added; a wrong number is the point
+EXPECTED=217   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

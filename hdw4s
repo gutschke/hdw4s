@@ -788,6 +788,32 @@ cmd_enable() {
     # does not come back up refusing to start for want of a file it already
     # has the secret for.
     link_credential "${inst}" 'auth' 70
+    # Kept, and said out loud, because keeping it is the right call and having
+    # it is not. "enable" is documented as safe to re-run: a session that came
+    # in with a credential its reverse proxy already presents must go out with
+    # the same one, or re-running this takes somebody's desktop away. So the
+    # existing combination is reported rather than repaired, and the repair is
+    # named for whoever decides to make it.
+    if auth_is_meaningless "${inst}"; then
+      echo
+      echo "Session ${inst} has a credential and is reachable over a filesystem"
+      echo '  socket, where a credential excludes nobody -- the only caller that can'
+      echo '  open the socket is the reverse proxy that would present the secret.'
+      echo '  It is not removed here, because a proxy configured with it would start'
+      echo '  getting 401s from a session that had just been re-enabled.'
+      echo "  Remove it when the proxy is ready: hdw4s noauth ${inst}"
+    fi
+  elif auth_is_meaningless "${inst}"; then
+    # The producer this guard exists to close. Both branches below generate a
+    # credential, and for an ephemeral slot "want" is forced to unix a few lines
+    # above -- so a fresh slot came out of "enable" with HDW4S_AUTH=basic on a
+    # socket where it means nothing, every time, with nothing said.
+    echo
+    echo 'No credential is generated for this session: it is reachable over a'
+    echo '  filesystem socket, which is an access decision already. The socket is'
+    echo '  group-owned by the reverse proxy and open to nothing else, so a secret'
+    echo '  would keep nobody out and would answer that proxy with 401 until it'
+    echo '  was configured with it.'
   elif [ "$(setting_of "${inst}" HDW4S_AUTH none)" = 'basic' ]; then
     echo
     echo 'Generating the credential this session is configured to require...'
@@ -1278,6 +1304,19 @@ cmd_transport() {
       systemctl restart "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
       echo "Session ${inst} is reachable at /run/hdw4s-proxy/${inst}.sock,"
       echo "readable by group ${group} only. It does not listen on the network."
+      # The third way the combination is reached, and the only one that is not a
+      # refusal. Moving a session onto the socket is the safer direction and must
+      # not be blocked -- but it leaves behind a credential that was meaningful
+      # on a port and is not here, and nothing else will ever mention it again.
+      # Said after the success line rather than instead of it: the move happened.
+      if has_auth "${inst}"; then
+        echo
+        echo "Session ${inst} still has a credential of its own, which now excludes"
+        echo '  nobody: the only caller that can open the socket is the reverse proxy'
+        echo '  that would present it. Until that proxy is configured with the secret'
+        echo '  this session answers 401 while its neighbours answer.'
+        echo "  Remove it: hdw4s noauth ${inst}"
+      fi
       ;;
     *)
       die "hdw4s: transport must be 'tcp' or 'unix', not '${mode}'"
@@ -1435,8 +1474,44 @@ cmd_reap() {
   [ "${stopped}" -eq 0 ] || reap_say "Stopped ${stopped} idle session(s)."
 }
 
+# Whether a credential can mean anything for this session, i.e. whether anything
+# it does not already exclude could present one.
+#
+# On a filesystem socket the answer is no, and that is the owner's ruling rather
+# than a judgement made here: the socket is group-owned by the reverse proxy and
+# readable by nobody else, so the only caller that can open it is the one that
+# would be handed the secret. Adding a credential there excludes nothing and
+# costs a 401.
+auth_is_meaningless() {
+  [ "$(setting_of "$1" HDW4S_TRANSPORT tcp)" = 'unix' ]
+}
+
 cmd_auth() {
   local inst="$1" pw
+  # Refused, not warned about, and refused HERE because this is the only thing
+  # in the tree that writes HDW4S_AUTH=basic for one session -- "hdw4s enable"
+  # reaches the same shape by calling this function, so one refusal covers both.
+  #
+  # Written from the failure: ephemeral0 on the test container carried
+  # HDW4S_AUTH=basic while ephemeral1 and ephemeral2 did not, all three on the
+  # filesystem socket. A demultiplexer connecting to ephemeral0.sock got a 401
+  # and the other two answered, so a routing test passed against one slot of a
+  # pool and failed against its neighbour. That is the expensive kind of wrong:
+  # the failure is real, reproducible, and attributed to the thing being tested.
+  if auth_is_meaningless "${inst}"; then
+    die "hdw4s: ${inst} is reachable over a filesystem socket, where a credential" \
+        '  excludes nobody. The socket is mode 0660 and group-owned by the reverse' \
+        '  proxy, so the only caller that can open it is the one that would be' \
+        '  given the secret; there is no second caller for it to keep out.' \
+        '' \
+        '  What it would do instead is answer that proxy with 401 until the proxy' \
+        '  is configured with the secret -- so one session refuses connections its' \
+        '  neighbours accept, for a reason the transport column does not explain.' \
+        '' \
+        '  If this is really wanted, put the session on the network first, where' \
+        '  a credential has something to do:' \
+        "    hdw4s transport ${inst} tcp"
+  fi
   require_slot "${inst}"
   pw="$(make_credential "${inst}" 'auth' 70)"
   config_write "${ETCDIR}/${inst}.conf" 'HDW4S_AUTH' 'basic'
