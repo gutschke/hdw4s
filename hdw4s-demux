@@ -115,13 +115,34 @@ BIND = os.environ.get("HDW4S_DEMUX_BIND", "0.0.0.0")
 PORT = int(os.environ.get("HDW4S_DEMUX_PORT", "7280"))
 REALM = "hdw4s"
 
-# The arrival arm. "mint" is what the owner ruled for this milestone -- a new
-# tab always means minting -- with its cost named by him: you lose your session
-# if you reload the tab even accidentally. The other arms are kept working and
-# tested in both positions BECAUSE the end-state gate is still his decision, and
-# a switch nobody exercises gets deleted by the next person as dead weight, at
-# which point the decision has been made by implementation.
-GATE_DEFAULT = os.environ.get("HDW4S_GATE_MODE", "mint")
+# The arrival arm, and it must agree with the page's. The page defaults to
+# "takeover"; this defaulted to "mint", and the two disagreed while gate_arm()'s
+# own docstring claimed "the two layers agree about which arm is in force".
+#
+# THE CONSEQUENCE WAS A RELEASE BLOCKER. arrival() resumes only when the arm is
+# "takeover" or "off", so under "mint" EVERY arrival minted -- including one from
+# a browser that already owned a session. Measured through the real proxy
+# hostname: three requests from ONE cookie jar returned three different sessions,
+# and the front door then answered 503 "Every desktop is in use" with three
+# desktops running and NOBODY connected to any of them.
+#
+# The comment that stood here cited a real ruling and applied it too widely. The
+# owner did say a new tab may always mint, for this milestone, with its cost
+# named. But A RELOAD IS NOT A NEW TAB, and an identity that already owns a
+# session is distinguishable from one that does not -- which is the whole point
+# of keying ownership on the browser. His arrival rule, settled 2026-09-22, is
+# explicit: mint when there is no session id, resume when it resolves and
+# everything agrees, GATE otherwise -- and "minting is a damage, not a neutral
+# default", because starting a session nobody asked for costs the visitor a
+# desktop and the pool a slot.
+#
+# So "takeover": a browser with no session still mints, which is the new-tab case
+# he ruled on, and one that already has a session resumes it instead of taking a
+# second. The other arms stay working and tested in both positions because the
+# end-state gate is still his decision, and a switch nobody exercises gets
+# deleted by the next person as dead weight -- at which point the decision has
+# been made by implementation.
+GATE_DEFAULT = os.environ.get("HDW4S_GATE_MODE", "takeover")
 GATE_ARMS = ("mint", "takeover", "off")
 
 IDLE_TIMEOUT = 120.0

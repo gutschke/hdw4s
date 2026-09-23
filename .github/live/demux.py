@@ -172,6 +172,11 @@ class Client:
 
 class Rig:
     def __init__(self, nslots=3, gate="mint"):
+        # gate=None means DO NOT SET HDW4S_GATE_MODE, so the module's own default
+        # applies. Without this every arm test pinned the mode explicitly and the
+        # shipped default was never exercised -- which is exactly how the router
+        # and the page came to disagree about it while a test named
+        # "default_gate" passed.
         self.tmp = tempfile.mkdtemp(prefix="demux-test-")
         self.rundir = os.path.join(self.tmp, "proxy")
         self.etc = os.path.join(self.tmp, "etc")
@@ -194,7 +199,7 @@ class Rig:
                    HDW4S_DEMUX_STATE=os.path.join(self.tmp, "state"),
                    HDW4S_DEMUX_BIND="127.0.0.1",
                    HDW4S_DEMUX_PORT=str(self.port),
-                   HDW4S_GATE_MODE=gate)
+                   **({"HDW4S_GATE_MODE": gate} if gate is not None else {}))
         for k in ("LISTEN_FDS", "LISTEN_PID"):
             env.pop(k, None)
         self.proc = subprocess.Popen([sys.executable, DEMUX], env=env,
@@ -417,12 +422,49 @@ def test_gate_arms(rig):
         "gate=takeover minted a new session instead of resuming"
 
 
-def test_default_gate_is_mint(rig):
+def test_explicit_mint_arm_mints(rig):
+    """With the mint arm PINNED, a second arrival takes a second session.
+
+    Renamed from "default_gate_is_mint", which is what it was called while
+    testing nothing of the sort: the rig pinned HDW4S_GATE_MODE for every test,
+    so the module's default was never exercised and this name asserted a
+    property nobody measured. The router and the page then disagreed about that
+    default -- the router minting on every arrival, the page expecting to
+    resume -- and this test passed throughout.
+    """
     a = rig.client()
     sid1, _ = arrive(rig, a)
     st, h, _ = a.get("/")
     assert h["location"][0].split("/")[2] != sid1, \
-        "the default arm resumed; the owner ruled that a new tab always mints"
+        "the pinned mint arm resumed instead of minting"
+
+
+def test_shipped_default_resumes_a_returning_browser():
+    """THE DEFAULT, unpinned, and it is the one that ships.
+
+    A browser that already owns a session must get that session back rather than
+    a second one. Minting there is what the owner calls a damage: it costs the
+    visitor the desktop they had and the pool a slot that is never returned.
+
+    Measured as a release blocker before this existed: three requests from one
+    cookie jar returned three different sessions, and the front door then refused
+    everyone with three desktops running and nobody connected to any of them.
+    """
+    rig = Rig(gate=None)          # no HDW4S_GATE_MODE -- the shipped default
+    try:
+        a = rig.client()
+        sid1, _ = arrive(rig, a)
+        st, h, _ = a.get("/")
+        got = h["location"][0].split("/")[2]
+        assert got == sid1, (
+            "the shipped default minted a SECOND session for a browser that "
+            "already had one (%s != %s)" % (got, sid1))
+        # And a browser that has none still mints, which is the new-tab case.
+        b = rig.client()
+        sid2, _ = arrive(rig, b)
+        assert sid2 != sid1, "a fresh browser was given somebody else's session"
+    finally:
+        rig.stop()
 
 
 def test_exhaustion(rig):
@@ -518,9 +560,19 @@ def main():
 
     green = [test_credential, test_two_tabs_diverge, test_cross_identity_refused,
              test_unknown_sid, test_trailing_slash, test_pooled_connection,
-             test_pooled_same_identity, test_gate_arms, test_default_gate_is_mint,
+             test_pooled_same_identity, test_gate_arms, test_explicit_mint_arm_mints,
              test_exhaustion, test_ownership_keying_guard,
              test_dead_sid_gates_and_does_not_mint]
+    # Runs WITHOUT a rig from here, because it builds its own with the gate mode
+    # unpinned -- the shipped default cannot be exercised by a rig that sets it.
+    for fn in (test_shipped_default_resumes_a_returning_browser,):
+        try:
+            fn()
+            check(fn.__name__, True)
+        except AssertionError as e:
+            check(fn.__name__, False, str(e))
+        except Exception as e:
+            check(fn.__name__, False, "error: %r" % e)
     for fn in green:
         rig = Rig()
         try:
