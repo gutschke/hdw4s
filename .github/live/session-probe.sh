@@ -77,6 +77,41 @@ else
   echo "internal port: (no index in /etc/hdw4s/instances)"
 fi
 
+# WHO MAY OPEN THE SLOT'S SOCKET -- or rather, what its ownership and mode are,
+# which until now neither test tier asserted ANYWHERE. A socket that stops being
+# isolated and one that becomes unreachable look identical from every other line
+# in this file, and both leave the whole suite green. This reports; it does not
+# assert, because the assertion needs a caller that does not exist on this box --
+# the group that must be kept out has no member process here, so a rig that looks
+# for one is green before a fix, after it, and after it is reverted. The rig that
+# BUILDS the caller instead is .github/live/socketgate.py.
+#
+# The directory is derived from the unit, never written down: a constant here is
+# a wrong answer waiting for a second deployment to exist.
+pdir="\$(systemctl show -p Listen --value "hdw4s-proxy@\${INST}.socket" 2>/dev/null |
+        sed -n 's|.*[^A-Za-z0-9_]\(/[^ ]*\)/[^/ ]*\.sock.*|\1|p' | head -1)"
+pdir="\${pdir:-/run/hdw4s-proxy}"
+sock="\${pdir}/\${INST}.sock"
+echo "socket       : \${sock}"
+echo "  inode      : \$(stat -c '%U:%G %a' "\${sock}" 2>/dev/null || echo '(absent)')"
+echo "  directory  : \$(stat -c '%U:%G %a' "\${pdir}" 2>/dev/null || echo '(absent)')"
+# A socket FILE is not a listener. "ls" answers a question about the filesystem;
+# "is anything bound" is a question for the kernel, and the two have disagreed
+# here -- an orphan left on disk was enumerated as a live slot while connect()
+# was REFUSED. The verdict is awk's exit status after an exact field comparison,
+# never a text match: a substring test would accept a neighbouring instance whose
+# name happens to contain this one.
+if ss -H -l -x 2>/dev/null |
+   awk -v p="\${sock}" '{for(i=1;i<=NF;i++) if (\$i==p) f=1} END{exit !f}'; then
+  echo "  listener   : bound"
+elif [ -e "\${sock}" ]; then
+  echo "  listener   : NONE BOUND, but the file exists -- an ORPHAN, not a slot"
+else
+  echo "  listener   : none, and no file. Load=\$(systemctl show -p LoadState \
+--value "hdw4s-proxy@\${INST}.socket" 2>/dev/null) \
+Result=\$(systemctl show -p Result --value "hdw4s-proxy@\${INST}.socket" 2>/dev/null)"
+fi
+
 # What is SERVED, not what is on disk. A web root can be present and correct
 # while the server declines it and hands out the packaged client instead.
 root="/usr/share/hdw4s/webroot/\${INST}"
