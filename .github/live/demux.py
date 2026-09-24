@@ -907,6 +907,205 @@ def test_ownership_keying_guard(rig=None):
         "and a returning browser would be routed to a stranger's desktop")
 
 
+def test_state_inventory_guard(rig=None):
+    """Every piece of the router's state has somebody's answer about its purpose.
+
+    THE REFUSAL IS PINNED, not the exit status. The guard has two faces on
+    purpose -- the router logs what uninventoried_state() returns and starts,
+    the suite calls assert_state_is_inventoried() and goes red -- and the
+    moment a check has two dispositions, the choice between them is itself
+    something that can be wired wrong in the quiet direction. If this asserted
+    only "the run exited zero" and the suite ever ended up on the reporting
+    face, it would pass while the guard printed violations into a log nobody
+    reads. So the arms below assert the refusal itself.
+    """
+    m = load_demux()
+    ns = vars(m)
+
+    # PERMIT ARM: the module as it ships has an answer for everything.
+    m.assert_state_is_inventoried(ns)
+    assert m.uninventoried_state(ns) == [], \
+        "the shipped module has state nobody has classified"
+
+    def must_refuse(what, **kw):
+        got = m.uninventoried_state(**kw)
+        assert got, ("the guard PASSED %s -- it is not a guard, and the next "
+                     "container added to that file arrives unclassified and "
+                     "unnoticed" % what)
+        return got
+
+    # REFUSE ARM 1: the inventory stops naming a live piece of state. This is
+    # the arm the brief asked for by name, and it is the realistic one: the
+    # list is edited by hand and a rename is the cheapest way to break it.
+    inv = dict(m.STATE_INVENTORY)
+    del inv["Ownership._refreshed"]
+    must_refuse("an ownership table whose refresh record is unlisted",
+                ns=ns, inventory=inv)
+
+    # REFUSE ARM 2: a new mutable container, in each of the three places one
+    # can appear. A namespace walk alone sees only the first.
+    extra = dict(ns)
+    extra["_seen_hosts"] = {}
+    must_refuse("a new module-level dict", ns=extra)
+
+    class Extra(m.Ownership):
+        def __init__(self):
+            super().__init__()
+            self._last_seen = {}
+    Extra.__module__ = ns["__name__"]
+    must_refuse("a new attribute on the ownership table", ns=ns, cls=Extra)
+
+    class Cached:
+        _hits = {}
+    Cached.__module__ = ns["__name__"]
+    shared = dict(ns)
+    shared["Cached"] = Cached
+    must_refuse("a dict in a class body, shared by every instance", ns=shared)
+
+    # REFUSE ARM 3: a tuple is only as immutable as what is in it. Without the
+    # recursion this is the cheapest way past the check, and it looks like a
+    # constant at the call site.
+    disguised = dict(ns)
+    disguised["PAIRS"] = ({}, {})
+    must_refuse("a tuple of dicts", ns=disguised)
+
+    # REFUSE ARM 4: a global rebound at run time. Its VALUE may be an ordinary
+    # number, so nothing that walks values could ever find it -- this is the
+    # arm that says the source is read as well as the namespace.
+    rebound = os.path.join(tempfile.mkdtemp(), "rebound")
+    src = open(DEMUX).read()
+    marked = src.replace("def main():\n    global COOKIE_LIFETIME",
+                         "def main():\n    global COOKIE_LIFETIME\n    global REALM")
+    assert marked != src, "the fixture did not find main()'s global statement"
+    open(rebound, "w").write(marked)
+    must_refuse("a newly rebound module global", ns=ns, source=rebound)
+
+    # REFUSE ARM 5: an entry describing state that is gone. Nothing else will
+    # ever surface that -- the thing it describes is not there to contradict
+    # it, so every other check keeps passing.
+    stale = dict(m.STATE_INVENTORY)
+    stale["Ownership._by_slot"] = "authority"
+    must_refuse("an entry for state that no longer exists", ns=ns,
+                inventory=stale)
+
+    # REFUSE ARM 6: a detector that could not run must not read as a clean
+    # sweep. An unreadable source is the difference between "nothing to report"
+    # and "nothing was looked at".
+    blind = dict(ns)
+    blind["__file__"] = os.path.join(tempfile.mkdtemp(), "not-here")
+    got = must_refuse("a source it could not parse", ns=blind)
+    assert any("not a clean result" in c for c in got), \
+        "a detector that did not run reported like one that found nothing"
+
+
+def test_the_router_actually_runs_its_state_sweep(rig):
+    """The guard above is exercised; this is that the ROUTER calls it.
+
+    Written because the arms above stayed green with the call deleted from
+    main(). A guard whose green is silence is indistinguishable from a guard
+    nobody invokes, and that is not a hypothetical on this project -- the file
+    you are reading had never been run by anything at all. So the router states
+    the sweep happened, and this reads the statement.
+    """
+    text = rig.stderr_text()
+    assert "state inventory:" in text, (
+        "the router never said it swept its own state, so nothing here can "
+        "tell the sweep from a deleted call:\n%s" % text)
+    assert "0 unclassified" in text, \
+        "the router started with state nobody has classified:\n%s" % text
+    # The COUNT is asserted, and against a floor derived from the module rather
+    # than a number typed here. A main() that deleted the call and kept the
+    # line was measured printing a plausible count from the inventory's own
+    # length; the line now counts what was looked at, which is strictly more
+    # than the inventory holds because most of what is looked at is fine.
+    m = load_demux()
+    n = int(text.split("state inventory: ")[1].split(" name")[0])
+    assert n > len(m.STATE_INVENTORY), (
+        "the router examined %d name(s), which is no more than the inventory "
+        "lists -- that is a count restated, not a sweep performed" % n)
+    # And the other half of this seat's work: the re-check has to be running,
+    # not merely defined. Its steady state is silence too, so the same trap
+    # applies -- a thread nobody started looks exactly like a quiet one.
+    assert "re-checked against the pool every" in text, (
+        "the identity lifetime is not being re-checked while we run, so a "
+        "widened idle window would again wait for somebody to be refused:\n%s"
+        % text)
+
+
+def test_identity_lifetime_is_rechecked_without_a_refusal(rig=None):
+    """The staleness warning fires when nobody has been turned away.
+
+    Its only triggers were a start and an exhausted pool. An administrator who
+    widens an idle window on a running box moves the desktop clock and not the
+    identity clock, and on a box with a spare slot nothing would ever have said
+    so -- the check existed and had no way to run.
+
+    The second arm matters as much as the first: a timer that restated a
+    standing complaint every quarter hour is a check that fires on an ordinary
+    state, and those get switched off, after which they protect nothing.
+    """
+    m = load_demux()
+    life = 30 * 86400
+
+    def poll(seen, windows):
+        said = []
+        return m.poll_cookie_policy(seen, life, windows=windows,
+                                    say=said.append), said
+
+    # A correct pool is silent from cold. Without this the arm below could be
+    # satisfied by something that complains about everything.
+    _, quiet = poll(set(), [("ephemeral0", 7 * 86400)])
+    assert not quiet, "an ordinary pool produced a warning: %r" % quiet
+
+    # REFUSE ARM: a window widened past the pinned identity, nobody refused.
+    seen, said = poll(set(), [("ephemeral0", 45 * 86400)])
+    assert any("not shorter than" in s for s in said), (
+        "an idle window longer than the pinned identity went unreported with "
+        "no refusal to trigger it: %r" % said)
+    assert any("Nobody was turned away" in s for s in said), \
+        "the line does not say why it appeared, so a reader cannot act on it"
+
+    # THE ANTI-SPAM ARM. Same state, same answer, and it must be silent.
+    seen, again = poll(seen, [("ephemeral0", 45 * 86400)])
+    assert not again, (
+        "a standing complaint was restated: four lines an hour for as long as "
+        "the condition lasts is how a check gets disabled: %r" % again)
+
+    # A NEW slot going bad must not be hidden behind the standing one.
+    seen, more = poll(seen, [("ephemeral0", 45 * 86400), ("ephemeral1", 0)])
+    assert any("never reaped" in s for s in more), \
+        "a second slot went bad and was hidden by the first: %r" % more
+
+    # And the question is closed by the instrument that raised it.
+    seen, cleared = poll(seen, [("ephemeral0", 7 * 86400),
+                                ("ephemeral1", 7 * 86400)])
+    assert any("no longer applies" in s for s in cleared), (
+        "the condition cleared and the log still carries two warnings: a "
+        "warning nobody ever retracts teaches a reader to ignore them")
+    assert seen == set(), "it kept complaints that no longer apply"
+
+    # A poll that raises must not take the watcher down silently. A dead
+    # background thread looks exactly like a clean box.
+    said = []
+    real_log, real_windows = m.log, m.idle_windows
+    m.log = said.append
+
+    def boom(*a, **kw):
+        raise OSError("the pool table vanished")
+
+    m.idle_windows = boom
+    t = threading.Thread(target=m.watch_cookie_policy,
+                         args=(life, set()), kwargs=dict(every=0.05),
+                         daemon=True)
+    t.start()
+    time.sleep(0.4)
+    m.idle_windows, m.log = real_windows, real_log
+    assert any("re-check failed" in s for s in said), \
+        "a failed re-check was silent: %r" % said
+    assert t.is_alive(), \
+        "one failed poll killed the watcher, and nothing would have said so"
+
+
 def main():
     print("== hdw4s-demux, stand-in slots, no browser ==")
     print("Real: the demultiplexer, TCP, HTTP, cookies, UNIX upstreams.")
@@ -921,7 +1120,10 @@ def main():
              test_refusal_is_logged_with_what_it_takes_to_judge_it,
              test_last_request_record_is_written_where_the_connection_is_accepted,
              test_a_session_cannot_set_our_cookie,
-             test_cookie_lifetime_guard, test_refresh_rate_limit]
+             test_cookie_lifetime_guard, test_refresh_rate_limit,
+             test_state_inventory_guard,
+             test_the_router_actually_runs_its_state_sweep,
+             test_identity_lifetime_is_rechecked_without_a_refusal]
 
     # Tests whose rig is not the default one. A pool with no instance table
     # derives the floor and nothing else, so a test about the DERIVATION has to

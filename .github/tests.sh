@@ -1769,8 +1769,21 @@ echo '== the router, against stand-in slots =='
   [ "${rc}" -eq 0 ] || printf '%s\n' "${out}"
   # A suite that silently ran nothing exits 0 too. Its own summary is the only
   # thing that can tell the difference, so it is asserted rather than trusted.
+  #
+  # THE SECOND ARM WAS WIRED TO THE WRONG SIGNAL and was measured firing on a
+  # perfectly good run. It looked for the substring "0 passed" in the summary,
+  # which every count ending in a zero contains: a thirty-test suite reports
+  # "30 passed" and was failed for having run nothing. A guard that cries wolf
+  # on an ordinary state is removed, and this one had the additional property
+  # of being untestable by the person who tripped it -- adding one test made it
+  # green again for no reason they could see. So it now reads the number.
   has 'and it actually ran its checks' "${out}" '0 failed'
-  hasnt 'and none of them was skipped away' "${out}" '0 passed'
+  ran="$(printf '%s\n' "${out}" | sed -n 's/^\([0-9][0-9]*\) passed.*/\1/p' | tail -1)"
+  if [ -n "${ran}" ] && [ "${ran}" -gt 0 ]; then
+    ok 'and none of them was skipped away'
+  else
+    bad 'and none of them was skipped away' "the suite reported [${ran:-no}] passing tests"
+  fi
 )
 
 echo

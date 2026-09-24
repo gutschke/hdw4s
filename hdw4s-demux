@@ -452,6 +452,115 @@ def cookie_policy_complaints(lifetime, windows):
     return out
 
 
+# How often the check above is asked again on a running box. Not a tuning
+# number: the condition it looks for is a person editing a conf file, and the
+# response is a person restarting the front door, so anything inside the human
+# loop is fast enough. Fifteen minutes re-reads a handful of small files on a
+# tmpfs and costs nothing measurable.
+COOKIE_POLICY_EVERY = 900.0
+
+
+def poll_cookie_policy(seen, lifetime, windows=None, say=None):
+    """Ask cookie_policy_complaints() again, and say only what CHANGED.
+
+    THE GAP THIS CLOSES. The complaint is real, it can genuinely go red, and
+    until now the only two things that ever asked it were main() at start and
+    log_refusal() when the pool was exhausted. So an administrator who raises
+    HDW4S_IDLE_DAYS on a running box moves the desktop clock and not the
+    identity clock -- the single state this file's own essay calls
+    indefensible, a desktop alive with its owner locked out -- and nothing says
+    so until somebody is turned away. On a box with a spare slot that is never.
+    A check whose trigger is a second failure is not a check on the first one.
+
+    WHY IT SAYS ONLY WHAT CHANGED, and this is the whole of the design rather
+    than a politeness. A timer that restated a standing complaint every fifteen
+    minutes would put the same line in the log four times an hour for as long
+    as the condition lasted, and a check that fires on an ordinary state gets
+    turned off -- after which it protects nothing at all, which is strictly
+    worse than the gap it was written for. So the state is carried in SEEN and
+    only the difference is printed: silent while nothing moves, loud once at
+    the moment it moves, and loud again when it clears.
+
+    A complaint DISAPPEARING is reported too. The instrument that raised a
+    question is the one that should close it; leaving the log with a warning
+    and no retraction teaches a reader that the warnings do not mean anything.
+
+    WHAT WAS REJECTED.
+
+      An external timer unit. There is already an hdw4s-check.timer and it
+      looks like the tidy home for this, and it cannot do the job: the
+      comparison is between a lifetime PINNED INSIDE THIS PROCESS and the
+      configuration on disk. Another process would have to guess the pinned
+      value, and a check that guesses one of its two inputs is answering a
+      different question. That is decisive, and it is why this is a thread.
+
+      Firing on every arrival, rate limited. Cheaper to reason about, but it
+      makes the trigger a visitor again -- a quieter visitor than a refused
+      one, but the box this is written for is the box nobody is visiting.
+
+      Watching the files for changes instead of re-reading them. It fires
+      exactly when the condition can newly become true, which is elegant, and
+      it buys nothing here: the answer is wanted within minutes, not
+      milliseconds, and a watch adds descriptors, a failure mode when a file is
+      replaced rather than written, and a second mechanism to keep true.
+
+      Making it fatal, or restarting ourselves when the configuration moves.
+      The warning's own text says the repair is to restart the front door.
+      Doing that unasked would drop every live session to fix a number that
+      only matters to arrivals, and the operator is the one who gets to choose
+      the moment.
+
+    Takes the windows and the reporter as parameters so it can be handed a pool
+    it did not read and a collector that is not the log -- the arms below are
+    exercised without a conf file, and a version that read its own inputs could
+    not have been.
+    """
+    say = log if say is None else say
+    if windows is None:
+        # The default reporter is swallowed here and nowhere else. idle_windows()
+        # shouts about an unreadable value, which is right on a path that runs
+        # once; on a path that runs every fifteen minutes forever it is the
+        # repetition this function exists to avoid. Nothing is lost: an
+        # unreadable window has its own complaint in the set below, and that one
+        # is printed on the transition like any other.
+        windows = idle_windows(complain=lambda _m: None)
+    now = set(cookie_policy_complaints(lifetime, windows))
+    for complaint in sorted(now - seen):
+        say("WARNING: %s" % complaint)
+        say("  Nobody was turned away to produce this line. The pool's"
+            " configuration has moved under an identity lifetime that was"
+            " pinned at start, so a desktop can now outlive the identity that"
+            " owns it -- and its owner then cannot reach it or close it.")
+    gone = seen - now
+    if gone:
+        say("the identity-lifetime warning no longer applies (%d cleared):"
+            " every configured window is now shorter than the pinned"
+            " identity." % len(gone))
+    return now
+
+
+def watch_cookie_policy(lifetime, seen=None, every=COOKIE_POLICY_EVERY):
+    """Run poll_cookie_policy() forever. Started as a daemon thread by main().
+
+    SEEN is seeded with what main() already printed, so a standing complaint is
+    stated once at start rather than again fifteen minutes later.
+
+    It sleeps FIRST and swallows nothing but its own failure to read: this runs
+    beside the accept loop, and a thread that dies takes the check with it
+    silently, which is the shape of defect the whole file is about. A failure
+    to read the pool is therefore reported and the loop continues.
+    """
+    seen = set() if seen is None else set(seen)
+    while True:
+        time.sleep(every)
+        try:
+            seen = poll_cookie_policy(seen, lifetime)
+        except Exception as e:      # noqa: BLE001 -- see above
+            log("WARNING: the identity-lifetime re-check failed: %r" % e)
+            log("  It will be tried again, but until it succeeds nothing is"
+                " watching for a widened idle window.")
+
+
 def assert_cookie_outlives_idle(derive=derive_cookie_lifetime):
     """Prove the derivation, in BOTH directions, at every start.
 
@@ -634,6 +743,321 @@ def assert_ownership_keying(factory=Ownership):
     for sid in probe.owned_by(a):
         assert probe.lookup(sid)["identity"] == a, \
             "identity A owns a session belonging to someone else"
+
+
+# --------------------------------------------------------------------------
+# Everything this process remembers, and what each piece of it is FOR
+# --------------------------------------------------------------------------
+#
+# The two guards above each prove one invariant. This one proves something
+# weaker and broader, and it exists because of what the two of them cannot see:
+# they say nothing at all about state that did not exist when they were written.
+#
+# THE FAILURE IT IS AIMED AT. Every defect this file carries a paragraph about
+# is the same shape -- two records of one fact drifting apart, or one record
+# being read as a different kind of thing than it is. The cookie was a fuse
+# because a lifetime was read as a sliding window. The ownership table was
+# nearly keyed on the slot because an address was read as an identity. A
+# desktop's last-request time and the sweep's sample of it are two clocks that
+# disagree, and saying so out loud is the whole of log_refusal(). In each case
+# the code was correct line by line and the mistake was in what the state MEANT.
+#
+# So the inventory below records the meaning, in three kinds, and the kinds are
+# not decoration -- they are what tells a reader whether losing the thing is a
+# cost or a catastrophe:
+#
+#   authority     Somebody is refused or admitted on the strength of it. Losing
+#                 it loses a person their desktop. It may never be rebuilt from
+#                 a guess, and a second copy of it is a second answer.
+#   cache         An answer we could recompute. Losing it costs time and
+#                 nothing else. If losing one can change a decision it was
+#                 never a cache, and calling it one is how the mistake starts.
+#   rate limiter  A record of when we last did something, kept only to avoid
+#                 doing it too often. Losing it costs one redundant action.
+#                 The tell is that clearing it wholesale must be harmless --
+#                 due_for_refresh() does exactly that when it grows too large,
+#                 which is only sound BECAUSE it is this kind.
+#
+#   not state     Listed although it records nothing, because the alternative
+#                 to listing it is an exemption no reader can see, and an
+#                 unwritten exemption is the same defect as an unlisted
+#                 container. Two of them: the one write this module makes into
+#                 somebody else's namespace, and this table itself, which is a
+#                 dict and was duly reported by its own first run.
+#
+# WHY A LIST AND NOT A CONVENTION. Whoever adds the next container will also be
+# correct line by line. The list is cheap to satisfy and impossible to satisfy
+# by accident: it cannot be filled in without answering "which of the three is
+# this", and that question is the one nobody asked about the cookie or the
+# ownership key.
+#
+# WHAT THIS DELIBERATELY DOES NOT CLAIM, because a list read as exhaustive is
+# worse than no list -- it silently permits whatever it forgot:
+#
+#   * Only module-level and class-level state is inventoried, plus the
+#     attributes one instance of the ownership table is born with. State a
+#     function builds and hands to something that keeps it is invisible here.
+#   * An imported module's namespace is not walked. DURATION is the grammar
+#     this file reads its idle windows with; nothing here writes to it, and
+#     nothing here would notice if something did.
+#   * A lock is not state and is skipped by type. A lock guards an answer, it
+#     never holds one, and losing one costs no answer -- but note what that
+#     means: this cannot see a lock protecting the wrong table.
+#   * It is a bookkeeping check. It asks whether somebody wrote down what a
+#     piece of state is for. It cannot tell whether what they wrote is TRUE.
+
+STATE_KINDS = ("authority", "cache", "rate limiter", "not state")
+
+STATE_INVENTORY = {
+    # Who owns which session. The refusal in serve() is decided from this, and
+    # it is the reason a reaped slot does not hand a stranger a desktop.
+    "Ownership._by_sid": "authority",
+    # The other direction of the same fact, and the one arrival() resumes from.
+    "Ownership._by_identity": "authority",
+    # When each identity's cookie was last wound on. Cleared wholesale above
+    # the bound; the cost of that is one redundant Set-Cookie header.
+    "Ownership._refreshed": "rate limiter",
+    # When each slot's last-request file was last rewritten. Losing it costs
+    # one extra write to a tmpfs.
+    "_touched": "rate limiter",
+    # Rebound once, by main(), from the pool the box is configured with. An
+    # authority: it is the Max-Age a browser is handed, so a wrong value locks
+    # somebody out of a running desktop. Pinned on purpose -- and pinned is
+    # exactly why cookie_policy_complaints() has to be asked again against a
+    # freshly read pool rather than against the value it was derived from.
+    "COOKIE_LIFETIME": "authority",
+    # Set by load_duration() so that importing the grammar beside this script
+    # cannot leave a .pyc behind. An interpreter flag, not a record of
+    # anything, and listed rather than exempted.
+    "sys.dont_write_bytecode": "not state",
+    # This table. It is a dict, so the sweep found it on its first run and said
+    # so -- which is the sweep working, not a nuisance: any command that
+    # searches for its own subject can match itself, and the cheap escape
+    # would have been a special case that also hid the next table somebody
+    # adds. Written once at import and never assigned to afterwards.
+    "STATE_INVENTORY": "not state",
+}
+
+
+def _frozen(value):
+    """True when nothing can be written into VALUE.
+
+    A tuple is only as immutable as what is in it, so this recurses rather than
+    trusting the outer type: a tuple of dicts is a mutable container wearing an
+    immutable label, and that is precisely the disguise this check exists to
+    see through.
+    """
+    if isinstance(value, (bool, int, float, complex, str, bytes, bytearray,
+                          type(None), range, slice)):
+        return not isinstance(value, bytearray)
+    if isinstance(value, (tuple, frozenset)):
+        return all(_frozen(v) for v in value)
+    return False
+
+
+def _not_state(value):
+    """True for things that are code or a lock rather than a record.
+
+    Functions, classes and modules are what the file IS; a lock is how a record
+    is guarded rather than a record. Classes are walked separately for the
+    attributes hung on them, so skipping them here is not skipping them.
+    """
+    import types
+    if isinstance(value, (types.FunctionType, types.BuiltinFunctionType,
+                          types.MethodType, types.ModuleType, type)):
+        return True
+    return isinstance(value, (type(threading.Lock()), type(threading.RLock()),
+                              threading.Condition, threading.Event,
+                              threading.Semaphore))
+
+
+def uninventoried_state(ns, cls=None, inventory=None, source=None,
+                        examined=None):
+    """Every piece of this module's state that nobody has said the purpose of.
+
+    REPORTS rather than refuses, and that split is deliberate. The test tier
+    asserts on what comes back and goes red; the router logs it and starts.
+    Those are opposite needs and the wrong way to serve them is a mode flag,
+    because the flag is then a check that can be wired wrong in the quiet
+    direction -- set to "warn" in the suite, which would go green while this
+    printed violations into a log nobody reads. There is no flag. There is one
+    function that returns a list, and each caller is visibly one or the other.
+
+    It takes the NAMESPACE rather than finding its own, for the same reason
+    assert_ownership_keying() takes a factory and assert_cookie_outlives_idle()
+    takes a derivation: a version that inspected only itself could not fail for
+    any module but the one it already trusted. Handed a namespace with an extra
+    dict in it, this goes red, and that is how it was seen to go red.
+
+    A dict is also the right handle for the caller to be given. Building a
+    module with an unlisted container in it, to prove the check can see one,
+    should not require editing the module under test -- we have already had a
+    red arm on this project that mutated the checker along with the code and
+    proved nothing.
+
+    EXAMINED, if a list is given, collects every name this actually looked
+    at. It exists so the caller can say out loud that the sweep RAN rather
+    than that it found nothing -- and so that sentence cannot be written
+    without calling this. A count of the inventory's own length would have
+    been restatable by a main() that had deleted the call, and was:
+    measured, by deleting it and watching the suite stay green.
+    """
+    import ast
+    cls = ns.get("Ownership") if cls is None else cls
+    inventory = STATE_INVENTORY if inventory is None else inventory
+    out = []
+    found = set()
+    examined = [] if examined is None else examined
+
+    def check(name, value):
+        found.add(name)
+        examined.append(name)
+        if _frozen(value) or _not_state(value):
+            return
+        if name not in inventory:
+            out.append("%s is a %s that nothing has classified; add it to "
+                       "STATE_INVENTORY as one of %s, or it is state nobody "
+                       "has decided the meaning of"
+                       % (name, type(value).__name__, ", ".join(STATE_KINDS)))
+
+    # 1. Module globals, as they stand after import.
+    mod_name = ns.get("__name__")
+    for k, v in sorted(ns.items()):
+        if k.startswith("__"):
+            continue
+        check(k, v)
+
+    # 2. Attributes hung on the classes this module defines. A dict in a class
+    #    body is shared by every instance ever made, which is the sharpest
+    #    version of the defect and the one a globals walk cannot see: it does
+    #    not look like a global and it does not look like instance state.
+    for k, v in sorted(ns.items()):
+        if isinstance(v, type) and getattr(v, "__module__", None) == mod_name:
+            for a, av in sorted(vars(v).items()):
+                if a.startswith("__") or callable(av):
+                    continue
+                check("%s.%s" % (k, a), av)
+
+    # 3. What one ownership table is born with. Built rather than read off the
+    #    class, because these attributes exist only once __init__ has run.
+    if cls is not None:
+        probe = cls()
+        for a, av in sorted(vars(probe).items()):
+            # Matched against every name in the inheritance chain, so a
+            # subclass inherits its base's classifications and only an
+            # attribute NOBODY has classified is reported. Without this a
+            # harness that subclasses Ownership to add one dict would be told
+            # about all four.
+            label = "%s.%s" % (type(probe).__name__, a)
+            for base in type(probe).__mro__:
+                if "%s.%s" % (base.__name__, a) in inventory:
+                    label = "%s.%s" % (base.__name__, a)
+                    break
+            check(label, av)
+
+    # 4 and 5 read the SOURCE, because two kinds of mutable state leave no
+    #   trace in a namespace walk: a global that is rebound at run time (its
+    #   value may be an ordinary number) and a write into another module's
+    #   namespace. The file parsed is the one this namespace was loaded from,
+    #   derived and never named -- a constant path here would be the "which
+    #   copy is running" trap inside the check written to notice it.
+    path = ns.get("__file__") if source is None else source
+    tree = None
+    if path:
+        try:
+            with open(path, "r") as f:
+                tree = ast.parse(f.read(), filename=path)
+        except (OSError, SyntaxError) as e:
+            # A detector that could not run says so. Silence here would read
+            # exactly like a clean sweep, which is the one thing it must not.
+            out.append("the source at %s could not be read or parsed (%s), so "
+                       "rebound globals and writes into other modules were not "
+                       "checked at all -- this is not a clean result" % (path, e))
+    else:
+        out.append("this namespace does not say which file it came from, so "
+                   "rebound globals and writes into other modules were not "
+                   "checked at all -- this is not a clean result")
+
+    if tree is not None:
+        imported = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    imported.add((a.asname or a.name).split(".")[0])
+            elif isinstance(n, ast.ImportFrom):
+                for a in n.names:
+                    imported.add(a.asname or a.name)
+        for n in ast.walk(tree):
+            # 4. A global that some function rebinds. COOKIE_LIFETIME is a
+            #    number, so no walk of values could ever have found it.
+            if isinstance(n, ast.Global):
+                for name in n.names:
+                    found.add(name)
+                    examined.append(name)
+                    if name not in inventory:
+                        out.append("%s is a module global rebound at run time "
+                                   "(line %d) and nothing has classified it; "
+                                   "a value that changes after start is state "
+                                   "however simple it looks"
+                                   % (name, n.lineno))
+            # 5. A write into an imported module's namespace. That state
+            #    outlives this module and is shared with everything else in
+            #    the interpreter, so it is the least visible of the lot.
+            targets = []
+            if isinstance(n, ast.Assign):
+                targets = n.targets
+            elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+                targets = [n.target]
+            for t in targets:
+                if isinstance(t, ast.Attribute) and \
+                        isinstance(t.value, ast.Name) and \
+                        t.value.id in imported:
+                    name = "%s.%s" % (t.value.id, t.attr)
+                    found.add(name)
+                    examined.append(name)
+                    if name not in inventory:
+                        out.append("%s is written at line %d, which puts state "
+                                   "in another module's namespace; nothing has "
+                                   "classified it" % (name, n.lineno))
+
+    # 6. THE OTHER DIRECTION, and it is the one that rots quietly. An entry
+    #    naming something that has been removed or renamed still reads as a
+    #    considered decision about a live piece of state. Nothing else will
+    #    ever surface it: the thing it describes is simply not there to
+    #    contradict it, so every check keeps passing.
+    for name in sorted(inventory):
+        if name not in found:
+            out.append("STATE_INVENTORY classifies %s as %r, and no such state "
+                       "exists any more; the classification is describing "
+                       "something that has been removed or renamed"
+                       % (name, inventory[name]))
+
+    # 7. And a classification has to be one of the kinds, or the list records
+    #    a word rather than a decision.
+    for name, kind in sorted(inventory.items()):
+        if kind not in STATE_KINDS:
+            out.append("STATE_INVENTORY classifies %s as %r, which is not one "
+                       "of %s" % (name, kind, ", ".join(STATE_KINDS)))
+    return out
+
+
+def assert_state_is_inventoried(ns, cls=None, inventory=None):
+    """The refusing face of uninventoried_state(), for the test tier.
+
+    The router does NOT call this; it logs what the reporter returns and
+    starts. An unclassified container is a mistake made while editing this
+    file, not a condition a visitor or an administrator can create, so paying
+    for it with a front door that will not come up is the wrong direction --
+    and a guard that takes the service down over bookkeeping is removed inside
+    a week, after which it guards nothing.
+
+    That is only safe because the suite runs THIS, and asserts on the refusal
+    itself rather than on an exit status. If it did not, the two faces would be
+    a mode selector with nobody watching the quiet setting.
+    """
+    complaints = uninventoried_state(ns, cls, inventory)
+    assert not complaints, "state nobody has classified:\n  " + \
+        "\n  ".join(complaints)
 
 
 # --------------------------------------------------------------------------
@@ -1427,6 +1851,38 @@ def main():
     assert_ownership_keying(Ownership)
     assert_cookie_outlives_idle(derive_cookie_lifetime)
 
+    # The third guard REPORTS and does not refuse, and the asymmetry with the
+    # two above is deliberate. Those two fail closed because what they catch is
+    # a router that would hand somebody a stranger's desktop or lock somebody
+    # out of their own. This one catches a container nobody wrote a purpose
+    # for, which is a mistake made while editing this file -- no visitor and no
+    # administrator can create it -- so the person who will see this line is
+    # the person who just caused it, on their first run. Taking the front door
+    # down for that would be a bookkeeping slip paid for with an outage, and a
+    # guard that does that is removed within the week.
+    #
+    # It is still a real guard because the suite calls the refusing face:
+    # .github/live/demux.py asserts on the refusal itself, so this cannot
+    # quietly become a line nobody reads.
+    examined = []
+    unclassified = uninventoried_state(globals(), Ownership, STATE_INVENTORY,
+                                       examined=examined)
+    for complaint in unclassified:
+        log("WARNING: %s" % complaint)
+    # SAID OUT LOUD EVEN WHEN CLEAN, and that is not a banner. A guard whose
+    # green is silence cannot be told apart from a guard nobody called -- which
+    # is this project's own recorded defect, a whole suite believed green that
+    # had never been invoked by anything at all. The suite asserts on this
+    # line, so deleting the call above turns a test red instead of turning a
+    # check into decoration.
+    #
+    # It counts what the sweep LOOKED AT, not what the inventory holds, and
+    # that distinction was measured rather than reasoned: the first version
+    # printed len(STATE_INVENTORY), and a main() with the call ripped out
+    # printed the same reassuring number while the suite stayed green.
+    log("state inventory: %d name(s) examined, %d unclassified"
+        % (len(examined), len(unclassified)))
+
     expected_b64 = load_credential()
     own = Ownership()
 
@@ -1440,10 +1896,26 @@ def main():
            ", ".join("%s=%s" % (i, describe_window(s))
                      for i, s in sorted(windows, key=lambda r: r[0]))
            or "none configured"))
-    for complaint in cookie_policy_complaints(COOKIE_LIFETIME, windows):
+    standing = cookie_policy_complaints(COOKIE_LIFETIME, windows)
+    for complaint in standing:
         log("WARNING: %s" % complaint)
         log("  While that holds, a desktop can outlive the identity that owns"
             " it -- and its owner then cannot reach it or close it.")
+
+    # AND ASKED AGAIN WHILE WE RUN. The lifetime above is pinned and the
+    # configuration is not, so an administrator who widens an idle window on a
+    # live box moves one clock and not the other. Until now the only thing that
+    # ever noticed was log_refusal(), which fires when the pool is exhausted --
+    # so on a box with a spare slot the warning had no trigger at all and the
+    # gap could stand indefinitely. Seeded with what was just printed, so the
+    # first thing this says is a CHANGE and not an echo.
+    threading.Thread(target=watch_cookie_policy,
+                     args=(COOKIE_LIFETIME, set(standing)),
+                     daemon=True).start()
+    # For the same reason as above: a thread that was never started is silent
+    # in exactly the way a thread with nothing to report is silent.
+    log("the identity lifetime is re-checked against the pool every %d minute(s)"
+        % int(COOKIE_POLICY_EVERY // 60))
 
     # The sweep's record is the second of the two columns the refusal log
     # prints. Whether it can be read at all is a property of this process, not
