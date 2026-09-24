@@ -1764,7 +1764,14 @@ echo '== the router, against stand-in slots =='
 # how a router that discarded its own configuration passed everything. Wiring
 # it in is the repair; a suite nobody runs is not a weak suite, it is no suite.
 (
-  out="$("${ROOT}/.github/live/demux.py" 2>&1)"; rc=$?
+  # THIS FILE IS "#!/bin/bash -e", so a bare assignment from a failing command
+  # KILLS THE SCRIPT BEFORE rc IS READ -- silently, with no assertion recorded
+  # and no message. Measured at the merge: the router suite went non-zero for a
+  # known reason and the whole run died after printing this group's header,
+  # which made the assertion below unreachable. A guard for "the suite failed"
+  # that cannot run when the suite fails is the defect it was written against.
+  rc=0
+  out="$("${ROOT}/.github/live/demux.py" 2>&1)" || rc=$?
   is 'the router suite passes' "${rc}" '0'
   [ "${rc}" -eq 0 ] || printf '%s\n' "${out}"
   # A suite that silently ran nothing exits 0 too. Its own summary is the only
