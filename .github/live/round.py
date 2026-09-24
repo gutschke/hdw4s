@@ -84,14 +84,72 @@ def visit_url(url):
 
 PASS, FAIL, SKIP, UNDEC, GATED = "PASS", "FAIL", "SKIP", "UNDECIDED", "GATED"
 
+# A sixth, and it is not a synonym for any of the five.
+#
+# UNDECIDED means the question was PUT and the answer was unclear. UNASKABLE
+# means it was never put, because this apparatus cannot reach the state the row
+# exists to look at -- no such device, no such page, nothing to photograph. The
+# distinction is the difference between "we looked and could not tell" and "we
+# did not look", and collapsing them is how a row stops being run while still
+# printing a line every round. SKIP stays what it was: the ROUND did not reach
+# the state, though the apparatus could have.
+UNASKABLE = "UNASKABLE"
+
 # The page-side video counter. Its LEVEL is not liveness -- a frozen tab keeps
 # whatever count it reached -- so every use of it here is a DELTA over a window.
-CHUNKS = "window.videoChunksReceived || 0"
+#
+# IT RETURNS None WHEN THERE IS NO COUNTER, AND THAT IS THE WHOLE POINT. This
+# used to be `window.videoChunksReceived || 0`, which maps an ABSENT counter and
+# a counter sitting at zero onto the same value. The counter is published by
+# the upstream Selkies client and by nothing in this repository, so the day
+# upstream renames it every window reads 0 -> 0, `moving()` says no video, and
+# arm 1 reports FAIL -- a product defect that does not exist, reported by an
+# instrument that cannot see. Measured 2026-09-23 in real Chrome on the real
+# gate page before the client module had loaded: `... || 0` returned 0, this
+# expression returned None. Absent is not zero; the arms now say UNDECIDED.
+CHUNKS = ("(typeof window.videoChunksReceived === 'number'"
+          " ? window.videoChunksReceived : null)")
 
-# The gate, by the element the product actually draws, not by its wording.
-GATE_UP = ("(()=>{var e=document.getElementById('hdw4s-gate');"
-           "return e ? !e.hidden : null})()")
-GO = "document.getElementById('hdw4s-go')"
+# The gate and its button, as RAW FACTS. Nothing here decides anything: what
+# the facts MEAN lives in shown() below, in Python, where the self-test points
+# at it. Two implementations plus a test is three things to keep in step.
+#
+# WHY GEOMETRY AND NOT `.hidden`, and it is measured rather than argued. This
+# used to be `e ? !e.hidden : null`. hdw4s-gate-index carries a stylesheet
+# whose comment says an author `display:flex` beats the user-agent
+# `[hidden]{display:none}`, so without its `!important` rule the card stays on
+# the screen while every DOM probe reads back hidden. That state was produced
+# on purpose 2026-09-23 -- real Chrome, the real gate page, one extra rule
+# appended after the product's own <style>: the card measured 1279x656 and the
+# screenshot counted 1445 colours, and `!e.hidden` said the gate was DOWN. A
+# detector for "is the product still asking" that reads an attribute instead of
+# the picture cannot see the one failure its own stylesheet exists to prevent.
+#
+# The `hidden` flag is still collected, because hidden-but-painted is worth
+# printing on the detail line: it is a product defect, not a rig defect.
+def _facts(el_id):
+    return ("(()=>{var e=document.getElementById(%s);"
+            "if(!e) return {present:false};"
+            "var r=e.getBoundingClientRect();var s=getComputedStyle(e);"
+            "return {present:true,hidden:!!e.hidden,display:s.display,"
+            "visibility:s.visibility,w:r.width,h:r.height};})()"
+            % json.dumps(el_id))
+
+
+GATE_FACTS = _facts("hdw4s-gate")
+GO_FACTS = _facts("hdw4s-go")
+
+# Clicking Connect, and SAYING WHAT HAPPENED. The old form was
+# `document.getElementById('hdw4s-go') && document.getElementById(...).click()`,
+# whose value is undefined when the button was found and clicked and undefined
+# when `.click()` did nothing -- measured, it returned None in every state,
+# including one where the button was there. It carried no information at all,
+# so click_gate() reported "clicked" on the strength of a different detector.
+# This returns one of three primitives and the caller records which.
+CLICK_GO = ("(()=>{var e=document.getElementById('hdw4s-go');"
+            "if(!e) return 'absent';"
+            "if(!e.getClientRects().length) return 'not-rendered';"
+            "e.click(); return 'clicked';})()")
 
 # The product's own wording for the capacity refusal, and the ONLY thing that
 # separates it from the 502 the same builder produces when a desktop dies.
@@ -99,10 +157,27 @@ GO = "document.getElementById('hdw4s-go')"
 # there instead of quietly turning a crash into a pass.
 CAPACITY_TITLE = "Every desktop is in use"
 
-# The session id, taken from the address bar rather than from anything the page
-# says about itself: /s/<sid>/ is what the demux issued, and a page that lies
-# about its own identity is exactly the failure an arm here is looking for.
-SID = r"(((location.pathname.match(/^\/s\/([^\/]+)\//))||[])[2])||''"
+# The address bar, and NOTHING BUT the address bar. The session id is derived
+# from this in Python by sid_of(), which is the one the self-test exercises.
+#
+# WHY THE EXTRACTION IS NOT DONE IN THE PAGE, and it is the reason four rows of
+# the first real run were lost. This used to ask the page for the id directly:
+#
+#   (((location.pathname.match(/^\/s\/([^\/]+)\//))||[])[2])||''
+#
+# which reads capture group TWO of a regex that has ONE, so it evaluated to ''
+# on every address a browser could possibly be at. Measured 2026-09-23 in a
+# real Chrome parked on /s/abc123def/: the expression returned '', the same
+# expression indexed [1] returned 'abc123def'.
+#
+# The self-test was green throughout, and could not have been anything else: it
+# exercised sid_of(), a PYTHON TWIN of that expression, and nothing ever
+# asserted the two agreed. A detector checked in one language and run in
+# another is two detectors, and only one of them was ever pointed at a known
+# answer. So the repair is not a second self-test for the JS -- it is deleting
+# the twin. The page is asked only for a primitive it cannot get wrong, and
+# every rule about what an address means lives in sid_of(), once.
+PATHNAME = "location.pathname"
 
 
 # --------------------------------------------------------------------------
@@ -112,18 +187,70 @@ SID = r"(((location.pathname.match(/^\/s\/([^\/]+)\//))||[])[2])||''"
 rows = []
 
 
-def record(name, outcome, detector, detail=""):
+def record(name, outcome, detector, detail="", artefact=None, question=""):
     """One row. `detector` is not decoration.
 
     An arm whose detector is "no error" is not an arm, so every row has to name
     what was actually observed. It is printed on every run because the thing
     compared between rounds is the shape -- these names, these detectors -- and
     a detector that quietly changed is how a matrix goes green by a new route.
+
+    `artefact` and `question` are the row's instruction to a reader, and they
+    are a pair on purpose. A row that saves a file and says "see the evidence
+    directory" has built a filing cabinet; a row that names the file AND the
+    specific question somebody is meant to answer from it has left an
+    instruction. The first real run left two undecided rows sitting as "awaiting
+    a human verdict" across two exchanges, and opening the image took one step
+    and produced three facts -- one of which was about a different row
+    altogether.
     """
-    rows.append((name, outcome, detector, detail))
+    rows.append((name, outcome, detector, detail, artefact, question))
     print("  %-9s %-44s [%s] %s" % (outcome, name, detector, detail),
           flush=True)
+    if artefact:
+        print("            READ %s -- %s" % (artefact, question), flush=True)
     return outcome == PASS
+
+
+def print_reading_list(counts):
+    """What a person must OPEN before this round means anything.
+
+    Pixel counting is the default and stays the default: it is cheap, it runs
+    unattended, and a row answering cleanly should not have its picture read.
+    This is the other half of that -- when a row is NOT answering cleanly, the
+    image gets read now rather than filed, because a wild goose chase is what
+    the deferral buys.
+
+    Two triggers, and the second is the one nobody would have written down:
+
+      1. An undecided row that saved an artefact. Undecided plus a file is an
+         instruction to open the file, not a note for later.
+
+      2. A PASS THAT DOES NOT FIT ITS NEIGHBOURS. In the first real run one row
+         passed while reporting the same empty identifier that made four of its
+         neighbours skip -- its detector is a picture and a chunk delta, and
+         neither consults that datum, so it was perfectly entitled to pass and
+         the tally hid the anomaly completely. A pass surrounded by rows that
+         could not run is a claim about a round that mostly did not happen, and
+         it deserves its evidence read for the same reason an undecided row
+         does.
+    """
+    unrun = counts[SKIP] + counts[GATED] + counts[UNASKABLE] + counts[UNDEC]
+    lonely = unrun > counts[PASS] and counts[PASS] > 0
+    todo = [r for r in rows if r[4] and r[1] != PASS]
+    if not todo and not lonely:
+        return
+    print("\n  READ THIS EVIDENCE BEFORE BELIEVING THE ROUND:")
+    for name, outcome, _, _, artefact, question in todo:
+        print("    %s (%s)\n      %s\n      question: %s"
+              % (artefact, outcome, name, question))
+    if lonely:
+        print("    %d row(s) passed while %d could not run. A pass whose "
+              "neighbours\n      never reached their own state is a claim "
+              "about a round that mostly did\n      not happen -- re-read the "
+              "passing rows' detail lines and ask what a\n      failure of the "
+              "unrun rows would have done to them."
+              % (counts[PASS], unrun))
 
 
 class Precondition(Exception):
@@ -154,6 +281,46 @@ def need(cond, what, detail=""):
 def sid_of(html_or_path):
     m = re.match(r"^/s/([^/]+)/", html_or_path or "")
     return m.group(1) if m else ""
+
+
+def shown(facts):
+    """Is this element ON THE SCREEN? -- three answers, and the third matters.
+
+    None   there is no such element. Not "it is down": a front-door card and a
+           refusal page have no gate at all, and an arm that reads that as
+           "the gate is down" has answered a question nobody put.
+    False  it exists and nothing of it is painted.
+    True   it exists and occupies a box.
+
+    Read the PICTURE, not the attribute. `hidden` is a property the page sets;
+    whether the card is covering the desktop is a fact about what was drawn,
+    and the two come apart -- measured, see GATE_FACTS. `visibility:hidden`
+    still occupies a box, so it is checked separately; `opacity:0` is not, and
+    is named under "what this cannot see" on click_gate().
+
+    `facts` is whatever GATE_FACTS/GO_FACTS returned, INCLUDING None: a probe
+    that could not be evaluated at all (a dead debugger, a page that refused
+    the eval) comes back None from browser.eval, and returning None here keeps
+    "I could not ask" distinct from "there is nothing there". Both are un-
+    answered, and neither is a failure of the product.
+    """
+    if not isinstance(facts, dict) or not facts.get("present"):
+        return None
+    if facts.get("display") == "none" or facts.get("visibility") == "hidden":
+        return False
+    return (facts.get("w") or 0) > 0 and (facts.get("h") or 0) > 0
+
+
+def contradicts(facts):
+    """Painted while claiming to be hidden -- the product defect shown() sees.
+
+    Printed on the detail line rather than scored: the round's verdict is about
+    what the visitor got, and this is about how the page got there. It is the
+    exact state hdw4s-gate-index's stylesheet comment exists to prevent, so a
+    round that ever prints it has caught that stylesheet regressing.
+    """
+    return bool(isinstance(facts, dict) and facts.get("hidden")
+                and shown(facts))
 
 
 def classify(title, body_html):
@@ -266,7 +433,7 @@ class Visitor:
         return self.br.eval("1+1") == 2
 
     def sid(self):
-        return self.eval(SID) or ""
+        return sid_of(self.eval(PATHNAME) or "")
 
     def html(self):
         return self.eval("document.documentElement.outerHTML") or ""
@@ -285,7 +452,17 @@ class Visitor:
         time.sleep(0.5)
 
     def moving(self, seconds=5.0, raise_first=True):
-        """Is video arriving NOW? Returns (bool|None, (before, after))."""
+        """Is video arriving NOW? Returns (bool|None, (before, after)).
+
+        None means UNANSWERED, and it now has two causes rather than one. The
+        debugger dying mid-measure was always one. The other is the counter not
+        being there: it is published by the upstream client and by nothing we
+        ship, so a rename upstream leaves this rig reading None forever. Scored
+        as "no video" that is a FAIL against a desktop that is streaming
+        perfectly -- the expensive direction -- so it is scored as no answer,
+        and the pair it returns carries the None through to the detail line
+        where a reader can see WHICH kind of silence it was.
+        """
         if raise_first:
             self.front()
         a = self.eval(CHUNKS)
@@ -293,7 +470,9 @@ class Visitor:
         b = self.eval(CHUNKS)
         if not self.alive():
             return None, (a, b)
-        return (b or 0) - (a or 0) > 0, (a, b)
+        if a is None or b is None:
+            return None, (a, b)
+        return b - a > 0, (a, b)
 
     def colours(self):
         r = self.br.call("Page.captureScreenshot",
@@ -314,12 +493,83 @@ class Visitor:
             time.sleep(0.5)
         return False, best
 
-    def click_gate(self):
-        if self.eval(GATE_UP) is True:
-            self.eval("%s && %s.click()" % (GO, GO))
-            time.sleep(3.0)
-            return True
+    def grant_media(self, origin):
+        """Answer the camera/microphone prompt, the way a person clicking
+        Allow does, without turning the prompt off.
+
+        NOT --use-fake-ui-for-media-stream: that browser never asks, and the
+        arm this exists for is about what the browser's chrome SHOWS. This
+        answers the question that was actually put.
+
+        Two mechanics, both of which bit while this was written:
+
+          * Browser.grantPermissions is a BROWSER-domain command, so it goes
+            to the browser target's websocket. The rest of this file talks to
+            a PAGE target, which does not carry it.
+          * It REPLACES the granted set for the origin. Granting videoCapture
+            and then audioCapture leaves video revoked -- measured, as a
+            NotAllowedError on video while audio succeeded. Hence one call.
+        """
+        try:
+            ver = json.loads(urllib.request.urlopen(
+                "http://127.0.0.1:%d/json/version" % self.br.port,
+                timeout=5).read())
+            _, _, rest = ver["webSocketDebuggerUrl"].partition("://")
+            hostport, _, path = rest.partition("/")
+            sock, tail = wsprobe.connect("http://" + hostport, path="/" + path)
+            sock.settimeout(20)
+            frames = wsprobe.frames(sock, tail)
+            wsprobe.send(sock, json.dumps({
+                "id": 1, "method": "Browser.grantPermissions",
+                "params": {"origin": origin,
+                           "permissions": ["videoCapture", "audioCapture"]}}))
+            end = time.time() + 20
+            while time.time() < end:
+                try:
+                    text = next(frames)
+                except (StopIteration, OSError):
+                    return False
+                if text is None:
+                    continue
+                try:
+                    msg = json.loads(text)
+                except ValueError:
+                    continue
+                if msg.get("id") == 1:
+                    return "result" in msg
+        except Exception:
+            return False
         return False
+
+    def gate(self):
+        """(shown, facts) for the card. `shown` is True/False/None -- see shown()."""
+        f = self.eval(GATE_FACTS)
+        return shown(f), f
+
+    def click_gate(self):
+        """Press Connect if the card is up, and REPORT WHAT THE PAGE DID.
+
+        Returns the page's own word: 'clicked', 'not-rendered', 'absent', or
+        None when the card was not up so nothing was pressed. It used to return
+        a bare True on the strength of the gate detector while the click
+        expression itself returned undefined in every state -- so "we clicked
+        Connect" was an inference, never an observation.
+
+        WHAT THIS CANNOT SEE, and both are reachable: a button rendered but
+        covered by something with a higher z-index, and one at opacity:0. Both
+        have a client rect, so this reports 'clicked' and the person's click
+        would have landed elsewhere. `.click()` also dispatches to a covered
+        element where a real pointer would not, so this is a weaker test than a
+        person for exactly that case. The picture is the oracle that settles
+        it: the arm goes on to wait for a desktop, and a click that did nothing
+        leaves the card up and is recorded as GATED.
+        """
+        up, _ = self.gate()
+        if up is not True:
+            return None
+        what = self.eval(CLICK_GO)
+        time.sleep(3.0)
+        return what
 
     def new_tab(self, url):
         """A second tab in THIS browser: same profile, same cookie jar."""
@@ -376,7 +626,7 @@ class Tab:
             return None
 
     def sid(self):
-        return self.eval(SID) or ""
+        return sid_of(self.eval(PATHNAME) or "")
 
     def html(self):
         return self.eval("document.documentElement.outerHTML") or ""
@@ -658,10 +908,15 @@ def arm_first_visit(a, url, floor):
     -- a still error page can be colourful, and a counter that has advanced at
     some point in the past is not a counter advancing now.
 
-    Gate vs failure: if #hdw4s-gate is up, this is the product ASKING, which is
-    a correct outcome for some arrivals and not a failure. The arm clicks
-    Connect once, because that is what a person does, and only reports GATED if
-    the card is still up afterwards.
+    Gate vs failure: if #hdw4s-gate is PAINTED, this is the product ASKING,
+    which is a correct outcome for some arrivals and not a failure. The arm
+    clicks Connect once, because that is what a person does, and only reports
+    GATED if the card is still up afterwards.
+
+    The gate detector decides GATED against FAIL here, so a detector that
+    cannot see the card manufactures a product defect that does not exist --
+    which is the expensive direction, because a false FAIL is a chase. It is
+    measured against a real Chrome on the real gate page by browsertest().
     """
     a.goto(url, settle=4.0)
     kind = classify(a.title(), a.html())
@@ -673,22 +928,40 @@ def arm_first_visit(a, url, floor):
     clicked = a.click_gate()
     got, best = a.wait_picture(floor)
     if not got:
-        if a.eval(GATE_UP) is True:
+        up, facts = a.gate()
+        if up is True:
             return record("1. first visit gets a desktop", GATED,
-                          "picture<floor AND #hdw4s-gate still up",
-                          "the card is still asking; no desktop was promised")
+                          "picture<floor AND #hdw4s-gate painted",
+                          "the card is still asking (%dx%d); no desktop was "
+                          "promised%s"
+                          % (facts.get("w") or 0, facts.get("h") or 0,
+                             "; and it claims hidden -- the [hidden] rule in "
+                             "hdw4s-gate-index has stopped winning"
+                             if contradicts(facts) else ""))
+        if up is None and facts is None:
+            # The probe itself could not be evaluated. That is not a product
+            # verdict, and calling it FAIL would be this rig blaming the
+            # product for its own blindness.
+            return record("1. first visit gets a desktop", UNDEC,
+                          "picture<floor and the gate probe did not answer",
+                          "colours %d <= floor %d, page kind %s"
+                          % (best, floor, kind))
         return record("1. first visit gets a desktop", FAIL,
-                      "picture<floor, no gate",
-                      "colours %d <= floor %d, page kind %s" % (best, floor, kind))
+                      "picture<floor, no gate painted",
+                      "colours %d <= floor %d, page kind %s, click %r"
+                      % (best, floor, kind, clicked))
     mov, pair = a.moving(5.0)
     if mov is None:
         return record("1. first visit gets a desktop", UNDEC,
-                      "debugger died mid-measure", "chunks %s" % (pair,))
+                      "chunk counter gone or debugger died mid-measure",
+                      "chunks %s -- a None here is the counter this rig reads "
+                      "not existing on this build, NOT an absence of video"
+                      % (pair,))
     return record("1. first visit gets a desktop", PASS if mov else FAIL,
                   "colours>floor AND chunk delta>0",
                   "colours %d>%d, chunks %s->%s%s"
                   % (best, floor, pair[0], pair[1],
-                     ", after clicking Connect" if clicked else ""))
+                     ", after Connect (%s)" % clicked if clicked else ""))
 
 
 def arm_reload_resumes(a, url):
@@ -759,7 +1032,9 @@ def arm_second_tab(a, url, probe, instance, exhausted):
     after_n = server_count(probe, instance)
     if mov is None:
         return record(label + " (tab 1 survives)", UNDEC,
-                      "tab 1's debugger died", "chunks %s" % (pair,))
+                      "tab 1's counter gone, or its debugger died",
+                      "chunks %s -- a None is no counter to read, not no video"
+                      % (pair,))
     if mov:
         return record(label + " (tab 1 survives)", PASS,
                       "chunk delta>0 after bringToFront",
@@ -856,7 +1131,9 @@ def arm_share_without_key(a, b, url):
     mov, pair = a.moving(5.0)
     if mov is None:
         return record("6b. A survives B's attempt", UNDEC,
-                      "A's debugger died", "chunks %s" % (pair,))
+                      "A's counter gone, or A's debugger died",
+                      "chunks %s -- a None is no counter to read, not no video"
+                      % (pair,))
     return record("6b. A survives B's attempt", PASS if mov else FAIL,
                   "A's chunk delta>0 after bringToFront",
                   "chunks %s->%s" % pair)
@@ -887,7 +1164,7 @@ def arm_second_interaction(a, url):
                   "%s -> %s" % (before[:12], after[:12]))
 
 
-def arm_capture_indicators(a, evidence_dir, display, expect_media):
+def arm_capture_indicators(a, evidence_dir, display, expect_media, url_origin):
     """Microphone and webcam: what the browser's own chrome shows.
 
     THIS ARM IS DELIBERATELY SPLIT, because one half of it cannot be automated
@@ -908,45 +1185,126 @@ def arm_capture_indicators(a, evidence_dir, display, expect_media):
     the shipped Browser passes --use-fake-ui-for-media-stream, which accepts
     the permission prompt without showing it. An arm about the chrome must not
     run in a browser configured never to ask.
+
+    WHAT THE FIRST REAL RUN GOT WRONG, because the photograph it took says so.
+    Both rows below came back UNDECIDED against a tab whose title was the
+    capacity refusal, with the permission prompt still on screen, unanswered.
+    Three separate faults, and none of them is "the answer was unclear":
+
+      * The tab had never held a desktop. There was nothing to capture and
+        nothing an indicator could be about, so a granted permission would
+        still have measured nothing. Hence the precondition below, which
+        REFUSES rather than reporting a soft outcome -- and which makes the
+        ordering constraint in main() enforced rather than remembered.
+      * Nobody answered the prompt, which is why getUserMedia never settled.
+        A pending prompt is not a lit indicator: the indicator lights when
+        capture is ACTIVE, so photographing the question photographs a state
+        upstream of the one the row exists to see. This arm now ANSWERS the
+        prompt, at the browser target, and only then looks.
+      * The prompt said "microphones (0)", and that was read as "this browser
+        has no microphone, so the row can never run". It is not: Chrome
+        withholds device labels and counts until a capture permission exists.
+        Measured 2026-09-23 with --use-fake-device-for-media-stream and no
+        real hardware -- before the grant, enumerateDevices() returned one
+        unlabelled audioinput; after it, three labelled ones, and
+        getUserMedia({audio:true}) returned a LIVE audio track. The mic half
+        is askable, and the count in a pending prompt is not evidence about
+        the apparatus.
+
+    Browser.grantPermissions REPLACES the granted set for an origin rather
+    than adding to it. Granting video and then audio leaves video REVOKED, and
+    the video half then fails NotAllowedError -- measured here while writing
+    this, in exactly that shape. So there is one call, with both.
     """
-    # browser.eval passes awaitPromise, so an async expression settles before
-    # the value comes back. It returns None on a timeout, which must NOT be
-    # read as "no tracks": that would score a dead debugger as the product
-    # correctly refusing, which is a green light for the wrong reason.
-    tracks = a.eval(
-        "(async()=>{try{"
-        "const s=await navigator.mediaDevices.getUserMedia({audio:true,video:true});"
-        "return s.getTracks().filter(t=>t.readyState==='live')"
-        ".map(t=>t.kind).sort().join(',')||'none';"
-        "}catch(e){return 'refused:'+e.name}})()", timeout=45)
-    if tracks is None:
-        record("9. capture at the page layer", UNDEC,
-               "getUserMedia never settled",
-               "no answer came back; this says nothing either way")
-        tracks, live = None, None
-    else:
+    kind = classify(a.title(), a.html())
+    if kind != "desktop":
+        for n in ("9a. the page may capture video", "9b. the page may capture audio",
+                  "10. the indicator in the browser's chrome"):
+            record(n, UNASKABLE, "this tab never reached a desktop",
+                   "the tab is on %r (%s); there is nothing capturing and "
+                   "nothing to photograph, so the question was never put"
+                   % (a.title(), kind))
+        return
+
+    granted = a.grant_media(url_origin)
+    if not granted:
+        record("9a. the page may capture video", UNASKABLE,
+               "Browser.grantPermissions did not answer",
+               "the prompt would still be pending, and a pending prompt "
+               "measures nothing")
+        record("9b. the page may capture audio", UNASKABLE,
+               "Browser.grantPermissions did not answer", "")
+        record("10. the indicator in the browser's chrome", UNASKABLE,
+               "no permission, so nothing can be capturing", "")
+        return
+
+    # Devices are enumerated AFTER the grant, because before it the list is
+    # censored and a censored list is not a statement about the hardware.
+    devs = a.eval(
+        "(async()=>{try{const d=await navigator.mediaDevices.enumerateDevices();"
+        "return d.map(x=>x.kind).join(',')}catch(e){return 'error:'+e.name}})()",
+        timeout=30) or ""
+
+    live_any = False
+    for label, want, cons in (
+            ("9a. the page may capture video", "videoinput", "{video:true}"),
+            ("9b. the page may capture audio", "audioinput", "{audio:true}")):
+        if want not in devs:
+            record(label, UNASKABLE, "no %s device in this browser" % want,
+                   "enumerateDevices() after the grant reported %r, so this "
+                   "half can never light whatever the product does -- the row "
+                   "was not asked, and that is not an undecided answer" % devs)
+            continue
+        # browser.eval passes awaitPromise, so an async expression settles
+        # before the value comes back. It returns None on a timeout, which must
+        # NOT be read as "no tracks": that would score a dead debugger as the
+        # product correctly refusing, which is a green light for the wrong
+        # reason.
+        tracks = a.eval(
+            "(async()=>{try{"
+            "const s=await navigator.mediaDevices.getUserMedia(%s);"
+            "return s.getTracks().filter(t=>t.readyState==='live')"
+            ".map(t=>t.kind).sort().join(',')||'none';"
+            "}catch(e){return 'refused:'+e.name}})()" % cons, timeout=45)
+        if tracks is None:
+            record(label, UNDEC, "getUserMedia never settled",
+                   "the permission was granted, so this is not a pending "
+                   "prompt; no answer came back and it says nothing either way")
+            continue
         live = not str(tracks).startswith("refused") and tracks != "none"
+        live_any = live_any or live
+        if expect_media:
+            record(label, PASS if live else FAIL,
+                   "live MediaStreamTrack kinds",
+                   "tracks=%r (deployed with capture enabled)" % (tracks,))
+        else:
+            record(label, PASS if not live else FAIL,
+                   "live MediaStreamTrack kinds",
+                   "tracks=%r (deployed with capture disabled; a live track "
+                   "here is the server failing to refuse)" % (tracks,))
 
-    if live is None:
-        pass
-    elif expect_media:
-        record("9. capture is live at the page layer",
-               PASS if live else FAIL,
-               "live MediaStreamTrack kinds",
-               "tracks=%r (deployed with capture enabled)" % (tracks,))
-    else:
-        record("9. capture is refused when disabled",
-               PASS if not live else FAIL,
-               "live MediaStreamTrack kinds",
-               "tracks=%r (deployed with capture disabled; a live track here "
-               "is the server failing to refuse)" % (tracks,))
-
+    # The photograph is of an indicator, and an indicator is about capture that
+    # is HAPPENING. With nothing live there is no indicator state to read, and
+    # a picture of its absence proves nothing in either direction -- so the row
+    # says it could not be asked instead of handing a person a meaningless file.
+    if not live_any:
+        record("10. the indicator in the browser's chrome", UNASKABLE,
+               "no live track, so no capture for an indicator to be about",
+               "nothing was photographed")
+        return
     shot = os.path.join(evidence_dir, "chrome-indicators.png")
     err = root_screenshot(display, shot)
+    if err:
+        return record("10. the indicator in the browser's chrome", UNASKABLE,
+                      "the framebuffer could not be photographed",
+                      "NOT captured: %s" % err)
     record("10. the indicator in the browser's chrome", UNDEC,
            "root-window photograph, read by a person",
-           ("captured %s -- a person must look at it" % shot) if not err
-           else ("NOT captured: %s" % err))
+           "captured while a track was live", artefact=shot,
+           question="is the capture indicator LIT in the omnibox, and is the "
+                    "tab behind the dialog a desktop rather than a card? Read "
+                    "the address bar and the tab title too -- they answer "
+                    "other rows.")
 
 
 # --------------------------------------------------------------------------
@@ -1016,6 +1374,219 @@ def product_pages():
     return (m.gate_page("Start a desktop", "detail", "Start").decode(),
             m.page(CAPACITY_TITLE, "detail").decode(),
             m.page("That desktop closed the connection", "detail").decode())
+
+
+# A document with exactly what hdw4s-gate-index requires of upstream's: one
+# module <script> and a </body> to append the overlay before. Everything else
+# upstream ships is irrelevant to the three probes, and standing in for it with
+# a whole client would make this need a product to test the instrument.
+STUB_UPSTREAM = ('<!doctype html><html><head><title>stub</title></head><body>'
+                 '<div id="status-display"></div>'
+                 '<script type="module" src="./core.js"></script>'
+                 '</body></html>')
+
+# The upstream client, reduced to the ONE thing this rig reads from it. The
+# real client publishes window.videoChunksReceived and advances it; so does
+# this. That the real one still uses that NAME is the part this cannot settle
+# -- see browsertest()'s closing note.
+STUB_CORE = ("window.videoChunksReceived = 0;"
+             "setInterval(function(){ window.videoChunksReceived++; }, 100);")
+
+
+def browsertest(display_num=95, port=9495, http_port=8795):
+    """The three page-side expressions, in the language they actually run in.
+
+    THIS IS THE TIER THAT WAS MISSING, and its absence is why a one-character
+    bug in the session-id expression survived a green self-test: that test
+    exercised a Python twin, and nothing ever asserted the two agreed. Here
+    there is no twin. Real Chrome, on a framebuffer, is handed the REAL gate
+    page -- built by running hdw4s-gate-index, not transcribed -- and each
+    expression is read at a state whose answer is already known, both ways.
+
+    The page is driven into its states by the product's own controls: the
+    default takeover arm shows the card, "?gate=off" boots without it, and the
+    Connect button is pressed the way the round presses it. Nothing about the
+    gate's behaviour is simulated; the desktop behind it is.
+
+    No product, no remote machine, no network beyond loopback.
+    """
+    import functools
+    import http.server
+    import socketserver
+    import tempfile
+    import threading
+
+    bad = 0
+
+    def expect(what, got, want):
+        nonlocal bad
+        ok = got == want
+        bad += 0 if ok else 1
+        print("  %-4s %-52s got %r want %r"
+              % ("ok" if ok else "RED", what, got, want))
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    gen = os.path.normpath(os.path.join(here, "..", "..", "hdw4s-gate-index"))
+    if not os.path.exists(gen):
+        print("  RED  hdw4s-gate-index is not beside this checkout, so the "
+              "page these\n       probes read would have to be transcribed. "
+              "Refusing.")
+        return 1
+    tmp = tempfile.mkdtemp(prefix="hdw4s-browsertest-")
+    up = os.path.join(tmp, "upstream.html")
+    with open(up, "w") as f:
+        f.write(STUB_UPSTREAM)
+    with open(os.path.join(tmp, "core.js"), "w") as f:
+        f.write(STUB_CORE)
+    r = subprocess.run([sys.executable, gen, up, os.path.join(tmp, "index.html")],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print("  RED  hdw4s-gate-index refused to build the page: %s"
+              % (r.stderr or r.stdout).strip()[:200])
+        return 1
+    print("  ..   page built by hdw4s-gate-index itself, not transcribed")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        # Silent, because the request log interleaves with the self-test's own
+        # lines and this tier's output is read by a person deciding whether to
+        # believe a round.
+        def log_message(self, *a):
+            pass
+
+    class Server(socketserver.TCPServer):
+        # A CLASS attribute, not one set on the instance afterwards: the socket
+        # is bound in __init__, so an assignment after construction arrives too
+        # late and the second run of the day dies on a TIME_WAIT from the
+        # first. Found by running this tier twice in three minutes.
+        allow_reuse_address = True
+
+    handler = functools.partial(Quiet, directory=tmp)
+    # Two runs in quick succession can still collide: SO_REUSEADDR does not
+    # help while a browser from a run that was cut short is holding the port
+    # open. A few seconds of patience beats making the caller guess a port,
+    # and a hard refusal after that beats a silent skip.
+    srv = None
+    for _ in range(10):
+        try:
+            srv = Server(("127.0.0.1", http_port), handler)
+            break
+        except OSError:
+            time.sleep(1.0)
+    if srv is None:
+        print("  RED  127.0.0.1:%d would not bind, so the probes were not "
+              "read. Something\n       from an earlier run is still holding "
+              "it." % http_port)
+        return 1
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = "http://127.0.0.1:%d/index.html" % http_port
+
+    x = isolation.XServer(display_num)
+    b = None
+    try:
+        if not x.up(timeout=20):
+            print("  RED  no framebuffer on :%d -- the probes cannot be read "
+                  "in the language\n       they run in, so nothing below is "
+                  "known. This is not a pass." % display_num)
+            return 1
+        b = browser.Browser(port, "probes", display=":%d" % display_num)
+        b.start()
+        if not b._connect(60):
+            print("  RED  the debugger never attached; the probes were not read")
+            return 1
+        for m in ("Page.enable", "Runtime.enable"):
+            b.call(m)
+
+        def go(url, settle=2.5):
+            b.call("Page.navigate", {"url": url}, timeout=60)
+            time.sleep(settle)
+
+        # KNOWN POSITIVE: a fresh arrival on the takeover arm shows the card.
+        go(base)
+        gf = b.eval(GATE_FACTS)
+        expect("GATE_FACTS finds the card the product drew",
+               isinstance(gf, dict) and gf.get("present"), True)
+        expect("the card is ON SCREEN when the product is asking", shown(gf), True)
+        expect("and it does not claim to be hidden", contradicts(gf), False)
+        expect("GO_FACTS finds Connect, rendered",
+               shown(b.eval(GO_FACTS)), True)
+        # The counter does not exist yet: the module is deferred behind the
+        # gate, so this is a real page in a real state with no counter on it.
+        expect("CHUNKS says ABSENT before the client loads",
+               b.eval(CHUNKS), None)
+
+        # The click, and the page's own word for what happened.
+        expect("CLICK_GO reports pressing the button", b.eval(CLICK_GO),
+               "clicked")
+        time.sleep(2.5)
+
+        # KNOWN NEGATIVE: the card is down and the client has loaded.
+        gf = b.eval(GATE_FACTS)
+        expect("the card is OFF SCREEN once it has been dismissed",
+               shown(gf), False)
+        expect("Connect is no longer rendered", shown(b.eval(GO_FACTS)), False)
+        expect("CLICK_GO refuses a button nobody can press", b.eval(CLICK_GO),
+               "not-rendered")
+        n1 = b.eval(CHUNKS)
+        expect("CHUNKS reads a NUMBER once a client publishes one",
+               isinstance(n1, int), True)
+        time.sleep(1.0)
+        expect("and the DELTA is what moves, not the level",
+               (b.eval(CHUNKS) or 0) > (n1 or 0), True)
+
+        # KNOWN NEGATIVE, the other kind: nothing of ours on the page at all.
+        go("about:blank", settle=1.0)
+        expect("GATE_FACTS on a page with no card", shown(b.eval(GATE_FACTS)),
+               None)
+        expect("absent is not the same answer as down",
+               shown(b.eval(GATE_FACTS)) is False, False)
+        expect("CLICK_GO says so rather than throwing", b.eval(CLICK_GO),
+               "absent")
+        expect("CHUNKS on a page with no client", b.eval(CHUNKS), None)
+
+        # The product's own "never ask" arm: a real page that boots straight
+        # through, which must read as down and NOT as absent.
+        go(base + "?gate=off")
+        expect("the 'off' arm leaves the card down, not missing",
+               shown(b.eval(GATE_FACTS)), False)
+
+        # THE REGRESSION THE PRODUCT'S OWN STYLESHEET EXISTS TO PREVENT, made
+        # to happen rather than argued about: `hidden` set, an author display
+        # rule winning, the card still covering the desktop. Measured
+        # 2026-09-23 -- 1279x656 on screen, 1445 colours in the screenshot --
+        # while `!e.hidden`, the expression this replaced, said the gate was
+        # DOWN. That reading turns "the product is asking" into FAIL.
+        go(base)
+        b.eval("(()=>{var s=document.createElement('style');"
+               "s.textContent='#hdw4s-gate[hidden]{display:flex !important}';"
+               "document.body.appendChild(s);"
+               "document.getElementById('hdw4s-gate').hidden=true;return 1})()")
+        time.sleep(0.5)
+        gf = b.eval(GATE_FACTS)
+        expect("a card painted over the desktop reads as UP", shown(gf), True)
+        expect("and the contradiction is reported", contradicts(gf), True)
+        expect("the attribute alone would have said DOWN",
+               bool(gf.get("hidden")), True)
+    finally:
+        if b is not None:
+            b.stop()
+        try:
+            x.stop()
+        except Exception:
+            pass
+        srv.shutdown()
+        srv.server_close()
+
+    # WHAT THIS STILL DOES NOT SETTLE, stated because a green tier that is
+    # quiet about its stand-ins is how the last one stayed green: the counter's
+    # NAME. window.videoChunksReceived is published by the upstream client and
+    # by nothing in this repository -- hdw4s-gate-index reads it too, for its
+    # stall backstop -- and the client here is a stub that publishes it because
+    # this file told it to. The experiment that settles it is a round against a
+    # real desktop: if CHUNKS reads None there, the name has moved, and the
+    # arms now say UNDECIDED instead of FAIL while somebody looks.
+    print("\n  %s -- %d page-side probe(s) disagreed with a known answer"
+          % ("BROWSER PROBES RED" if bad else "BROWSER PROBES PROVEN", bad))
+    return 1 if bad else 0
 
 
 def guardtest():
@@ -1152,9 +1723,57 @@ def selftest():
     expect("gate and refusal are not the same verdict",
            classify("", GATE_HTML) != classify("", REFUSED_HTML), True)
 
+    # These are location.pathname values, because location.pathname is the
+    # only thing the page is now asked for. Every one of them is a string a
+    # browser on this product really reports, and the extraction they feed is
+    # the SAME function the run uses -- not a twin of it. See PATHNAME.
     expect("sid: a session path", sid_of("/s/abc123/"), "abc123")
+    expect("sid: a session path with a page under it",
+           sid_of("/s/abc123/index.html"), "abc123")
     expect("sid: the front door", sid_of("/"), "")
     expect("sid: a lookalike path", sid_of("/session/abc/"), "")
+    # The trailing slash is what the demux redirects TO, so an id without one
+    # is a state the browser passes through and never rests in. Reporting it
+    # as "no session" would be a lie about a real address, but reporting an id
+    # from it would accept a shape the product never serves -- and the arms
+    # compare ids to each other, so consistency is what matters. It is pinned
+    # here so that a change to it is deliberate rather than noticed in a run.
+    expect("sid: an id with no trailing slash", sid_of("/s/abc123"), "")
+    expect("sid: nothing at all", sid_of(""), "")
+    # The negative that the old JS extraction would have failed: a real id must
+    # not come back empty. This is the assertion that was missing, and its
+    # absence cost four rows of the first real run.
+    expect("sid: a real id is not empty", sid_of("/s/abc123/") != "", True)
+
+    # shown(), which is the whole of what GATE_FACTS/GO_FACTS mean. The facts
+    # below are not invented: every one is a dict a real Chrome returned from
+    # GATE_FACTS on the real gate page, recorded 2026-09-23 by the measurement
+    # in browsertest(), which re-derives them rather than trusting this list.
+    up = {"present": True, "hidden": False, "display": "flex",
+          "visibility": "visible", "w": 1279, "h": 656}
+    down = {"present": True, "hidden": True, "display": "none",
+            "visibility": "visible", "w": 0, "h": 0}
+    painted_but_hidden = {"present": True, "hidden": True, "display": "flex",
+                          "visibility": "visible", "w": 1279, "h": 656}
+    expect("shown: the card is up", shown(up), True)
+    expect("shown: the card is down", shown(down), False)
+    expect("shown: there is no card at all", shown({"present": False}), None)
+    expect("shown: the probe did not answer", shown(None), None)
+    expect("shown: absent and down are NOT the same answer",
+           shown({"present": False}) is shown(down), False)
+    expect("shown: visibility:hidden is not on screen",
+           shown(dict(up, visibility="hidden")), False)
+    expect("shown: a zero-height box is not on screen",
+           shown(dict(up, h=0)), False)
+    # The measured regression: `hidden` set, author display rule winning, card
+    # covering the desktop. An attribute-reading detector called this DOWN and
+    # the arm would have reported FAIL on a product that was merely asking.
+    expect("shown: painted while claiming hidden is UP",
+           shown(painted_but_hidden), True)
+    expect("contradicts: and it is called out", contradicts(painted_but_hidden),
+           True)
+    expect("contradicts: a card that is honestly down is not",
+           contradicts(down), False)
 
     print("\n  %s -- %d detector(s) disagreed with a known answer"
           % ("SELFTEST RED" if bad else "SELFTEST GREEN", bad))
@@ -1214,13 +1833,28 @@ def main():
                          "watch it refuse; touches no machine")
     ap.add_argument("--selftest", action="store_true",
                     help="exercise every detector against known answers and "
-                         "exit; touches no machine and needs no product")
+                         "exit; touches no machine and needs no product. "
+                         "Includes the PAGE-SIDE probes, read in a real "
+                         "browser on a framebuffer -- a detector written in "
+                         "JavaScript and checked in Python is two detectors")
+    ap.add_argument("--no-page-probes", action="store_true",
+                    help="skip the browser tier of --selftest. Deliberate and "
+                         "loud: the three page-side expressions are then "
+                         "UNPROVEN for that run, which is the state a "
+                         "one-character bug survived in once")
     args = ap.parse_args()
 
     if args.guardtest:
         return guardtest()
     if args.selftest:
-        return selftest() or guardtest()
+        bad = selftest()
+        if args.no_page_probes:
+            print("\n  SKIPPED: the page-side probes were not read in a "
+                  "browser. GATE_FACTS,\n           GO_FACTS, CLICK_GO and "
+                  "CHUNKS are unproven for this run.")
+        else:
+            bad = browsertest() or bad
+        return bad or guardtest()
     if not args.url:
         ap.error("--url is required (or --selftest)")
 
@@ -1256,6 +1890,16 @@ def main():
              "(known-bad inputs, this run)")
         need(selftest() == 0, "every detector agrees with a known answer",
              "(and disagrees where it should)")
+        # The page-side probes, read where they run, before a single row is
+        # scored. It costs one browser start and it is the only thing standing
+        # between a mistyped expression and a round of invented defects. Its
+        # display and ports are derived from this run's own bases so that it
+        # cannot collide with the visitors below.
+        need(browsertest(display_num=args.display_base + 30,
+                         port=args.base_port + 90,
+                         http_port=args.base_port + 300) == 0,
+             "the page-side probes were read in a real browser",
+             "(the gate, the button and the counter, both ways)")
 
         real, fake, differs, host = discriminator(args.url)
         need(real[0] is not None, "the address answers at all", "%s" % (real,))
@@ -1284,17 +1928,51 @@ def main():
         arm_reverse_order(A, B, args.url)
         arm_second_interaction(A, args.url)
 
+        # THE CAPTURE BROWSER NEEDS A FREE SLOT, so it runs here and not where
+        # its row numbers suggest.
+        #
+        # The numbering and the ordering constraint used to disagree, and the
+        # disagreement was silent. Rows 9 and 10 are numbered after row 4, row
+        # 4 needs an EXHAUSTED pool, and exhaustion is deliberately last
+        # because it leaves the machine with no free slot -- so the capture
+        # browser arrived third in line for a pool that had none, got the
+        # capacity refusal, and photographed a permission prompt in front of a
+        # card. The row numbers are names, not a schedule.
+        #
+        # Stated as a need rather than a position: every row above needs a slot
+        # and runs before exhaustion; row 4 needs the pool full and runs after
+        # it. A comment alone would not hold this -- the arm itself now refuses
+        # unless its tab is on a desktop, so getting the order wrong again
+        # produces an UNASKABLE row naming the reason instead of two soft
+        # verdicts about a state nobody reached.
+        M = Visitor(args.base_port + 2, "M", args.display_base + 2,
+                    real_media_ui=True)
+        M.start()
+        M.goto(args.url, settle=4.0)
+        M.click_gate()
+        sp = _urlsplit(args.url)
+        arm_capture_indicators(M, evidence, M.display, args.media,
+                               "%s://%s" % (sp.scheme, sp.netloc))
+
         # Now fill the pool and do the two-tab row again. This is the row the
         # owner found by hand, and it is last because it leaves the machine
         # with no free slot.
         held, refused, fillers = exhaust(args.url, args.display_base + 3,
                                          args.base_port, args.slots)
-        if args.slots and held + 2 != args.slots and refused:
+        # DERIVED, not the digit that used to be here. This arithmetic said
+        # "+ 2" because A and B were the only browsers holding a session when
+        # it was written; moving the capture browser ahead of the exhaustion
+        # made it three, and a literal would have gone on reporting the pool as
+        # misconfigured with nothing wrong with the pool. A constant in a
+        # comparison is a claim, and this one is now read off the browsers that
+        # exist rather than asserted.
+        ours = len([v for v in (A, B, M) if v is not None])
+        if args.slots and held + ours != args.slots and refused:
             record("0. the deployed pool is the one declared", FAIL,
                    "browsers served before the front door refused",
                    "--slots said %d; this run got %d more visitors served "
-                   "before refusal, with 2 already holding sessions"
-                   % (args.slots, held))
+                   "before refusal, with %d already holding sessions"
+                   % (args.slots, held, ours))
         if not refused:
             record("4. two tabs, pool EXHAUSTED", UNDEC,
                    "the pool never refused",
@@ -1304,14 +1982,6 @@ def main():
         else:
             arm_second_tab(A, args.url, args.server_probe, args.instance,
                            exhausted=True)
-
-        # The capture arm gets its own browser, without the fake permission UI.
-        M = Visitor(args.base_port + 2, "M", args.display_base + 2,
-                    real_media_ui=True)
-        M.start()
-        M.goto(args.url, settle=4.0)
-        M.click_gate()
-        arm_capture_indicators(M, evidence, M.display, args.media)
 
     except Occupied as e:
         print("\n  %s" % e)
@@ -1332,16 +2002,22 @@ def main():
         browser.kill_strays()
         if rows:
             n = {o: len([r for r in rows if r[1] == o])
-                 for o in (PASS, FAIL, UNDEC, SKIP, GATED)}
+                 for o in (PASS, FAIL, UNDEC, SKIP, GATED, UNASKABLE)}
             print("\n  SHAPE -- compare these rows and detectors to last "
                   "round's, not the counts:")
-            for name, outcome, det, _ in rows:
+            for name, outcome, det, _, _, _ in rows:
                 print("    %-9s %-44s [%s]" % (outcome, name, det))
-            print("\n  %d passed, %d FAILED, %d undecided, %d gated, %d skipped"
-                  % (n[PASS], n[FAIL], n[UNDEC], n[GATED], n[SKIP]))
+            print("\n  %d passed, %d FAILED, %d undecided, %d gated, "
+                  "%d skipped, %d unaskable"
+                  % (n[PASS], n[FAIL], n[UNDEC], n[GATED], n[SKIP],
+                     n[UNASKABLE]))
             if n[UNDEC] or n[GATED]:
                 print("  An undecided or gated row is not a pass. The round "
                       "has not seen what that row exists to see.")
+            if n[UNASKABLE]:
+                print("  An UNASKABLE row was never asked. Fix the apparatus; "
+                      "it will not answer by being run again.")
+            print_reading_list(n)
     return 1 if [r for r in rows if r[1] == FAIL] else 0
 
 
