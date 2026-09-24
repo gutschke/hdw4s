@@ -607,6 +607,30 @@ single hostname for the whole pool and are given a session from it.
     presents one credential to reach the pool; individual slots have none and
     cannot be given one, which is why `auth` refuses for a slot.
 
+### The pool's credential
+
+The pool reads one credential from `/etc/hdw4s/demux.auth.cred`. Nothing creates
+that file for you: it is a site's own secret, shared with the reverse proxy, so
+the package has no business inventing one. **Without it the pool refuses to
+start**, and says so in the journal rather than serving without authentication.
+
+It holds one line, `user:password`, with no trailing newline required, and should
+be `0600` and owned by `root`. Both halves are yours to choose; the proxy has to
+present the same pair.
+
+    ( umask 0077
+      printf 'front:%s' "$(head -c48 /dev/urandom | base64 | tr -d '\n=/+' | head -c32)" \
+        > /etc/hdw4s/demux.auth.cred )
+
+Nothing reads the user name except the comparison, so it may be anything that
+does not contain a colon; the colon is the separator.
+
+**Rotating it takes three steps and the third is the one people forget.** Write
+the new value here, put the matching pair in the reverse proxy, and then restart
+the pool. It reads the credential once, at startup, so a file changed underneath
+a running pool changes nothing until then, and the proxy will be refused with
+`401` in the meantime.
+
 Run `proxy` against any slot to print the reverse-proxy configuration for the
 pool. It is the same for every slot.
 

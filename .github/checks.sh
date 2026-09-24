@@ -363,8 +363,13 @@ strip_pool_identifiers() {
   # manual spells the unit "hdw4s\-demux", and without this the check would go
   # red on a page whose only mention is the unit name it is supposed to allow.
   # Found by running it, not by reading it.
+  # The same is true of the DOT, and it was missed when the hyphen was fixed:
+  # roff writes the credential file as "demux\.auth\.cred", so the pattern below
+  # went red on the first manual page that ever mentioned it -- two years of
+  # green meaning only that nobody had documented the file. Same lesson as the
+  # line above, found the same way.
   sed -e 's/hdw4s\\\?-[d]emux//g' \
-      -e 's/[d]emux\.auth\.cred//g' \
+      -e 's/[d]emux\\\?\.auth\\\?\.cred//g' \
       -e 's/HDW4S_[D]EMUX[A-Z_]*//g' \
       -e 's/[d]emux_port//g'
 }

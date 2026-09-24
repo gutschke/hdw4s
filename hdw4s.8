@@ -321,6 +321,21 @@ The pool is configured as \fBone thing\fR, not slot by slot\. Visitors arrive at
 .IP "\[ci]" 4
 \fBThe credential belongs to the pool, not to a slot\.\fR A reverse proxy presents one credential to reach the pool; individual slots have none and cannot be given one, which is why \fBauth\fR refuses for a slot\.
 .IP "" 0
+.SS "The pool's credential"
+The pool reads one credential from \fB/etc/hdw4s/demux\.auth\.cred\fR\. Nothing creates that file for you: it is a site's own secret, shared with the reverse proxy, so the package has no business inventing one\. \fBWithout it the pool refuses to start\fR, and says so in the journal rather than serving without authentication\.
+.P
+It holds one line, \fBuser:password\fR, with no trailing newline required, and should be \fB0600\fR and owned by \fBroot\fR\. Both halves are yours to choose; the proxy has to present the same pair\.
+.IP "" 4
+.nf
+( umask 0077
+  printf 'front:%s' "$(head \-c48 /dev/urandom | base64 | tr \-d '\en=/+' | head \-c32)" \e
+    > /etc/hdw4s/demux\.auth\.cred )
+.fi
+.IP "" 0
+.P
+Nothing reads the user name except the comparison, so it may be anything that does not contain a colon; the colon is the separator\.
+.P
+\fBRotating it takes three steps and the third is the one people forget\.\fR Write the new value here, put the matching pair in the reverse proxy, and then restart the pool\. It reads the credential once, at startup, so a file changed underneath a running pool changes nothing until then, and the proxy will be refused with \fB401\fR in the meantime\.
 .P
 Run \fBproxy\fR against any slot to print the reverse\-proxy configuration for the pool\. It is the same for every slot\.
 .P
