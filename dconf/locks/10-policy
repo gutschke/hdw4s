@@ -1,21 +1,33 @@
 # Keys an ephemeral session may not override.
 #
-# Only the ones whose whole purpose is defeated by overriding them. A lock is
-# not a preference: every key here is one where a session changing it either
-# strands its own user or removes the signal that tells them what kind of
-# session they are in.
-
-# Locking the screen strands the user: there is no password to unlock it with.
-/org/gnome/desktop/screensaver/lock-enabled
-/org/gnome/desktop/screensaver/idle-activation-enabled
-/org/gnome/desktop/session/idle-delay
-
-# The background is the cue that this session keeps nothing. Every key, because
-# Settings rewrites all six when a stock wallpaper is chosen, and leaving one
-# unlocked lets the cue be removed by an action nobody thinks of as removing it.
-/org/gnome/desktop/background/picture-uri
-/org/gnome/desktop/background/picture-uri-dark
-/org/gnome/desktop/background/primary-color
-/org/gnome/desktop/background/secondary-color
-/org/gnome/desktop/background/color-shading-type
-/org/gnome/desktop/background/picture-options
+# THERE ARE NONE, AND THAT IS THE DECISION RATHER THAN AN OVERSIGHT.
+#
+# Markus, 2026-09-24: "i strongly feel we shouldn't lock any of the gnome
+# settings. that's enforcing policy, something we're generally reluctant to do.
+# and these are ephemeral sessions. the user isn't going to hurt anyone but
+# themselves, if they misconfigure gnome."
+#
+# This file previously locked nine keys in two groups, and both reasons were
+# good ones. They are recorded here because the next person to reach for a lock
+# will have a reason at least as good, and should have to argue past these
+# rather than rediscover them.
+#
+#   THE BACKGROUND (six keys). "The background is the cue that this session
+#   keeps nothing." True, and it made the wallpaper load-bearing for a message
+#   that is not about the wallpaper. That cue belongs on the client page
+#   surround, which the visitor does not own and cannot remove -- see
+#   private/DESIGN-per-session-background.md. A cue that has to be defended by
+#   taking a setting away from its owner is in the wrong place.
+#
+#   THE SCREENSAVER (three keys). "Locking the screen strands the user: there
+#   is no password to unlock it with." That one is NOT policy -- it is an
+#   unrecoverable state, and it is the case that argues hardest against an empty
+#   file. It is still the user harming only themselves, and in an ephemeral
+#   session the loss is bounded by what the session was going to discard anyway.
+#   His ruling covers it; the honest repair if it bites is to make the state
+#   recoverable, not to forbid reaching it.
+#
+# So: locking is for a key where a session changing it strands its user with no
+# way back AND no better repair exists. Neither of the groups above met the
+# second half. If you are about to add one, say which of those two tests it
+# passes, in this file, beside the key.

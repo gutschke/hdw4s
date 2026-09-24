@@ -1265,9 +1265,9 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
 ( set +e; sandbox; . "${SB}/setup.sh"
   unset JOURNAL_STREAM
   RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
-  DEMUXDIR="${SB}/run/hdw4s-demux"
+  POOLDIR="${SB}/run/hdw4s-demux"
   printf '%s\n' '1 eph0 ephemeral' > "${SLOTS}"
-  mkdir -p "${RUNDIR}/hdw4s/eph0" "${REAPDIR}" "${DEMUXDIR}/last-request"
+  mkdir -p "${RUNDIR}/hdw4s/eph0" "${REAPDIR}" "${POOLDIR}/last-request"
   ss() { :; }
   STOPPED="${SB}/stopped"; : > "${STOPPED}"
   systemctl() {
@@ -1280,7 +1280,7 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
   printf 'HDW4S_IDLE_DAYS=1h\n' > "${SB}/etc/eph0.conf"
   now="$(date +%s)"
   stale="$(( now - 86400 ))"
-  rstamp="${DEMUXDIR}/last-request/eph0"
+  rstamp="${POOLDIR}/last-request/eph0"
 
   # POSITIVE CONTROL FIRST. Without it every "not reaped" below is satisfied by
   # a reaper that no longer reaps anything, and the whole block would be green
@@ -1333,7 +1333,10 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
   # file here, so a symlink is a fault rather than a shape to support -- and the
   # reaper runs as root, so following one is how a read becomes a disclosure.
   : > "${STOPPED}"
-  secret="${SB}/pretend-shadow"; printf 'root:$6$verysecret:1::\n' > "${secret}"
+  # No "$" in the stand-in hash: a literal one here is flagged as a variable
+  # that will not expand, and the point of the file is only that its contents
+  # are recognisable if they ever reach the journal.
+  secret="${SB}/pretend-shadow"; printf 'root:verysecret:1::\n' > "${secret}"
   rm -f "${rstamp}"; ln -s "${secret}" "${rstamp}"
   out="$(cmd_reap 2>/dev/null)"
   has   'a symlinked router record is refused' "${out}" 'symlink'
@@ -1886,7 +1889,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=304   # update when tests are added; a wrong number is the point
+EXPECTED=315   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

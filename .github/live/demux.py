@@ -821,6 +821,72 @@ def test_a_restart_does_not_re_let_an_occupied_slot(rig):
         % slot_a)
 
 
+def test_a_restart_does_not_re_let_a_slot_whose_desktop_is_still_starting(rig):
+    """DEFECT 4 BY A CLOCK RATHER THAN BY A TABLE, and it needs no crafted input.
+
+    A mint precedes its session: the redirect is what sends the browser at the
+    slot, and that first request is what socket-activates the desktop. So for a
+    few seconds a slot is held on the router's word alone, in memory. Restart
+    inside that window -- Restart=on-failure, RestartSec=1s, or an upgrade --
+    and the word is gone while the visitor is still walking to their desktop.
+    The next arrival is handed the same slot. That is the double-booking that
+    was confirmed at the pixels, reached by a timer instead of a forgotten
+    table, and the in-memory pending_mints() half cannot prevent it by
+    construction: it dies with the process it is protecting against.
+
+    THE VISITOR HERE DELIBERATELY DOES NOT FOLLOW THE REDIRECT. That is not a
+    contrived client, it is the ordinary state of every visitor for the moment
+    between the 302 and the browser's next request, and it is the only state in
+    which this defect exists. Following it would start the stand-in desktop,
+    occupancy would take over, and the arm would be testing the authority
+    instead of the reservation.
+
+    NOT wiped, because the shipped unit now says RuntimeDirectoryPreserve=
+    restart. Wiping here would model a configuration this package does not ship
+    and the arm would fail for a reason that is not the product's.
+
+    THE ORACLE IS THE BACKEND, as everywhere else in this file: each slot
+    reports its own name, so "B landed on A's slot" is read from the thing that
+    served B and never from the router's account of itself.
+    """
+    a = rig.client()
+    st, h, _ = a.get("/")
+    assert st == 302, "arrival did not redirect: %d" % st
+    a.learn_cookie(h)
+    assert h["location"][0].startswith("/s/"), \
+        "redirect was not to a session path: %s" % h["location"][0]
+    # Nothing has been served yet, so no stand-in desktop exists and no slot
+    # can be occupied. Asserted rather than assumed: if the rig ever starts a
+    # backend on the mint, this arm silently becomes the occupancy test.
+    assert slots_in_use(rig) == 0, \
+        "a slot was served before the redirect was followed, so this arm is " \
+        "measuring occupancy rather than the reservation"
+
+    rig.restart(wipe_state=False)
+
+    # Every remaining visitor, each with a fresh cookie jar -- strangers, not
+    # returning tabs. Drained until the pool refuses rather than a fixed count,
+    # because how many are left is exactly what is under test.
+    landed = []
+    for _ in range(len(rig.slots) + 1):
+        c = rig.client()
+        st, h, _ = c.get("/")
+        if st == 503:
+            break
+        assert st == 302, "an arrival was neither routed nor refused: %d" % st
+        c.learn_cookie(h)
+        st, _, body = c.get(h["location"][0])
+        assert st == 200, "session path did not serve: %d" % st
+        landed.append(body.decode().split("SLOT=")[1].split()[0])
+
+    assert len(landed) == len(set(landed)), (
+        "two strangers were put on the same slot after a restart: %r" % landed)
+    assert len(landed) == len(rig.slots) - 1, (
+        "the pool let %d of %d slots after a restart, so the slot held by a "
+        "mint that had not yet started its desktop was re-let to a stranger "
+        "(%r)" % (len(landed), len(rig.slots), landed))
+
+
 def test_a_reaped_slot_returns_to_the_pool_without_a_restart(rig):
     """DEFECT 2. The pool exhausts permanently, and no crash is involved.
 
@@ -1100,10 +1166,12 @@ def test_the_records_the_refusal_log_is_read_from_survive_a_restart():
     state_default = src.split('HDW4S_DEMUX_STATE", "')[1].split('"')[0]
     under = [d for d in rundirs if state_default.startswith("/run/" + d)]
     assert not under or preserved, (
-        "the last-request records live in %s, which is RuntimeDirectory=%s "
+        "the router's on-disk records live in %s, which is RuntimeDirectory=%s "
         "with no RuntimeDirectoryPreserve= -- systemd deletes them every time "
-        "the service stops, and every slot then reads 'no record', which is "
-        "the same thing a slot nobody has ever opened reads"
+        "the service stops. The last-request records then read 'no record', "
+        "which is the same thing a slot nobody has ever opened reads; and the "
+        "mint reservations, whose ONLY job is to cross a restart, are destroyed "
+        "by the event they exist for while every guard over them still passes"
         % (state_default, ",".join(under)))
 
 
@@ -1701,6 +1769,7 @@ def main():
              # are not evidence of anything.
              test_control_two_visitors_without_a_restart_land_on_different_slots,
              test_a_restart_does_not_re_let_an_occupied_slot,
+             test_a_restart_does_not_re_let_a_slot_whose_desktop_is_still_starting,
              test_a_reaped_slot_returns_to_the_pool_without_a_restart,
              test_a_reaped_visitor_reaches_the_gate_rather_than_a_dead_end,
              test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one]

@@ -115,7 +115,7 @@ REAPDIR="${HDW4S_REAP_STAMP_DIR:-/run/hdw4s-reap}"
 #
 # Same environment variable hdw4s-demux reads, deliberately: two spellings of
 # one path is two paths as soon as either is edited.
-DEMUXDIR="${HDW4S_DEMUX_STATE:-/run/hdw4s-demux}"
+POOLDIR="${HDW4S_DEMUX_STATE:-/run/hdw4s-demux}"
 # The runtime tree a session publishes its own live state in. Overridable for
 # the same reason, and needed alongside REAPDIR rather than instead of it: the
 # reaper reads the stamp only for an instance whose directory here exists, so
@@ -1799,7 +1799,7 @@ reap_say() {
 RLAST=''
 RLAST_WHY=''
 router_last_request() {
-  local inst="${1}" path="${DEMUXDIR}/last-request/${1}" raw=''
+  local inst="${1}" path="${POOLDIR}/last-request/${1}" raw=''
   RLAST=''; RLAST_WHY=''
   # -L before -r: a symlink that resolves to a readable file passes -r.
   if [ -L "${path}" ]; then

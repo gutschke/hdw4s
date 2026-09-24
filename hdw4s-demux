@@ -216,6 +216,35 @@ WEBROOT_DIR = os.environ.get("HDW4S_WEBROOT_DIR", "/usr/share/hdw4s/webroot")
 # Long enough for a GNOME session to come up on a loaded box, and its only cost
 # when too long is a slot held briefly after a visitor walked away. Its cost
 # when too SHORT is the defect, so it errs long.
+#
+# THIS NUMBER IS NOT DERIVED, AND THE ATTEMPT TO DERIVE IT WAS RETRACTED. A run
+# timed "first connect until /run/hdw4s/<inst> exists" and the figures were
+# withdrawn, because that directory is RuntimeDirectory= and systemd creates it
+# BEFORE ExecStart runs -- it measured a mkdir, not a session start. Do not
+# quote those numbers; they are not evidence about this constant. What this
+# window needs is the tail of a real start, cold and warm, and nobody has it.
+#
+# AND THE OUTLIER IS THE PART THAT MATTERS HERE, because it is a claim about the
+# SHAPE of the failure and not about its size: one of eight trials never
+# produced the directory at all inside 300 seconds. Unexplained -- a failed
+# unit, an artefact of the measurement's own loop, or real.
+#
+# If a session start can HANG, then a clock is the wrong instrument for this
+# window and no value of this constant is right: a timer cannot tell "still
+# coming" from "never coming", which is the only distinction that decides
+# whether releasing the slot is a repair or the pixel-confirmed double-booking
+# arriving on a timer. The party that CAN tell them apart is the session unit
+# itself, which knows whether it is activating, active or failed -- the same
+# move this round made twice already, and the reason it is not made here is
+# that nobody has explained the hang yet and a guess about it would be a
+# second unmeasured constant wearing a better story.
+#
+# So the window stays a BACKSTOP and is documented as one: it exists to stop a
+# mint that went nowhere from holding a slot forever, which is a real and
+# common case, and it is NOT a claim that a start completes inside it. Erring
+# long is the cheap direction; the expiry is logged where it happens so the
+# choice between "a visitor walked away" and "a start is wedged" is put in
+# front of somebody rather than resolved by a constant.
 MINT_GRACE = 180.0
 
 ETC_DIR = os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s")
@@ -1216,6 +1245,267 @@ def touch_slot(instance, now=None):
         pass
 
 
+# --------------------------------------------------------------------------
+# A mint held across our own death
+# --------------------------------------------------------------------------
+#
+# THE ONE FACT THIS PROCESS HOLDS WHOSE LOSS CAN PERMIT SOMETHING, and that is
+# why it is the only one written down.
+#
+# Everything else the router remembers fails toward a refusal. Lose the
+# ownership table and a returning visitor reaches the gate, which is the
+# arrival rule's designed damage. Lose the cookie-refresh timestamps and
+# somebody gets one redundant header. But a MINT is a claim on a slot made
+# BEFORE the session behind it exists -- the redirect is what sends the browser
+# at the slot, and that first request is what socket-activates the desktop --
+# so for a few seconds the slot is held on this process's word alone, and
+# losing that word lets a second visitor be handed a slot the first is still
+# walking to. That is the double-booking confirmed at the pixels, arriving by
+# a crash instead of by a forgotten table, and Restart=on-failure with
+# RestartSec=1s is the mechanism that makes it reachable.
+#
+# So the reservation is EMBODIED rather than remembered: a file that outlives
+# the process that made it.
+#
+# IT IS STRICTLY WEAKER THAN THE OCCUPANCY AUTHORITY AND MUST STAY THAT WAY.
+# It may only ever ADD to the set of slots that must not be let. It is never
+# consulted to resolve a sid, never to permit a resume, never to decide that a
+# desktop is alive. A stale one costs a slot for at most MINT_GRACE; a stale
+# one that could PERMIT would cost somebody their desktop. Same refuse-only
+# wiring as slot_incarnation(), sound for the same reason: it does not depend
+# on anyone having enumerated the stale cases correctly.
+#
+# IT IS AN ADDITION TO pending_mints(), NOT A REPLACEMENT. The in-memory half
+# still runs, so a failure to write here -- a full tmpfs, a permission fault --
+# degrades to exactly the behaviour before this existed rather than costing a
+# visitor a desktop. The file's whole job is to cross a restart, which memory
+# cannot do, and memory's whole job is to work when the filesystem does not.
+#
+# NOT flock, AND THIS IS THE REFLEX TO RESIST. An exclusive lock is the obvious
+# primitive for "reserve a slot" and it is exactly wrong here: the kernel
+# releases it when the holder dies, and surviving this process's death is the
+# entire purpose. It would be a guard that unlocks precisely when it is needed.
+#
+# ABANDONMENT IS EVALUATED BY THE READER, from the file's mtime against
+# MINT_GRACE. No sweeper, no second daemon, and no new grace window in a new
+# place -- it is the same window the in-memory half already uses, read instead
+# of held.
+#
+# WHAT THIS FILE'S HOME MUST DO, stated as a property because the directory is
+# replaceable and the property is not:
+#
+#   it must outlive the router process, and it must not outlive the boot.
+#
+# /run is a tmpfs, which gives the second half for nothing. The first half is
+# NOT free and is not a property of /run: RuntimeDirectory= removes its tree
+# whenever the unit stops, and a restart is a stop, so the default destroys this
+# file at precisely the event it exists to cross. hdw4s-demux.service therefore
+# says RuntimeDirectoryPreserve=yes, and that line and this code are a matched
+# pair -- remove it and every guard here still passes while the thing it guards
+# is gone. The unit carries the reasoning; this carries the requirement.
+#
+# READ THE NEXT PARAGRAPH BEFORE MOVING THIS FILE ANYWHERE. The reflex refused
+# just above -- flock, because the kernel drops a lock when the holder dies --
+# and the default that had to be overridden here are THE SAME MISTAKE at two
+# levels: both hand you something that disappears exactly when its holder does.
+# The first was refused on sight and the second was walked into anyway, in this
+# same round, by people who had already measured the wipe happening. Checking
+# the primitive is not the same as checking the lifetime of the place you put
+# its result, and only one of those two is obvious.
+
+RESERVE_DIR = os.path.join(STATE_DIR, "reserved")
+
+
+def reservation_fresh(age):
+    """True when a reservation of this age still holds its slot.
+
+    Takes an AGE rather than a path so that the rule can be exercised without a
+    filesystem, and takes the absolute value on purpose. A reservation whose
+    mtime is in the FUTURE -- a clock step, a tmpfs oddity -- would otherwise
+    never expire, and a slot that can never be re-let is the pool-exhaustion
+    defect wearing a safety check. Treating a wildly-wrong stamp as abandoned
+    costs at most one double-booking inside the grace window, which is the
+    bounded failure; treating it as fresh forever is the unbounded one.
+    """
+    return abs(age) < MINT_GRACE
+
+
+def reserved_slots(now=None, root=None):
+    """Slots held by a reservation that has not expired. OBSERVES ONLY.
+
+    os.listdir and os.stat, and nothing that opens or creates. This is called
+    from slots_in_use() on every arrival, which puts it on the path that must
+    never actuate anything: these slots are socket-activated, so a reader here
+    that opened a socket would start a desktop on every free slot, which is the
+    measured defect this whole file is arranged against.
+
+    An unreadable directory yields the EMPTY SET, and that is sound only
+    because this half may only ever ADD to the taken set -- an empty answer
+    here means "no reservation is known", which is the same thing the in-memory
+    half says after a restart, and it falls back to it rather than overriding
+    it. Do not copy this pattern to the occupancy reader, where an empty result
+    read as "nothing is occupied" hands every slot away twice.
+    """
+    now = time.time() if now is None else now
+    base = RESERVE_DIR if root is None else root
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return set()
+    out = set()
+    for name in names:
+        try:
+            age = now - os.stat(os.path.join(base, name)).st_mtime
+        except OSError:
+            continue
+        if reservation_fresh(age):
+            out.add(name)
+    return out
+
+
+def reserve_slot(instance, now=None, root=None):
+    """Write down that this slot has been let. Never called from a reader.
+
+    O_EXCL, and the stale-takeover path below is race-free only because there
+    is exactly one router process: hdw4s-demux.socket is Accept=no and the
+    service it activates is a single instance. STATE THAT AS A DEPENDENCY
+    SOMEBODY CAN REMOVE, not as a reassurance -- the day this is run twice
+    against one directory, the unlink-then-create here is a window in which two
+    arrivals can both succeed. The O_EXCL is kept anyway, because it costs
+    nothing and it is a real refusal rather than an argument.
+
+    Returns nothing and raises nothing. A failure to reserve is not a reason to
+    refuse a visitor: the in-memory half of the mint still holds the slot for
+    this process's lifetime, so the cost of losing this file is confined to a
+    restart inside the grace window -- which is the case it exists for, but not
+    a case worth turning into an outage on a full tmpfs.
+    """
+    now = time.time() if now is None else now
+    base = RESERVE_DIR if root is None else root
+    path = os.path.join(base, instance)
+    try:
+        os.makedirs(base, mode=0o700, exist_ok=True)
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            return
+        except FileExistsError:
+            pass
+        # Already there. Ours to take over only if it has expired -- an
+        # unexpired one belongs to a mint that is still walking to its slot,
+        # and pick_slot() should never have offered this name at all.
+        try:
+            age = now - os.stat(path).st_mtime
+        except OSError:
+            return
+        if reservation_fresh(age):
+            return
+        # SAID OUT LOUD, because this is the one moment where the backstop
+        # chooses for us and it cannot tell the two cases apart. An expired
+        # reservation means either a visitor who walked away before their
+        # desktop came up -- ordinary, and returning the slot is right -- or a
+        # session start that is WEDGED and still on its way, in which case this
+        # line is the last warning before two people share a desktop. A clock
+        # cannot distinguish them; a human reading this can go and look.
+        log("re-letting %s: its reservation expired after %ds without a "
+            "desktop answering. If that session was still starting, this is "
+            "the moment a second visitor can be sent to it."
+            % (instance, int(age)))
+        os.unlink(path)
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except OSError:
+        pass
+
+
+def assert_reservation_only_refuses(reserve=None, reserved=None, release=None,
+                                    fresh=None):
+    """Prove the reservation holds a slot, expires, and can do nothing else.
+
+    Runs at every start beside the other four, because every property it checks
+    fails silently in one direction or the other: a reservation that does not
+    hold lets a restart double-book a live desktop, and one that never expires
+    empties the pool a slot at a time with no error anywhere.
+
+    TAKES ITS FOUR FUNCTIONS AS PARAMETERS for the reason the rest of this file
+    does: a version that called the module's own would be green for the only
+    implementation it already trusted, which is a check that cannot fail by
+    construction. Pointed at a reservation that never expires, the third arm
+    below goes red.
+    """
+    reserve = reserve_slot if reserve is None else reserve
+    reserved = reserved_slots if reserved is None else reserved
+    release = release_slot if release is None else release
+    fresh = reservation_fresh if fresh is None else fresh
+
+    # Imported here rather than at module scope, as the other guards do: these
+    # are used only by code that runs at start-up and never on a request path.
+    import shutil
+    import tempfile
+
+    d = tempfile.mkdtemp(prefix="hdw4s-reserve-")
+    try:
+        now = time.time()
+
+        # NEGATIVE CONTROL FIRST. Without it every "is held" below would pass
+        # against a reader that simply returned every name it could think of.
+        assert reserved(now, d) == set(), \
+            "an empty reservation directory reported slots as held"
+
+        # HOLD ARM.
+        reserve("ephemeral0", now, d)
+        assert "ephemeral0" in reserved(now, d), \
+            "a slot that was just let is not held"
+        assert "ephemeral1" not in reserved(now, d), \
+            "a slot nobody let is held"
+
+        # EXPIRY ARM, asked of the rule rather than by sleeping: a guard that
+        # needs three minutes to prove itself would be deleted by whoever runs
+        # this next.
+        assert fresh(0.0), "a reservation made now had already expired"
+        assert not fresh(MINT_GRACE + 1), \
+            "a reservation older than the grace window still holds its slot"
+        # And the sharp one: a stamp in the FUTURE must not read as eternally
+        # fresh, or the slot can never be re-let.
+        assert not fresh(-(MINT_GRACE + 1)), \
+            "a reservation dated in the future holds its slot forever"
+
+        # RELEASE ARM.
+        release("ephemeral0", d)
+        assert "ephemeral0" not in reserved(now, d), \
+            "a released reservation still holds its slot"
+
+        # AND THE ONE THAT MATTERS MOST: this thing has no way to permit. It
+        # answers a set of names and nothing else -- no sid, no identity, no
+        # liveness -- so there is no path by which a stale file can hand
+        # somebody a desktop. Asserted as a TYPE rather than as a value,
+        # because the day someone makes it return a record is the day it
+        # becomes capable of the failure it was built to avoid.
+        reserve("ephemeral2", now, d)
+        held = reserved(now, d)
+        assert isinstance(held, set) and all(isinstance(n, str) for n in held), \
+            "the reservation reader answers something richer than slot names"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def release_slot(instance, root=None):
+    """Drop a reservation once the authority can speak for the slot itself.
+
+    NOT REQUIRED FOR CORRECTNESS, and saying so matters: the mtime bound
+    already retires an abandoned reservation, so this only returns capacity
+    sooner. It is called where a desktop has answered -- from that moment the
+    session's own runtime directory says the slot is taken and is more current
+    than we are -- and where a mint is dropped as dead.
+
+    Losing the call is a slot held for the rest of the grace window. Losing the
+    BOUND would be a slot held forever, which is why the bound is the guarantee
+    and this is the optimisation.
+    """
+    try:
+        os.unlink(os.path.join(RESERVE_DIR if root is None else root, instance))
+    except OSError:
+        pass
+
+
 def stamp_age(path, now=None):
     """(seconds, None) for a readable stamp, or (None, why) -- never a number
     we made up. An unreadable stamp rendered as "0" or as "never" is the wrong
@@ -1817,6 +2107,13 @@ def slots_in_use(own, slots=None):
                 taken.add(name)
     for inst, minted in own.pending_mints(now - MINT_GRACE):
         taken.add(inst)
+    # THE SAME HALF, WRITTEN DOWN. pending_mints() above is this process's
+    # memory of what it let; this is the part of that memory that survives our
+    # own death, which is the one thing memory cannot do and the one case where
+    # losing it PERMITS rather than refuses. A union, never a substitution: if
+    # the filesystem half is empty because nothing could be written, the
+    # in-memory half still holds every mint this process made.
+    taken |= reserved_slots(now)
     return taken
 
 
@@ -2199,6 +2496,10 @@ def arrival(own, wf, identity, query, new_identity):
             # an entry, and a slot the sweep had freed stayed "in use" until the
             # process died.
             own.forget(candidate)
+            # A mint that never became a desktop still has its reservation on
+            # disk. Dropping the record without it would hold the slot for the
+            # rest of the grace window for no reason.
+            release_slot(rec["instance"])
             log_arrival("dropped a dead session", identity, rec["instance"],
                         candidate, why)
     if sid is None:
@@ -2221,6 +2522,11 @@ def arrival(own, wf, identity, query, new_identity):
                 "finished with, or try again shortly."), extra)
             return
         sid = own.mint_session(identity, instance)
+        # WRITTEN DOWN BEFORE THE REDIRECT, and the order is the point. The
+        # redirect is what starts the desktop, so a reservation recorded after
+        # it would leave the slot unheld across exactly the window where this
+        # process can die and forget it.
+        reserve_slot(instance)
         # AFTER the mint and before the redirect, so the line exists even if the
         # visitor never comes back for it. A record written only once a request
         # reached the session would miss exactly the mint that went nowhere,
@@ -2565,6 +2871,11 @@ def serve(sock, own, expected_b64):
             # that never existed. One stat settles it and cannot be confused.
             if occupancy_readable() and slot_occupied(rec["instance"]):
                 own.attach(sid, slot_incarnation(rec["instance"]))
+                # The desktop has answered, so the authority now speaks for
+                # this slot and is more current than we are. Our reservation
+                # has nothing left to say and holding it would only delay the
+                # slot's return when the session stops.
+                release_slot(rec["instance"])
             if not served:
                 return
     finally:
@@ -2611,6 +2922,11 @@ def main():
     # than spent, and that the incarnation token can only ever refuse.
     assert_occupancy_is_read_not_created(slot_occupied, occupancy_readable,
                                          session_replaced)
+    # And the fifth: the only fact this process holds whose LOSS can permit
+    # something, and therefore the only one written to disk. That it holds,
+    # that it expires, and that it has no way to say yes to anybody.
+    assert_reservation_only_refuses(reserve_slot, reserved_slots, release_slot,
+                                    reservation_fresh)
 
     # The third guard REPORTS and does not refuse, and the asymmetry with the
     # two above is deliberate. Those two fail closed because what they catch is

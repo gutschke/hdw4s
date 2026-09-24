@@ -73,15 +73,44 @@ RuntimeDirectoryMode=0700
 #                        Deleted on restart it is strictly worse than useless --
 #                        it looks like a guard and refuses nothing.
 #
-# "restart" rather than "yes", deliberately: it is the narrower grant and it
-# covers both needs, because Restart=on-failure above is a restart. A deliberate
-# stop still clears the tree, and that is the safe direction -- the reaper falls
-# back to its own sample, which is what it did before any of this existed, and
-# stale reservations are ignored by their own mtime anyway.
+# THE REQUIREMENT IS A PROPERTY, NOT THIS DIRECTIVE, and stating it as the
+# directive is how it gets moved back. What the reservation needs of its home is
+# exactly this:
+#
+#   it must outlive the router process, and it must not outlive the boot.
+#
+# Anything with those two lifetimes will do. This directive is one way to get
+# them and not the only one -- a directory created by something that outlives
+# the router would also qualify, and was the alternative considered here. It was
+# rejected because it needs a second unit to own a directory for a component
+# that already has one, and because the ownership of that directory then has to
+# be arranged by hand for a DynamicUser= service, which is the part this
+# directive does correctly and silently.
+#
+# "yes" rather than "restart", and the reason is evidence rather than taste.
+# "restart" is the narrower grant and would be the better fit on paper, since
+# Restart=on-failure above is a restart and a deliberate stop could then clear
+# the tree. It is not used because what has actually been measured on this
+# estate is "yes": the tree relocates to /run/private/<name> at root:root 0700,
+# and the surviving directory PINS THE DYNAMIC UID across a stop and start,
+# with a control arm that saw a different uid when preservation was off. Nobody
+# has measured "restart", and picking the tidier value on the strength of a
+# measurement of a different value is the whole class of error this file keeps
+# warning about. Narrow it when somebody measures it.
 #
 # /run is a tmpfs, so none of this survives a boot, which is correct: these
 # records describe a machine that is currently up.
-RuntimeDirectoryPreserve=restart
+#
+# AND THE LESSON THAT COST THE MOST, because the next person will make the same
+# move for the same good reasons. The reservation code deliberately refuses
+# flock, on the grounds that the kernel releases a lock when the holder dies and
+# surviving the holder's death is the entire purpose. That reflex was correctly
+# refused -- and then the file was put in a directory that systemd deletes when
+# the holder dies, which fails for the IDENTICAL reason one level down. The
+# wipe had been measured, in this same round, by people who had read the
+# measurement. Refusing the obvious primitive is not the same as checking the
+# lifetime of the place you put the result.
+RuntimeDirectoryPreserve=yes
 
 # Hardened deliberately rather than maximally. This is a small stdlib HTTP
 # router with no desktop behind it, so it tolerates far more than a session
