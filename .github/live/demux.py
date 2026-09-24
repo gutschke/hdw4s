@@ -806,6 +806,62 @@ def test_a_reaped_visitor_is_not_handed_back_the_same_dead_address(rig):
         "told the visitor to come here to escape" % sid)
 
 
+# THE WIPE, MEASURED ON REAL SYSTEMD, so that nobody has to re-derive why a
+# tmpdir was allowed to stand in for it below. Kept here rather than in a report
+# because the next reader of this arm has exactly two wrong moves available --
+# delete the stand-in as sloppy, or trust it as complete -- and both are made by
+# somebody who cannot see this measurement. Measured on ct154; it supersedes the
+# docstring's "the unit file is the oracle for that half", which was true when
+# it was written and is now the weaker of the two.
+#
+# Directives read from the RUNNING unit, not from the packaged file:
+#
+#     RuntimeDirectory=hdw4s-demux   RuntimeDirectoryPreserve=no
+#     DynamicUser=yes                Restart=on-failure
+#     /run/hdw4s-demux   drwx------ hdw4s-demux hdw4s-demux
+#
+# NOT under /run/private. That relocation is the preserve=yes case, so any note
+# claiming a pinned uid or a /run/private path is describing a CANDIDATE REPAIR
+# and not what ships -- worth knowing before somebody reads one as evidence.
+#
+# Clean restart:
+#
+#     arrival (curl -L, cookie jar, reaching /s/<sid>/)
+#     BEFORE  /run/hdw4s-demux/last-request/ephemeral0  11 bytes 09:39:13 count 1
+#     systemctl restart hdw4s-demux.service
+#     AFTER                                                               count 0
+#
+# Crash, which is the path that happens unattended:
+#
+#     record written:  ephemeral0  09:43:30
+#     kill -9
+#     AFTER            nothing
+#
+# NO DIFFERENCE between the two. Stated explicitly because
+# RuntimeDirectoryPreserve=restart exists as a distinct value, so "a crash is the
+# same as a restart" was an assumption right up until somebody ran both.
+#
+# And the half that makes it a defect rather than a curiosity: THE DESKTOP WAS
+# NEVER TOUCHED. hdw4s-ephemeral@ephemeral0 stayed ActiveState=active with
+# ExecMainPID=60813 and an ActiveEnterTimestamp from before the restart. A live
+# desktop, visited seconds earlier, renders the byte-identical string that a slot
+# nobody has ever opened renders.
+#
+# TWO TRAPS FOR WHOEVER RE-RUNS THIS, and the first one cost a retraction:
+#
+#   * A BARE CURL PROVES NOTHING. It takes the 302 and stops, never reaches a
+#     slot, and writes no record -- so the thing you are about to call a
+#     survivor is somebody else's traffic. Use curl -L with a cookie jar and
+#     follow it to /s/<sid>/.
+#   * OWN THE BOX FOR THE DURATION. The first attempt read 2 -> 1 and looked
+#     like a record surviving a restart; the extra record belonged to another
+#     seat working the same machine at the same time. File ownership was
+#     allocated and machine ownership was not, which is a gap in the allocation
+#     rather than a mistake at the keyboard -- and the only reason it was caught
+#     is that the contaminated number was interesting enough to doubt. An
+#     uninteresting wrong number would still be in the record.
+
+
 def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
     """DEFECT 4, and READ THE STAND-IN BEFORE BELIEVING THIS ONE.
 
