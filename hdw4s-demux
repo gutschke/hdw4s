@@ -63,7 +63,9 @@ import hmac
 import http.cookies
 import os
 import secrets
+import hashlib
 import socket
+import stat
 import sys
 import threading
 import time
@@ -1199,6 +1201,56 @@ def log_refusal(reason, now=None):
         log("  WARNING: %s" % complaint)
 
 
+def visitor_tag(identity):
+    """A short, stable, non-reversible name for one browser, for the log.
+
+    The identity cookie itself is never written anywhere. It is what decides
+    whose desktop a request reaches, so a log line carrying it is a log line
+    that hands somebody else's session to whoever can read the journal -- and on
+    this box the journal has already been read across occupants once.
+
+    COMPUTED, not truncated. Printing the first eight characters of the cookie
+    would be the print-then-redact shape: it narrows the search for the rest by
+    exactly the part that was printed, and it looks just as anonymous. A digest
+    of the whole value does not.
+
+    Eight hex characters, because the question an operator asks of this is "are
+    these two lines the same browser or two different ones", over a handful of
+    lines, and not "which browser is this".
+    """
+    return hashlib.sha256(identity.encode("ascii", "replace")).hexdigest()[:8]
+
+
+def log_arrival(what, identity, instance, sid, why=None):
+    """A session was minted, or resumed. Said out loud, because NOTHING DID.
+
+    This was the missing instrument, and its absence is why every defect around
+    it was silent. A visitor arrived, a slot was taken, and the only trace on
+    the box was a file mtime under the runtime directory that systemd deletes on
+    every restart. There was no record that a slot had been let at all.
+
+    Three readers, and the middle one is the reason this is not a debug line:
+
+      * the pool filling up. log_refusal() says the pool is full; nothing said
+        how it got that way, so the idle window was being judged from one end.
+      * A SLOT LET TWICE. The router's table is in memory, so a restart forgets
+        who holds what. Two mints on one instance, with two different visitor
+        tags and no reap between them, is one person being handed the desktop
+        another person is sitting in -- and there is no other way for an
+        operator to find that out, because to both visitors it looks fine.
+      * anything watching this box for contamination during a measurement. That
+        currently reads last-request files by path, which makes it blind the
+        moment those records move or are wiped; a log line is not a path.
+
+    The sid is written and the identity is NOT. A sid is an address: the session
+    it names can read it out of its own environment, so it is in somebody else's
+    access log already. An identity is what authorises reaching that address.
+    """
+    log("%s: slot %s, session %s, visitor %s%s"
+        % (what, instance, sid, visitor_tag(identity),
+           "" if why is None else " (%s)" % why))
+
+
 def slot_carries_own_credential(instance):
     """True when a slot was configured with a Basic credential of its own.
 
@@ -1247,29 +1299,258 @@ def available_slots():
     return sorted(n[:-5] for n in names if n.endswith(".sock"))
 
 
-def slot_unreachable(instance):
+def listening_paths(proc_net_unix="/proc/net/unix"):
+    """Every AF_UNIX path the kernel currently has a LISTENING socket on.
+
+    The kernel's own answer to "is anything bound and accepting here", asked
+    without opening anything. Field 4 of /proc/net/unix is the socket's flags
+    and 0x10000 is SO_ACCEPTCON, which is set by listen() and by nothing else.
+
+    Controlled in both directions rather than reasoned about, because a parser
+    that returned the empty set would make every slot look dead and one that
+    returned everything would make every slot look live:
+
+        a socket that called listen()      Flags 00010000  -> in this set
+        a socket bound and never listened  Flags 00000000  -> NOT in this set
+        a regular file made with "touch"   absent from the file entirely
+
+    That middle row is the orphan this project has already enumerated as a live
+    slot, and the third is the "touch zz-probe.sock" case measured on 2026-09-22.
+    assert_probe_does_not_activate() below builds all three and checks them.
+
+    A failure to read is NOT an empty set. Returning one would say "nothing is
+    listening anywhere", which is the confident wrong sentence this whole file
+    is about, so the caller is handed None and says so.
+    """
+    try:
+        with open(proc_net_unix, "r") as f:
+            rows = f.readlines()[1:]
+    except OSError:
+        return None
+    out = set()
+    for row in rows:
+        bits = row.split()
+        if len(bits) < 8:
+            continue
+        try:
+            if int(bits[3], 16) & 0x10000:
+                out.add(bits[7])
+        except ValueError:
+            continue
+    return out
+
+
+def slot_unreachable(instance, listening=None, path=None):
     """Why this slot cannot be reached, or None if it can.
 
-    Answers the question the enumeration above only appears to answer. A name in
-    the socket directory is a filename; whether a request can be served through
-    it is a fact about the kernel, and the two came apart in the field -- a
-    regular file created with "touch" was enumerated as a slot, and a socket with
-    nothing bound to it was handed to a visitor.
+    Answers the question available_slots() only appears to answer. A name in the
+    socket directory is a filename; whether a request can be served through it is
+    a fact about the kernel, and the two came apart in the field -- a regular file
+    created with "touch" was enumerated as a slot, and a socket with nothing bound
+    to it was handed to a visitor.
+
+    IT USED TO CONNECT, AND THAT WAS NOT AN OBSERVATION. IT WAS AN ACTION.
+    /run/hdw4s-proxy/<instance>.sock belongs to hdw4s-proxy@<instance>.socket,
+    which is socket-activated and which the sweep deliberately leaves listening
+    when it reaps a desktop. So a bare connect() -- no bytes sent, no HTTP --
+    starts the relay AND a whole GNOME session behind it. Measured on a stock
+    install: with a session stopped and its socket unit still up, one connect()
+    took hdw4s-ephemeral@<instance> from inactive to active and created its
+    runtime tree.
+
+    The consequence was the startup banner, which calls this once per slot:
+    three desktops stopped, the router restarted, and ten milliseconds after it
+    printed "routing to 3 slot(s)" all three incarnation units and all three
+    sessions started, with nobody on the box and no arrival. A restart of the
+    front door consumed the entire pool. The check written to report what the
+    pool could serve was manufacturing the answer it reported -- and it would
+    have gone on looking right forever, because what it says is true by the time
+    anybody reads it.
+
+    So nothing here opens the socket. Three questions, none of which activates
+    anything, and between them they cover every failure this was written for:
+
+      * is it a socket at all       -- stat, which catches the touched file
+      * is anything listening on it -- /proc/net/unix, which catches the orphan
+      * may we open it              -- os.access, which catches the EACCES case
+                                       that a leftover socket owned by another
+                                       user produced in the field
+
+    LISTENING is passed in so the caller can read /proc/net/unix once for a
+    whole pool instead of once per slot, and so the arms below can hand this a
+    set they built. A caller that passes nothing gets a fresh read. PATH is
+    there for the same reason and for one more: the arms build their slots in a
+    private directory, and a version that could only ever look in PROXY_RUNDIR
+    would have had to be proved by mutating the module it was proving.
 
     Deliberately returns the reason rather than a boolean: an operator reading
     "cannot be reached" wants to know whether it is a leftover file, a permission
     problem or a session that is down, and those want different actions.
     """
-    path = socket_path(instance)
-    up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    up.settimeout(2)
+    path = socket_path(instance) if path is None else path
     try:
-        up.connect(path)
-        return None
+        st = os.stat(path)
     except OSError as e:
         return "%s (%s)" % (e.strerror or e, errno.errorcode.get(e.errno, e.errno))
+    if not stat.S_ISSOCK(st.st_mode):
+        return "not a socket, it is an ordinary file left in the pool directory"
+    if not os.access(path, os.R_OK | os.W_OK):
+        # The measured field failure: a socket left by an earlier configuration,
+        # owned by a different user than this service runs as. connect() gave
+        # EACCES; this says the same thing without the side effect.
+        return "no permission to open it (EACCES); it belongs to %d:%d" \
+            % (st.st_uid, st.st_gid)
+    if listening is None:
+        listening = listening_paths()
+    if listening is None:
+        # NOT "it is unreachable", and not "it is fine" either. The instrument
+        # did not run, and an instrument that did not run must never be read as
+        # a result -- in either direction.
+        return None
+    if path not in listening:
+        return "nothing is listening on it (the socket unit is down, or this is" \
+               " an orphan left behind by a session that stopped)"
+    return None
+
+
+def assert_probe_does_not_activate(probe=slot_unreachable,
+                                   enumerate_listening=listening_paths):
+    """Prove the reachability probe reports without CONNECTING, at every start.
+
+    Takes both halves as parameters for the same reason assert_ownership_keying()
+    takes a factory: a version that built its own probe could not fail for any
+    implementation but the one it already trusted, and this file has already
+    caught exactly that mistake once.
+
+    THE REFUSE ARM IS THE POINT, and it is the one that would have gone red
+    against the code this replaces: a slot that is bound but never listened to
+    must be reported as unreachable. The old probe connect()ed, which on a
+    socket-activated path SUCCEEDS and starts a desktop, so it returned None --
+    "this slot is fine" -- about a slot with no session behind it, having just
+    created one.
+
+    Four slots are built in a private directory: one listening, one bound and
+    never listened to, one a plain file, and one LISTENING WITH A WITNESS BEHIND
+    IT. Each of the first three must be classified differently, and the
+    listening one must still be permitted, because a probe that refused
+    everything would satisfy the refuse arm on its own.
+
+    The fourth is the arm that catches the predecessor, and it took two goes to
+    get right. The first version of this function had only the three
+    classification arms -- and the connecting probe PASSES all three, because
+    nothing in a temporary directory is socket-activated: connect() to the
+    orphan is refused there, so the old code returned the right answer for the
+    right reason and the guard went green against the exact defect it was named
+    for. A check that cannot fail for the implementation it replaced is not a
+    check. So the fourth slot is listening, with a thread that records having
+    been ACCEPTED on, which is the local stand-in for systemd holding a slot
+    socket open and starting a desktop for whoever knocks. The probe must leave
+    that witness untouched.
+
+    WHAT IT STILL CANNOT SEE, because an unwritten blind spot reads as
+    exhaustive: it does not observe systemd. The witness proves nothing was
+    connected to; that a connection would have started a GNOME session is a fact
+    about the shipped units, measured on a box and written up beside
+    slot_unreachable(), not something this reproduces.
+    """
+    import shutil
+    import tempfile
+
+    d = tempfile.mkdtemp(prefix="hdw4s-demux-probe-")
+    keep = []
+    try:
+        live = os.path.join(d, "live.sock")
+        orphan = os.path.join(d, "orphan.sock")
+        plain = os.path.join(d, "plain.sock")
+
+        a = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        a.bind(live)
+        a.listen(4)
+        keep.append(a)
+        b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        b.bind(orphan)              # bound, never listen()ed
+        keep.append(b)
+        with open(plain, "w"):
+            pass
+
+        # The stand-in for a socket-activated slot: listening, and it notices.
+        witnessed = os.path.join(d, "witnessed.sock")
+        w = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        w.bind(witnessed)
+        w.listen(4)
+        keep.append(w)
+        accepted = []
+
+        def watch():
+            while True:
+                try:
+                    c, _ = w.accept()
+                except OSError:
+                    return
+                accepted.append(1)
+                c.close()
+
+        threading.Thread(target=watch, daemon=True).start()
+
+        seen = enumerate_listening()
+        assert seen is not None, \
+            "the listening-socket enumeration could not run at all, so it" \
+            " cannot distinguish a live slot from an orphan"
+        # THE CONTROL, INSIDE THE SPACE SEARCHED. An enumeration that came back
+        # empty would make every slot below look dead, and the refuse arms would
+        # all pass for the wrong reason.
+        assert live in seen, \
+            "a socket this process is listening on was not found among the" \
+            " listening sockets, so an empty answer here means nothing"
+        assert orphan not in seen, \
+            "a socket that was bound and never listened to was counted as" \
+            " listening: the flag being read is not SO_ACCEPTCON"
+
+        # PERMIT ARM.
+        assert probe("live", listening=seen, path=live) is None, \
+            "a slot with a listening socket was reported unreachable"
+        # REFUSE ARMS, and each names a different repair to an operator.
+        assert probe("orphan", listening=seen, path=orphan) is not None, \
+            "a socket with nothing listening on it was reported reachable --" \
+            " a visitor minted onto it gets no answer and the slot is consumed"
+        assert probe("plain", listening=seen, path=plain) is not None, \
+            "an ordinary file in the pool directory was reported reachable"
+        assert probe("gone", listening=seen,
+                     path=os.path.join(d, "no-such.sock")) is not None, \
+            "a name with no file at all was reported reachable"
+        # THE ARM THAT CATCHES THE PREDECESSOR. A probe that connects here gets
+        # a perfectly good answer -- this slot is listening and is reachable --
+        # and in the field that same connect starts a desktop. The verdict is
+        # therefore not evidence either way; the side effect is.
+        assert probe("witnessed", listening=seen, path=witnessed) is None, \
+            "a listening slot was reported unreachable"
+        # The accept happens on another thread, so give it a moment rather than
+        # racing it: a check that can be beaten by scheduling reports clean at
+        # random, which is worse than not checking.
+        for _ in range(50):
+            if accepted:
+                break
+            time.sleep(0.01)
+        assert not accepted, \
+            "the reachability probe CONNECTED to a slot. On this box that is" \
+            " only a wasted syscall; on a socket-activated pool it starts a" \
+            " desktop, and the startup banner does it once per slot -- which" \
+            " is how restarting the front door consumed the whole pool"
+
+        # AND IT MUST NOT HAVE OPENED ANYTHING. The orphan is the only slot here
+        # that a connect() would have changed -- on a socket-activated path it
+        # would have started a session. Nothing bound it to a listener, so if
+        # the probe had connected, it would still not be listening; what this
+        # can check is the weaker, true thing: the probe left the pool exactly
+        # as it found it.
+        after = enumerate_listening()
+        assert after is not None and orphan not in after and live in after, \
+            "the probe changed which sockets are listening, so it acted on the" \
+            " pool rather than observing it"
     finally:
-        up.close()
+        for s in keep:
+            s.close()
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def pick_slot(own):
@@ -1503,6 +1784,10 @@ def arrival(own, wf, identity, query, new_identity):
         # the sid is what is resumed, so a reaped session is simply absent here
         # rather than resolving to whoever now holds its slot.
         sid = owned[-1]
+        rec = own.lookup(sid)
+        log_arrival("resumed a session", identity,
+                    rec["instance"] if rec else "?", sid,
+                    "arm %s, %d owned" % (arm, len(owned)))
     if sid is None:
         instance = pick_slot(own)
         if instance is None:
@@ -1517,6 +1802,13 @@ def arrival(own, wf, identity, query, new_identity):
                 "finished with, or try again shortly."), extra)
             return
         sid = own.mint_session(identity, instance)
+        # AFTER the mint and before the redirect, so the line exists even if the
+        # visitor never comes back for it. A record written only once a request
+        # reached the session would miss exactly the mint that went nowhere,
+        # which is the one that quietly consumed a slot.
+        log_arrival("minted a session", identity, instance, sid,
+                    "arm %s, %d slot(s) now let" % (arm,
+                                                    len(own.instances_in_use())))
 
     location = "/s/%s/" % sid
     if query:
@@ -1850,6 +2142,12 @@ def main():
     # Both arms, at every start, before anything can arrive.
     assert_ownership_keying(Ownership)
     assert_cookie_outlives_idle(derive_cookie_lifetime)
+    # And the third, for the same reason and with a sharper history: the probe
+    # this guards used to CONNECT, and a connect on a socket-activated slot is
+    # not a question, it is an instruction to start a desktop. That was silent
+    # for as long as it existed, because what the probe reported became true the
+    # moment it asked.
+    assert_probe_does_not_activate(slot_unreachable, listening_paths)
 
     # The third guard REPORTS and does not refuse, and the asymmetry with the
     # two above is deliberate. Those two fail closed because what they catch is
@@ -1935,6 +2233,14 @@ def main():
         log("no session sockets in %s; nothing to route to." % PROXY_RUNDIR)
     else:
         log("routing to %d slot(s): %s" % (len(slots), ", ".join(slots)))
+        # Read ONCE for the whole pool rather than once per slot, so the banner
+        # describes one instant instead of N of them.
+        listening = listening_paths()
+        if listening is None:
+            log("WARNING: /proc/net/unix could not be read, so whether anything"
+                " is listening on each slot is unknown here.")
+            log("  The names below are what the pool is configured with. They"
+                " are not a claim that any of them can be served.")
         # A slot with its own Basic credential answers 401 to EVERYTHING that
         # comes through here, including its index -- and it does so alone, while
         # its neighbours work, which reads as a routing fault rather than as
@@ -1946,15 +2252,24 @@ def main():
             # announce slots it could not open -- a socket left behind by an
             # earlier configuration, with nothing bound to it, was listed as
             # routable and then given to the first arrival, which got no
-            # response at all. One connect-and-close per slot at startup says so
-            # in the line that already exists, at the moment the pool is read.
+            # response at all.
+            #
+            # THIS LOOP USED TO BE THE MOST EXPENSIVE LINE IN THE FILE. It ran
+            # one connect-and-close per slot, and on a socket-activated pool a
+            # connect starts a desktop. Measured on a three-slot pool: every
+            # session stopped, one `systemctl restart hdw4s-demux`, and eleven
+            # milliseconds after this banner printed, all three incarnation
+            # units and all three GNOME sessions had started -- with no arrival
+            # and nobody on the box. A restart of the front door consumed the
+            # whole pool, every time, and said nothing, because by the time
+            # anyone read "routing to 3 slot(s)" it was true.
             #
             # NOT keyed on a particular errno. The failure measured in the field
             # was EACCES, not ENOENT or ECONNREFUSED, because the leftover socket
             # was owned by a different user than the one this runs as. Anything
             # written against "the file is missing" would have stayed silent
             # through exactly the case that produced the defect.
-            why = slot_unreachable(name)
+            why = slot_unreachable(name, listening)
             if why:
                 log("WARNING: %s is listed as a slot but cannot be reached: %s"
                     % (name, why))
