@@ -850,6 +850,76 @@ else
 fi
 
 echo
+# ---------------------------------------------------------------------------
+# The idle window's grammar exists exactly once, and both callers reach it.
+#
+# It did not. The tool carried a unit table and the router read the same
+# setting with int(), caught the failure and used seven days without a word --
+# so "30d", which hdw4s.conf and hdw4s.8 both tell an administrator to type,
+# was accepted, written down and then discarded by the component whose
+# behaviour depended on it.
+#
+# WHAT MAKES THIS A CHECK RATHER THAN A COMMENT: the previous repair also put
+# the grammar "in one place", and only half of it landed. One side learned the
+# unit letters and the other kept its fallback, and nothing anywhere could
+# notice, because "there is one implementation" is a property of the whole tree
+# and no file can assert it about itself. So it is asserted here, over the
+# tree, where a merge that keeps one half fails.
+#
+# .github/setting-grammar.py is the other half of the pair and they are not
+# redundant: that one compares the two callers' ANSWERS, this one asserts there
+# is only one thing to answer with. Two implementations that happen to agree
+# today would pass that check and fail this one.
+begin
+# The two constants systemd uses for the units that have no fixed length -- a
+# month of 30.44 days and a year of 365.25 -- keyed on because nothing else in
+# this tree has any reason to name them. A second unit table is the defect
+# returning, and it will carry these whether or not it is spelled the same way.
+for n in 2629800 31557600; do
+  holders="$(grep -rlF "${n}" --exclude-dir=.git --exclude-dir=.github \
+             --exclude-dir=private --exclude-dir=tmp --exclude-dir=__pycache__ . 2>/dev/null |
+             sed 's|^\./||' | sort)"
+  case "${holders}" in
+    'hdw4s-duration') ;;
+    '') bad 'duration grammar' "${n} is in no shipped file: hdw4s-duration has lost its unit table" ;;
+    *)  bad 'duration grammar' \
+            "${n} is named by $(printf '%s' "${holders}" | tr '\n' ' ' | sed 's/ $//'); the unit table belongs to hdw4s-duration alone" ;;
+  esac
+done
+# And every shipped script that reads the setting must reach that file. A
+# component naming the key and not the parser is a component with a reading of
+# its own, which is the shape the router had. Derived from the tree rather than
+# listed: a list would be right until the next component reads it.
+readers="$(grep -rlF 'HDW4S_IDLE_DAYS' --exclude-dir=.git --exclude-dir=.github \
+           --exclude-dir=private --exclude-dir=tmp --exclude-dir=__pycache__ . 2>/dev/null |
+           sed 's|^\./||' | sort)"
+# POSITIVE CONTROL. An empty list passes this loop in silence, and a broken
+# grep looks exactly like a tree where nothing reads the setting.
+case "${readers}" in
+  *hdw4s-demux*) ;;
+  *) bad 'duration grammar' 'nothing in the tree reads HDW4S_IDLE_DAYS, which cannot be true: the search is broken, not the tree clean' ;;
+esac
+for f in ${readers}; do
+  # Documentation names the key without reading it, and the parser names it in
+  # the account of why it exists.
+  case "${f}" in hdw4s.conf|hdw4s.8|hdw4s.8.md|hdw4s-duration|README.md|SECURITY.md) continue;; esac
+  # Comment lines stripped first. The first version of this looked at the whole
+  # file, so pointing the caller at a different parser and LEAVING THE COMMENT
+  # that explains why it uses this one passed -- which is close to the exact
+  # shape of the defect: the account of what the code does, still true-sounding,
+  # while the code does something else.
+  #
+  # WHAT THIS STILL CANNOT SEE, said out loud rather than left to be assumed: a
+  # Python caller that names the file only in a docstring satisfies it, because
+  # a docstring is not a comment to grep. The behavioural half of the pair is
+  # what closes that -- .github/setting-grammar.py asks the router for an answer
+  # and compares it against the tool's -- and neither half is sufficient alone.
+  grep -v '^[[:space:]]*#' "${f}" | grep -qF 'hdw4s-duration' ||
+    bad 'duration grammar' "${f} reads HDW4S_IDLE_DAYS without reaching hdw4s-duration, so it has a grammar of its own"
+done
+okif 'the idle window has one grammar'
+
+echo
 section 'behaviour tests'
 if "$(dirname "$0")/tests.sh" > /tmp/hdw4s-tests.$$ 2>&1; then
   printf '%-28s %s\n' 'tests.sh' "$(tail -n1 /tmp/hdw4s-tests.$$)"

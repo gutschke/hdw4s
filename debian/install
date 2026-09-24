@@ -7,6 +7,10 @@ hdw4s-refuse             usr/lib/hdw4s
 hdw4s-incarnation        usr/lib/hdw4s
 hdw4s-update             usr/lib/hdw4s
 hdw4s-wait             usr/lib/hdw4s
+# The idle window's grammar. Installed BESIDE the components rather than under
+# a library directory, because hdw4s-demux finds it by its own location and
+# hdw4s runs it as a command: two callers, one file, and nothing to configure.
+hdw4s-duration           usr/lib/hdw4s
 hdw4s.xorg.conf          usr/lib/hdw4s
 wrappers/*               usr/lib/hdw4s/wrappers
 hdw4s.conf               usr/share/hdw4s

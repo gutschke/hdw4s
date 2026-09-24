@@ -1141,46 +1141,28 @@ declare -A SETTABLE=(
 
 # HDW4S_IDLE_DAYS is a duration, and a bare number in it still means DAYS.
 #
-# THE NAME IS DELIBERATE. DO NOT "TIDY" IT BY RENAMING THE KEY. It names the
-# setting and its default unit, and the awkwardness of writing "60s" against a
-# key spelled DAYS is doing work: a development value cannot then be mistaken
-# for a production one at a glance. Renaming to HDW4S_IDLE would make a bare
-# number arbitrary -- nothing in the name would say days -- so the nudge toward
-# days would be removed rather than relocated. Revisit only when there are real
-# configurations to look at.
+# THE GRAMMAR IS NOT HERE. It is hdw4s-duration, and this calls it. There used
+# to be a copy of it in this file and another reading of it in hdw4s-demux, and
+# the two disagreed: the copy here took "30d" and the router read the same line
+# with int(), caught the failure and used seven days without a word. The value
+# in question is the one our own sample configuration and manual tell an
+# administrator to type. A repair that taught both sides the same rules would
+# have been correct on the day it landed and available to drift again the day
+# after, which is what had already happened once -- so there is one
+# implementation and both callers reach it.
 #
-# The unit letters are systemd's, so that an administrator who knows one knows
-# the other: s m h d w M y. CASE MATTERS -- "m" is minutes and "M" is months --
-# and a letter that is neither is rejected rather than folded to the one that
-# looks closest. Nothing here guesses.
+# .github/checks.sh refuses a second unit table anywhere in the tree, and
+# .github/setting-grammar.py asks this side and the router the same values and
+# compares the answers. Neither is decoration: the first red arm either has
+# ever produced was the shipped defect itself.
 #
-# There is no fallback. This replaced
-#
-#     case "${days}" in ''|*[!0-9]*) days=7;; esac
-#
-# which turned anything it could not read into a week with no message at all --
-# so "30m", meant as thirty minutes, became seven days silently, and the unit
-# ambiguity above could not have been noticed by anybody. Teaching the parser
-# units WITHOUT removing that line is what would have let it bite for the first
-# time, so the two belong in one change.
+# THE NAME IS DELIBERATE. DO NOT "TIDY" IT BY RENAMING THE KEY -- the reasoning
+# is in hdw4s-duration, beside the grammar it is about.
 
-# Whole seconds below which a non-zero window is refused.
-#
-# An ephemeral session takes the full stop timeout to die -- 91 seconds,
-# measured from the journal and recorded in hdw4s-ephemeral@.service, because
-# several of GNOME's helpers ignore SIGTERM and have to be SIGKILLed. A window
-# shorter than the teardown cannot free a slot inside the window, so it is not
-# an aggressive setting, it is an incoherent one: the slot is still occupied
-# when the next window has already elapsed.
-#
-# Sampling is the second reason, and it is the one an administrator meets
-# first: hdw4s-reaper.timer runs every five minutes, so nothing is noticed
-# sooner than that whatever this says. The floor is set at the teardown rather
-# than at the sampling interval because the teardown is what makes a value
-# incoherent rather than merely coarse -- but the refusal says both, since an
-# administrator who sets 120s and watches for two minutes would otherwise
-# conclude the setting was ignored.
-IDLE_MIN_SECONDS=120
+# Where the grammar lives. HDW4S_LIBDIR for the test suite and for a tree that
+# is not installed; the literal is what install.sh rewrites when the package is
+# put somewhere else, which is why it is spelled out rather than computed.
+DURATION_TOOL="${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-duration"
 
 # The two answers from idle_seconds: the window in whole seconds when it
 # succeeds, and why it refused when it does not.
@@ -1200,86 +1182,47 @@ IDLE_WHY=''
 # Sets IDLE_SECONDS to the window in whole seconds, or fails with the reason in
 # IDLE_WHY.
 #
-# Zero is a legal answer and means "never reap" -- a person typed a zero and
-# that is a statement. A NON-ZERO value that computes to less than a second is
-# refused instead, because reading it as "disabled" would silently invert what
-# was asked for.
-#
 # Failing rather than dying, so both callers can be loud in their own way: "set"
 # dies on the spot, and the reaper has other sessions to get to and must not
 # exit in the middle of the list. NEITHER may fall back to a default.
+#
+# THREE OUTCOMES, NOT TWO. Exit 1 from the helper is "that value cannot be
+# read" and carries the reason. Any other non-zero status -- the helper missing,
+# unreadable, or raising -- is "this installation is broken", and it is reported
+# as that rather than folded into a refusal about the value. Conflating a parse
+# failure with a policy decision is precisely the defect this replaced, and it
+# would be a poor joke to reintroduce it one level up.
 idle_seconds() {
-  local raw="$1" num unit mult secs
+  local out rc
   IDLE_SECONDS=''
   IDLE_WHY=''
-
-  # Split the trailing unit off by removing the longest run that ends in a
-  # digit or a decimal point. "30s" -> "s"; "30" -> ""; "0.5h" -> "h"; and
-  # "1h30m" -> "m" with "1h30" left over, which fails the number test below.
-  # Compound durations are refused on purpose: systemd accepts them, nothing
-  # here needs them, and "90m" says the same thing with one way to read it.
-  unit="${raw##*[0-9.]}"
-  num="${raw%"${unit}"}"
-  if ! [[ "${num}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-    IDLE_WHY="'${raw}' is not a duration."
-    return 1
-  fi
-
-  case "${unit}" in
-    ''|d)  mult=86400;;
-    s)     mult=1;;
-    m)     mult=60;;
-    h)     mult=3600;;
-    w)     mult=604800;;
-    # systemd's own lengths for the two units that have no fixed one: a month
-    # is 30.44 days and a year is 365.25. Spelled out rather than computed so
-    # that they can be compared against systemd's documentation by eye.
-    M)     mult=2629800;;
-    y)     mult=31557600;;
-    *)     IDLE_WHY="'${unit}' is not a unit of time."; return 1;;
+  out="$("${DURATION_TOOL}" "$1" 2>&1)"; rc=$?
+  case "${rc}" in
+    0) # Checked rather than trusted: on success the helper prints digits and
+       # nothing else, so anything else on either stream means we are talking
+       # to something that is not the parser -- a python warning, a wrapper, a
+       # stale file. Reading that as a number is how a window becomes a value
+       # nobody wrote.
+       case "${out}" in
+         ''|*[!0-9]*)
+           IDLE_WHY="${DURATION_TOOL} answered '${out}', which is not a number of seconds."
+           return 1;;
+       esac
+       IDLE_SECONDS="${out}";;
+    1) IDLE_WHY="${out}";;
+    *) IDLE_WHY="${DURATION_TOOL} could not be run (exit ${rc}): ${out}";;
   esac
-
-  # awk, because 0.5h has to be 1800 and bash has no fractions. Truncating
-  # toward zero is safe here precisely because the representation is seconds:
-  # the only way to reach zero from a non-zero value is to be smaller than a
-  # second, and that is refused two lines below rather than read as "disabled".
-  secs="$(awk -v n="${num}" -v m="${mult}" 'BEGIN { printf "%d", int(n * m) }')"
-  case "${secs}" in ''|*[!0-9]*)
-    IDLE_WHY="'${raw}' is too large to be a duration."; return 1;;
-  esac
-
-  if [ "${secs}" -eq 0 ]; then
-    # Zero seconds from a zero. Disabled, and said so explicitly.
-    if awk -v n="${num}" 'BEGIN { exit !(n + 0 == 0) }'; then
-      IDLE_SECONDS='0'
-      return 0
-    fi
-    IDLE_WHY="'${raw}' is less than a second."
-    return 1
-  fi
-
-  if [ "${secs}" -lt "${IDLE_MIN_SECONDS}" ]; then
-    IDLE_WHY="'${raw}' is ${secs} seconds, and the shortest window is ${IDLE_MIN_SECONDS}."
-    return 1
-  fi
-
-  IDLE_SECONDS="${secs}"
+  [ "${rc}" -eq 0 ]
 }
 
-# The remedy, printed under every refusal above. Every form named here is one
-# the parser accepts; a refusal that names a spelling the tool then rejects is
-# worse than one that names none.
+# The remedy, printed under every refusal above. It comes out of the same file
+# as the rules, so a refusal cannot name a spelling the parser rejects; every
+# form in it is run back through the parser by .github/tests.sh.
 idle_syntax_help() {
-  printf '%s\n' \
-    '  Write a number with one of systemd'"'"'s unit letters, or a bare number' \
-    '  for days. Case matters: m is minutes, M is months.' \
-    '      s seconds   m minutes   h hours   d days   w weeks   M months   y years' \
-    '  For example: 7 (seven days), 30d, 12h, 90m, 0.5h.' \
-    '  0 disables reaping altogether.' \
-    "  The shortest window is ${IDLE_MIN_SECONDS} seconds: an ephemeral session takes up to 91" \
-    '  seconds to shut down, so a shorter window cannot free a slot inside' \
-    '  itself. Connections are sampled every five minutes, so nothing shorter' \
-    '  than that is noticed any sooner either.'
+  "${DURATION_TOOL}" --help-text 2>/dev/null ||
+    printf '%s\n' \
+      "  ${DURATION_TOOL} is missing, so the accepted forms cannot be named." \
+      '  Reinstall the package: nothing can read an idle window without it.'
 }
 
 # How long ago, in words, for a message a person reads. Whole units only: the

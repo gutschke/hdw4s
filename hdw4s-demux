@@ -157,11 +157,12 @@ COOKIE_REFRESH_EVERY = 3600.0
 # The one number here that is chosen rather than derived, and it is a FLOOR, not
 # a value: the derivation below can only raise it.
 COOKIE_FLOOR_DAYS = 30
+COOKIE_FLOOR_SECONDS = COOKIE_FLOOR_DAYS * 86400
 
 # Replaced in main() by the value derived from the pool. The floor stands in
 # until then so that importing this module -- which the trial harness does, to
 # exercise the guards without a network -- never depends on main() having run.
-COOKIE_LIFETIME = COOKIE_FLOOR_DAYS * 86400
+COOKIE_LIFETIME = COOKIE_FLOOR_SECONDS
 
 # Where the periodic sweep records the last time anything was connected to a
 # slot. Same environment variable the CLI reads, deliberately: two spellings of
@@ -171,6 +172,68 @@ REAP_STAMP_DIR = os.environ.get("HDW4S_REAP_STAMP_DIR", "/run/hdw4s-reap")
 ETC_DIR = os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s")
 SITE_CONF = os.path.join(ETC_DIR, "hdw4s.conf")
 SLOTS_FILE = os.path.join(ETC_DIR, "instances")
+
+
+def load_duration():
+    """The idle window's grammar, from the one file that holds it.
+
+    DERIVED FROM THIS FILE'S OWN LOCATION, not from a configured directory and
+    not from a constant. hdw4s-duration is installed beside this script, so
+    "beside me" is true in the package, in the repository and under install.sh
+    --prefix alike, and it cannot select a copy belonging to some other
+    installation. A constant would have been right today and wrong the first
+    time somebody installed two.
+
+    Imported rather than run: this is the component a stranger's request
+    reaches, and the reader is called again on the refusal path, so a
+    subprocess here would be a fork an arrival can ask for.
+
+    NO FALLBACK, and the service fails to start without it. The whole subject
+    of this file is a reader that answered a plausible number when it could not
+    read the real one; a router that carried on with an internal copy of the
+    grammar because the shared one was missing would be that defect with an
+    apology attached.
+    """
+    import importlib.machinery
+    import importlib.util
+    # NO BYTECODE CACHE. Importing a file by path writes a __pycache__ beside
+    # it, and a .pyc is a generated file that knows the path it was built from
+    # -- one has already carried a home directory into this project's public
+    # history. Under the shipped unit /usr is read-only and the write would
+    # fail anyway, which is worse rather than better: the behaviour would then
+    # differ between the package and an install.sh --prefix tree, and a stale
+    # .pyc beside the source is the "which copy is running" trap with nothing
+    # to warn you. Cheaper to never write one; this is imported once at start.
+    sys.dont_write_bytecode = True
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "hdw4s-duration")
+    loader = importlib.machinery.SourceFileLoader("hdw4s_duration", path)
+    spec = importlib.util.spec_from_loader("hdw4s_duration", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+DURATION = load_duration()
+
+# What an idle window is when nobody has written one down. It is the value
+# hdw4s.conf documents and the value the CLI's own table carries, and
+# .github/checks.sh compares all three: a default that disagrees with its
+# documentation is the same class of defect as a parser that disagrees with
+# its caller.
+DEFAULT_IDLE_SECONDS = DURATION.parse("7")
+
+
+def describe_window(secs):
+    """An idle window as a person would say it, for a line a person reads."""
+    if secs is None:
+        return "unreadable"
+    if secs <= 0:
+        return "none (never reaped)"
+    for size, name in ((86400, "d"), (3600, "h"), (60, "m")):
+        if secs >= size and secs % size == 0:
+            return "%d%s" % (secs // size, name)
+    return "%ds" % secs
 
 # How often a slot's own last-request record is rewritten. A record per asset
 # fetch would be a write per image; a minute is far finer than the sweep it
@@ -242,20 +305,82 @@ def conf_value(path, key):
     return found
 
 
-def idle_windows():
-    """[(instance, days)] for every EPHEMERAL slot the pool is configured with.
+def idle_seconds_of(text):
+    """Whole seconds for one written-down idle window, or raise.
 
-    days == 0 means the sweep never stops that slot, which is not a long window
-    but an absent one. It is kept as 0 rather than folded into a large number,
-    because the two need different handling and a large number would let an
-    unbounded case masquerade as a bounded one.
+    THE CONTRACT .github/setting-grammar.py COMPARES AGAINST, and the reason it
+    is spelled in seconds. What stood here read the value with int() and caught
+    the failure:
+
+        try:
+            days = int(v) if v is not None else 7
+        except ValueError:
+            days = 7
+
+    Three things were wrong with that and only one of them is the exception.
+    "30d" -- the value our own sample configuration and manual tell an
+    administrator to type -- raised and became a week. So did a typo like
+    "30x", which means a rejected value and a chosen one produced the same
+    number and the same silence, and nothing downstream could tell them apart.
+    And the unit was WHOLE DAYS, so "12h" had no representation here even in
+    principle: had the parsing been fixed alone, a half-day window would have
+    truncated to zero and read as "never reaped", which inverts the setting
+    rather than mis-stating it.
+
+    So the grammar is not here either. hdw4s-duration is the one copy, the CLI
+    calls the same file, and there is no fallback on this path: a value that
+    cannot be read raises, and every caller says so out loud.
+    """
+    return DURATION.parse(text)
+
+
+def read_idle_window(inst):
+    """(seconds, why) for one slot. seconds is None when it cannot be read.
+
+    None is NOT zero and must never be folded into it. Zero is a person saying
+    "never reap this"; None is us saying "we do not know what this says", and
+    the difference is the whole of the defect this replaced -- which answered
+    a confident seven days to both.
+    """
+    path = os.path.join(ETC_DIR, inst + ".conf")
+    v = conf_value(path, "HDW4S_IDLE_DAYS")
+    if v is None:
+        path = SITE_CONF
+        v = conf_value(path, "HDW4S_IDLE_DAYS")
+    if v is None:
+        # The one value that is not written down anywhere, and it is the
+        # documented default rather than a fallback: hdw4s.conf documents 7,
+        # the CLI's own table defaults to 7, and .github/checks.sh compares the
+        # three. An absent setting is not an unreadable one.
+        return DEFAULT_IDLE_SECONDS, None
+    try:
+        return idle_seconds_of(v), None
+    except DURATION.DurationError as e:
+        return None, "%s says HDW4S_IDLE_DAYS=%s, which cannot be read: %s" \
+            % (path, v, e)
+
+
+def idle_windows(complain=None):
+    """[(instance, seconds)] for every EPHEMERAL slot the pool is configured
+    with; seconds is 0 for "never reaped" and None for "cannot be read".
+
+    Zero is kept as 0 rather than folded into a large number, because the two
+    need different handling and a large number would let an unbounded case
+    masquerade as a bounded one. None is kept apart from both for the same
+    reason one step further along.
 
     Read from the instance table and the conf files rather than asked of the
     service manager. That is the CLI's precedence for THIS key -- the ephemeral
     unit sets several values in Environment=, but not this one -- and it is the
     reason cookie_policy_complaints() re-reads and re-checks at runtime instead
     of trusting the start-time answer forever.
+
+    complain is where an unreadable value is reported. It defaults to log()
+    because the one thing this must never do is read a value it cannot parse
+    and say nothing; pass a collector where the caller wants to place the
+    message itself.
     """
+    complain = log if complain is None else complain
     rows = []
     try:
         with open(SLOTS_FILE, "r", errors="replace") as f:
@@ -269,24 +394,29 @@ def idle_windows():
         inst = bits[1]
         if (bits[2] if len(bits) > 2 else "desktop") != "ephemeral":
             continue
-        v = conf_value(os.path.join(ETC_DIR, inst + ".conf"), "HDW4S_IDLE_DAYS")
-        if v is None:
-            v = conf_value(SITE_CONF, "HDW4S_IDLE_DAYS")
-        try:
-            days = int(v) if v is not None else 7
-        except ValueError:
-            days = 7
-        rows.append((inst, max(0, days)))
+        secs, why = read_idle_window(inst)
+        if why:
+            complain("WARNING: %s: %s" % (inst, why))
+            complain("  Nothing here will guess a window for it. Until it is"
+                     " fixed this slot is treated as one that is never reaped,"
+                     " which is the cautious reading and not a default.")
+        rows.append((inst, secs))
     return rows
 
 
 def derive_cookie_lifetime(windows):
-    """Seconds an identity lasts, from the pool's own idle windows."""
+    """Seconds an identity lasts, from the pool's own idle windows.
+
+    A window of None -- unreadable -- contributes nothing, exactly as 0 does.
+    Neither may SHORTEN the identity: an unknown window could be longer than
+    any guess, so the honest answer is the floor plus a complaint, not a
+    number derived from something nobody read.
+    """
     longest = 0
-    for _, days in windows:
-        if days > 0:
-            longest = max(longest, days)
-    return max(COOKIE_FLOOR_DAYS, 2 * longest) * 86400
+    for _, secs in windows:
+        if secs:
+            longest = max(longest, secs)
+    return max(COOKIE_FLOOR_SECONDS, 2 * longest)
 
 
 def cookie_policy_complaints(lifetime, windows):
@@ -304,16 +434,21 @@ def cookie_policy_complaints(lifetime, windows):
     read set of windows and is run again later, where the two can disagree.
     """
     out = []
-    for inst, days in sorted(windows):
-        if days <= 0:
+    for inst, secs in sorted(windows, key=lambda r: r[0]):
+        if secs is None:
+            out.append("%s has an idle window nobody can read, so how long its "
+                       "desktop is kept is unknown and may exceed any identity;"
+                       " fix the value rather than leaving it to be guessed"
+                       % inst)
+        elif secs <= 0:
             out.append("%s is never reaped for idleness, so its desktop can "
                        "outlive any identity; give it a nonzero idle window"
                        % inst)
-        elif days * 86400 >= lifetime:
-            out.append("%s keeps a desktop for %d day(s), which is not shorter "
+        elif secs >= lifetime:
+            out.append("%s keeps a desktop for %s, which is not shorter "
                        "than the %d-day identity pinned at start; restart the "
                        "front door to pick the new window up"
-                       % (inst, days, lifetime // 86400))
+                       % (inst, describe_window(secs), lifetime // 86400))
     return out
 
 
@@ -336,23 +471,32 @@ def assert_cookie_outlives_idle(derive=derive_cookie_lifetime):
     # For every window a pool could plausibly carry, the identity must outlive
     # the desktop -- strictly, not equally. Equal is the shipped defect: the
     # person is locked out at the moment the desktop is still there.
-    for days in (1, 7, 14, 30, 90, 365):
-        got = derive([("probe", days)])
-        assert got > days * 86400, (
-            "an identity lasting %d day(s) does not outlive a desktop kept for "
-            "%d day(s): the owner is locked out of a session that is still "
-            "running" % (got // 86400, days))
+    # In SECONDS, and the sub-day probes are not decoration. The windows were
+    # whole days here, so 12h and 90m -- forms the tool accepts and the manual
+    # names -- could not be represented at all: they truncated to zero, which
+    # this file reads as "never reaped". A repair that only fixed the parsing
+    # would have turned a silent week into a silent forever.
+    for secs in (5400, 43200, 86400, 604800, 1209600, 2592000, 7776000,
+                 31536000):
+        got = derive([("probe", secs)])
+        assert got > secs, (
+            "an identity lasting %d second(s) does not outlive a desktop kept "
+            "for %d second(s): the owner is locked out of a session that is "
+            "still running" % (got, secs))
 
-    # PERMIT ARM. A pool with nothing to derive from, and one whose slots are
-    # never reaped at all, must still produce a lifetime rather than zero.
-    assert derive([]) >= COOKIE_FLOOR_DAYS * 86400, \
+    # PERMIT ARM. A pool with nothing to derive from, one whose slots are never
+    # reaped at all, and one whose window cannot be read, must each still
+    # produce a lifetime rather than zero.
+    assert derive([]) >= COOKIE_FLOOR_SECONDS, \
         "an empty pool produced no identity lifetime at all"
-    assert derive([("a", 0)]) >= COOKIE_FLOOR_DAYS * 86400, \
+    assert derive([("a", 0)]) >= COOKIE_FLOOR_SECONDS, \
         "a pool that is never reaped produced no identity lifetime at all"
+    assert derive([("a", None)]) >= COOKIE_FLOOR_SECONDS, \
+        "a pool with an unreadable window produced no identity lifetime at all"
 
     # And the floor is a floor, not a value: a pool with a long window must
     # raise it rather than be clamped to it.
-    assert derive([("probe", 90)]) > COOKIE_FLOOR_DAYS * 86400, \
+    assert derive([("probe", 90 * 86400)]) > COOKIE_FLOOR_SECONDS, \
         "a long idle window was clamped to the floor"
 
 
@@ -607,10 +751,8 @@ def log_refusal(reason, now=None):
         swept, swept_why = stamp_age(os.path.join(REAP_STAMP_DIR, name), now)
         if name not in windows:
             window = "not in the pool table"
-        elif windows[name] <= 0:
-            window = "none (never reaped)"
         else:
-            window = "%dd" % windows[name]
+            window = describe_window(windows[name])
         log("  %s: last request %s; idle sweep last saw %s; idle window %s"
             % (name,
                seen_why or ("%s ago" % describe_age(seen)),
@@ -1295,8 +1437,9 @@ def main():
     COOKIE_LIFETIME = derive_cookie_lifetime(windows)
     log("an identity lasts %d day(s), derived from %d ephemeral slot(s): %s"
         % (COOKIE_LIFETIME // 86400, len(windows),
-           ", ".join("%s=%s" % (i, ("never" if d <= 0 else "%dd" % d))
-                     for i, d in sorted(windows)) or "none configured"))
+           ", ".join("%s=%s" % (i, describe_window(s))
+                     for i, s in sorted(windows, key=lambda r: r[0]))
+           or "none configured"))
     for complaint in cookie_policy_complaints(COOKIE_LIFETIME, windows):
         log("WARNING: %s" % complaint)
         log("  While that holds, a desktop can outlive the identity that owns"

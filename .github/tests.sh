@@ -26,11 +26,25 @@ set -o nounset -o pipefail
 #
 #   .github/tests.sh
 #
-# Needs nothing but bash and coreutils. Anything that would need systemd, nft
-# or a live session is deliberately not here; those belong on a real machine.
+# Needs bash, coreutils, python3 and a loopback interface. Anything that would
+# need systemd, nft or a live session is deliberately not here; those belong on
+# a real machine.
+#
+# python3 was added when the last two groups were: the router is written in it,
+# and a suite that cannot run the router cannot notice the router disagreeing
+# with the tool -- which is exactly what shipped. It is a hard dependency of the
+# package, so requiring it here narrows nothing.
 
 cd "$(dirname "$0")/.."
 ROOT="${PWD}"
+
+# The scripts resolve their siblings under ${HDW4S_LIBDIR:-/usr/lib/hdw4s}.
+# Exported here so that everything sourced or run below reaches THIS tree.
+# Without it an installed copy would answer instead, and a suite that passes
+# against the package while the working tree is broken is worse than no suite:
+# hdw4s-duration is where the idle window's grammar lives, so the whole of the
+# duration group would have been testing whatever is in /usr/lib/hdw4s.
+export HDW4S_LIBDIR="${ROOT}"
 
 # Results go to a file, not to shell variables: every group runs in a subshell
 # so that one failure cannot derail the rest, and a subshell cannot hand a
@@ -1121,6 +1135,21 @@ echo '== the idle window is a duration, and nothing falls back to a week =='
     '') bad 'the refusal reason reaches the caller';;
     *)  ok  'the refusal reason reaches the caller';;
   esac
+
+  # A BROKEN PARSER IS NOT A BAD VALUE, and the two must not read alike. The
+  # grammar now lives in a separate file, so "it is missing" is a new way for
+  # this to fail -- and the failure that would be worst is the quiet one: a
+  # helper that cannot be run, reported as though the administrator's value
+  # were at fault, or worse, absorbed into a default. There is no default. The
+  # message has to name the thing that could not be run, or nobody will look at
+  # it.
+  ( DURATION_TOOL="${SB}/there-is-no-such-parser"
+    idle_seconds '7' >/dev/null 2>&1 \
+      && bad 'a missing parser is a failure, not a week' \
+      || ok  'a missing parser is a failure, not a week'
+    is  'and it does not answer anyway' "${IDLE_SECONDS}" ''
+    has 'and it names what could not be run' "${IDLE_WHY}" 'there-is-no-such-parser'
+    hasnt 'and does not blame the value'    "${IDLE_WHY}" "'7' is" )
 )
 
 echo '== never reaping is a choice for a named session and a leak for a slot =='
@@ -1694,10 +1723,60 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   has 'having looked at no running slots' "${out}" '0 running ephemeral session(s)'
 )
 
+echo '== the tool and the router agree about what a setting means =='
+# HDW4S_IDLE_DAYS was read by both and parsed differently: the tool took "30d"
+# and the router read the same line with int(), swallowed the failure and used
+# seven days. The value is the one our own sample configuration and manual tell
+# an administrator to type. Nothing caught it because nothing anywhere compared
+# the two readers, and a test for that one setting would have caught that one
+# setting.
+#
+# So the checker is a class check and it lives in its own file: it derives which
+# settings the router reads out of a conf file, derives the values from the
+# documentation that tells people to type them, and asks both sides. It is run
+# from here rather than left beside the other harnesses, because the other half
+# of this defect is that .github/live/demux.py had never been invoked by
+# anything at all.
+(
+  out="$("${ROOT}/.github/setting-grammar.py" "${ROOT}" 2>&1)"; rc=$?
+  is  'the two readers agree on every setting they share' "${rc}" '0'
+  [ "${rc}" -eq 0 ] || printf '%s\n' "${out}"
+  # The positive controls, asserted HERE as well as inside the checker. An
+  # empty class and an empty corpus both produce a clean pass, and a clean pass
+  # is what this whole subject is about.
+  has 'and the class it derived is not empty'   "${out}" 'class: 1 setting(s)'
+  has 'and the corpus came from our own manual' "${out}" 'documented value(s)'
+  # A green here is worth what the red behind it was worth, and only one member
+  # has ever been seen to fail. The checker says which; this makes sure it
+  # keeps saying it, because that distinction is the first thing a tidy-up
+  # deletes.
+  has 'and it says which members were ever seen to fail' "${out}" 'seen to fail'
+)
+
+echo '== the router, against stand-in slots =='
+# NOT a live test, despite living under .github/live: it spawns the real
+# hdw4s-demux against UNIX-socket backends on loopback and needs no systemd, no
+# session and no browser. It ran in three seconds on the workstation.
+#
+# IT WAS INVOKED BY NOTHING. Not by checks.sh, not by this file. It was
+# syntax-parsed as one of the Python files in the package and never executed --
+# a whole tier believed green that had never been seen green at all, which is
+# how a router that discarded its own configuration passed everything. Wiring
+# it in is the repair; a suite nobody runs is not a weak suite, it is no suite.
+(
+  out="$("${ROOT}/.github/live/demux.py" 2>&1)"; rc=$?
+  is 'the router suite passes' "${rc}" '0'
+  [ "${rc}" -eq 0 ] || printf '%s\n' "${out}"
+  # A suite that silently ran nothing exits 0 too. Its own summary is the only
+  # thing that can tell the difference, so it is asserted rather than trusted.
+  has 'and it actually ran its checks' "${out}" '0 failed'
+  hasnt 'and none of them was skipped away' "${out}" '0 passed'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=293   # update when tests are added; a wrong number is the point
+EXPECTED=304   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

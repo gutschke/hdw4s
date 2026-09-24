@@ -17,7 +17,7 @@ trap 'rc="$?"
 }
 
 src="$(cd "$(dirname "$0")" && pwd)"
-SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait}
+SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration}
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
          hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index
@@ -164,6 +164,7 @@ if [ "${src}" != "${dst}" ]; then
   cp -f "${src}"/wrappers/* "${dst}/wrappers/"
 fi
 chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
+           "${dst}"/hdw4s-duration \
            "${dst}"/hdw4s-ephemeral-slots "${dst}"/hdw4s-webroot \
            "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse \
            "${dst}"/hdw4s-incarnation \

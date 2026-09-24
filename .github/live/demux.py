@@ -205,9 +205,15 @@ class Rig:
             with open(os.path.join(self.etc, "instances"), "w") as f:
                 for i, (name, _) in enumerate(windows):
                     f.write("%d %s ephemeral\n" % (i, name))
+            # "%s", NOT "%d", and this is the fixture that let the defect ship.
+            # An integer format specifier cannot put "30d", "12h" or "90m" in
+            # front of the router -- the only forms that reproduced the failure
+            # -- so the whole tier was structurally incapable of expressing the
+            # input that breaks it. Every green here was a green about integers.
+            # A window is written EXACTLY as an administrator would write it.
             for name, days in windows:
                 with open(os.path.join(self.etc, name + ".conf"), "w") as f:
-                    f.write("HDW4S_IDLE_DAYS=%d\n" % days)
+                    f.write("HDW4S_IDLE_DAYS=%s\n" % (days,))
         self.slots = []
         for i in range(nslots):
             name = "ephemeral%d" % i
@@ -708,6 +714,79 @@ def test_a_slot_that_is_never_reaped_is_reported_at_start():
         rig.stop()
 
 
+def test_a_suffixed_window_is_honoured(rig):
+    """THE DEFECT ITSELF, at the product's own surface.
+
+    "30d" is what hdw4s.conf and hdw4s.8 tell an administrator to type. The
+    router read it with int(), caught the failure and used seven days without a
+    word, so the identity it derived was 30 days -- the floor -- instead of 60.
+    Nothing failed: the conf file said one thing and the wire said another, and
+    both looked healthy.
+
+    Asserted on the Max-Age the browser actually receives rather than on the
+    reader, because the number the reader returns is not what anybody is locked
+    out by. 30 days of window must derive 60 days of identity, and 60 beats the
+    floor, so a router that fell back to ANY of the wrong answers -- seven days,
+    the floor, a truncation -- fails this and says which.
+    """
+    c = rig.client()
+    st, h, _ = c.get("/")
+    sc = [v for v in h.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    assert sc, "a fresh browser was given no identity at all"
+    age = int(sc[0].split("Max-Age=")[1].split(";")[0])
+    assert age == 60 * 86400, (
+        "HDW4S_IDLE_DAYS=30d derived a %d-day identity; 30 days of window must "
+        "derive 60. A 30-day answer is the floor standing in, and a 14-day one "
+        "is the seven-day fallback this replaced." % (age // 86400))
+
+
+def test_a_sub_day_window_is_not_read_as_never(rig):
+    """The half of the defect that a parser fix alone would have created.
+
+    The router worked in whole days, so "12h" had no representation in it: had
+    int() merely been taught units, twelve hours would have truncated to zero
+    days -- which this file reads as "never reaped" -- and the setting would
+    have been INVERTED rather than mis-stated. The slot would have been
+    reported as unbounded and its desktop kept forever.
+    """
+    text = rig.stderr_text()
+    assert "never reaped" not in text, (
+        "a twelve-hour window was reported as never reaped -- the window was "
+        "truncated to whole days:\n%s" % text)
+    assert "ephemeral0=12h" in text, (
+        "the router did not state a twelve-hour window as twelve hours:\n%s"
+        % text)
+
+
+def test_an_unreadable_window_is_loud_and_is_not_a_default(rig):
+    """A value nobody can read must not be indistinguishable from one somebody
+    chose.
+
+    This is the sharp edge of the defect and the reason a repair that only
+    made the two parsers agree would not have been enough. "30x" is a typo. The
+    router answered seven days to it, silently, exactly as it answered seven
+    days to a deliberate 7 -- so the configuration file and the behaviour could
+    disagree with nothing anywhere able to report it.
+
+    The oracle is the log, not the derived number: what makes this survivable is
+    that somebody is TOLD, and a test on the number alone would pass against a
+    router that guessed correctly in silence.
+    """
+    text = rig.stderr_text()
+    assert "HDW4S_IDLE_DAYS=30x" in text, (
+        "the router did not quote the value it could not read:\n%s" % text)
+    assert "cannot be read" in text, (
+        "an unreadable idle window was not reported as unreadable:\n%s" % text)
+    assert "not a unit of time" in text, (
+        "the reason was not given, so nobody can tell a typo from a form we "
+        "do not support:\n%s" % text)
+    # And it must not be absorbed. An unknown window is unbounded as far as
+    # anything here knows, so it gets the complaint an unbounded one gets.
+    assert "unknown and may exceed any identity" in text, (
+        "an unreadable window was read as bounded, which is a guess:\n%s"
+        % text)
+
+
 def test_a_session_cannot_set_our_cookie(rig):
     """A desktop must not be able to rewrite the identity of its visitor.
 
@@ -757,8 +836,8 @@ def test_cookie_lifetime_guard(rig=None):
     # refused: equal is the defect, not the boundary of it.
     try:
         m.assert_cookie_outlives_idle(
-            lambda windows: max(d for _, d in windows) * 86400 if windows
-            else m.COOKIE_FLOOR_DAYS * 86400)
+            lambda windows: max(s for _, s in windows) if windows
+            else m.COOKIE_FLOOR_SECONDS)
     except AssertionError:
         pass
     else:
@@ -853,6 +932,14 @@ def main():
          dict(nslots=1, windows=[("ephemeral0", 40)])),
         (test_derivation_complains_when_a_window_outgrows_the_pinned_lifetime,
          dict(nslots=1, windows=[("ephemeral0", 1)])),
+        # Written the way an administrator writes them, which the fixture
+        # could not express until it stopped formatting windows with "%d".
+        (test_a_suffixed_window_is_honoured,
+         dict(nslots=1, windows=[("ephemeral0", "30d")])),
+        (test_a_sub_day_window_is_not_read_as_never,
+         dict(nslots=1, windows=[("ephemeral0", "12h")])),
+        (test_an_unreadable_window_is_loud_and_is_not_a_default,
+         dict(nslots=1, windows=[("ephemeral0", "30x")])),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode

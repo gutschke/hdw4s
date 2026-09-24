@@ -1,0 +1,223 @@
+#!/usr/bin/python3
+"""The idle window's grammar, in one place, for every component that reads it.
+
+    hdw4s-duration <value>      whole seconds on stdout, exit 0
+                                the reason on stdout, exit 1
+    hdw4s-duration --help-text  the remedy printed under a refusal
+    hdw4s-duration --floor      the shortest window a non-zero value may be
+
+Importable as a module too: parse() is what the router calls, and it is the
+same function this command runs, not a second one written to match.
+
+WHY THIS FILE EXISTS, which is the whole point and must not be summarised away.
+
+HDW4S_IDLE_DAYS was parsed twice. The tool took systemd's unit letters, refused
+what it could not read, and wrote the value into the conf file. The router read
+the same line with int(), caught the ValueError and used seven days:
+
+    try:
+        days = int(v) if v is not None else 7
+    except ValueError:
+        days = 7
+
+So "30d" -- the value our own sample configuration and manual tell an
+administrator to type -- was accepted, written, and then silently read as a
+week. So was "12h". So was "90m". So was "30x", which is a typo: the router
+could not tell a rejected value from a chosen one, and neither could anybody
+reading it afterwards, because both produced the same number and the same
+silence.
+
+The number mattered. The router derives how long a visitor's identity lasts
+from the longest idle window in the pool, and the assertion that an identity
+must outlive the desktop it owns was being handed a window that was not the
+configured one. It went green on a number nobody had written.
+
+A previous repair put the grammar "in one place" and only half of it landed:
+the tool learned the unit letters and the router kept its fallback. That is why
+this is a FILE rather than a convention, and why .github/setting-grammar.py
+compares the two callers' answers as a class rather than testing this setting.
+A second implementation of this grammar anywhere is the defect returning, and
+.github/checks.sh refuses one.
+
+THE UNIT LETTERS ARE SYSTEMD'S, so that an administrator who knows one knows
+the other: s m h d w M y. CASE MATTERS -- "m" is minutes and "M" is months --
+and a letter that is neither is rejected rather than folded to the one that
+looks closest. Nothing here guesses, and nothing here has a fallback.
+
+THE KEY IS NAMED _DAYS ON PURPOSE. Do not "tidy" it by renaming it. It names
+the setting and its default unit, and the awkwardness of writing "60s" against
+a key spelled DAYS is doing work: a development value cannot then be mistaken
+for a production one at a glance. Renaming to HDW4S_IDLE would make a bare
+number arbitrary -- nothing in the name would say days -- so the nudge toward
+days would be removed rather than relocated.
+"""
+
+import sys
+
+# Whole seconds below which a non-zero window is refused.
+#
+# An ephemeral session takes the full stop timeout to die -- 91 seconds,
+# measured from the journal and recorded in hdw4s-ephemeral@.service, because
+# several of GNOME's helpers ignore SIGTERM and have to be SIGKILLed. A window
+# shorter than the teardown cannot free a slot inside the window, so it is not
+# an aggressive setting, it is an incoherent one: the slot is still occupied
+# when the next window has already elapsed.
+#
+# Sampling is the second reason, and it is the one an administrator meets
+# first: hdw4s-reaper.timer runs every five minutes, so nothing is noticed
+# sooner than that whatever this says. The floor is set at the teardown rather
+# than at the sampling interval because the teardown is what makes a value
+# incoherent rather than merely coarse -- but the refusal says both, since an
+# administrator who sets 120s and watches for two minutes would otherwise
+# conclude the setting was ignored.
+#
+# It lives HERE rather than in each caller for the same reason the grammar
+# does: a floor the tool enforces and the router does not is a value the tool
+# refuses to set and the router honours when somebody edits the file by hand.
+MIN_SECONDS = 120
+
+# systemd's own lengths for the two units that have no fixed one: a month is
+# 30.44 days and a year is 365.25. Spelled out rather than computed so that
+# they can be compared against systemd's documentation by eye.
+#
+# The empty string is days, which is what a bare number means.
+UNITS = {
+    "": 86400,
+    "s": 1,
+    "m": 60,
+    "h": 3600,
+    "d": 86400,
+    "w": 604800,
+    "M": 2629800,
+    "y": 31557600,
+}
+
+# Above this, seconds stop being a duration and start being a mistake with a
+# keyboard on it. The bound is what a 64-bit signed count of seconds holds,
+# because that is what every consumer of this number is: a systemd timestamp,
+# a shell arithmetic context, a C time_t. A value past it used to reach awk's
+# "%d" and come back as something that was not a number at all.
+MAX_SECONDS = 2 ** 63 - 1
+
+
+class DurationError(ValueError):
+    """A value that cannot be read. Never a default -- there isn't one."""
+
+
+def parse(text, floor=MIN_SECONDS):
+    """Whole seconds, or raise DurationError naming what is wrong.
+
+    Zero is a legal answer and means "never reap" -- a person typed a zero and
+    that is a statement. A NON-ZERO value that computes to less than a second
+    is refused instead, because reading it as "disabled" would silently invert
+    what was asked for.
+
+    Pass floor=0 only where the floor genuinely does not apply. Both shipped
+    callers take the default: a window the tool refuses to write and the router
+    quietly honours is the same two-readings-of-one-value defect in a smaller
+    costume.
+    """
+    text = "" if text is None else str(text)
+
+    # Split the trailing unit off at the last digit or decimal point. "30s" ->
+    # "s"; "30" -> ""; "0.5h" -> "h"; and "1h30m" -> "m" with "1h30" left over,
+    # which fails the number test below. Compound durations are refused on
+    # purpose: systemd accepts them, nothing here needs them, and "90m" says
+    # the same thing with one way to read it.
+    cut = -1
+    for i, ch in enumerate(text):
+        if ch.isdigit() or ch == ".":
+            cut = i
+    num, unit = (text[:cut + 1], text[cut + 1:]) if cut >= 0 else ("", text)
+
+    # The shell half of this grammar tested the number with
+    #
+    #     [[ "${num}" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+    #
+    # under LC_ALL=C, and this has to mean the same thing. Neither float() nor
+    # str.isdigit() does: float() takes "1e3", "inf", "nan", "+7" and a leading
+    # underscore, and isdigit() is true for Arabic-Indic and superscript digits
+    # -- so "٣" would have been a number here and not one there, which is the
+    # class of quiet divergence this file exists to end. ASCII, spelled out.
+    if not num or num.count(".") > 1 or num.startswith(".") or \
+            num.endswith(".") or \
+            not all(c in "0123456789." for c in num):
+        raise DurationError("'%s' is not a duration." % text)
+
+    if unit not in UNITS:
+        raise DurationError("'%s' is not a unit of time." % unit)
+
+    # Truncating toward zero is safe precisely because the representation is
+    # seconds: the only way to reach zero from a non-zero value is to be
+    # smaller than a second, and that is refused below rather than read as
+    # "disabled".
+    # A number long enough to overflow a double becomes inf, and int(inf)
+    # raises rather than returning something wrong -- which is the good
+    # failure, as long as it is caught here and named as a duration problem
+    # instead of escaping as a traceback the callers would read as "this
+    # helper is broken".
+    try:
+        secs = int(float(num) * UNITS[unit])
+    except (OverflowError, ValueError):
+        raise DurationError("'%s' is too large to be a duration." % text)
+    if secs > MAX_SECONDS:
+        raise DurationError("'%s' is too large to be a duration." % text)
+
+    if secs == 0:
+        if float(num) == 0:
+            return 0
+        raise DurationError("'%s' is less than a second." % text)
+
+    if secs < floor:
+        raise DurationError(
+            "'%s' is %d seconds, and the shortest window is %d."
+            % (text, secs, floor))
+
+    return secs
+
+
+def help_text(floor=MIN_SECONDS):
+    """The remedy printed under every refusal.
+
+    Every form named here is one parse() accepts, and .github/tests.sh runs
+    each of them back through it: a refusal that names a spelling the tool then
+    rejects is worse than one that names none.
+    """
+    return "\n".join((
+        "  Write a number with one of systemd's unit letters, or a bare number",
+        "  for days. Case matters: m is minutes, M is months.",
+        "      s seconds   m minutes   h hours   d days   w weeks   M months   y years",
+        "  For example: 7 (seven days), 30d, 12h, 90m, 0.5h.",
+        "  0 disables reaping altogether.",
+        "  The shortest window is %d seconds: an ephemeral session takes up to 91"
+        % floor,
+        "  seconds to shut down, so a shorter window cannot free a slot inside",
+        "  itself. Connections are sampled every five minutes, so nothing shorter",
+        "  than that is noticed any sooner either.",
+    ))
+
+
+def main(argv):
+    # Exit 1 is "your value is bad" and carries the reason on stdout. Anything
+    # else is "this helper is broken", and the callers say so differently: a
+    # component that cannot tell the two apart is how the original defect read
+    # a parse failure as a policy decision.
+    if len(argv) != 2:
+        sys.stderr.write("usage: hdw4s-duration <value>|--help-text|--floor\n")
+        return 2
+    if argv[1] == "--help-text":
+        print(help_text())
+        return 0
+    if argv[1] == "--floor":
+        print(MIN_SECONDS)
+        return 0
+    try:
+        print(parse(argv[1]))
+    except DurationError as e:
+        print(str(e))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
