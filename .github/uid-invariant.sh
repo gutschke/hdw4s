@@ -1,10 +1,12 @@
 #!/bin/bash -e
-# The two properties that make a recycled physical uid safe, as a check rather
-# than as a paragraph.
+# The properties that make a recycled physical uid safe, and the one that makes
+# an occupant's own slot directory mean anything, as checks rather than as
+# paragraphs.
 #
 #   .github/uid-invariant.sh static [<tree>]   the directives, on the tree
 #   .github/uid-invariant.sh distinct          no two live sessions share a uid
 #   .github/uid-invariant.sh clean <slot>...   nothing still refers to a parked slot
+#   .github/uid-invariant.sh rundir [<slot>]   an occupant cannot forge occupancy
 #
 # HDW4S_CLEAN_ROOTS overrides the directories "clean" sweeps. It defaults to the
 # full list; narrowing it narrows the claim, so the roots used are printed.
@@ -21,24 +23,35 @@
 #                      directions: a planted violation went red and named itself,
 #                      and the same tree went green once it was removed.
 #
-#                      THIRTEEN of the selftest's twenty-three arms run there. The
-#                      other ten need root and a parked slot, so CI exercises the
-#                      static and fixture halves only. Keep that number attached to
-#                      any claim about what CI covers here; it is the qualifier that
-#                      disappears first in a summary, and then somebody believes
-#                      twenty-three arms run in CI.
+#                      THIRTEEN of the selftest's twenty-eight arms run there.
+#                      Four more need root but no parked slot -- the "rundir"
+#                      fixtures -- and the remaining eleven need root AND a
+#                      parked slot, so CI exercises the static and fixture halves
+#                      only. Keep those numbers attached to any claim about what
+#                      CI covers here; they are the qualifier that disappears
+#                      first in a summary, and then somebody believes
+#                      twenty-eight arms run in CI.
 #
-#   distinct, clean    a HAND TOOL for a disposable machine, and deliberately not
-#                      wired into any tier. They need root, and "clean" needs a
-#                      slot that is PARKED -- which a machine busy enough to be
-#                      worth testing does not have, and a machine carrying real
-#                      users is not somewhere to go looking. Wired, they would
-#                      skip wherever they were actually run, which reads as
-#                      coverage and delivers none. So: run them by hand, on a
-#                      throwaway box, after any change to
+#                      Count the arms EXECUTED, not the lines that call one: three
+#                      of the static arms sit in a loop over three directives, so a
+#                      grep for "expect" reports eleven where thirteen run. The
+#                      number above was right and the obvious way of checking it is
+#                      wrong, which is worth one sentence here rather than another
+#                      person deciding the header had drifted.
+#
+#   distinct, clean,   a HAND TOOL for a disposable machine, and deliberately not
+#   rundir             wired into any tier. They need root, and "clean" and
+#                      "rundir" need a slot that is PARKED -- which a machine busy
+#                      enough to be worth testing does not have, and a machine
+#                      carrying real users is not somewhere to go looking. Wired,
+#                      they would skip wherever they were actually run, which
+#                      reads as coverage and delivers none. So: run them by hand,
+#                      on a throwaway box, after any change to
 #                      hdw4s-ephemeral@.service, to hdw4s-ephemeral-slots, or to
-#                      how the pool hands a uid on. Revisit the wiring only
-#                      somewhere a slot is reliably parked.
+#                      how the pool hands a uid on -- and "rundir" also after a
+#                      systemd upgrade, because the behaviour it measures is
+#                      systemd's and not ours. Revisit the wiring only somewhere
+#                      a slot is reliably parked.
 #
 # A logical identity dies with its session. The PHYSICAL uid goes back to a free
 # pool and is handed to a stranger, and two things have to be true for that to be
@@ -47,9 +60,20 @@
 #   1. no two live sessions hold the same physical uid, and
 #   2. a recycled uid inherits nothing from the session before it.
 #
-# Both were established once, by measurement, when the pool was static and a slot
-# was reused a handful of times between reboots. Under a pool that grows and
-# recycles they are continuous obligations, and until this script existed they
+# A third property belongs beside them because it is about the same uid and the
+# same directory, and because nothing else in the tree asserts it:
+#
+#   3. an occupant cannot create or remove a slot directory in /run/hdw4s --
+#      neither anybody else's nor its own.
+#
+# That is what makes the router's occupancy reading a fact about the pool rather
+# than a claim by a stranger. See "rundir" below for what it costs if it is not
+# true; unlike the first two it has no visible directive at all, which is why it
+# survived this long unchecked.
+#
+# The first two were established once, by measurement, when the pool was static
+# and a slot was reused a handful of times between reboots. Under a pool that
+# grows and recycles they are continuous obligations, and until this script existed they
 # were held up by directives being PRESENT -- which is an argument, not a check.
 # Nothing would have noticed one being dropped.
 #
@@ -445,6 +469,200 @@ check_clean() {
   else bad "clean ${slot} residue" "$(echo "${found}" | tr '\n' '|')"; fi
 }
 
+# ---------------------------------------------------------------- rundir ----
+# Assertion 3, and it is the one the whole ephemeral design rests on without
+# saying so anywhere.
+#
+# /run/hdw4s/<slot> is not a RECORD of whether a desktop is running behind that
+# slot -- it IS that fact. systemd makes it with the session and removes it with
+# the session, so the router reads it with os.path.isdir and never opens
+# anything. Every derivation on the arrival path is built on that reading being
+# something the occupant cannot arrange: a stranger with a full desktop and a
+# shell sits inside one of these.
+#
+# The property that makes it unforgeable is not in any file. It is a permission
+# on the PARENT: `RuntimeDirectory=hdw4s/%i` gives the last component to the
+# session's user, and the intermediate /run/hdw4s is made by systemd as root.
+# If an occupant could write that directory, two lines would do this:
+#
+#   rmdir /run/hdw4s/<some other slot>   makes an occupied slot read FREE, so
+#                                        the router double-books a live desktop
+#   mkdir /run/hdw4s/<every free slot>   makes the whole pool read FULL, so
+#                                        every visitor is refused
+#
+# WHOSE ACT THE DIRECTORY IS, because two things one sentence apart get
+# conflated and one of them cost a retracted measurement. The directory is made
+# by SYSTEMD, while it builds the execution environment, BEFORE ExecStart runs
+# -- so it is not something the session does and not something the session can
+# undo, which is the whole reason it can be believed about the session. A
+# measurement elsewhere timed that directory appearing and called it a session
+# start; it was timing a mkdir. This check asks the other question, about
+# permissions on a directory whose creation was never the session's, and that
+# is why it is sound and the timing was not.
+#
+# Two readers disagreed from memory about whether systemd chowns every component
+# of a nested RuntimeDirectory or only the last one. That disagreement is the
+# reason this exists: a property nobody has checked, that everything depends on,
+# is not an assumption, it is a measurement waiting to be taken. It was then
+# taken, and it came back the safe way round -- which is exactly when a check has
+# to be written, because the value of this arm is not today's answer. It is that
+# a systemd upgrade which changes the behaviour goes RED here instead of silently
+# inverting the router.
+#
+# WHY NOT JUST READ THE MODE. `stat` on the parent tells you what systemd did on
+# this box today; it does not tell you what the kernel will refuse. A mode that
+# looks right has been the wrong answer wearing the right shape twice on this
+# project, and the question is whether the operation is REFUSED. So the mode is
+# printed as evidence and the verdict comes from trying it.
+#
+# THE TWO POSITIVE CONTROLS ARE NOT OPTIONAL. Three refusals prove nothing on
+# their own: a broken setpriv, a read-only /run, a missing parent and a uid that
+# cannot do anything anywhere all produce the same three refusals and the same
+# green line. So root must be seen to succeed at the same operations (the medium
+# works), and the slot uid must be seen to succeed inside its OWN directory (the
+# identity is really acting). A failure of either is reported as a failure of the
+# CONTROL, in those words, and never as a pass.
+#
+# HDW4S_RUNDIR_PARENT points this at a fabricated parent, which is what the
+# selftest uses to plant a world-writable one without touching /run. When it is
+# set, the answer is about that directory and the report says so.
+check_rundir() {
+  local slot="${1:-ephemeral0}" id row parent dir fixture='' probe own msg
+  row="$(getent passwd "${slot}" 2>/dev/null || true)"
+  if [ -z "${row}" ]; then skip "rundir ${slot}" 'no such identity'; return; fi
+  row="${row#*:}"; row="${row#*:}"; id="${row%%:*}"
+
+  if [ "$(id -u)" != '0' ]; then
+    skip "rundir ${slot}" 'needs root, to act as the slot uid and as root'
+    return
+  fi
+  if ! command -v setpriv >/dev/null 2>&1; then
+    skip "rundir ${slot}" 'no setpriv, so the slot uid could not be assumed'
+    return
+  fi
+
+  if [ -n "${HDW4S_RUNDIR_PARENT:-}" ]; then
+    parent="${HDW4S_RUNDIR_PARENT}"; fixture=' (fixture)'
+  else
+    # DERIVED, never pinned. A constant "/run/hdw4s" here would keep answering
+    # confidently about a path the unit had stopped using -- which is the shape
+    # of a check that validates a copy nobody runs.
+    #
+    # From the service manager first, because that is what is actually in force;
+    # the tree's copy is the fallback for a box where the unit is not installed.
+    dir="$(systemctl show -p RuntimeDirectory --value \
+             "hdw4s-ephemeral@${slot}.service" 2>/dev/null || true)"
+    [ -n "${dir}" ] ||
+      dir="$(sed -n 's|^RuntimeDirectory=\(.*\)$|\1|p' \
+               hdw4s-ephemeral@.service 2>/dev/null | head -n1 || true)"
+    if [ -z "${dir}" ]; then
+      bad "rundir ${slot}" 'nothing declares a RuntimeDirectory for this slot,'\
+' so there is no parent to ask about'
+      return
+    fi
+    case "${dir}" in
+      */*) parent="/run/${dir%/*}" ;;
+      *)   # A FLAT directive means the slot's own directory sits directly in
+           # /run, and the question this check asks changes completely. Refuse
+           # rather than answer about the wrong path.
+           msg="RuntimeDirectory is '${dir}', which is not nested: the parent"
+           msg="${msg} would be /run itself, and this check no longer asks what"
+           msg="${msg} it was written to ask"
+           bad "rundir ${slot}" "${msg}"
+           return ;;
+    esac
+    if [ "$(systemctl is-active "hdw4s-ephemeral@${slot}.service" 2>/dev/null || true)" = 'active' ]; then
+      skip "rundir ${slot}" 'the session is running; ask when it has stopped'
+      return
+    fi
+  fi
+
+  own="${parent}/${slot}"
+  probe="${parent}/.uid-invariant-rundir-$$"
+  if [ ! -d "${parent}" ]; then
+    skip "rundir ${slot}" "no parent at '${parent}' to ask about"
+    return
+  fi
+  if [ -e "${own}" ]; then
+    # Somebody is in there, or something was left behind. Either way this arm
+    # would be removing a directory it did not make.
+    skip "rundir ${slot}" "'${own}' already exists; this will not touch it"
+    return
+  fi
+
+  # Evidence, printed and not judged. The verdict below comes from what the
+  # kernel refuses, not from what this line says.
+  note "rundir ${slot} parent${fixture}" \
+       "${parent} $(stat -c '%U:%G %a' "${parent}" 2>/dev/null || echo '?')"
+
+  # CONTROL 1: the medium works. Root can make and remove a sibling here.
+  if ! { mkdir "${probe}" 2>/dev/null && rmdir "${probe}" 2>/dev/null; }; then
+    rm -rf "${probe}" 2>/dev/null || true
+    msg="root itself cannot create a directory in '${parent}', so a refusal"
+    msg="${msg} below would prove nothing"
+    skip "rundir ${slot}" "${msg}"
+    return
+  fi
+  note "rundir ${slot} control (root)" 'ok (root can create and remove here)'
+
+  install -d -m 0700 -o "${id}" -g "${id}" "${own}"
+
+  # CONTROL 2: the identity is really acting. The slot uid must be able to work
+  # INSIDE its own directory -- otherwise setpriv is broken, or the uid cannot
+  # do anything anywhere, and all three refusals below are the instrument
+  # failing rather than the kernel protecting anything.
+  if setpriv --reuid "${id}" --regid "${id}" --clear-groups \
+       /bin/sh -c "touch '${own}/probe' && rm -f '${own}/probe'" 2>/dev/null; then
+    note "rundir ${slot} control (uid ${id})" 'ok (writes inside its own directory)'
+  else
+    msg="could not write inside its OWN directory, so the refusals below are"
+    msg="${msg} the CONTROL failing and not a property of the parent"
+    bad "rundir ${slot} control (uid ${id})" "${msg}"
+    rmdir "${own}" 2>/dev/null || true
+    return
+  fi
+
+  # REFUSAL 1: making a sibling. This is the denial of the whole pool -- every
+  # free slot made to read occupied.
+  if setpriv --reuid "${id}" --regid "${id}" --clear-groups \
+       /bin/mkdir "${probe}" 2>/dev/null; then
+    msg="uid ${id} CREATED '${probe}': an occupant can make every free slot"
+    msg="${msg} read as occupied and refuse the pool to everyone"
+    bad "rundir ${slot} mkdir sibling" "${msg}"
+    rmdir "${probe}" 2>/dev/null || true
+  else
+    note "rundir ${slot} mkdir sibling" 'ok (refused)'
+  fi
+
+  # REFUSAL 2: removing somebody else's. Done against a directory ROOT made a
+  # moment ago, never against a real slot's -- if the kernel allowed it, the
+  # arm would have destroyed a live session's runtime directory to find out.
+  mkdir "${probe}"
+  if setpriv --reuid "${id}" --regid "${id}" --clear-groups \
+       /bin/rmdir "${probe}" 2>/dev/null; then
+    msg="uid ${id} REMOVED '${probe}': an occupant can make an occupied slot"
+    msg="${msg} read free, and the router then hands a live desktop to a second"
+    msg="${msg} visitor"
+    bad "rundir ${slot} rmdir sibling" "${msg}"
+  else
+    note "rundir ${slot} rmdir sibling" 'ok (refused)'
+    rmdir "${probe}"
+  fi
+
+  # REFUSAL 3: removing its own. The directory is the occupant's, and it is
+  # still not theirs to unmake: removing it needs write on the parent, and that
+  # is the same permission as the two above asked from the other side.
+  if setpriv --reuid "${id}" --regid "${id}" --clear-groups \
+       /bin/rmdir "${own}" 2>/dev/null; then
+    msg="uid ${id} REMOVED its own '${own}': the occupant can make their live"
+    msg="${msg} desktop read as gone and have the slot re-let underneath them"
+    bad "rundir ${slot} rmdir own" "${msg}"
+  else
+    note "rundir ${slot} rmdir own" 'ok (refused)'
+    rmdir "${own}" 2>/dev/null || true
+  fi
+}
+
 # -------------------------------------------------------------- selftest ----
 # Every assertion above, broken on purpose and watched. A check nobody has seen
 # go red is not known to go red, and this one guards properties whose whole
@@ -638,8 +856,76 @@ EOF
     expect green 'clean, a world-readable path naming the uid is not a finding' \
       "${self}" clean ephemeral0
     rm -f "${namef}"
+
+    # And then the real one, which is the measurement rather than the proof of
+    # the comparison. It skips where there is no /run/hdw4s to ask about, and a
+    # skip is not a pass -- it says so on its own line.
+    expect green 'rundir, the real parent as it stands' "${self}" rundir ephemeral0
   else
     skip 'selftest clean' 'needs root and a parked ephemeral0 on this machine'
+  fi
+
+  # "rundir", against a FABRICATED parent. These arms need root -- setpriv, and
+  # a directory owned by somebody else -- but NOT a parked slot, because they
+  # never touch /run: the property is a permission on a directory, so it can be
+  # planted with chmod on a directory of our own. That also keeps a
+  # world-writable /run/hdw4s from existing for even a moment on a machine that
+  # may have a live session on it. Gated separately from the block above for
+  # exactly that reason: folded in with "clean", four arms that need nothing of
+  # the sort would skip on every box with a session running, which is most of
+  # them.
+  if [ "$(id -u)" = '0' ] && getent passwd ephemeral0 >/dev/null 2>&1; then
+    local fake="${tmp}/parent"
+    # The SCRATCH DIRECTORY has to be traversable, and finding that out is the
+    # best thing these arms have done so far. mktemp -d makes 0700 root-owned,
+    # so the slot uid could not reach the fixture at all -- and every arm
+    # reported the same thing: "could not write inside its OWN directory, so the
+    # refusals below are the CONTROL failing and not a property of the parent".
+    # Which is the check working. Without that control the three refusals would
+    # have been produced by a uid that could not reach the directory, printed as
+    # a clean green line, and the property would have been "proved" by an
+    # instrument that never touched it. 0711 and not 0755: traverse is all the
+    # uid needs, and it has no business listing our fixtures.
+    #
+    # The same thing happens where TMPDIR points somewhere the uid cannot
+    # traverse -- /root, for instance -- and there is deliberately no attempt to
+    # work around it. The control reports that it could not act, which is the
+    # honest answer; an arm that quietly relocated itself would be answering
+    # about a directory nobody asked about.
+    chmod 0711 "${tmp}"
+    install -d -m 0755 -o root -g root "${fake}"
+    HDW4S_RUNDIR_PARENT="${fake}" \
+      expect green 'rundir, a root-owned 0755 parent refuses the slot uid' \
+      "${self}" rundir ephemeral0
+
+    # THE ARM THIS ASSERTION EXISTS FOR. If systemd ever hands the intermediate
+    # component to the session user -- which is what two readers disagreed about
+    # from memory -- this is the shape it would have.
+    chmod 0777 "${fake}"
+    EXPECT_MATCH='mkdir sibling' \
+      HDW4S_RUNDIR_PARENT="${fake}" \
+      expect red 'rundir, a world-writable parent' "${self}" rundir ephemeral0
+    unset EXPECT_MATCH
+
+    # And the CONTROL has to be seen failing too, or a green line could be three
+    # refusals produced by a uid that can do nothing anywhere. A parent the slot
+    # cannot even traverse leaves root able to work here and the slot unable to
+    # write inside its own directory, which must be reported as the control
+    # failing and NOT as the property holding.
+    chmod 0700 "${fake}"
+    EXPECT_MATCH='control' \
+      HDW4S_RUNDIR_PARENT="${fake}" \
+      expect red 'rundir, the identity control cannot write its own directory' \
+      "${self}" rundir ephemeral0
+    unset EXPECT_MATCH
+
+    chmod 0755 "${fake}"
+    HDW4S_RUNDIR_PARENT="${fake}" \
+      expect green 'rundir, the fabricated parent restored' \
+      "${self}" rundir ephemeral0
+    chmod 0700 "${tmp}"
+  else
+    skip 'selftest rundir' 'needs root and an ephemeral0 identity on this machine'
   fi
 }
 
@@ -648,8 +934,9 @@ case "${1:-}" in
   distinct) check_distinct ;;
   clean)    shift; [ "$#" -gt 0 ] || set -- ephemeral0
             for s in "$@"; do check_clean "${s}"; done ;;
+  rundir)   check_rundir "${2:-ephemeral0}" ;;
   selftest) check_selftest "${2:-.}" ;;
-  *) echo "usage: $0 static [<tree>] | distinct | clean <slot>... | selftest [<tree>]" >&2
+  *) echo "usage: $0 static [<tree>] | distinct | clean <slot>... | rundir [<slot>] | selftest [<tree>]" >&2
      exit 2 ;;
 esac
 
