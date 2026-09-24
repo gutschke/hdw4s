@@ -588,7 +588,7 @@ else
     installed_names=''
   }
   for u in "${UNITS[@]}"; do
-    printf '%s\n' "${installed_names}" | grep -qxF "${u}" ||
+    grep -qxF "${u}" <<<"${installed_names}" ||
       bad "${u}" 'is not in install.sh SOURCES, so install.sh would not copy it'
   done
 fi
@@ -598,7 +598,7 @@ rules_named="$(grep -oE 'hdw4s[^[:space:]]*\.(service|socket|timer|slice)' debia
                sort -u)"
 for u in "${UNITS[@]}"; do
   case " ${RULES_EXEMPT[*]} " in *" ${u} "*) continue;; esac
-  printf '%s\n' "${rules_named}" | grep -qxF "${u}" ||
+  grep -qxF "${u}" <<<"${rules_named}" ||
     bad "${u}" 'is not named in debian/rules, so debhelper never sees it'
 done
 # And an exemption that no longer names anything is an exemption nobody will
@@ -692,7 +692,7 @@ begin
 for check in static selftest; do
   if out="$("$(dirname "$0")/uid-invariant.sh" "${check}" . 2>&1)"; then
     :
-  elif printf '%s\n' "${out}" | grep -q 'FAIL:'; then
+  elif grep -q 'FAIL:' <<<"${out}"; then
     printf '%s\n' "${out}" | grep 'FAIL:' | sed 's/^/  /'
     bad "uid-invariant ${check}" 'reported the above'
   else
@@ -930,7 +930,7 @@ for f in ${readers}; do
   # a docstring is not a comment to grep. The behavioural half of the pair is
   # what closes that -- .github/setting-grammar.py asks the router for an answer
   # and compares it against the tool's -- and neither half is sufficient alone.
-  grep -v '^[[:space:]]*#' "${f}" | grep -qF 'hdw4s-duration' ||
+  grep -qF 'hdw4s-duration' <<<"$(grep -v '^[[:space:]]*#' "${f}")" ||
     bad 'duration grammar' "${f} reads HDW4S_IDLE_DAYS without reaching hdw4s-duration, so it has a grammar of its own"
 done
 okif 'the idle window has one grammar'
@@ -1015,7 +1015,7 @@ probe() {
     refuse)
       if [ "${rc}" -eq 0 ]; then
         bad 'overlay guard' "allowed ${desc}"
-      elif ! printf '%s' "${out}" | grep -q 'Nothing has been changed'; then
+      elif ! grep -q 'Nothing has been changed' <<<"${out}"; then
         bad 'overlay guard' "refused ${desc} without saying nothing was changed"
       fi ;;
     allow)
@@ -1171,7 +1171,7 @@ if [ "${1:-}" = '--package' ]; then
     bad 'package contents' 'dpkg-deb -c produced nothing'
   else
     for u in "${UNITS[@]}"; do
-      printf '%s\n' "${contents}" | grep -qxF "./usr/lib/systemd/system/${u}" ||
+      grep -qxF "./usr/lib/systemd/system/${u}" <<<"${contents}" ||
         bad "${u}" 'is not in the built package'
     done
   fi
