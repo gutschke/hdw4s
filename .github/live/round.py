@@ -283,6 +283,86 @@ def sid_of(html_or_path):
     return m.group(1) if m else ""
 
 
+def owner_update(kind, sid, previous):
+    """The session a visitor OWNS -- the SECOND notion of identifier.
+
+    The rig had one where it needs two, and this is the one it was missing.
+    sid() reads location.pathname, so it answers WHICH ADDRESS THIS BROWSER IS
+    DISPLAYING. Most of the time that is also the session the visitor holds,
+    which is exactly why the conflation survived: the two coincide until
+    somebody is deliberately sent to an address that is not theirs.
+
+    Measured 2026-09-23, and it is where this function comes from. Row 6 pastes
+    A's link into B, the product refuses, and B is left SITTING at A's address
+    displaying the refusal. Row 7 then asked "whose session does B hold?"
+    through sid() and was told "A's" -- a correct answer to the question sid()
+    answers, and the wrong question. It reported the two visitors SWAPPED while
+    the three neighbouring rows about the same two browsers all passed, and the
+    product was not implicated in any of it.
+
+    So ownership is adopted ONLY from an arrival at the front door that was
+    SERVED. A capacity refusal, a dead desktop, an unknown page, or a landing
+    with no session in the path are things that happened to the address bar,
+    not transfers of a session, and each leaves ownership where it was.
+
+    Not "navigate B away after the refusal": that repairs one call site and
+    leaves the next one to rediscover this. Ownership is now a value only
+    front_door() can move, so a raw goto() cannot corrupt it by construction.
+    """
+    return sid if sid and kind in ("desktop", "gate") else previous
+
+
+def fresh_visitor_verdict(kind):
+    """What a BRAND-NEW visitor meeting a full pool must be told.
+
+    'refused' is the capacity page. 'broken' is a 502 from a dead desktop and
+    is NOT the same answer -- the round-4 note has said so since the detector
+    tier was built, while the arm carrying that expectation was putting it to
+    the wrong browser entirely. Anything else means the pool was not full,
+    which makes every later row here evidence about nothing.
+    """
+    if kind == "refused":
+        return PASS, "the capacity page"
+    if kind == "broken":
+        return FAIL, ("a DEAD desktop (502), not a capacity refusal -- the "
+                      "failure that scores as a pass if 'no desktop' is the "
+                      "whole test")
+    if kind in ("desktop", "gate"):
+        return FAIL, ("served, so the pool was not full and nothing later is "
+                      "evidence about an exhausted pool")
+    return FAIL, "neither served nor refused"
+
+
+def second_tab_verdict(kind, sid2, sid1):
+    """What the OWNER's second tab must get when the pool has no free slot.
+
+    This row used to assert the capacity refusal, and that was a category
+    error rather than a threshold set too high. Two tabs in one browser share
+    one cookie jar, so tab 2 is the SAME VISITOR arriving again -- the arrival
+    rule resumes it, and resuming consumes no slot. A second tab should never
+    reach the capacity path at all, full pool or not. The row was exercising
+    one mechanism and asserting another's expectation, so it had the shape of
+    a product failure while the product was doing what the owner ruled.
+
+    The expectation that belongs here is the one a full pool actually puts at
+    risk: THE OWNER IS NOT LOCKED OUT OF HIS OWN DESKTOP because strangers
+    filled the pool. A refusal to tab 2 is that lock-out. That is why this
+    keeps running against a full pool rather than folding into row 8, whose
+    pool has room: same assertion, different and harsher circumstance.
+    """
+    if kind == "refused":
+        return FAIL, ("the owner's own second tab was told the pool is full; "
+                      "resuming consumes no slot, so this is a lock-out")
+    if kind not in ("desktop", "gate"):
+        return FAIL, "the owner's second tab landed on %r" % kind
+    if not sid1:
+        return UNDEC, "tab 1 held no session to be resumed"
+    if sid2 != sid1:
+        return FAIL, "tab 2 minted %s rather than resuming %s" % (sid2[:12],
+                                                                 sid1[:12])
+    return PASS, "resumed tab 1's session"
+
+
 def shown(facts):
     """Is this element ON THE SCREEN? -- three answers, and the third matters.
 
@@ -411,6 +491,10 @@ class Visitor:
                                   fake_media_ui=not real_media_ui)
         self.tag = tag
         self.tabs = []
+        # THE SECOND NOTION OF IDENTIFIER. sid() answers "which address is this
+        # browser displaying"; this answers "which session does this visitor
+        # hold". Only front_door() moves it -- see owner_update().
+        self.held = ""
 
     def start(self):
         if not self.x.up(timeout=20):
@@ -423,8 +507,41 @@ class Visitor:
             self.br.call(m)
 
     def goto(self, url, settle=2.0):
+        """Navigate. DELIBERATELY does not touch ownership: an arm that sends a
+        browser to an address chosen by the arm -- a pasted link, someone
+        else's session -- is moving the address bar, not handing over a
+        session. Front-door arrivals go through front_door()."""
         self.br.call("Page.navigate", {"url": visit_url(url)}, timeout=120)
         time.sleep(settle)
+
+    def front_door(self, url, settle=4.0):
+        """Arrive the way a person does: type the address, answer the card.
+
+        Returns (kind, clicked). This is the ONLY thing that can change what
+        this visitor owns, so a row asking about ownership reads `held` and
+        gets an answer that no later navigation can have overwritten.
+        """
+        self.goto(url, settle=settle)
+        clicked = self.click_gate()
+        kind = classify(self.title(), self.html())
+        self.held = owner_update(kind, self.sid(), self.held)
+        return kind, clicked
+
+    def owned(self):
+        """The session this visitor holds, as last established at the front
+        door. NOT what its address bar currently reads -- see owner_update()
+        for the round where those two came apart and cost a row."""
+        return self.held
+
+    def photograph(self, path):
+        """The whole framebuffer, address bar included.
+
+        An ownership row's detector reads location.pathname; this reads the
+        same fact off the screen with a different mechanism, which is what was
+        missing when a one-character bug in the id expression survived a green
+        self-test. Returns an error string, or None on success.
+        """
+        return root_screenshot(self.display, path)
 
     def eval(self, e, timeout=30):
         return self.br.eval(e, timeout)
@@ -918,14 +1035,31 @@ def arm_first_visit(a, url, floor):
     which is the expensive direction, because a false FAIL is a chase. It is
     measured against a real Chrome on the real gate page by browsertest().
     """
-    a.goto(url, settle=4.0)
-    kind = classify(a.title(), a.html())
+    kind, clicked = a.front_door(url)
     if kind == "refused":
-        return record("1. first visit gets a desktop", GATED,
-                      "front-door refusal page",
-                      "the server refused: %r -- not a failure, but this round "
-                      "cannot see a desktop" % a.title())
-    clicked = a.click_gate()
+        # NOT a soft row. A capacity refusal to the FIRST visitor of a run
+        # means every slot was owned before the run started, so every row
+        # after this one is about an exhausted pool while claiming to be about
+        # something else -- which is exactly what happened once, and was caught
+        # only because a person read the transcript. A row that says "this
+        # round cannot see a desktop" and then lets thirteen more rows print is
+        # a remedy living in somebody's memory.
+        #
+        # It REFUSES rather than resetting. A reset kills every session on the
+        # machine, and a test rig that destroys state to make its own
+        # preconditions true is a rig that will one day do it to the wrong box
+        # -- the same reasoning that keeps reset-state.sh behind
+        # private/dev-targets. So it names the remedy and stops.
+        raise Precondition(
+            "the FIRST visitor of this run was refused for capacity (%r).\n"
+            "    Every slot was already owned before the run began, so nothing "
+            "this rig\n"
+            "    could go on to measure would be about the thing its rows "
+            "name.\n"
+            "    The remedy, which this tool will not perform for you because "
+            "it destroys\n"
+            "    every session on the target:  private/reset-state.sh "
+            "<ssh-target>" % a.title())
     got, best = a.wait_picture(floor)
     if not got:
         up, facts = a.gate()
@@ -976,8 +1110,7 @@ def arm_reload_resumes(a, url):
     if not before:
         return record("2. a reload resumes, never mints", SKIP,
                       "no sid to resume", "arm 1 did not reach /s/<sid>/")
-    a.goto(url, settle=4.0)
-    a.click_gate()
+    a.front_door(url)
     after = a.sid()
     if not after:
         return record("2. a reload resumes, never mints", GATED,
@@ -995,10 +1128,16 @@ def arm_second_tab(a, url, probe, instance, exhausted):
     while a matrix reported sixteen of sixteen.
 
     Run twice by the caller: once with the pool having room, once EXHAUSTED.
-    The interesting half is the second, and its assertion is not about tab 2 at
-    all. It is that TAB 1 IS STILL THERE.
 
-    Detector, tab 2: which page it landed on (desktop / gate / refusal).
+    WHAT THE EXHAUSTED HALF USED TO ASSERT, AND WHY IT WAS WRONG: it demanded
+    that tab 2 be told the pool is full. Tab 2 shares tab 1's cookie jar, so it
+    is the same visitor arriving again and the arrival rule RESUMES it --
+    which is what the deployment did, and the row called it a failure. A
+    capacity refusal needs a FRESH VISITOR with a fresh cookie jar; that is now
+    row 4a, taken from the browsers exhaust() opens. See second_tab_verdict().
+
+    Detector, tab 2: which page it landed on, AND whether it came back to tab
+    1's session rather than minting or being refused.
     Detector, tab 1: chunk delta AFTER Page.bringToFront, because opening tab 2
     backgrounds tab 1 and freezes its counter, which looks exactly like
     eviction. Where a --server-probe is supplied, the server's own count of
@@ -1007,21 +1146,20 @@ def arm_second_tab(a, url, probe, instance, exhausted):
     its own, so with no probe and a zero delta this arm is UNDECIDED and says
     so rather than reporting a failure it cannot see.
     """
-    label = "4. two tabs, pool EXHAUSTED" if exhausted else "3. two tabs, pool has room"
-    sid1 = a.sid()
+    label = ("4b. two tabs, pool EXHAUSTED" if exhausted
+             else "3. two tabs, pool has room")
+    sid1 = a.owned()
     before_n = server_count(probe, instance)
     t = a.new_tab(url)
     kind = classify(t.title(), t.html())
     sid2 = t.sid()
 
     if exhausted:
-        ok2 = kind == "refused"
-        record(label + " (tab 2 is told so)", PASS if ok2 else FAIL,
-               "page kind == refused (capacity), NOT 'broken'",
-               ("tab 2 got %s, title %r, sid %r" % (kind, t.title(), sid2[:12]))
-               + (" -- a DEAD desktop, not a capacity refusal; this is the "
-                  "failure that would otherwise have scored as a pass"
-                  if kind == "broken" else ""))
+        outcome, why = second_tab_verdict(kind, sid2, sid1)
+        record(label + " (tab 2 resumes, is NOT refused)", outcome,
+               "tab 2 resumes tab 1's session; a refusal is a LOCK-OUT",
+               "tab 2 got %s, title %r, sid %r vs tab 1's %r -- %s"
+               % (kind, t.title(), sid2[:12], sid1[:12], why))
     else:
         ok2 = kind in ("desktop", "gate")
         record(label + " (tab 2 is served)", PASS if ok2 else FAIL,
@@ -1030,6 +1168,7 @@ def arm_second_tab(a, url, probe, instance, exhausted):
 
     mov, pair = a.moving(6.0)
     after_n = server_count(probe, instance)
+    label = label.replace("4b.", "4c.")
     if mov is None:
         return record(label + " (tab 1 survives)", UNDEC,
                       "tab 1's counter gone, or its debugger died",
@@ -1051,7 +1190,7 @@ def arm_second_tab(a, url, probe, instance, exhausted):
                   "page delta zero; server %s->%s" % (before_n, after_n))
 
 
-def arm_reverse_order(a, b, url):
+def arm_reverse_order(a, b, url, evidence):
     """The same two visitors, arriving in the other order.
 
     Not a relabelling of the row above: it re-navigates B first and A second,
@@ -1063,28 +1202,87 @@ def arm_reverse_order(a, b, url):
 
     Detector: each browser comes back to the sid it already held. A swap, or
     either of them minting a third, is the failure.
+
+    THE BEFORE-VALUES ARE OWNERSHIP, NOT THE ADDRESS BAR, and the difference
+    is not academic here. This arm runs immediately after row 6 pastes A's
+    link into B, which leaves B parked at A's address displaying a refusal --
+    so reading B's before-value with sid() read A's id out of B's window and
+    reported a swap that never happened. See owner_update().
     """
-    was_a, was_b = a.sid(), b.sid()
+    was_a, was_b = a.owned(), b.owned()
     if not was_a or not was_b:
         return record("7. reverse order does not swap owners", SKIP,
-                      "one visitor had no sid to return to",
+                      "one visitor owned no session to return to",
                       "A=%r B=%r" % (was_a[:12], was_b[:12]))
-    b.goto(url, settle=4.0)
-    b.click_gate()
-    a.goto(url, settle=4.0)
-    a.click_gate()
+    b.front_door(url)
+    a.front_door(url)
     now_a, now_b = a.sid(), b.sid()
     swapped = now_a == was_b or now_b == was_a
     kept = now_a == was_a and now_b == was_b
+    shots, errs = ownership_photos((("A", a), ("B", b)), evidence, "reversed")
     return record("7. reverse order does not swap owners",
                   PASS if kept and not swapped else FAIL,
                   "each browser returns to the sid it held",
-                  "A %s->%s, B %s->%s%s"
+                  "A %s->%s, B %s->%s%s%s"
                   % (was_a[:12], now_a[:12], was_b[:12], now_b[:12],
-                     ", SWAPPED" if swapped else ""))
+                     ", SWAPPED" if swapped else "",
+                     "; NOT photographed: " + "; ".join(errs) if errs else ""),
+                  artefact=" and ".join(shots) or None,
+                  question=ADDRESS_BAR_QUESTION if shots else "")
 
 
-def arm_two_visitors(a, b, url, floor):
+ADDRESS_BAR_QUESTION = (
+    "in each photograph, does the address bar show the id this row reported "
+    "for that browser? The row read it from location.pathname; the photograph "
+    "reads the same fact by a different mechanism, which is what was missing "
+    "when a one-character bug in that expression survived a green self-test.")
+
+
+def ownership_photos(pair, evidence_dir, stem):
+    """Photograph each visitor's whole screen, address bar included.
+
+    WHY THESE ROWS AND NOT ALL OF THEM. The standing rule is to look at the
+    screen, and the ownership rows are the ones that never did: every detector
+    in them is a DOM query -- a pathname, a counter, some document text --
+    so nine of them passed today without a single pixel being examined. Three
+    earlier and worse runs left a photograph each and the good one left none,
+    because the only camera in the rig sat behind an early return for "no live
+    media track". The better the run went, the less there was to look at.
+
+    The two rows photographed are the two that assert WHO OWNS WHAT, which is
+    also where both of today's detector faults landed -- one returned an empty
+    identifier while the address bar held the truth, the other read the right
+    address bar for the wrong browser. A picture aimed at the address bar is
+    therefore worth more here than one aimed at browser chrome, and it is what
+    the cheap text extractors read best.
+
+    Not every row, deliberately: a directory of files nobody opens is
+    indistinguishable from no evidence, and print_reading_list() only puts an
+    artefact in front of a person when its row did NOT pass cleanly. These
+    files are for the round that goes wrong.
+
+    WHAT A PHOTOGRAPH HERE STILL DOES NOT SETTLE, and it is the harder half:
+    it shows that A DESKTOP appeared, not that THE RIGHT desktop did. Two
+    slots running the same image look identical on screen. The address bar is
+    the part of the picture that carries identity, which is why it is what the
+    question asks about, and telling one desktop's CONTENT from another's
+    needs something the sessions do not currently have -- named as an open
+    question rather than answered here.
+
+    Returns (paths, errors); a failed photograph is reported, never dropped.
+    """
+    paths, errs = [], []
+    for tag, v in pair:
+        p = os.path.join(evidence_dir, "%s-%s.png" % (stem, tag))
+        err = v.photograph(p)
+        if err:
+            errs.append("%s: %s" % (tag, err))
+        else:
+            paths.append(p)
+    return paths, errs
+
+
+def arm_two_visitors(a, b, url, evidence):
     """Two browsers are two people, and neither is the other.
 
     Detector: the two session ids differ, AND B's whole document does not
@@ -1092,7 +1290,8 @@ def arm_two_visitors(a, b, url, floor):
     ids prove the demux issued two, not that one page never mentions the other.
     """
     n = "5. two browsers are two visitors"
-    sa, sb = a.sid(), b.sid()
+    # Ownership, not the address bar: this row is about who holds what.
+    sa, sb = a.owned(), b.owned()
     if not sa or not sb:
         return record(n, GATED, "one visitor has no sid",
                       "A=%r B=%r -- one of them was gated rather than served"
@@ -1101,10 +1300,14 @@ def arm_two_visitors(a, b, url, floor):
         return record(n, FAIL, "sid(A) != sid(B)",
                       "both browsers were given %s" % sa[:12])
     leaked = sa in b.html() or sb in a.html()
+    shots, errs = ownership_photos((("A", a), ("B", b)), evidence, "owners")
     return record(n, FAIL if leaked else PASS,
                   "sids differ AND neither document names the other's",
-                  "A=%s B=%s%s" % (sa[:12], sb[:12],
-                                   ", LEAKED" if leaked else ""))
+                  "A=%s B=%s%s%s"
+                  % (sa[:12], sb[:12], ", LEAKED" if leaked else "",
+                     "; NOT photographed: " + "; ".join(errs) if errs else ""),
+                  artefact=" and ".join(shots) or None,
+                  question=ADDRESS_BAR_QUESTION if shots else "")
 
 
 def arm_share_without_key(a, b, url):
@@ -1115,13 +1318,17 @@ def arm_share_without_key(a, b, url):
     killing A's session has refused correctly and broken the thing that
     mattered.
     """
-    sa = a.sid()
+    sa = a.owned()
     if not sa:
         return record("6. a pasted session link is refused", SKIP,
-                      "A has no sid to paste", "")
+                      "A owns no session to paste", "")
     from urllib.parse import urljoin
     b.goto(urljoin(url, "/s/%s/" % sa), settle=5.0)
     kind = classify(b.title(), b.html())
+    # b.sid() ON PURPOSE: this half asks what B's window is showing, which is
+    # the address-bar question. B's OWNERSHIP is deliberately not touched by
+    # this navigation -- goto() cannot move it -- which is what lets row 7
+    # still know whose session B holds after B has been parked here.
     b_sid = b.sid()
     stole = kind == "desktop" and b_sid == sa
     record("6. a pasted session link is refused",
@@ -1255,21 +1462,60 @@ def arm_capture_indicators(a, evidence_dir, display, expect_media, url_origin):
                    "half can never light whatever the product does -- the row "
                    "was not asked, and that is not an undecided answer" % devs)
             continue
-        # browser.eval passes awaitPromise, so an async expression settles
-        # before the value comes back. It returns None on a timeout, which must
-        # NOT be read as "no tracks": that would score a dead debugger as the
-        # product correctly refusing, which is a green light for the wrong
-        # reason.
-        tracks = a.eval(
-            "(async()=>{try{"
-            "const s=await navigator.mediaDevices.getUserMedia(%s);"
-            "return s.getTracks().filter(t=>t.readyState==='live')"
-            ".map(t=>t.kind).sort().join(',')||'none';"
-            "}catch(e){return 'refused:'+e.name}})()" % cons, timeout=45)
+        # TWO PHASES, and the reason is that one phase could not tell two
+        # things apart. browser.eval passes awaitPromise, so an unsettled
+        # getUserMedia simply never gets a CDP reply and the call times out
+        # returning None -- the same None a dead debugger returns. Both rounds
+        # so far reported "never settled" and NEITHER of them knows which of
+        # those happened, which is an unanswered row that cannot say what to
+        # fix. moving() already refuses to conflate a missing counter with an
+        # absent video; this is the same rule applied to the same kind of None.
+        #
+        # So: fire the call, park its outcome on the page, and then POLL with a
+        # plain synchronous read. A poll that keeps answering "pending" is a
+        # measurement of a hung getUserMedia -- the page is alive and the call
+        # has not come back. A poll that stops answering at all is the rig
+        # going blind, and it is a different sentence with a different repair.
+        started = a.eval(
+            "(()=>{window.__hdw4s_cap='pending';"
+            "navigator.mediaDevices.getUserMedia(%s).then(s=>{"
+            "window.__hdw4s_cap='tracks:'+(s.getTracks()"
+            ".filter(t=>t.readyState==='live').map(t=>t.kind).sort()"
+            ".join(',')||'none')})"
+            ".catch(e=>{window.__hdw4s_cap='refused:'+e.name});"
+            "return 'started'})()" % cons, timeout=20)
+        if started != "started":
+            record(label, UNDEC, "the capture call could not even be started",
+                   "the page returned %r rather than 'started', so nothing was "
+                   "asked of getUserMedia and this says nothing about the "
+                   "product" % (started,))
+            continue
+        deadline, tracks, polls, blind = time.time() + 45, None, 0, False
+        while time.time() < deadline:
+            time.sleep(1.5)
+            polls += 1
+            v = a.eval("window.__hdw4s_cap", timeout=15)
+            if v is None:
+                blind = True
+                break
+            blind = False
+            if v != "pending":
+                tracks = v[len("tracks:"):] if v.startswith("tracks:") else v
+                break
+        if blind:
+            record(label, UNDEC, "the page stopped answering mid-measure",
+                   "getUserMedia was started and the poll went silent after "
+                   "%d read(s); that is this rig losing the page, NOT the "
+                   "product refusing" % polls)
+            continue
         if tracks is None:
-            record(label, UNDEC, "getUserMedia never settled",
-                   "the permission was granted, so this is not a pending "
-                   "prompt; no answer came back and it says nothing either way")
+            record(label, UNDEC, "getUserMedia still PENDING after 45s",
+                   "measured, not inferred: the page answered %d poll(s) and "
+                   "said 'pending' every time, so the page is alive and the "
+                   "call has not come back. The permission was granted, so "
+                   "this is not a prompt waiting for a click -- it is a "
+                   "getUserMedia that does not settle, and it is apparatus to "
+                   "fix rather than a product verdict" % polls)
             continue
         live = not str(tracks).startswith("refused") and tracks != "none"
         live_any = live_any or live
@@ -1322,25 +1568,33 @@ def exhaust(url, display_base, base_port, declared, limit=8):
     the deployment, and it is reported instead of being smoothed over, because
     every later arm that says "exhausted" is resting on this number.
 
-    Returns (held_open, reached_refusal, browsers_to_close).
+    It also stops on ANY page that is not a served desktop, and says which,
+    rather than only on the capacity page. A 502 from a dead desktop used to be
+    kept as a filler and the loop carried on, so a broken front door would have
+    been counted as a slot -- and the one row that cares about the difference
+    between a refusal and a crash would never have been shown it.
+
+    Returns (held_open, stopped_on, browsers_to_close), where stopped_on is the
+    page kind that ended the loop, or None if the front door was still serving
+    when the limit ran out. The LAST visitor it opens is the fresh visitor row
+    4a is about: its cookie jar is its own, which is the whole difference
+    between it and a second tab.
     """
     held, kept = 0, []
     for i in range(limit):
         v = Visitor(base_port + 40 + i, "fill%d" % i, display_base + i)
         try:
             v.start()
-            v.goto(url, settle=4.0)
-            v.click_gate()
-            kind = classify(v.title(), v.html())
+            kind, _ = v.front_door(url)
         except Precondition:
             v.stop()
             break
-        if kind == "refused":
+        if kind not in ("desktop", "gate"):
             v.stop()
-            return held, True, kept
+            return held, kind, kept
         kept.append(v)
         held += 1
-    return held, False, kept
+    return held, None, kept
 
 
 # --------------------------------------------------------------------------
@@ -1775,6 +2029,51 @@ def selftest():
     expect("contradicts: a card that is honestly down is not",
            contradicts(down), False)
 
+    # ----------------------------------------------------------------
+    # THE TWO NOTIONS OF IDENTIFIER. Each of these is a line from the
+    # 2026-09-23 round, and the middle one is the failure itself: B owned
+    # a77ed5b6a8c3 and was parked at A's address after a refused paste, so
+    # the address bar read 12c6ab05201f and row 7 called it a swap.
+    # ----------------------------------------------------------------
+    expect("owned: a served front-door arrival adopts the session",
+           owner_update("desktop", "AAA", ""), "AAA")
+    expect("owned: the card at the front door adopts nothing yet",
+           owner_update("gate", "", "AAA"), "AAA")
+    expect("owned: a refused paste of another's link moves NOTHING",
+           owner_update("broken", "12c6ab05201f", "a77ed5b6a8c3"),
+           "a77ed5b6a8c3")
+    expect("owned: and the address bar would have said otherwise",
+           owner_update("broken", "12c6ab05201f", "a77ed5b6a8c3")
+           != "12c6ab05201f", True)
+    expect("owned: a capacity refusal moves nothing",
+           owner_update("refused", "", "BBB"), "BBB")
+    expect("owned: an unknown page moves nothing",
+           owner_update("unknown", "AAA", "BBB"), "BBB")
+
+    # Row 4a: what a FRESH visitor must be told, and the two answers that
+    # look like a refusal and are not one.
+    expect("fresh visitor: the capacity page is the pass",
+           fresh_visitor_verdict("refused")[0], PASS)
+    expect("fresh visitor: a DEAD desktop (502) is NOT a refusal",
+           fresh_visitor_verdict("broken")[0], FAIL)
+    expect("fresh visitor: being served means the pool was not full",
+           fresh_visitor_verdict("desktop")[0], FAIL)
+
+    # Row 4b: the row that used to assert the OPPOSITE of the arrival rule.
+    # The last line is today's deployment, which the old row failed.
+    expect("second tab: resuming tab 1's session is the pass",
+           second_tab_verdict("desktop", "AAA", "AAA")[0], PASS)
+    expect("second tab: a capacity refusal to the owner is a LOCK-OUT",
+           second_tab_verdict("refused", "", "AAA")[0], FAIL)
+    expect("second tab: minting a second session fails",
+           second_tab_verdict("desktop", "ZZZ", "AAA")[0], FAIL)
+    expect("second tab: the deployment the old row FAILED now passes",
+           second_tab_verdict("desktop", "12c6ab05201f", "12c6ab05201f")[0],
+           PASS)
+    expect("second tab: and the old expectation and the new disagree",
+           second_tab_verdict("refused", "", "AAA")[0]
+           != second_tab_verdict("desktop", "AAA", "AAA")[0], True)
+
     print("\n  %s -- %d detector(s) disagreed with a known answer"
           % ("SELFTEST RED" if bad else "SELFTEST GREEN", bad))
     return 1 if bad else 0
@@ -1921,11 +2220,10 @@ def main():
 
         B = Visitor(args.base_port + 1, "B", args.display_base + 1)
         B.start()
-        B.goto(args.url, settle=4.0)
-        B.click_gate()
-        arm_two_visitors(A, B, args.url, floor)
+        B.front_door(args.url)
+        arm_two_visitors(A, B, args.url, evidence)
         arm_share_without_key(A, B, args.url)
-        arm_reverse_order(A, B, args.url)
+        arm_reverse_order(A, B, args.url, evidence)
         arm_second_interaction(A, args.url)
 
         # THE CAPTURE BROWSER NEEDS A FREE SLOT, so it runs here and not where
@@ -1948,8 +2246,7 @@ def main():
         M = Visitor(args.base_port + 2, "M", args.display_base + 2,
                     real_media_ui=True)
         M.start()
-        M.goto(args.url, settle=4.0)
-        M.click_gate()
+        M.front_door(args.url)
         sp = _urlsplit(args.url)
         arm_capture_indicators(M, evidence, M.display, args.media,
                                "%s://%s" % (sp.scheme, sp.netloc))
@@ -1957,8 +2254,8 @@ def main():
         # Now fill the pool and do the two-tab row again. This is the row the
         # owner found by hand, and it is last because it leaves the machine
         # with no free slot.
-        held, refused, fillers = exhaust(args.url, args.display_base + 3,
-                                         args.base_port, args.slots)
+        held, stopped_on, fillers = exhaust(args.url, args.display_base + 3,
+                                            args.base_port, args.slots)
         # DERIVED, not the digit that used to be here. This arithmetic said
         # "+ 2" because A and B were the only browsers holding a session when
         # it was written; moving the capture browser ahead of the exhaustion
@@ -1967,19 +2264,57 @@ def main():
         # comparison is a claim, and this one is now read off the browsers that
         # exist rather than asserted.
         ours = len([v for v in (A, B, M) if v is not None])
-        if args.slots and held + ours != args.slots and refused:
-            record("0. the deployed pool is the one declared", FAIL,
-                   "browsers served before the front door refused",
-                   "--slots said %d; this run got %d more visitors served "
-                   "before refusal, with %d already holding sessions"
-                   % (args.slots, held, ours))
-        if not refused:
-            record("4. two tabs, pool EXHAUSTED", UNDEC,
-                   "the pool never refused",
-                   "opened %d extra visitors and the front door kept serving; "
-                   "the exhausted case was never reached, so nothing here is "
-                   "evidence about it" % held)
+
+        # ROW 0 IS RECORDED ON EVERY PATH, including the one where it agrees.
+        # It used to print only when it disagreed, so the run where the pool
+        # matched left NO ROW AT ALL -- and the standing comparison between
+        # rounds is "the same rows with the same detectors", which an absent
+        # row passes by not being there. A missing row is a shape change; it is
+        # the loudest thing this rig can get wrong quietly, because the reader
+        # is looking for failures and a row that is gone is neither.
+        n0 = "0. the deployed pool is the one declared"
+        if not args.slots:
+            record(n0, SKIP, "no --slots to compare against",
+                   "nothing declared the pool size, so this run measured it "
+                   "(%d + %d) and had nothing to check it against"
+                   % (held, ours))
+        elif stopped_on is None:
+            record(n0, UNDEC, "the front door never stopped serving",
+                   "--slots said %d; this run served %d fillers on top of %d "
+                   "held sessions and the front door was still serving when "
+                   "the filler limit ran out, so %d is a floor, not a count"
+                   % (args.slots, held, ours, held + ours))
         else:
+            record(n0, PASS if held + ours == args.slots else FAIL,
+                   "browsers served before the front door stopped serving",
+                   "--slots said %d; %d fillers were served on top of %d "
+                   "sessions already held, then the door answered %r"
+                   % (args.slots, held, ours, stopped_on))
+
+        # ROW 4a IS THE CAPACITY REFUSAL, and it is put to a FRESH VISITOR --
+        # a browser with its own cookie jar, which is what "a new person" means
+        # to this product. It is read off the visitor exhaust() already opened
+        # rather than opening a second one: deriving it from the measurement
+        # that was taken beats taking a new one that could disagree with it.
+        if stopped_on is None:
+            for nm, det in (
+                    ("4a. a fresh visitor meets the capacity refusal",
+                     "page kind == refused (capacity), NOT 'broken'"),
+                    ("4b. two tabs, pool EXHAUSTED (tab 2 resumes, is NOT "
+                     "refused)",
+                     "tab 2 resumes tab 1's session; a refusal is a LOCK-OUT"),
+                    ("4c. two tabs, pool EXHAUSTED (tab 1 survives)",
+                     "chunk delta>0 after bringToFront")):
+                record(nm, UNDEC, det,
+                       "opened %d extra visitors and the front door kept "
+                       "serving; the exhausted case was never reached, so "
+                       "nothing here is evidence about it" % held)
+        else:
+            outcome, why = fresh_visitor_verdict(stopped_on)
+            record("4a. a fresh visitor meets the capacity refusal", outcome,
+                   "page kind == refused (capacity), NOT 'broken'",
+                   "visitor %d, with a cookie jar of its own, got %r -- %s"
+                   % (held + 1, stopped_on, why))
             arm_second_tab(A, args.url, args.server_probe, args.instance,
                            exhausted=True)
 
