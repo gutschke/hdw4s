@@ -81,6 +81,54 @@ class Slot(threading.Thread):
         # its own behaviour.
         self.seen = False
 
+    def reap(self):
+        """Stand in for the sweep stopping this desktop.
+
+        The LISTENER goes away and the socket FILE stays, which is what a
+        reaped session actually leaves behind: the path lives in a runtime
+        directory the router does not own, so connect() gives ECONNREFUSED
+        rather than ENOENT and the name is still enumerated by
+        available_slots(). Unlinking it instead would make the slot vanish from
+        the pool and would quietly test a different, easier world -- one where
+        exhaustion cures itself because the directory shrank.
+
+        Closing the listener ALONE is not enough and the first version of this
+        did exactly that. A close from this thread does not interrupt the
+        accept() already blocked in the serving thread, so for a few
+        milliseconds afterwards a connect() still lands in the backlog and is
+        served -- measured: a probe connected successfully to a slot this had
+        just "reaped", and the test that depended on it passed against a defect
+        that is really there. So the path is rebound to a socket that is bound
+        and NOT listening, which refuses deterministically, and this does not
+        return until it has WATCHED a connect() be refused. A stand-in whose
+        effect is a race is worse than no stand-in: it produces a green.
+        """
+        self.stop = True
+        try:
+            self.s.close()
+        except OSError:
+            pass
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+        self.dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.dead.bind(self.path)      # bound, never listen()ed
+        for _ in range(100):
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(2)
+            try:
+                probe.connect(self.path)
+            except OSError:
+                probe.close()
+                return
+            probe.close()
+            time.sleep(0.02)
+        raise AssertionError(
+            "%s still accepts connections after being reaped -- the stand-in "
+            "for the sweep does not work, so nothing that depends on it is "
+            "evidence" % self.name)
+
     def run(self):
         while not self.stop:
             try:
@@ -221,7 +269,7 @@ class Rig:
             s.start()
             self.slots.append(s)
         self.port = self.free_port()
-        env = dict(os.environ,
+        self.env = dict(os.environ,
                    HDW4S_PROXY_RUNDIR=self.rundir,
                    HDW4S_ETCDIR=self.etc,
                    HDW4S_DEMUX_CRED=os.path.join(self.etc, "demux.auth.cred"),
@@ -231,19 +279,64 @@ class Rig:
                    HDW4S_DEMUX_PORT=str(self.port),
                    **({"HDW4S_GATE_MODE": gate} if gate is not None else {}))
         for k in ("LISTEN_FDS", "LISTEN_PID"):
-            env.pop(k, None)
-        self.proc = subprocess.Popen([sys.executable, DEMUX], env=env,
+            self.env.pop(k, None)
+        self.statedir = os.path.join(self.tmp, "state")
+        self.err = []
+        self._spawn()
+
+    # The spawn is a method rather than eight lines of __init__ because the
+    # fixture could not express a RESTART at all while it was inline: every
+    # test built a fresh Rig, which meant a fresh tmpdir, fresh slots and a
+    # fresh port as well as a fresh process. A router's whole lifecycle -- up,
+    # down, up again against the same slots and the same state directory -- had
+    # no representation here, and three defects live in exactly that gap. A rig
+    # cannot catch what it cannot say.
+    def _spawn(self):
+        self.proc = subprocess.Popen([sys.executable, DEMUX], env=self.env,
                                      stderr=subprocess.PIPE)
         # Drained continuously, in a thread. Reading the pipe only on failure
         # was fine while nothing checked the log; now that a test asserts on
         # what was written, a full pipe would block the thing under test and
         # the symptom would be a hang rather than a failure.
-        self.err = []
-        threading.Thread(target=self._drain, daemon=True).start()
+        threading.Thread(target=self._drain, args=(self.proc,),
+                         daemon=True).start()
         self.wait_up()
 
-    def _drain(self):
-        for line in self.proc.stderr:
+    def restart(self, wipe_state=False):
+        """Stop the router and start another one against the SAME slots.
+
+        The port is kept, so a client built before the restart still addresses
+        the same front door -- a visitor does not get a new URL because a
+        service restarted, and a rig that handed out a new port would be
+        testing a migration rather than a restart.
+
+        The stand-in desktops are deliberately NOT touched. That is the whole
+        point of the case: systemd restarts this router on failure while every
+        session it was routing to goes on running, so the slots outlive the
+        table that says who owns them.
+
+        wipe_state=False is the HONEST default and it is not the production
+        one. See the comment on test_a_visited_slot_is_not_indistinguishable_
+        from_a_never_visited_one for what a tmpdir cannot stand in for.
+        """
+        self.proc.terminate()
+        try:
+            self.proc.wait(5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait(5)
+        if wipe_state:
+            import shutil
+            shutil.rmtree(self.statedir, ignore_errors=True)
+        self.err.append("--- router restarted ---\n")
+        self._spawn()
+
+    def _drain(self, proc):
+        # Takes the process it is draining rather than reading self.proc, which
+        # a restart rebinds under it: the old thread would then follow the NEW
+        # process's pipe and the log of the run under test would be spliced
+        # together from two routers.
+        for line in proc.stderr:
             self.err.append(line.decode("utf-8", "replace"))
 
     def stderr_text(self, settle=1.0):
@@ -533,6 +626,282 @@ def test_exhaustion(rig):
     c = rig.client()
     st, _, _ = c.get("/")
     assert st == 503, "an arrival past capacity was not refused: %d" % st
+
+
+# --- the router's LIFECYCLE, which this fixture could not express ---------
+#
+# Everything above this line runs against a router that was started once and
+# never stopped, and every test builds its own. That is not a gap in coverage,
+# it is a gap in VOCABULARY: there was no way to write down "a router that has
+# been restarted" or "a slot the sweep has stopped", so the whole class of
+# defect that lives there was invisible by construction. The same shape put a
+# duration defect on the wire -- the rig could not express "30d" and says so in
+# its own comment above.
+#
+# Ownership is entirely in process memory and forget() has exactly one call
+# site, inside a start-up assertion. Those two facts pull in OPPOSITE
+# directions: losing the table misroutes a stranger onto a live desktop,
+# keeping it forever exhausts the pool. A repair that trades one for the other
+# would satisfy either arm alone, so both are here and neither is sufficient.
+
+
+def slot_named(rig, name):
+    """The stand-in backend a name refers to. DERIVED from the name the router
+    reported, never indexed off the end of the string: "ephemeral10" would have
+    reaped ephemeral0, and the test would still have gone red -- for the wrong
+    reason, which is the failure that looks most like success."""
+    for s in rig.slots:
+        if s.name == name:
+            return s
+    raise AssertionError("the router named a slot this rig does not have: %s"
+                         % name)
+
+
+def arrive_on_slot(rig, client):
+    """(sid, slot name). The slot is read from the BACKEND's own answer, not
+    from the router's account of itself -- a component is not evidence about
+    its own behaviour."""
+    sid, body = arrive(rig, client)
+    return sid, body.split("SLOT=")[1].split()[0]
+
+
+def test_control_two_visitors_without_a_restart_land_on_different_slots(rig):
+    """THE CONTROL for everything below, and it is not decoration.
+
+    The three tests after this one all conclude "these two visitors were put on
+    the same slot". That sentence is only evidence if the rig can be seen
+    producing the other answer under conditions where the other answer is
+    right. Without this, a rig in which EVERY pair collides -- one slot
+    misconfigured, the backends mixed up, the body parsed wrong -- would report
+    the defect just as loudly against a router that had already been repaired.
+
+    So: same helpers, same oracle, no restart. Separation must be visible
+    working before it is believed failing.
+    """
+    _, slot_a = arrive_on_slot(rig, rig.client())
+    _, slot_b = arrive_on_slot(rig, rig.client())
+    assert slot_a != slot_b, (
+        "two visitors with nothing between them were put on ONE slot (%s) -- "
+        "this rig cannot tell separation from collision, so nothing below it "
+        "means anything" % slot_a)
+
+
+def test_a_restart_does_not_re_let_an_occupied_slot(rig):
+    """DEFECT 1. A restart hands a stranger a desktop that is still running.
+
+    The ownership table lives in process memory and nothing writes it down, so
+    a router that comes back has no idea which slots it let. systemd restarts
+    it on failure and the sessions it was routing to are separate units that
+    never noticed, so the pool it sees as empty is in fact fully occupied.
+
+    The oracle is the BACKEND: visitor B's response carries the name of the
+    slot that served it, and that name being A's is not "a routing table
+    disagreement", it is B reading A's desktop.
+
+    This needs no crash to be reached in the field -- a package upgrade
+    restarts the service -- and no crafted request: two ordinary arrivals with
+    a restart in between.
+    """
+    a = rig.client()
+    _, slot_a = arrive_on_slot(rig, a)
+
+    rig.restart()
+
+    # A fresh cookie jar. Not a returning tab, not a resumed session: a
+    # different person, who has never been here.
+    b = rig.client()
+    sid_b, slot_b = arrive_on_slot(rig, b)
+    # ONE client, arriving ONCE. The first version of this arrived twice -- a
+    # bare GET / on b, and then arrive_on_slot() on a SECOND fresh client -- so
+    # the pool had already been advanced past the re-let slot by the time the
+    # answer was read, and the test passed against the defect it was written
+    # for. A rig that consumes a slot while measuring which slot was consumed
+    # measures the wrong thing.
+
+    assert slot_b != slot_a, (
+        "a restart re-let slot %s: a stranger with a fresh cookie was routed "
+        "to a desktop that never stopped and that somebody else is using"
+        % slot_a)
+
+
+def test_a_reaped_slot_returns_to_the_pool_without_a_restart(rig):
+    """DEFECT 2. The pool exhausts permanently, and no crash is involved.
+
+    forget() is dead code -- one call site, inside an assertion -- so
+    instances_in_use() only ever grows. After as many arrivals as there are
+    slots, every later visitor gets 503 forever, however many desktops the
+    sweep has since stopped. This is the half that arrives from ORDINARY
+    UPTIME rather than from a restart, which makes it the likelier of the two
+    to be met first: a long-lived router simply serves more arrivals than it
+    has slots and then stops serving anybody.
+
+    What is asserted is the ARRIVAL being granted, not a picture. Whether a
+    desktop comes back up behind the freed slot is the slot unit's business --
+    it is socket-activated -- and the stand-in backends here do not restart, so
+    asserting on a 200 would be asserting about the fixture.
+    """
+    for _ in range(len(rig.slots)):
+        arrive(rig, rig.client())
+    st, _, _ = rig.client().get("/")
+    assert st == 503, \
+        "the pool was not full after one arrival per slot: %d" % st
+
+    # The sweep stops one desktop. The router is not restarted and is not told;
+    # in the field it finds out the same way, by the socket refusing.
+    rig.slots[0].reap()
+
+    st, h, _ = rig.client().get("/")
+    assert st == 302, (
+        "a slot was reaped and the pool stayed full: a visitor got %d with "
+        "capacity standing free. Nothing the sweep does can ever cure this, "
+        "because the only thing that removes a slot from instances_in_use() "
+        "is forget(), which nothing calls." % st)
+
+
+def test_a_reaped_visitor_reaches_the_gate_rather_than_a_dead_end(rig):
+    """DEFECT 3, first half: the 410 gate is unreachable for the one visitor
+    it was written for.
+
+    The gate fires when a sid does not resolve. A reaped visitor's sid resolves
+    perfectly -- the table it lives in knows nothing about reaping -- so they
+    fall through to the proxy, which cannot connect, and get a 502. The 410
+    page exists, is tested above, and cannot be reached by the case it is for.
+    """
+    a = rig.client()
+    sid, slot = arrive_on_slot(rig, a)
+    slot_named(rig, slot).reap()
+
+    st, _, body = a.get("/s/%s/" % sid)
+    assert st == 410, (
+        "a visitor whose desktop was reaped got %d instead of the 410 gate -- "
+        "the gate cannot be reached by the visitor it was written for" % st)
+
+
+def test_a_reaped_visitor_is_not_handed_back_the_same_dead_address(rig):
+    """DEFECT 3, second half, and it is a separate failure from the first.
+
+    The 502 page tells the visitor to "Open the front door again". They do, and
+    arrival resumes the most recent session this identity owns -- which is the
+    dead one. So the instruction the product gives them cannot be carried out:
+    the front door returns them to the address that just failed, for as long as
+    the router stays up.
+
+    Asserted separately from the gate above so that a repair which fixes the
+    resolution but leaves arrival resuming a corpse still goes red here.
+    ANYTHING DOCUMENTED MUST BE POSSIBLE TO DO, and this page documents an
+    action.
+    """
+    a = rig.client()
+    sid, slot = arrive_on_slot(rig, a)
+    slot_named(rig, slot).reap()
+    a.get("/s/%s/" % sid)              # the dead end they are sent from
+
+    st, h, _ = a.get("/")
+    assert st in (302, 503), "the front door neither routed nor refused: %d" % st
+    assert st == 302, \
+        "the front door refused a visitor with free slots standing by: 503"
+    got = h["location"][0].split("/")[2]
+    assert got != sid, (
+        "the front door handed back the SAME dead address (%s) it had just "
+        "told the visitor to come here to escape" % sid)
+
+
+def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
+    """DEFECT 4, and READ THE STAND-IN BEFORE BELIEVING THIS ONE.
+
+    What is real here: the rendering. A slot with no readable record renders
+    "no record", and a slot that has never been visited renders "no record",
+    and those are the same eight characters -- so an operator reading a refusal
+    cannot tell "this desktop is idle and can be reaped" from "I lost my
+    notes". That much is measured, in this process, against the shipped code.
+
+    What is STOOD IN FOR, and it is the premise rather than a detail: the WIPE.
+    The shipped unit has RuntimeDirectory=hdw4s-demux with no
+    RuntimeDirectoryPreserve=, and STATE_DIR defaults inside it, so systemd
+    removes the records every time the service stops. This rig's state lives in
+    a tmpdir that has no relationship to RuntimeDirectory= whatsoever and would
+    survive a thousand restarts. The rmtree below is the fixture IMITATING
+    systemd, not observing it -- it proves the router renders a wiped record
+    indistinguishably, and proves nothing at all about whether the wipe
+    happens. The unit file is the oracle for that half, and it is checked by
+    the test after this one.
+    """
+    a = rig.client()
+    _, visited = arrive_on_slot(rig, a)
+    path = os.path.join(rig.statedir, "last-request", visited)
+    for _ in range(50):
+        if os.path.exists(path):
+            break
+        time.sleep(0.05)
+    assert os.path.exists(path), "no record was written for %s" % visited
+
+    rig.restart(wipe_state=True)
+
+    # Exhausted with BARE front-door requests, which mint and redirect and
+    # stop there. Following each redirect the way arrive() does would send a
+    # request THROUGH every slot and write a fresh record on each, so all three
+    # would read "0m ago" and the comparison would find a difference that the
+    # test itself had created. Written that way first, and it went red for a
+    # reason that was not the defect.
+    for _ in range(len(rig.slots)):
+        assert rig.client().get("/")[0] == 302, "an arrival was not admitted"
+    st, _, _ = rig.client().get("/")
+    assert st == 503, "the pool did not refuse, so there is no refusal to read"
+    text = rig.stderr_text().split("--- router restarted ---")[-1]
+    # Matched on "  <name>:" INSIDE the line, not on its start: log() prefixes
+    # every line with the programme name, so a startswith() on the slot name
+    # matches nothing and reports a missing slot rather than a failed
+    # comparison -- an empty result that reads exactly like a finding.
+    lines = {}
+    for line in text.splitlines():
+        for slot in rig.slots:
+            key = "  %s: " % slot.name
+            if key in line:
+                lines[slot.name] = line.split(key, 1)[1]
+    assert visited in lines, "the refusal did not name %s at all" % visited
+    others = [v for k, v in lines.items() if k != visited]
+    assert others, "the rig has only one slot, so nothing can be compared"
+    stripped = lines[visited]
+    assert any(stripped != o for o in others), (
+        "a slot that served a visitor before the restart reads EXACTLY like "
+        "one nobody has ever opened (%r) -- the operator who sets the idle "
+        "window from this line is reading a lost record as an idle desktop"
+        % stripped)
+
+
+def test_the_records_the_refusal_log_is_read_from_survive_a_restart():
+    """DEFECT 4's premise, against the only oracle that can settle it.
+
+    The test above imitates the wipe. This one asks whether the wipe is real,
+    and the thing that decides is the shipped unit file -- not this rig, which
+    cannot reach systemd, and not the running service, which does not exist:
+    hdw4s-demux has never run on the production box, so there is no instance
+    anywhere to observe and no incident history to learn from. A unit file read
+    is the whole of the available evidence.
+
+    Deliberately agnostic between the two repairs, because choosing one here
+    would be this seat designing somebody else's fix: either the runtime
+    directory is preserved across a restart, or the records do not live in a
+    runtime directory at all. Both make the refusal log mean something after a
+    restart; this asserts the property, not the mechanism.
+    """
+    here = os.path.dirname(os.path.dirname(HERE))
+    unit = os.path.join(here, "hdw4s-demux.service")
+    text = "".join(l for l in open(unit) if not l.lstrip().startswith("#"))
+    rundirs = [l.split("=", 1)[1].strip() for l in text.splitlines()
+               if l.startswith("RuntimeDirectory=")]
+    preserved = [l for l in text.splitlines()
+                 if l.startswith("RuntimeDirectoryPreserve=")
+                 and l.split("=", 1)[1].strip() != "no"]
+    src = open(DEMUX).read()
+    state_default = src.split('HDW4S_DEMUX_STATE", "')[1].split('"')[0]
+    under = [d for d in rundirs if state_default.startswith("/run/" + d)]
+    assert not under or preserved, (
+        "the last-request records live in %s, which is RuntimeDirectory=%s "
+        "with no RuntimeDirectoryPreserve= -- systemd deletes them every time "
+        "the service stops, and every slot then reads 'no record', which is "
+        "the same thing a slot nobody has ever opened reads"
+        % (state_default, ",".join(under)))
 
 
 # --- red arms: the same guards, deliberately violated --------------------
@@ -921,7 +1290,15 @@ def main():
              test_refusal_is_logged_with_what_it_takes_to_judge_it,
              test_last_request_record_is_written_where_the_connection_is_accepted,
              test_a_session_cannot_set_our_cookie,
-             test_cookie_lifetime_guard, test_refresh_rate_limit]
+             test_cookie_lifetime_guard, test_refresh_rate_limit,
+             # The lifecycle arms. The control comes FIRST on purpose: if
+             # separation cannot be seen working, the three collisions after it
+             # are not evidence of anything.
+             test_control_two_visitors_without_a_restart_land_on_different_slots,
+             test_a_restart_does_not_re_let_an_occupied_slot,
+             test_a_reaped_slot_returns_to_the_pool_without_a_restart,
+             test_a_reaped_visitor_reaches_the_gate_rather_than_a_dead_end,
+             test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one]
 
     # Tests whose rig is not the default one. A pool with no instance table
     # derives the floor and nothing else, so a test about the DERIVATION has to
@@ -940,12 +1317,19 @@ def main():
          dict(nslots=1, windows=[("ephemeral0", "12h")])),
         (test_an_unreadable_window_is_loud_and_is_not_a_default,
          dict(nslots=1, windows=[("ephemeral0", "30x")])),
+        # UNPINNED gate, because the question is what the SHIPPED arm does with
+        # a returning visitor whose desktop is gone. Under the pinned mint arm
+        # the front door mints a fresh session and the test passes while saying
+        # nothing -- it was written that way first and was green.
+        (test_a_reaped_visitor_is_not_handed_back_the_same_dead_address,
+         dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
     # unpinned -- the shipped default cannot be exercised by a rig that sets it.
     for fn in (test_shipped_default_resumes_a_returning_browser,
-               test_a_slot_that_is_never_reaped_is_reported_at_start):
+               test_a_slot_that_is_never_reaped_is_reported_at_start,
+               test_the_records_the_refusal_log_is_read_from_survive_a_restart):
         try:
             fn()
             check(fn.__name__, True)
