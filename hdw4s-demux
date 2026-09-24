@@ -55,6 +55,26 @@ session was reaped into whatever now occupies that slot -- a stranger's desktop,
 handed over by the ownership check meant to prevent exactly that. The sid is
 minted per session and never reused; the slot name is a value in the record, not
 its key. assert_ownership_keying() below exists to be seen failing.
+
+OCCUPANCY IS NOT OURS TO REMEMBER, AND THAT IS THE WHOLE OF THE ROUTING DESIGN.
+Whether a slot is in use and whose it is are two facts with two owners and two
+acceptable losses. Losing "whose" sends a returning visitor to the gate, which
+is the arrival rule's designed damage and is honest. Losing "in use" hands a
+second person a desktop the first is sitting in, and must never happen -- so the
+half that must not be lost is the half we do not own: /run/hdw4s/<instance>,
+the session unit's own runtime directory, which exists exactly while a desktop
+does and which no restart of ours can forget.
+
+ONCE A DESKTOP ANSWERS, OUR WORD ABOUT ITS SLOT IS NOT MERELY UNNECESSARY, IT IS
+WRONG -- the authority is more current than we are. We speak for a slot only in
+the gap between minting it and its session coming up, because there is nothing
+else to speak for it yet, and we stop the moment there is.
+
+And the authority may only ever be OBSERVED, never opened. These slots are
+socket-activated, so anything that connects to one starts a desktop: a probe
+that asked whether the pool was reachable started a session on every free slot,
+every time this service restarted, and read correctly afterwards because it had
+made itself true. os.path.isdir, and nothing else, for that reason and no other.
 """
 
 import base64
@@ -63,7 +83,9 @@ import hmac
 import http.cookies
 import os
 import secrets
+import hashlib
 import socket
+import stat
 import sys
 import threading
 import time
@@ -168,6 +190,33 @@ COOKIE_LIFETIME = COOKIE_FLOOR_SECONDS
 # slot. Same environment variable the CLI reads, deliberately: two spellings of
 # one path is two paths as soon as either is edited.
 REAP_STAMP_DIR = os.environ.get("HDW4S_REAP_STAMP_DIR", "/run/hdw4s-reap")
+
+# WHERE THE ANSWER TO "IS A DESKTOP RUNNING HERE" ACTUALLY LIVES, and it is not
+# ours. /run/hdw4s/<instance> is the session unit's own RuntimeDirectory:
+# systemd creates it when the unit starts and removes it when the unit stops,
+# so it is present exactly while there is a desktop behind the slot, and a reap
+# frees it without anybody having to remember to.
+#
+# HDW4S_RUNDIR is the spelling the CLI already reads. One name for one path;
+# a second spelling is a second path the moment either is edited.
+SESSION_RUNDIR = os.path.join(os.environ.get("HDW4S_RUNDIR", "/run"), "hdw4s")
+
+# Where each slot publishes the identity of ITS CURRENT START. Written by
+# hdw4s-incarnation at every session start, mode 0644 in a read-only tree, so
+# this service can read it and nothing here can write it.
+WEBROOT_DIR = os.environ.get("HDW4S_WEBROOT_DIR", "/usr/share/hdw4s/webroot")
+
+# How long a minted slot is held on our word alone, before the authority above
+# has to agree. A mint happens BEFORE the session starts -- the redirect is what
+# sends the browser at it, and the session is socket-activated by that first
+# request -- so for a few seconds a slot is legitimately ours and not yet
+# occupied. Without this window two arrivals in that gap would be handed the
+# same slot, which is the double-booking this whole change exists to stop.
+#
+# Long enough for a GNOME session to come up on a loaded box, and its only cost
+# when too long is a slot held briefly after a visitor walked away. Its cost
+# when too SHORT is the defect, so it errs long.
+MINT_GRACE = 180.0
 
 ETC_DIR = os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s")
 SITE_CONF = os.path.join(ETC_DIR, "hdw4s.conf")
@@ -658,15 +707,65 @@ class Ownership:
         return secrets.token_hex(16)
 
     def mint_session(self, identity, instance):
+        """Record that IDENTITY now holds INSTANCE. No desktop exists yet."""
         sid = secrets.token_hex(16)
         with self._lock:
             self._by_sid[sid] = {
                 "identity": identity,
                 "instance": instance,
                 "minted": time.time(),
+                # Filled in by attach() once a desktop has actually answered.
+                "live": False,
+                "incarnation": None,
             }
             self._by_identity.setdefault(identity, []).append(sid)
         return sid
+
+    def attach(self, sid, incarnation):
+        """Record that a desktop has answered for SID, and which start it is.
+
+        NOT DONE AT MINT, and the first version did it there and gated every
+        visitor in the pool. A mint precedes its session: the redirect is what
+        sends the browser at the slot, and the session is socket-activated by
+        that first request. So at mint time the token on disk belongs to the
+        PREVIOUS occupant -- it survives a reap, measured -- and the session
+        that is about to start will publish a different one. Comparing against
+        the value read at mint therefore refused every brand-new session as
+        "replaced", which is the check working perfectly on the wrong instant.
+
+        Written once and then left alone. Refreshing it would make it agree
+        with whatever is there now, which is the question and not the answer.
+        """
+        with self._lock:
+            rec = self._by_sid.get(sid)
+            if rec is None or rec["live"]:
+                return
+            rec["live"] = True
+            rec["incarnation"] = incarnation
+
+    def pending_mints(self, since):
+        """[(instance, minted)] for slots handed out whose desktop has not
+        answered yet, and only while that is still plausible.
+
+        The half of occupancy that is ours, and it is deliberately BOTH narrow
+        and short. A mint precedes the session it starts, so for a few seconds a
+        slot is legitimately held on our word alone. Two bounds, and leaving out
+        either one reintroduces a defect:
+
+          not live   Once a desktop has answered, the authority says so and our
+                     word is not merely unnecessary, it is WRONG. Without this
+                     a slot the sweep reaped seconds after it was let stayed
+                     held for the rest of the grace window, so a pool that had
+                     just been freed still answered 503 -- measured against the
+                     arm for exactly that, which went red with the whole window
+                     applied rather than only its pending part.
+          recent     Without this the table grows forever, which is how
+                     instances_in_use() became monotonic and why every visitor
+                     past the Nth got 503 for the life of the process.
+        """
+        with self._lock:
+            return [(r["instance"], r["minted"]) for r in self._by_sid.values()
+                    if not r["live"] and r["minted"] >= since]
 
     def lookup(self, sid):
         with self._lock:
@@ -1199,6 +1298,56 @@ def log_refusal(reason, now=None):
         log("  WARNING: %s" % complaint)
 
 
+def visitor_tag(identity):
+    """A short, stable, non-reversible name for one browser, for the log.
+
+    The identity cookie itself is never written anywhere. It is what decides
+    whose desktop a request reaches, so a log line carrying it is a log line
+    that hands somebody else's session to whoever can read the journal -- and on
+    this box the journal has already been read across occupants once.
+
+    COMPUTED, not truncated. Printing the first eight characters of the cookie
+    would be the print-then-redact shape: it narrows the search for the rest by
+    exactly the part that was printed, and it looks just as anonymous. A digest
+    of the whole value does not.
+
+    Eight hex characters, because the question an operator asks of this is "are
+    these two lines the same browser or two different ones", over a handful of
+    lines, and not "which browser is this".
+    """
+    return hashlib.sha256(identity.encode("ascii", "replace")).hexdigest()[:8]
+
+
+def log_arrival(what, identity, instance, sid, why=None):
+    """A session was minted, or resumed. Said out loud, because NOTHING DID.
+
+    This was the missing instrument, and its absence is why every defect around
+    it was silent. A visitor arrived, a slot was taken, and the only trace on
+    the box was a file mtime under the runtime directory that systemd deletes on
+    every restart. There was no record that a slot had been let at all.
+
+    Three readers, and the middle one is the reason this is not a debug line:
+
+      * the pool filling up. log_refusal() says the pool is full; nothing said
+        how it got that way, so the idle window was being judged from one end.
+      * A SLOT LET TWICE. The router's table is in memory, so a restart forgets
+        who holds what. Two mints on one instance, with two different visitor
+        tags and no reap between them, is one person being handed the desktop
+        another person is sitting in -- and there is no other way for an
+        operator to find that out, because to both visitors it looks fine.
+      * anything watching this box for contamination during a measurement. That
+        currently reads last-request files by path, which makes it blind the
+        moment those records move or are wiped; a log line is not a path.
+
+    The sid is written and the identity is NOT. A sid is an address: the session
+    it names can read it out of its own environment, so it is in somebody else's
+    access log already. An identity is what authorises reaching that address.
+    """
+    log("%s: slot %s, session %s, visitor %s%s"
+        % (what, instance, sid, visitor_tag(identity),
+           "" if why is None else " (%s)" % why))
+
+
 def slot_carries_own_credential(instance):
     """True when a slot was configured with a Basic credential of its own.
 
@@ -1247,44 +1396,570 @@ def available_slots():
     return sorted(n[:-5] for n in names if n.endswith(".sock"))
 
 
-def slot_unreachable(instance):
+def listening_paths(proc_net_unix="/proc/net/unix"):
+    """Every AF_UNIX path the kernel currently has a LISTENING socket on.
+
+    The kernel's own answer to "is anything bound and accepting here", asked
+    without opening anything. Field 4 of /proc/net/unix is the socket's flags
+    and 0x10000 is SO_ACCEPTCON, which is set by listen() and by nothing else.
+
+    Controlled in both directions rather than reasoned about, because a parser
+    that returned the empty set would make every slot look dead and one that
+    returned everything would make every slot look live:
+
+        a socket that called listen()      Flags 00010000  -> in this set
+        a socket bound and never listened  Flags 00000000  -> NOT in this set
+        a regular file made with "touch"   absent from the file entirely
+
+    That middle row is the orphan this project has already enumerated as a live
+    slot, and the third is the "touch zz-probe.sock" case measured on 2026-09-22.
+    assert_probe_does_not_activate() below builds all three and checks them.
+
+    A failure to read is NOT an empty set. Returning one would say "nothing is
+    listening anywhere", which is the confident wrong sentence this whole file
+    is about, so the caller is handed None and says so.
+    """
+    try:
+        with open(proc_net_unix, "r") as f:
+            rows = f.readlines()[1:]
+    except OSError:
+        return None
+    out = set()
+    for row in rows:
+        bits = row.split()
+        if len(bits) < 8:
+            continue
+        try:
+            if int(bits[3], 16) & 0x10000:
+                out.add(bits[7])
+        except ValueError:
+            continue
+    return out
+
+
+def slot_unreachable(instance, listening=None, path=None):
     """Why this slot cannot be reached, or None if it can.
 
-    Answers the question the enumeration above only appears to answer. A name in
-    the socket directory is a filename; whether a request can be served through
-    it is a fact about the kernel, and the two came apart in the field -- a
-    regular file created with "touch" was enumerated as a slot, and a socket with
-    nothing bound to it was handed to a visitor.
+    Answers the question available_slots() only appears to answer. A name in the
+    socket directory is a filename; whether a request can be served through it is
+    a fact about the kernel, and the two came apart in the field -- a regular file
+    created with "touch" was enumerated as a slot, and a socket with nothing bound
+    to it was handed to a visitor.
+
+    IT USED TO CONNECT, AND THAT WAS NOT AN OBSERVATION. IT WAS AN ACTION.
+    /run/hdw4s-proxy/<instance>.sock belongs to hdw4s-proxy@<instance>.socket,
+    which is socket-activated and which the sweep deliberately leaves listening
+    when it reaps a desktop. So a bare connect() -- no bytes sent, no HTTP --
+    starts the relay AND a whole GNOME session behind it. Measured on a stock
+    install: with a session stopped and its socket unit still up, one connect()
+    took hdw4s-ephemeral@<instance> from inactive to active and created its
+    runtime tree.
+
+    The consequence was the startup banner, which calls this once per slot:
+    three desktops stopped, the router restarted, and ten milliseconds after it
+    printed "routing to 3 slot(s)" all three incarnation units and all three
+    sessions started, with nobody on the box and no arrival. A restart of the
+    front door consumed the entire pool. The check written to report what the
+    pool could serve was manufacturing the answer it reported -- and it would
+    have gone on looking right forever, because what it says is true by the time
+    anybody reads it.
+
+    So nothing here opens the socket. Three questions, none of which activates
+    anything, and between them they cover every failure this was written for:
+
+      * is it a socket at all       -- stat, which catches the touched file
+      * is anything listening on it -- /proc/net/unix, which catches the orphan
+      * may we open it              -- os.access, which catches the EACCES case
+                                       that a leftover socket owned by another
+                                       user produced in the field
+
+    LISTENING is passed in so the caller can read /proc/net/unix once for a
+    whole pool instead of once per slot, and so the arms below can hand this a
+    set they built. A caller that passes nothing gets a fresh read. PATH is
+    there for the same reason and for one more: the arms build their slots in a
+    private directory, and a version that could only ever look in PROXY_RUNDIR
+    would have had to be proved by mutating the module it was proving.
 
     Deliberately returns the reason rather than a boolean: an operator reading
     "cannot be reached" wants to know whether it is a leftover file, a permission
     problem or a session that is down, and those want different actions.
     """
-    path = socket_path(instance)
-    up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    up.settimeout(2)
+    path = socket_path(instance) if path is None else path
     try:
-        up.connect(path)
-        return None
+        st = os.stat(path)
     except OSError as e:
         return "%s (%s)" % (e.strerror or e, errno.errorcode.get(e.errno, e.errno))
+    if not stat.S_ISSOCK(st.st_mode):
+        return "not a socket, it is an ordinary file left in the pool directory"
+    if not os.access(path, os.R_OK | os.W_OK):
+        # The measured field failure: a socket left by an earlier configuration,
+        # owned by a different user than this service runs as. connect() gave
+        # EACCES; this says the same thing without the side effect.
+        return "no permission to open it (EACCES); it belongs to %d:%d" \
+            % (st.st_uid, st.st_gid)
+    if listening is None:
+        listening = listening_paths()
+    if listening is None:
+        # NOT "it is unreachable", and not "it is fine" either. The instrument
+        # did not run, and an instrument that did not run must never be read as
+        # a result -- in either direction.
+        return None
+    if path not in listening:
+        return "nothing is listening on it (the socket unit is down, or this is" \
+               " an orphan left behind by a session that stopped)"
+    return None
+
+
+def assert_probe_does_not_activate(probe=slot_unreachable,
+                                   enumerate_listening=listening_paths):
+    """Prove the reachability probe reports without CONNECTING, at every start.
+
+    Takes both halves as parameters for the same reason assert_ownership_keying()
+    takes a factory: a version that built its own probe could not fail for any
+    implementation but the one it already trusted, and this file has already
+    caught exactly that mistake once.
+
+    THE REFUSE ARM IS THE POINT, and it is the one that would have gone red
+    against the code this replaces: a slot that is bound but never listened to
+    must be reported as unreachable. The old probe connect()ed, which on a
+    socket-activated path SUCCEEDS and starts a desktop, so it returned None --
+    "this slot is fine" -- about a slot with no session behind it, having just
+    created one.
+
+    Four slots are built in a private directory: one listening, one bound and
+    never listened to, one a plain file, and one LISTENING WITH A WITNESS BEHIND
+    IT. Each of the first three must be classified differently, and the
+    listening one must still be permitted, because a probe that refused
+    everything would satisfy the refuse arm on its own.
+
+    The fourth is the arm that catches the predecessor, and it took two goes to
+    get right. The first version of this function had only the three
+    classification arms -- and the connecting probe PASSES all three, because
+    nothing in a temporary directory is socket-activated: connect() to the
+    orphan is refused there, so the old code returned the right answer for the
+    right reason and the guard went green against the exact defect it was named
+    for. A check that cannot fail for the implementation it replaced is not a
+    check. So the fourth slot is listening, with a thread that records having
+    been ACCEPTED on, which is the local stand-in for systemd holding a slot
+    socket open and starting a desktop for whoever knocks. The probe must leave
+    that witness untouched.
+
+    WHAT IT STILL CANNOT SEE, because an unwritten blind spot reads as
+    exhaustive: it does not observe systemd. The witness proves nothing was
+    connected to; that a connection would have started a GNOME session is a fact
+    about the shipped units, measured on a box and written up beside
+    slot_unreachable(), not something this reproduces.
+    """
+    import shutil
+    import tempfile
+
+    d = tempfile.mkdtemp(prefix="hdw4s-demux-probe-")
+    keep = []
+    try:
+        live = os.path.join(d, "live.sock")
+        orphan = os.path.join(d, "orphan.sock")
+        plain = os.path.join(d, "plain.sock")
+
+        a = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        a.bind(live)
+        a.listen(4)
+        keep.append(a)
+        b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        b.bind(orphan)              # bound, never listen()ed
+        keep.append(b)
+        with open(plain, "w"):
+            pass
+
+        # The stand-in for a socket-activated slot: listening, and it notices.
+        witnessed = os.path.join(d, "witnessed.sock")
+        w = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        w.bind(witnessed)
+        w.listen(4)
+        keep.append(w)
+        accepted = []
+
+        def watch():
+            while True:
+                try:
+                    c, _ = w.accept()
+                except OSError:
+                    return
+                accepted.append(1)
+                c.close()
+
+        threading.Thread(target=watch, daemon=True).start()
+
+        seen = enumerate_listening()
+        assert seen is not None, \
+            "the listening-socket enumeration could not run at all, so it" \
+            " cannot distinguish a live slot from an orphan"
+        # THE CONTROL, INSIDE THE SPACE SEARCHED. An enumeration that came back
+        # empty would make every slot below look dead, and the refuse arms would
+        # all pass for the wrong reason.
+        assert live in seen, \
+            "a socket this process is listening on was not found among the" \
+            " listening sockets, so an empty answer here means nothing"
+        assert orphan not in seen, \
+            "a socket that was bound and never listened to was counted as" \
+            " listening: the flag being read is not SO_ACCEPTCON"
+
+        # PERMIT ARM.
+        assert probe("live", listening=seen, path=live) is None, \
+            "a slot with a listening socket was reported unreachable"
+        # REFUSE ARMS, and each names a different repair to an operator.
+        assert probe("orphan", listening=seen, path=orphan) is not None, \
+            "a socket with nothing listening on it was reported reachable --" \
+            " a visitor minted onto it gets no answer and the slot is consumed"
+        assert probe("plain", listening=seen, path=plain) is not None, \
+            "an ordinary file in the pool directory was reported reachable"
+        assert probe("gone", listening=seen,
+                     path=os.path.join(d, "no-such.sock")) is not None, \
+            "a name with no file at all was reported reachable"
+        # THE ARM THAT CATCHES THE PREDECESSOR. A probe that connects here gets
+        # a perfectly good answer -- this slot is listening and is reachable --
+        # and in the field that same connect starts a desktop. The verdict is
+        # therefore not evidence either way; the side effect is.
+        assert probe("witnessed", listening=seen, path=witnessed) is None, \
+            "a listening slot was reported unreachable"
+        # The accept happens on another thread, so give it a moment rather than
+        # racing it: a check that can be beaten by scheduling reports clean at
+        # random, which is worse than not checking.
+        for _ in range(50):
+            if accepted:
+                break
+            time.sleep(0.01)
+        assert not accepted, \
+            "the reachability probe CONNECTED to a slot. On this box that is" \
+            " only a wasted syscall; on a socket-activated pool it starts a" \
+            " desktop, and the startup banner does it once per slot -- which" \
+            " is how restarting the front door consumed the whole pool"
+
+        # AND IT MUST NOT HAVE OPENED ANYTHING. The orphan is the only slot here
+        # that a connect() would have changed -- on a socket-activated path it
+        # would have started a session. Nothing bound it to a listener, so if
+        # the probe had connected, it would still not be listening; what this
+        # can check is the weaker, true thing: the probe left the pool exactly
+        # as it found it.
+        after = enumerate_listening()
+        assert after is not None and orphan not in after and live in after, \
+            "the probe changed which sockets are listening, so it acted on the" \
+            " pool rather than observing it"
     finally:
-        up.close()
+        for s in keep:
+            s.close()
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def occupancy_readable(rundir=None):
+    """True when the occupancy authority is present and can be consulted.
+
+    ASKED SEPARATELY FROM "IS THIS SLOT OCCUPIED", and that separation is the
+    whole guard. If the directory the sessions hang their runtime trees off does
+    not exist at all, then every slot reads "not occupied" -- which is a
+    perfectly formed answer meaning "I could not look", and reading it as "the
+    pool is empty" would hand every slot away twice. An empty result is not a
+    negative, and here the empty result is the DEFAULT one.
+    """
+    return os.path.isdir(SESSION_RUNDIR if rundir is None else rundir)
+
+
+def slot_occupied(instance, rundir=None):
+    """True when a desktop is running behind this slot. A STAT, never an open.
+
+    THE AUTHORITY IS THE SESSION'S OWN RuntimeDirectory, and it was chosen over
+    every other candidate because each of those is wrong in a way that is
+    invisible:
+
+      * OUR OWN TABLE is in memory. A restart forgets who holds what while every
+        session it was routing to goes on running, so the pool it believes empty
+        is in fact full. Persisting it instead trades a defect a restart clears
+        for one that nothing clears.
+      * SYSTEMD UNIT STATE reads "active" for every slot moments after any
+        restart, because the thing that asked is what started them.
+      * A connect() PROBE is not an observation at all. These slots are
+        socket-activated, so opening one starts a desktop: measured, and it is
+        why the startup banner no longer connects. A check that creates the
+        state it reports is worse than no check.
+
+    So: os.path.isdir, and nothing else. It opens nothing, activates nothing and
+    can be run on every arrival for free. SAY THAT AT THE CALL SITE and keep it
+    true -- the next person here will reach for something that opens, because
+    opening is the obvious way to ask whether something is alive, and on this
+    pool it is the way to make it alive. A rig built against this warning still
+    created its stand-in directory on accept and had the router's own startup
+    connection bring all three slots into existence occupied.
+
+    Contents are never read and could not be: the directory is 0700 and owned by
+    the session's user. Existence is all that is wanted and all that is legible,
+    which is the right amount of both.
+    """
+    root = SESSION_RUNDIR if rundir is None else rundir
+    return os.path.isdir(os.path.join(root, instance))
+
+
+def slot_incarnation(instance, root=None):
+    """The identity this slot publishes for its CURRENT start, or None.
+
+    A CORROBORATOR AND NEVER AN AUTHORITY, and the distinction is load bearing
+    rather than a shade of meaning. This file on disk can outlive the session it
+    describes: the authoritative record lives in /run and dies at a boot, while
+    this published copy does not, and two slots have been measured serving
+    tokens minted before a reboot. The record that would contradict it is
+    root-only and this service cannot read it.
+
+    So it is wired so that a stale value cannot do any harm THAT DOES NOT DEPEND
+    ON MY HAVING ENUMERATED THE STALE CASES CORRECTLY. It may only ever cause a
+    refusal, never a resume. Every case I could construct where it is stale also
+    has occupancy false -- but that is a claim about what I could imagine, and
+    refuse-only is sound whether or not the enumeration was complete. Same shape
+    as failing closed on a credential.
+
+    None means "nothing published here", which is NOT "the same as before".
+    It is the normal state of a slot whose web root has just been rebuilt --
+    hdw4s-webroot copies a fresh tree and the token is absent until the next
+    session start -- so absent is common, and a comparison that treated it as a
+    match would resume a visitor onto whatever now holds the slot.
+    """
+    base = WEBROOT_DIR if root is None else root
+    try:
+        with open(os.path.join(base, instance, "hdw4s-incarnation"), "r") as f:
+            v = f.read().strip()
+    except OSError:
+        return None
+    return v or None
+
+
+def session_replaced(rec, instance, at=None, rundir=None, webroot=None):
+    """Why this record no longer describes the desktop behind INSTANCE, or None.
+
+    The two questions in one place, in the order that matters: is anything there
+    at all, and if so is it the same thing. Occupancy decides; the token may only
+    add a refusal on top.
+
+    Takes its two roots as parameters for the same reason every other guard in
+    this file takes a factory: a version that read only the module globals could
+    not be proved against anything but the machine it was already running on,
+    and proving it by mutating those globals is a red arm that edits the checker.
+    """
+    if not occupancy_readable(rundir):
+        # The instrument is missing. It may not answer, in either direction --
+        # "I could not look" must not be spent as either a permit or a refusal.
+        return None
+    here = time.time() if at is None else at
+    occupied = slot_occupied(instance, rundir)
+
+    if not rec.get("live"):
+        # NOTHING HAS ANSWERED FOR THIS RECORD YET, so an empty slot is the
+        # EXPECTED state rather than a reaped one. The mint comes first, the
+        # redirect sends the browser, and that request is what starts the
+        # session -- so between those two moments a perfectly healthy session
+        # has no runtime directory. Gating there refuses every visitor at the
+        # exact instant they arrive, which is what the first version of this
+        # did to all thirty-one tests at once.
+        if occupied:
+            return None
+        if here - rec["minted"] < MINT_GRACE:
+            return None
+        # Past the window and still nothing. The slot was handed out and no
+        # desktop ever came up on it -- which is a dead address either way, and
+        # saying so releases the slot instead of holding it for the life of the
+        # process.
+        return "no desktop ever came up on %s" % instance
+
+    if not occupied:
+        return "the desktop behind %s has stopped" % instance
+    was = rec.get("incarnation")
+    now = slot_incarnation(instance, webroot)
+    if was is None and now is None:
+        # Nothing published this token when the session was minted and nothing
+        # publishes one now. No opinion -- said out loud at startup rather than
+        # silently, so nobody reads this pair as corroboration that happened.
+        return None
+    if was != now:
+        return "%s is running a different desktop than the one minted here" \
+            % instance
+    return None
+
+
+def slots_in_use(own, slots=None):
+    """Every slot that must not be minted onto, from BOTH halves of the fact.
+
+    Two sources with different lifetimes, deliberately not merged into one
+    record:
+
+      the authority   a session runtime directory that exists. Survives our
+                      restart, disappears when the sweep stops a desktop, and
+                      is nobody's copy of anything.
+      our own mint    a slot we handed out in the last few minutes whose
+                      session has NOT YET ANSWERED. Ours to lose, and losing it
+                      costs at most one double-booking inside the grace window
+                      rather than a permanent one. It stops counting the moment
+                      a desktop answers, because from then on the authority is
+                      both sufficient and more current than we are.
+
+    The union is what may not be re-let, and the ASYMMETRY is the point: losing
+    "whose" sends a returning visitor to the gate, which is the designed damage;
+    losing "in use" double-books a live desktop, which must never happen. So the
+    half that must not be lost is the half we do not own.
+
+    This is also what makes instances_in_use() stop being monotonic. It grew
+    forever because nothing ever removed an entry -- forget() had one call site,
+    inside an assertion -- so after one arrival per slot every later visitor got
+    503 for as long as the process lived, whatever the sweep had stopped. Here a
+    slot the sweep stopped simply stops appearing, because the authority stopped
+    saying so.
+    """
+    now = time.time()
+    taken = set()
+    if occupancy_readable():
+        for name in (available_slots() if slots is None else slots):
+            if slot_occupied(name):
+                taken.add(name)
+    for inst, minted in own.pending_mints(now - MINT_GRACE):
+        taken.add(inst)
+    return taken
+
+
+def assert_occupancy_is_read_not_created(occupied=slot_occupied,
+                                         readable=occupancy_readable,
+                                         replaced=session_replaced):
+    """Prove the occupancy check observes, and prove the token can only refuse.
+
+    Runs at every start beside the other three. What it catches is silent in
+    both directions: an occupancy reader that creates what it reports makes
+    every slot look taken, and one that reads a missing authority as "nothing
+    is taken" makes every slot look free -- and both answers are well formed.
+
+    Handed the real functions rather than building its own, and each of them
+    takes its root as a parameter, so this exercises the shipping code against
+    directories it builds. A red arm that has to edit the module under test
+    proves nothing, and this project has already had one.
+    """
+    import shutil
+    import tempfile
+
+    def LIVE(token, minted=0.0):
+        """A record that has ATTACHED: a desktop answered and we noted which."""
+        return {"live": True, "incarnation": token, "minted": minted}
+
+    def PENDING(minted):
+        """A record that has been minted and whose session has not answered."""
+        return {"live": False, "incarnation": None, "minted": minted}
+
+    d = tempfile.mkdtemp(prefix="hdw4s-demux-occ-")
+    try:
+        rundir = os.path.join(d, "run", "hdw4s")
+        web = os.path.join(d, "webroot")
+
+        # 1. A MISSING AUTHORITY IS NOT AN EMPTY ONE. Before anything is built,
+        #    nothing may report a free pool -- "I could not look" and "nobody is
+        #    here" are the same shape and must not be the same answer.
+        assert not readable(rundir), \
+            "an authority that does not exist reported itself present"
+        assert replaced(LIVE(None), "ephemeral0", rundir=rundir, webroot=web) is None, \
+            "a missing authority was spent as a verdict rather than withheld"
+
+        os.makedirs(rundir)
+        assert readable(rundir), "a present authority reported itself missing"
+
+        # 2. READING MUST NOT CREATE. The property the whole design rests on.
+        assert not occupied("ephemeral0", rundir), \
+            "an unoccupied slot reported occupied"
+        assert not os.path.exists(os.path.join(rundir, "ephemeral0")), \
+            "ASKING whether a slot was occupied CREATED its runtime directory:" \
+            " the reader is acting on the pool instead of observing it, which" \
+            " is how a connect() probe started a desktop on every slot"
+
+        # 3. PERMIT ARM. A running session with a matching token resumes.
+        os.makedirs(os.path.join(rundir, "ephemeral0"))
+        os.makedirs(os.path.join(web, "ephemeral0"))
+        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+            f.write("aaaa\n")
+        assert occupied("ephemeral0", rundir), \
+            "a slot with a live runtime directory reported free"
+        assert replaced(LIVE("aaaa"), "ephemeral0", rundir=rundir, webroot=web) is None, \
+            "a live session with its own token was refused to its owner"
+
+        # 4. REFUSE ARM, occupancy. The sweep stops the desktop.
+        shutil.rmtree(os.path.join(rundir, "ephemeral0"))
+        assert replaced(LIVE("aaaa"), "ephemeral0", rundir=rundir, webroot=web), \
+            "a reaped desktop still resolved for the visitor who held it --" \
+            " they are routed to whatever starts on that slot next"
+
+        # 5. REFUSE ARM, token. Reaped AND re-let: occupancy is true again, and
+        #    only the token can tell that it is somebody else's desktop.
+        os.makedirs(os.path.join(rundir, "ephemeral0"))
+        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+            f.write("bbbb\n")
+        assert replaced(LIVE("aaaa"), "ephemeral0", rundir=rundir, webroot=web), \
+            "a slot reaped and re-let to somebody else was resumed by the" \
+            " previous holder: the token is not being compared"
+
+        # 6. ABSENT IS NOT EQUAL, both ways round. A rebuilt web root publishes
+        #    no token for a running session, and a slot that published none at
+        #    mint may publish one later. Neither is a match.
+        os.unlink(os.path.join(web, "ephemeral0", "hdw4s-incarnation"))
+        assert replaced(LIVE("aaaa"), "ephemeral0", rundir=rundir, webroot=web), \
+            "a token that has VANISHED was read as unchanged -- absent is not" \
+            " equal, and it is the ordinary state of a rebuilt web root"
+        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+            f.write("cccc\n")
+        assert replaced(LIVE(None), "ephemeral0", rundir=rundir, webroot=web), \
+            "a token APPEARING where none was recorded was read as unchanged"
+
+        # 6b. THE WINDOW BETWEEN A MINT AND ITS SESSION. A slot handed out a
+        #     moment ago has no desktop yet -- the redirect has not been
+        #     followed, and following it is what starts one. Refusing there
+        #     refuses every visitor at the instant of arrival, which is what
+        #     the first version of this did to the whole suite at once.
+        shutil.rmtree(os.path.join(rundir, "ephemeral0"))
+        assert replaced(PENDING(time.time()), "ephemeral0",
+                        rundir=rundir, webroot=web) is None, \
+            "a slot minted moments ago was gated for having no desktop yet --" \
+            " the mint precedes the session, so this refuses on arrival"
+        # And the window CLOSES. A slot handed out long ago with nothing ever
+        # behind it is a dead address, and holding it costs the pool a slot for
+        # the life of the process.
+        assert replaced(PENDING(time.time() - 10 * MINT_GRACE), "ephemeral0",
+                        rundir=rundir, webroot=web), \
+            "a slot minted long ago with no desktop on it was held anyway"
+        os.makedirs(os.path.join(rundir, "ephemeral0"))
+
+        # 7. AND WHERE NO SLOT PUBLISHES ONE AT ALL, the token has no opinion
+        #    and occupancy alone decides. Demanding a token nobody publishes
+        #    would gate every visitor on a pool that has none.
+        shutil.rmtree(web)
+        assert replaced(LIVE(None), "ephemeral0", rundir=rundir, webroot=web) is None, \
+            "a pool that publishes no tokens gated a live session anyway"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def pick_slot(own):
-    """A slot nobody owns, or None.
+    """A slot with no desktop behind it and no fresh mint on it, or None.
 
     "Free" means UNMINTED CAPACITY, not an idle desktop: under the identity
     ruling every session that has been arrived at is owned by the browser that
     arrived, so there is no pool of free sessions to balance across. "Pick a free
     one" and "mint one" are the same act here.
+
+    REACHABLE SLOTS FIRST, but an unreachable one is still offered rather than
+    withheld. A slot the sweep has just reaped is momentarily unreachable and is
+    exactly the capacity we want to hand out -- its socket unit is still
+    listening and the next connection starts a fresh desktop. Refusing a visitor
+    while such a slot stood free would be the exhaustion defect wearing a
+    reachability check.
     """
-    taken = own.instances_in_use()
-    for name in available_slots():
-        if name not in taken:
-            return name
-    return None
+    taken = slots_in_use(own)
+    free = [n for n in available_slots() if n not in taken]
+    if not free:
+        return None
+    listening = listening_paths()
+    if listening is not None:
+        for name in free:
+            if slot_unreachable(name, listening) is None:
+                return name
+    return free[0]
 
 
 # --------------------------------------------------------------------------
@@ -1499,11 +2174,40 @@ def arrival(own, wf, identity, query, new_identity):
 
     sid = None
     if owned and arm in ("takeover", "off"):
-        # Resume the most recent session this identity owns. Not a slot lookup:
-        # the sid is what is resumed, so a reaped session is simply absent here
-        # rather than resolving to whoever now holds its slot.
-        sid = owned[-1]
+        # Resume the most recent session this identity owns -- IF IT IS STILL
+        # THERE. Not a slot lookup: the sid is what is resumed, so a reaped
+        # session is absent here rather than resolving to whoever now holds its
+        # slot. But the table alone cannot tell a live session from a reaped
+        # one, which is how the front door came to hand a visitor back the same
+        # dead address it had just told them to come here to escape.
+        #
+        # Walked from the most recent backwards, because an identity may own
+        # several and the newest one being gone says nothing about the others.
+        for candidate in reversed(owned):
+            rec = own.lookup(candidate)
+            if rec is None:
+                continue
+            why = session_replaced(rec, rec["instance"])
+            if why is None:
+                sid = candidate
+                log_arrival("resumed a session", identity, rec["instance"],
+                            sid, "arm %s, %d owned" % (arm, len(owned)))
+                break
+            # DROPPED HERE, and this is forget()'s first real call site. It has
+            # existed since the table did, with exactly one caller inside a
+            # start-up assertion -- so nothing in a running router ever removed
+            # an entry, and a slot the sweep had freed stayed "in use" until the
+            # process died.
+            own.forget(candidate)
+            log_arrival("dropped a dead session", identity, rec["instance"],
+                        candidate, why)
     if sid is None:
+        # MINTING IS RIGHT HERE AND ONLY HERE. This is the front door: the
+        # visitor has asked for a desktop, so starting one is the thing they
+        # came for. The gate belongs on /s/<sid>/, where an unresolvable address
+        # is a QUESTION rather than an instruction -- a browser restoring twenty
+        # tabs presents twenty dead addresses and must not be handed twenty
+        # desktops.
         instance = pick_slot(own)
         if instance is None:
             # Logged BEFORE the response, and with the cookie still attached:
@@ -1517,6 +2221,13 @@ def arrival(own, wf, identity, query, new_identity):
                 "finished with, or try again shortly."), extra)
             return
         sid = own.mint_session(identity, instance)
+        # AFTER the mint and before the redirect, so the line exists even if the
+        # visitor never comes back for it. A record written only once a request
+        # reached the session would miss exactly the mint that went nowhere,
+        # which is the one that quietly consumed a slot.
+        log_arrival("minted a session", identity, instance, sid,
+                    "arm %s, %d slot(s) now let" % (arm,
+                                                    len(own.instances_in_use())))
 
     location = "/s/%s/" % sid
     if query:
@@ -1769,6 +2480,27 @@ def serve(sock, own, expected_b64):
                 continue
 
             rec = own.lookup(sid)
+            if rec is not None:
+                # RESOLVING IS NOT ENOUGH, and that gap is why the gate below
+                # was unreachable by the one visitor it was written for.
+                #
+                # The table knows nothing about reaping. A visitor whose desktop
+                # the sweep stopped presents a sid that resolves PERFECTLY, so
+                # they fell straight past the gate to the proxy -- and the slot
+                # socket is still listening and socket-activated, so the connect
+                # succeeded and started a brand-new empty desktop under their
+                # old address, in about two seconds. Not a 502, not a stall:
+                # their in-memory home was gone and the screen looked fine.
+                #
+                # So the person the 410 page was written for was the only person
+                # who could never see it, while it was shown to strangers whose
+                # ids had simply expired.
+                why = session_replaced(rec, rec["instance"])
+                if why is not None:
+                    own.forget(sid)
+                    log("gated a returning visitor at %s: %s"
+                        % (rec["instance"], why))
+                    rec = None
             if rec is None:
                 # GATE. Not a mint, and the difference is the whole point.
                 #
@@ -1812,10 +2544,28 @@ def serve(sock, own, expected_b64):
                     refresh_headers(own, identity, new_identity))
                 continue
 
-            if not forward_request(rec["instance"], method, rest, query,
-                                   headers, rf, wf, sock,
-                                   refresh_headers(own, identity,
-                                                   new_identity)):
+            served = forward_request(rec["instance"], method, rest, query,
+                                     headers, rf, wf, sock,
+                                     refresh_headers(own, identity,
+                                                     new_identity))
+            # A DESKTOP IS NOW THERE, so there is at last a start to attach to.
+            # This is the earliest moment such a thing exists: before it, the
+            # slot's published token belongs to whoever held it last -- it
+            # survives a reap, measured -- and the session about to start will
+            # replace it. Recording here rather than at mint is the difference
+            # between a check that refuses a stranger and one that refuses
+            # everybody, which is what the first version did to every test at
+            # once.
+            #
+            # ASKED OF THE AUTHORITY, not inferred from the return value above.
+            # forward_request() answers False for "this downstream connection
+            # cannot carry another request" AND for the 502 it writes when the
+            # session could not be reached, and those must not attach alike --
+            # treating a 502 as an attachment would pin a record to a desktop
+            # that never existed. One stat settles it and cannot be confused.
+            if occupancy_readable() and slot_occupied(rec["instance"]):
+                own.attach(sid, slot_incarnation(rec["instance"]))
+            if not served:
                 return
     finally:
         for f in (rf, wf):
@@ -1850,6 +2600,17 @@ def main():
     # Both arms, at every start, before anything can arrive.
     assert_ownership_keying(Ownership)
     assert_cookie_outlives_idle(derive_cookie_lifetime)
+    # And the third, for the same reason and with a sharper history: the probe
+    # this guards used to CONNECT, and a connect on a socket-activated slot is
+    # not a question, it is an instruction to start a desktop. That was silent
+    # for as long as it existed, because what the probe reported became true the
+    # moment it asked.
+    assert_probe_does_not_activate(slot_unreachable, listening_paths)
+    # And the fourth, which is the routing decision itself: that occupancy is
+    # observed rather than created, that a missing authority is withheld rather
+    # than spent, and that the incarnation token can only ever refuse.
+    assert_occupancy_is_read_not_created(slot_occupied, occupancy_readable,
+                                         session_replaced)
 
     # The third guard REPORTS and does not refuse, and the asymmetry with the
     # two above is deliberate. Those two fail closed because what they catch is
@@ -1930,11 +2691,50 @@ def main():
             log("  Refusals will still be logged, and the last-request column"
                 " is unaffected, but the sweep's own column will be blank.")
 
+    # SAID OUT LOUD, BOTH HALVES, because each degrades quietly.
+    #
+    # If the authority is missing, this router cannot tell an occupied slot from
+    # a free one and will re-let a running desktop after a restart. That is the
+    # defect this change exists to remove, so it must not be reachable by a
+    # silent path -- and its symptom on a live box is somebody else's desktop,
+    # which nobody traces back to a directory that was not there.
+    if occupancy_readable():
+        busy = [n for n in available_slots() if slot_occupied(n)]
+        log("%d of %d slot(s) already have a desktop running: %s"
+            % (len(busy), len(available_slots()), ", ".join(busy) or "none"))
+        log("  Read from the sessions' own runtime directories under %s, which"
+            " survive a restart of this service. Nothing was opened to find"
+            " out." % SESSION_RUNDIR)
+    else:
+        log("WARNING: %s does not exist, so nothing here can tell a slot with a"
+            " desktop behind it from a free one." % SESSION_RUNDIR)
+        log("  Every slot will be treated as available. After a restart of this"
+            " service that re-lets desktops that never stopped, and the visitor"
+            " already using one is not told.")
+        log("  It is created by hdw4s-ephemeral-slots at boot; if that has not"
+            " run, this router is routing without the fact it routes on.")
+    # The corroborator, reported separately because "no opinion" and "agrees"
+    # are different states and only one of them is evidence.
+    published = [n for n in available_slots() if slot_incarnation(n)]
+    if not published:
+        log("no slot publishes an incarnation under %s, so a returning visitor"
+            " is judged on occupancy alone." % WEBROOT_DIR)
+        log("  That still refuses a reaped desktop. What it cannot see is a"
+            " slot reaped and re-let to somebody else between two visits.")
+
     slots = available_slots()
     if not slots:
         log("no session sockets in %s; nothing to route to." % PROXY_RUNDIR)
     else:
         log("routing to %d slot(s): %s" % (len(slots), ", ".join(slots)))
+        # Read ONCE for the whole pool rather than once per slot, so the banner
+        # describes one instant instead of N of them.
+        listening = listening_paths()
+        if listening is None:
+            log("WARNING: /proc/net/unix could not be read, so whether anything"
+                " is listening on each slot is unknown here.")
+            log("  The names below are what the pool is configured with. They"
+                " are not a claim that any of them can be served.")
         # A slot with its own Basic credential answers 401 to EVERYTHING that
         # comes through here, including its index -- and it does so alone, while
         # its neighbours work, which reads as a routing fault rather than as
@@ -1946,15 +2746,24 @@ def main():
             # announce slots it could not open -- a socket left behind by an
             # earlier configuration, with nothing bound to it, was listed as
             # routable and then given to the first arrival, which got no
-            # response at all. One connect-and-close per slot at startup says so
-            # in the line that already exists, at the moment the pool is read.
+            # response at all.
+            #
+            # THIS LOOP USED TO BE THE MOST EXPENSIVE LINE IN THE FILE. It ran
+            # one connect-and-close per slot, and on a socket-activated pool a
+            # connect starts a desktop. Measured on a three-slot pool: every
+            # session stopped, one `systemctl restart hdw4s-demux`, and eleven
+            # milliseconds after this banner printed, all three incarnation
+            # units and all three GNOME sessions had started -- with no arrival
+            # and nobody on the box. A restart of the front door consumed the
+            # whole pool, every time, and said nothing, because by the time
+            # anyone read "routing to 3 slot(s)" it was true.
             #
             # NOT keyed on a particular errno. The failure measured in the field
             # was EACCES, not ENOENT or ECONNREFUSED, because the leftover socket
             # was owned by a different user than the one this runs as. Anything
             # written against "the file is missing" would have stayed silent
             # through exactly the case that produced the defect.
-            why = slot_unreachable(name)
+            why = slot_unreachable(name, listening)
             if why:
                 log("WARNING: %s is listed as a slot but cannot be reached: %s"
                     % (name, why))
