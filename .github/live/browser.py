@@ -33,7 +33,16 @@ PROFILE_PREFIX = "hdw4s-live-"
 
 
 class Browser:
-    def __init__(self, port, tag, headers=None, display=None):
+    def __init__(self, port, tag, headers=None, display=None,
+                 fake_media_ui=True):
+        # `fake_media_ui=False` keeps --use-fake-ui-for-media-stream OFF, so the
+        # browser asks about the camera and microphone the way a person's does.
+        # Every other caller wants it on -- accepting the prompt silently is
+        # what lets the rest of the suite measure the session rather than
+        # Chrome's permission flow. It is wrong for exactly one arm: the one
+        # about what the browser's own chrome SHOWS. An indicator arm run in a
+        # browser configured never to ask is testing the flag, not the product.
+        self.fake_media_ui = fake_media_ui
         # `display` runs a real browser on an X server instead of headless.
         # Clipboard work needs it: a paste is only honoured after genuine user
         # activation, and a synthetic key event delivered over the debugging
@@ -78,7 +87,13 @@ class Browser:
             # real camera. These two together make this browser behave like a
             # person who has a webcam and clicked Allow, which is the
             # configuration that ships.
-            "--use-fake-ui-for-media-stream",
+            # The UI half is conditional; the DEVICE half is not. A container
+            # has no camera, so without a fake device getUserMedia fails
+            # whatever the person clicks, and an arm would be measuring the
+            # absence of hardware rather than the product. Only the
+            # auto-accept comes off, and only for the arm that needs the
+            # prompt to actually happen.
+            *(["--use-fake-ui-for-media-stream"] if self.fake_media_ui else []),
             "--use-fake-device-for-media-stream",
             "--window-position=0,0",
             "--window-size=1280,800",
