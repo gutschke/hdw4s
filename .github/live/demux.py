@@ -397,14 +397,14 @@ class Rig:
         point of the case: systemd restarts this router on failure while every
         session it was routing to goes on running, so the slots outlive the
         table that says who owns them. No longer an inference from Restart=
-        on-failure in the packaged unit -- measured on ct154, where the session
+        on-failure in the packaged unit -- measured on a development container, where the session
         kept its ExecMainPID and its start timestamp across a restart of the
         router. The run is quoted above arm 5.
 
         wipe_state DEFAULTS TO TRUE, and the default was the other way round
         until the wipe was measured. STATE_DIR lives under the router's own
         RuntimeDirectory= on the box, so systemd removes it on EVERY stop --
-        a clean restart and a kill -9 alike, both watched on ct154 and quoted
+        a clean restart and a kill -9 alike, both watched on a development container and quoted
         above arm 5. A rig that carried the state across a restart was
         therefore modelling a world that does not exist, and it was not a
         harmless simplification: it made a table persisted under
@@ -787,7 +787,7 @@ def test_a_restart_does_not_re_let_an_occupied_slot(rig):
     a router that comes back has no idea which slots it let. systemd restarts
     it on failure and the sessions it was routing to are separate units that
     never noticed, so the pool it sees as empty is in fact fully occupied. The
-    "never noticed" half is measured rather than reasoned: on ct154 the
+    "never noticed" half is measured rather than reasoned: on a development container the
     session's ExecMainPID and start timestamp were unchanged across a restart
     of the router. See the run quoted above arm 5.
 
@@ -920,7 +920,7 @@ def test_a_reaped_visitor_is_not_handed_back_the_same_dead_address(rig):
 # tmpdir was allowed to stand in for it below. Kept here rather than in a report
 # because the next reader of this arm has exactly two wrong moves available --
 # delete the stand-in as sloppy, or trust it as complete -- and both are made by
-# somebody who cannot see this measurement. Measured on ct154; it supersedes the
+# somebody who cannot see this measurement. Measured on a development container; it supersedes the
 # docstring's "the unit file is the oracle for that half", which was true when
 # it was written and is now the weaker of the two.
 #
@@ -994,7 +994,7 @@ def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
     WHAT SETTLES IT, and this sentence replaces the one that used to be here.
     It said the unit file was the oracle for that half. The unit file is a real
     check and the arm after this one still makes it, but it is now the WEAKER
-    evidence: the wipe has since been observed on ct154 under real systemd,
+    evidence: the wipe has since been observed on a development container under real systemd,
     across a clean restart and a kill -9, with the desktop untouched throughout.
     That run is written out in the comment above this function, traps included.
     A reader who stops at this docstring must not leave with the superseded
@@ -1065,7 +1065,7 @@ def test_the_records_the_refusal_log_is_read_from_survive_a_restart():
     settle it" and that "a unit file read is the whole of the available
     evidence", because hdw4s-demux had never run on the production box and
     nobody had stood one up elsewhere. Both sentences were true when written
-    and both are now false: it has since been run on ct154 under real systemd
+    and both are now false: it has since been run on a development container under real systemd
     and the wipe was watched happening. What survives is the weaker claim --
     that this arm checks the CONFIGURATION, which is worth having because a
     configuration can be changed back without anybody re-running a box.
