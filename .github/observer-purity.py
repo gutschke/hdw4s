@@ -119,6 +119,16 @@ EXEMPT = {
         " directory served by the session -- not the socket. Opening a file"
         " there cannot activate a slot. Read-only, and the value may only ever"
         " cause a refusal.",
+    ("slot_table", "open"):
+        "reads /etc/hdw4s/instances, the root-owned configuration file that says"
+        " which slots exist and what type each one is. It is an ordinary file in"
+        " /etc: it is not a socket, it is not under /run, nothing is activated"
+        " by reading it, and a visitor cannot write it. It is on the arrival"
+        " path DELIBERATELY -- this is the repair that stopped the mint path"
+        " deciding the pool from a directory listing, where a named desktop's"
+        " leftover socket was enumerated as ephemeral capacity. Banning it here"
+        " would ban that repair, exactly as it would have banned"
+        " listening_paths() above.",
 }
 
 
@@ -442,8 +452,8 @@ def cmd_selftest(path):
         #    connect; the assertion is that the arrival path does not reach it.
         run("the actor reachable from a root", "red",
             plant(original,
-                  "    taken = slots_in_use(own)\n",
-                  "    taken = slots_in_use(own)\n"
+                  "    taken = slots_in_use(own, pool)\n",
+                  "    taken = slots_in_use(own, pool)\n"
                   "    if False:\n"
                   "        forward_request(None, None, None, None, None, None,"
                   " None, None)\n"),

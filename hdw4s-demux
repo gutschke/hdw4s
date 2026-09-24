@@ -438,6 +438,184 @@ def read_idle_window(inst):
             % (path, v, e)
 
 
+# The "you read it" sentinel. NOT None, because None is the answer that means
+# "the table could not be read", and a parameter whose default shares a value
+# with a real answer cannot tell a caller who passed nothing from one who passed
+# the failure. Caught by assert_pool_is_typed() at the first start after it was
+# written; see ephemeral_slots().
+_READ_IT = object()
+
+
+def slot_table(path=None):
+    """[(instance, type)] exactly as the slot table declares them, or None.
+
+    THE ONE PARSER FOR THAT FILE. There were two readings of it in this module
+    -- idle_windows() here, and nothing at all on the mint path, which read a
+    directory listing instead -- and the whole of the defect below was that the
+    typed authority was consulted only where being wrong was harmless.
+
+    A row is "<index> <instance> [<type>]". The type defaults to "desktop" when
+    the column is absent, which is the CLI's own reading of the same file; a
+    table written before the column existed describes named desktops, and
+    guessing "ephemeral" for them would put a person's long-lived session into
+    the pool a stranger is minted onto.
+
+    None, NOT an empty list, when the file cannot be read. The two mean opposite
+    things to a caller deciding whether to hand a slot out -- "this box has no
+    ephemeral slots configured" is a reason to refuse politely, and "I could not
+    read the file that says" is a reason to say so loudly -- and returning [] for
+    both is how an unreadable table would have become a silent, permanent 503
+    with nothing in the log naming the file.
+    """
+    path = SLOTS_FILE if path is None else path
+    try:
+        with open(path, "r", errors="replace") as f:
+            raw = f.readlines()
+    except OSError:
+        return None
+    rows = []
+    for line in raw:
+        bits = line.split()
+        if len(bits) < 2 or bits[0].startswith("#"):
+            continue
+        rows.append((bits[1], bits[2] if len(bits) > 2 else "desktop"))
+    return rows
+
+
+def ephemeral_slots(table=_READ_IT):
+    """The names a visitor may be minted onto. None if the table is unreadable.
+
+    THE POOL, and the reason this exists rather than a directory listing is the
+    defect it replaces. The mint path used to compute free capacity from
+    socket_filenames() below -- os.listdir() on the proxy run directory, filtered
+    on a ".sock" suffix -- and EVERY proxy instance on the box binds into that
+    one directory, named and ephemeral alike. Measured 2026-09-22 and recorded in
+    that function's own docstring: "a named session's leftover socket is
+    enumerated into the ephemeral pool". Three separate seats sighted it; nothing
+    was built on it until now, and a provisioning slot that must be reachable by
+    an administrator and never offered to a visitor is exactly the thing that
+    directory listing cannot express.
+
+    WHAT IS DELIBERATELY NOT FILTERED HERE: whether anything is listening. The
+    brief that asked for this called the pool an intersection of the typed rows
+    with listening_paths(), and that is one condition too many -- it would undo
+    pick_slot()'s reap-window reasoning, which is correct and predates this. A
+    slot the sweep has just reaped has no desktop behind it and is momentarily
+    unreachable, and it is precisely the capacity we want to hand out: its
+    socket unit is still listening and the next connection starts a fresh
+    desktop. Refusing a visitor while such a slot stood free is the exhaustion
+    defect wearing a reachability check. So reachability stays where it already
+    was -- a PREFERENCE ORDER inside pick_slot() and a warning in the banner --
+    and the table is the only thing that decides membership.
+
+    The asymmetry that follows, stated because it is the whole behaviour: a name
+    in the socket directory that is not in the table is never offered; a name in
+    the table with nothing listening still is.
+
+    A SENTINEL RATHER THAN None FOR "READ IT YOURSELF", and the first version of
+    this did use None for both. That collision means ephemeral_slots(None) --
+    "here is the table, and it could not be read" -- returns the whole pool of
+    whatever is on disk instead of None. assert_pool_is_typed() below went red on
+    it at the first start, which is the only reason it is not in this file: the
+    two meanings are indistinguishable at every call site and the wrong one
+    permits.
+    """
+    table = slot_table() if table is _READ_IT else table
+    if table is None:
+        return None
+    return sorted(inst for inst, kind in table if kind == "ephemeral")
+
+
+def assert_pool_is_typed(read_table=slot_table, pool=ephemeral_slots):
+    """Prove the mint pool comes from the typed table, at every start.
+
+    Takes both halves as parameters for the same reason the other three do: a
+    version that built its own reader could not go red for any implementation
+    but the one it already trusted.
+
+    THE ARM THAT CATCHES THE PREDECESSOR is the last one, and it is the whole
+    reason this exists. Against the code this replaces -- os.listdir() on the
+    proxy run directory, filtered on a ".sock" suffix -- "named0" and "zz-probe"
+    are both in the pool, because the directory is where the answer came from
+    and every instance on the box binds into it. Against this code they are not,
+    because the answer comes from the file that carries the type. Both names are
+    the measured cases from socket_filenames()'s own docstring, 2026-09-22.
+
+    THE PERMIT ARM IS NOT OPTIONAL. A pool that returned nothing at all would
+    satisfy every refusal below and would refuse every visitor on a healthy box,
+    which is the exhaustion defect arriving as a fix.
+
+    Four refusals, each a different way the old answer was wrong:
+
+      named0     typed "desktop"  -- a person's long-lived session, in the same
+                                     socket directory, offered to a stranger
+      legacy     no type column   -- a table written before the column existed;
+                                     defaulting it to "ephemeral" would do the
+                                     same damage to every row of an old file
+      zz-probe   only a filename  -- the "touch zz-probe.sock" case; it is in no
+                                     table at all
+      unreadable table            -- must be None and not [], because [] says
+                                     "no slots are configured" and a caller
+                                     cannot tell that from "I could not look"
+
+    WHAT IT DOES NOT SEE, written down because an unlisted blind spot is read as
+    exhaustive: nothing here opens a socket, reads /proc/net/unix or asks
+    systemd. It is entirely about which names the pool contains. Whether one of
+    them can be served is slot_unreachable()'s question and deliberately does
+    NOT filter the pool -- see ephemeral_slots().
+    """
+    import tempfile
+
+    d = tempfile.mkdtemp(prefix="hdw4s-demux-pool-")
+    try:
+        path = os.path.join(d, "instances")
+        with open(path, "w") as f:
+            f.write("# an administrator's comment, and a blank line follows\n\n")
+            f.write("0 eph0 ephemeral\n")
+            f.write("1 named0 desktop\n")
+            f.write("2 eph1 ephemeral\n")
+            f.write("3 legacy\n")
+        table = read_table(path)
+        assert table is not None, \
+            "a readable slot table was reported unreadable, so every refusal" \
+            " below would pass for the wrong reason"
+        got = pool(table)
+
+        # PERMIT ARM, inside the space searched.
+        assert got == ["eph0", "eph1"], \
+            "the ephemeral rows of a table are %r, and the pool said %r" \
+            % (["eph0", "eph1"], got)
+        # REFUSE ARMS.
+        assert "named0" not in got, \
+            "a row typed 'desktop' was offered as ephemeral capacity: a named" \
+            " desktop can be handed to a stranger"
+        assert "legacy" not in got, \
+            "a row with no type column was treated as ephemeral; every row of" \
+            " a table written before that column existed is a named desktop"
+        assert "zz-probe" not in got, \
+            "a name that is in no table at all reached the pool, so the pool" \
+            " is still being computed from something other than the table"
+
+        # The unreadable case, and it must be told apart from an empty one.
+        missing = read_table(os.path.join(d, "no-such-file"))
+        assert missing is None, \
+            "an unreadable slot table was reported as a table with no rows;" \
+            " a caller cannot tell 'none configured' from 'I could not look'"
+        assert pool(None) is None, \
+            "the pool turned an unreadable table into an empty pool, which" \
+            " refuses every visitor with nothing in the log naming the file"
+
+        # An EMPTY table is a different fact again, and must survive as one.
+        empty = os.path.join(d, "empty")
+        with open(empty, "w") as f:
+            f.write("# nothing but a comment\n")
+        assert pool(read_table(empty)) == [], \
+            "an empty but readable table did not produce an empty pool"
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def idle_windows(complain=None):
     """[(instance, seconds)] for every EPHEMERAL slot the pool is configured
     with; seconds is 0 for "never reaped" and None for "cannot be read".
@@ -460,18 +638,15 @@ def idle_windows(complain=None):
     """
     complain = log if complain is None else complain
     rows = []
-    try:
-        with open(SLOTS_FILE, "r", errors="replace") as f:
-            raw = f.readlines()
-    except OSError:
+    names = ephemeral_slots()
+    if names is None:
+        # Unchanged behaviour on purpose: this function's callers derive a
+        # cookie lifetime and a refusal report, and an empty set degrades both
+        # safely. The mint path asks ephemeral_slots() directly, where the
+        # difference between "none configured" and "cannot read" is the
+        # difference between a 503 and a 503 with the file named in the log.
         return rows
-    for line in raw:
-        bits = line.split()
-        if len(bits) < 2 or bits[0].startswith("#"):
-            continue
-        inst = bits[1]
-        if (bits[2] if len(bits) > 2 else "desktop") != "ephemeral":
-            continue
+    for inst in names:
         secs, why = read_idle_window(inst)
         if why:
             complain("WARNING: %s: %s" % (inst, why))
@@ -964,6 +1139,12 @@ STATE_INVENTORY = {
     # would have been a special case that also hid the next table somebody
     # adds. Written once at import and never assigned to afterwards.
     "STATE_INVENTORY": "not state",
+    # A default-argument sentinel for ephemeral_slots(). An identity to compare
+    # against and nothing else: nothing is ever written into it and nothing
+    # reads anything out of it. It is a bare object() rather than a string or
+    # None precisely so that it cannot collide with a real answer -- which is
+    # the defect it was introduced to fix.
+    "_READ_IT": "not state",
 }
 
 
@@ -1553,9 +1734,16 @@ def log_refusal(reason, now=None):
     # status code, which is the only oracle that could have seen it.
     pairs = idle_windows()
     windows = dict(pairs)
-    names = sorted(set(list(windows) + available_slots()))
-    log("turned an arrival away: %s (%d slot(s) configured)"
-        % (reason, len(names)))
+    # THE COUNT IS THE POOL; THE LIST IS WIDER, and the difference is the point
+    # of this report. What was refused is capacity, and capacity is the typed
+    # rows -- counting socket files alongside them told an operator the pool was
+    # bigger than anything a visitor could be given, which is the wrong number
+    # to size an idle window from. The extra names stay in the listing below,
+    # marked "not in the pool table", because a leftover socket in that
+    # directory is one of the things an operator reading a 503 is looking for.
+    names = sorted(set(list(windows) + socket_filenames()))
+    log("turned an arrival away: %s (%d slot(s) in the pool)"
+        % (reason, len(windows)))
     if not names:
         log("  no slots are configured, so nothing can be served here.")
         return
@@ -1659,8 +1847,15 @@ def slot_carries_own_credential(instance):
     return os.path.exists(os.path.join(d, "%s.auth.cred" % instance))
 
 
-def available_slots():
-    """The names in the socket directory. NOT the slots this box can serve.
+def socket_filenames():
+    """The names in the socket directory. NOT the pool, and NOT what can be served.
+
+    RENAMED FROM available_slots(). The old name is the reason this was still
+    here to be found three times: it promised the thing every caller wanted, so
+    a docstring underneath saying the opposite got read as a caveat rather than
+    as a correction, and the mint path went on computing free capacity from a
+    filename. The name now asks the question the body answers, and a caller who
+    wants the pool has to type ephemeral_slots() to get it.
 
     This docstring used to claim it read "the authority that defines the set --
     the bound sockets -- rather than from a configured count", and ended "a count
@@ -2102,7 +2297,17 @@ def slots_in_use(own, slots=None):
     now = time.time()
     taken = set()
     if occupancy_readable():
-        for name in (available_slots() if slots is None else slots):
+        # SLOTS IS PASSED BY THE ONE CALLER THAT MATTERS. pick_slot() has
+        # already read the table and already refused if it could not, so the
+        # default below is a fallback for nothing on the live path -- it is
+        # kept because a future caller reaching this without a pool must not
+        # get a directory listing, which is the substitution this change
+        # removed everywhere else.
+        if slots is None:
+            slots = ephemeral_slots()
+            if slots is None:
+                slots = []
+        for name in slots:
             if slot_occupied(name):
                 taken.add(name)
     for inst, minted in own.pending_mints(now - MINT_GRACE):
@@ -2246,9 +2451,24 @@ def pick_slot(own):
     listening and the next connection starts a fresh desktop. Refusing a visitor
     while such a slot stood free would be the exhaustion defect wearing a
     reachability check.
+
+    THE POOL IS THE TABLE, not the socket directory. Every proxy instance on the
+    box binds into one directory, so a listing of it offered a named desktop's
+    leftover socket to a stranger; ephemeral_slots() asks the file that carries
+    the type instead. None from it is "the table could not be read", which
+    refuses -- and says which file -- rather than falling back to the listing
+    that was the defect.
     """
-    taken = slots_in_use(own)
-    free = [n for n in available_slots() if n not in taken]
+    pool = ephemeral_slots()
+    if pool is None:
+        log("cannot read the slot table at %s, so nothing here knows which"
+            " slots are ephemeral." % SLOTS_FILE)
+        log("  No slot will be minted until it can be read. The sockets under"
+            " %s are NOT a substitute: every instance on this box binds into"
+            " that one directory, named desktops included." % PROXY_RUNDIR)
+        return None
+    taken = slots_in_use(own, pool)
+    free = [n for n in pool if n not in taken]
     if not free:
         return None
     listening = listening_paths()
@@ -2922,6 +3142,12 @@ def main():
     # than spent, and that the incarnation token can only ever refuse.
     assert_occupancy_is_read_not_created(slot_occupied, occupancy_readable,
                                          session_replaced)
+    # And the fifth, which is WHICH SLOTS EXIST at all -- the question the four
+    # above all take an answer to. It was computed from a directory listing for
+    # as long as this file has existed, and was sighted three times without
+    # being fixed, because the function's name promised the pool while its body
+    # returned filenames.
+    assert_pool_is_typed(slot_table, ephemeral_slots)
     # And the fifth: the only fact this process holds whose LOSS can permit
     # something, and therefore the only one written to disk. That it holds,
     # that it expires, and that it has no way to say yes to anybody.
@@ -3014,10 +3240,25 @@ def main():
     # defect this change exists to remove, so it must not be reachable by a
     # silent path -- and its symptom on a live box is somebody else's desktop,
     # which nobody traces back to a directory that was not there.
+    # THE POOL, READ ONCE FOR THE WHOLE BANNER. Every line below used to call
+    # the socket-directory listing again, so the banner described a set the mint
+    # path does not use and re-read it four times while it did. An operator
+    # sizing a pool from "routing to 4 slot(s)" was being told about a named
+    # desktop's leftover socket.
+    pool = ephemeral_slots()
+    if pool is None:
+        log("WARNING: the slot table at %s cannot be read, so this router does"
+            " not know which slots are ephemeral." % SLOTS_FILE)
+        log("  It will refuse every arrival until that is fixed. It will NOT"
+            " fall back to the sockets under %s: every instance on this box"
+            " binds into that directory, named desktops included, and handing"
+            " one of those to a visitor is the defect this refuses to repeat."
+            % PROXY_RUNDIR)
+        pool = []
     if occupancy_readable():
-        busy = [n for n in available_slots() if slot_occupied(n)]
+        busy = [n for n in pool if slot_occupied(n)]
         log("%d of %d slot(s) already have a desktop running: %s"
-            % (len(busy), len(available_slots()), ", ".join(busy) or "none"))
+            % (len(busy), len(pool), ", ".join(busy) or "none"))
         log("  Read from the sessions' own runtime directories under %s, which"
             " survive a restart of this service. Nothing was opened to find"
             " out." % SESSION_RUNDIR)
@@ -3031,16 +3272,30 @@ def main():
             " run, this router is routing without the fact it routes on.")
     # The corroborator, reported separately because "no opinion" and "agrees"
     # are different states and only one of them is evidence.
-    published = [n for n in available_slots() if slot_incarnation(n)]
+    published = [n for n in pool if slot_incarnation(n)]
     if not published:
         log("no slot publishes an incarnation under %s, so a returning visitor"
             " is judged on occupancy alone." % WEBROOT_DIR)
         log("  That still refuses a reaped desktop. What it cannot see is a"
             " slot reaped and re-let to somebody else between two visits.")
 
-    slots = available_slots()
+    # THE ORPHANS, NAMED. Said before the pool rather than after it, because the
+    # sighting that started this was an operator reading a socket file's name in
+    # the routing line and concluding the pool had a slot it does not have. A
+    # name here is either a named desktop's socket -- correct, and none of this
+    # router's business -- or a leftover nothing will ever serve.
+    stray = [n for n in socket_filenames() if n not in pool]
+    if stray:
+        log("%d socket(s) in %s are not ephemeral rows in %s and will never be"
+            " offered: %s"
+            % (len(stray), PROXY_RUNDIR, SLOTS_FILE, ", ".join(stray)))
+        log("  A named desktop's socket belongs here and is not a fault. One"
+            " that belongs to nothing is a leftover and can be removed.")
+
+    slots = pool
     if not slots:
-        log("no session sockets in %s; nothing to route to." % PROXY_RUNDIR)
+        log("no ephemeral slots in %s; nothing can be minted here."
+            % SLOTS_FILE)
     else:
         log("routing to %d slot(s): %s" % (len(slots), ", ".join(slots)))
         # Read ONCE for the whole pool rather than once per slot, so the banner

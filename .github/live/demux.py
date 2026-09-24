@@ -302,7 +302,8 @@ class Client:
 # --------------------------------------------------------------------------
 
 class Rig:
-    def __init__(self, nslots=3, gate="mint", windows=None):
+    def __init__(self, nslots=3, gate="mint", windows=None, strays=(),
+                 demux=None):
         # gate=None means DO NOT SET HDW4S_GATE_MODE, so the module's own default
         # applies. Without this every arm test pinned the mode explicitly and the
         # shipped default was never exercised -- which is exactly how the router
@@ -325,11 +326,23 @@ class Rig:
         # The pool table the CLI keeps, and the idle window each slot is
         # configured with. Written before the router starts, because the
         # lifetime it derives from them is pinned at start.
+        #
+        # ALWAYS WRITTEN NOW, for every rig, and its absence used to be the
+        # fixture's biggest lie. The table was created only when a test asked
+        # for idle windows, so on every other rig the router ran against a box
+        # with sockets and NO SLOT TABLE -- a shape that cannot exist on a real
+        # machine, because the same CLI command that creates a slot writes both.
+        # While the mint path computed its pool from the socket directory that
+        # difference was invisible, which is precisely why the directory listing
+        # survived three sightings: no test could tell the two sources apart.
         self.windows = windows
+        self.instances = os.path.join(self.etc, "instances")
+        names = ([n for n, _ in windows] if windows is not None
+                 else ["ephemeral%d" % i for i in range(nslots)])
+        with open(self.instances, "w") as f:
+            for i, name in enumerate(names):
+                f.write("%d %s ephemeral\n" % (i, name))
         if windows is not None:
-            with open(os.path.join(self.etc, "instances"), "w") as f:
-                for i, (name, _) in enumerate(windows):
-                    f.write("%d %s ephemeral\n" % (i, name))
             # "%s", NOT "%d", and this is the fixture that let the defect ship.
             # An integer format specifier cannot put "30d", "12h" or "90m" in
             # front of the router -- the only forms that reproduced the failure
@@ -350,6 +363,28 @@ class Rig:
                      os.path.join(self.hdw4s_rundir, "hdw4s", name))
             s.start()
             self.slots.append(s)
+        # NAMES IN THE SOCKET DIRECTORY THAT ARE IN NO TABLE ROW, which is the
+        # shape a real box is in all the time and this rig could not express.
+        # Every hdw4s-proxy@ instance binds into ONE directory -- a named
+        # desktop provisioned for a person, a slot left over from an earlier
+        # configuration, a file somebody touched while debugging -- and until
+        # now every socket this rig created was also a pool member, so a router
+        # reading the directory and a router reading the table were
+        # indistinguishable here. That is why the directory listing survived
+        # three sightings.
+        #
+        # A stray is built as a REAL, LISTENING, ANSWERING backend rather than
+        # as an empty file. The weaker version passes against the defect: an
+        # unreachable name loses pick_slot()'s reachability preference, so a
+        # router that wrongly has it in the pool still hands out a healthy slot
+        # while any healthy slot remains, and the arm goes green having proved
+        # nothing. It must be the most attractive slot in the directory.
+        self.strays = []
+        for name in strays:
+            s = Slot(os.path.join(self.rundir, name + ".sock"), name,
+                     os.path.join(self.hdw4s_rundir, "hdw4s", name))
+            s.start()
+            self.strays.append(s)
         self.port = self.free_port()
         self.env = dict(os.environ,
                    HDW4S_PROXY_RUNDIR=self.rundir,
@@ -365,6 +400,11 @@ class Rig:
             self.env.pop(k, None)
         self.statedir = os.path.join(self.tmp, "state")
         self.err = []
+        # WHICH COPY OF THE ROUTER. Defaults to the shipped one; the red arms
+        # below hand it a scratch copy with one function put back the way it
+        # was. The MUTATION IS THE SUBJECT, never the checker: the assertions
+        # the red arms run are byte-identical to the green one's.
+        self.demux = DEMUX if demux is None else demux
         self._spawn()
 
     # The spawn is a method rather than eight lines of __init__ because the
@@ -375,7 +415,7 @@ class Rig:
     # no representation here, and three defects live in exactly that gap. A rig
     # cannot catch what it cannot say.
     def _spawn(self):
-        self.proc = subprocess.Popen([sys.executable, DEMUX], env=self.env,
+        self.proc = subprocess.Popen([sys.executable, self.demux], env=self.env,
                                      stderr=subprocess.PIPE)
         # Drained continuously, in a thread. Reading the pipe only on failure
         # was fine while nothing checked the log; now that a test asserts on
@@ -476,7 +516,7 @@ class Rig:
             self.proc.wait(5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
-        for s in self.slots:
+        for s in self.slots + self.strays:
             s.stop = True
             s.s.close()
 
@@ -1746,6 +1786,145 @@ def test_identity_lifetime_is_rechecked_without_a_refusal(rig=None):
         "one failed poll killed the watcher, and nothing would have said so"
 
 
+# --------------------------------------------------------------------------
+# The pool is the typed table, not the socket directory
+# --------------------------------------------------------------------------
+#
+# Every hdw4s-proxy@ instance on a box binds into /run/hdw4s-proxy, named
+# desktops included, so a router that computes free capacity by listing that
+# directory will hand a stranger somebody's long-lived session. Measured
+# 2026-09-22 and recorded in the shipped function's own docstring; sighted three
+# times by three seats and never fixed, because nothing here could tell the two
+# sources apart -- this rig only ever created sockets that were also pool
+# members.
+
+
+def test_a_socket_outside_the_table_is_never_minted(rig):
+    """A stray listening socket must not be offered, even when nothing else is.
+
+    ONE POOL SLOT AND ONE STRAY, deliberately. With spare capacity the router
+    hands out a real slot whatever it believes the pool to be, and the arm goes
+    green against the defect. The second visitor arrives with the pool full, so
+    the only way to serve them at all is to reach for the stray -- which is
+    exactly what the directory listing did.
+
+    THE CONTROL IS THE FIRST VISITOR. If arrival were broken outright, nobody
+    would land on the stray either and the refusal below would pass for a reason
+    that has nothing to do with the pool.
+    """
+    names = [s.name for s in rig.strays]
+    assert names, "this test needs a stray; the rig was built without one"
+
+    c = rig.client()
+    _, body = arrive(rig, c)
+    got = body.split("SLOT=")[1].split()[0]
+    assert got == "ephemeral0", \
+        "the control visitor did not reach the one pool slot: %s" % got
+
+    c2 = rig.client()
+    st, h, _ = c2.get("/?socket_worker=false")
+    assert st == 503, \
+        "a second arrival was served while the only pool slot was taken: %d" % st
+    # THE SLOT'S OWN ACCOUNT, not the router's. A 503 says the router refused;
+    # it does not say the stray was left alone, and a router that mis-routed
+    # and then failed would look identical from the client.
+    for s in rig.strays:
+        assert not s.seen, \
+            "%s is in no table row and was served anyway: a named desktop's " \
+            "socket in the same directory would have been handed to a stranger" \
+            % s.name
+
+
+# --------------------------------------------------------------------------
+# Putting the defect back, to prove the arm above can see it
+# --------------------------------------------------------------------------
+
+POOL_FROM_DIRECTORY = """
+
+# Appended by the red arm: the pool as it was computed before the repair.
+def ephemeral_slots(table=_READ_IT):
+    return socket_filenames()
+"""
+
+NO_STARTUP_GUARD = """
+
+def assert_pool_is_typed(read_table=None, pool=None):
+    return None
+"""
+
+
+def scratch_demux(suffix, extra):
+    """A copy of the shipped router with EXTRA appended. Returns its path.
+
+    Appended rather than patched by regular expression, because a substitution
+    that silently matched nothing would leave the shipped code in place and the
+    red arm would go green -- reporting that the defect is absent from a file it
+    never edited. A redefinition at the end of the module either parses and
+    rebinds the name or the process does not start at all.
+
+    WRITTEN BESIDE THE SHIPPED COPY, not in a temporary directory, and this is
+    not tidiness. load_duration() derives the grammar module from the router's
+    OWN location -- deliberately, so that two installations cannot select each
+    other's -- so a copy in /tmp dies at import looking for /tmp/hdw4s-duration.
+    Measured: the first version of this put both red arms in /tmp, and one of
+    them was reported red for that import failure while claiming to be about the
+    pool. That is the whole failure mode these arms are supposed to avoid.
+    """
+    fd, path = tempfile.mkstemp(prefix=".demux-red-", suffix=suffix,
+                                dir=os.path.dirname(DEMUX))
+    with os.fdopen(fd, "w") as f:
+        f.write(open(DEMUX).read().replace(
+            'if __name__ == "__main__":', extra + '\nif __name__ == "__main__":'))
+    return path
+
+
+def red_pool_from_the_directory():
+    """The arm above, against a router whose pool is the directory listing.
+
+    Both the pool AND the start-up guard are put back, so this fails where the
+    green arm asserts -- on a visitor reaching a slot that is in no table row --
+    rather than at start-up. A red arm that dies for a different cause proves
+    nothing about the arm it is named after, and that has happened twice here.
+    """
+    path = scratch_demux("-pool", POOL_FROM_DIRECTORY + NO_STARTUP_GUARD)
+    rig = Rig(nslots=1, strays=["named0"], demux=path)
+    try:
+        test_a_socket_outside_the_table_is_never_minted(rig)
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
+def red_startup_guard_notices_the_directory_listing():
+    """And the start-up guard alone must refuse the same router.
+
+    Separate from the arm above on purpose: that one proves the BEHAVIOUR is
+    visible to a test, this one proves the router refuses to come up at all
+    without waiting for a visitor to arrive and be misrouted. Only the pool is
+    put back here; assert_pool_is_typed() is left shipped and has to catch it.
+    """
+    path = scratch_demux("-guard", POOL_FROM_DIRECTORY)
+    try:
+        rig = Rig(nslots=1, strays=["named0"], demux=path)
+    except RuntimeError as e:
+        os.unlink(path)
+        # NAMED, not merely non-zero. "The process died" is satisfied by a typo
+        # in the scratch copy or by an import that cannot find its way, and
+        # BOTH were seen here before this line existed.
+        #
+        # The wrong cause is raised as something that is NOT an AssertionError,
+        # because expect_red() treats an AssertionError as the arm working.
+        # Written the other way first, this arm reported a clean red while the
+        # scratch copy was dying in load_duration() and the guard was never
+        # reached at all.
+        if "assert_pool_is_typed" not in str(e):
+            raise RuntimeError(
+                "the router failed to start, but not in the guard: %s" % e)
+        raise AssertionError("start-up guard refused, as it must")
+    rig.stop()
+    os.unlink(path)
+
+
 def main():
     print("== hdw4s-demux, stand-in slots, no browser ==")
     print("Real: the demultiplexer, TCP, HTTP, cookies, UNIX upstreams.")
@@ -1797,6 +1976,11 @@ def main():
         # nothing -- it was written that way first and was green.
         (test_a_reaped_visitor_is_not_handed_back_the_same_dead_address,
          dict(gate=None)),
+        # ONE pool slot and one stray, so the second arrival has nowhere legal
+        # to go. See the test's own docstring for why a spare slot would make
+        # this green against the defect.
+        (test_a_socket_outside_the_table_is_never_minted,
+         dict(nslots=1, strays=["named0"])),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -1841,6 +2025,11 @@ def main():
             expect_red(fn.__name__, lambda: fn(rig))
         finally:
             rig.stop()
+    # These two build their OWN rigs, against a scratch copy of the router with
+    # the repair undone, so they cannot share the one above.
+    for fn in (red_pool_from_the_directory,
+               red_startup_guard_notices_the_directory_listing):
+        expect_red(fn.__name__, fn)
 
     print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
     return 1 if FAIL else 0
