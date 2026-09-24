@@ -464,13 +464,13 @@ expect() {  # expect <red|green> <label> <command...>
     # contrived unit can violate two assertions at once, and "something went
     # red" would then not distinguish the one being proved from the one that
     # came along with it.
-    if [ "${rc}" -ne 0 ] && echo "${out}" | grep -q 'FAIL:' &&
-       { [ -z "${EXPECT_MATCH:-}" ] || echo "${out}" | grep -q "${EXPECT_MATCH}"; }; then
+    if [ "${rc}" -ne 0 ] && grep -q 'FAIL:' <<<"${out}" &&
+       { [ -z "${EXPECT_MATCH:-}" ] || grep -q "${EXPECT_MATCH}" <<<"${out}"; }; then
       note "selftest ${label}" 'ok (went red, and said why)'
       return
     fi
     if [ "${rc}" -ne 0 ] && [ -n "${EXPECT_MATCH:-}" ] &&
-       ! echo "${out}" | grep -q "${EXPECT_MATCH}"; then
+       ! grep -q "${EXPECT_MATCH}" <<<"${out}"; then
       bad "selftest ${label}" "went red, but not for '${EXPECT_MATCH}'"
       printf '      %s\n' "${out}"
       return

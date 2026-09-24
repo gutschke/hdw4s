@@ -1438,7 +1438,7 @@ echo '== every path the session hides must be one something creates first =='
 
   missing=''
   for h in ${hidden}; do
-    printf '%s\n' "${created}" | grep -qxF "${h}" || missing="${missing} ${h}"
+    grep -qxF "${h}" <<<"${created}" || missing="${missing} ${h}"
   done
   is 'and every one of them is created by the slot minter' "${missing}" ''
 )
