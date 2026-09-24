@@ -452,6 +452,115 @@ def cookie_policy_complaints(lifetime, windows):
     return out
 
 
+# How often the check above is asked again on a running box. Not a tuning
+# number: the condition it looks for is a person editing a conf file, and the
+# response is a person restarting the front door, so anything inside the human
+# loop is fast enough. Fifteen minutes re-reads a handful of small files on a
+# tmpfs and costs nothing measurable.
+COOKIE_POLICY_EVERY = 900.0
+
+
+def poll_cookie_policy(seen, lifetime, windows=None, say=None):
+    """Ask cookie_policy_complaints() again, and say only what CHANGED.
+
+    THE GAP THIS CLOSES. The complaint is real, it can genuinely go red, and
+    until now the only two things that ever asked it were main() at start and
+    log_refusal() when the pool was exhausted. So an administrator who raises
+    HDW4S_IDLE_DAYS on a running box moves the desktop clock and not the
+    identity clock -- the single state this file's own essay calls
+    indefensible, a desktop alive with its owner locked out -- and nothing says
+    so until somebody is turned away. On a box with a spare slot that is never.
+    A check whose trigger is a second failure is not a check on the first one.
+
+    WHY IT SAYS ONLY WHAT CHANGED, and this is the whole of the design rather
+    than a politeness. A timer that restated a standing complaint every fifteen
+    minutes would put the same line in the log four times an hour for as long
+    as the condition lasted, and a check that fires on an ordinary state gets
+    turned off -- after which it protects nothing at all, which is strictly
+    worse than the gap it was written for. So the state is carried in SEEN and
+    only the difference is printed: silent while nothing moves, loud once at
+    the moment it moves, and loud again when it clears.
+
+    A complaint DISAPPEARING is reported too. The instrument that raised a
+    question is the one that should close it; leaving the log with a warning
+    and no retraction teaches a reader that the warnings do not mean anything.
+
+    WHAT WAS REJECTED.
+
+      An external timer unit. There is already an hdw4s-check.timer and it
+      looks like the tidy home for this, and it cannot do the job: the
+      comparison is between a lifetime PINNED INSIDE THIS PROCESS and the
+      configuration on disk. Another process would have to guess the pinned
+      value, and a check that guesses one of its two inputs is answering a
+      different question. That is decisive, and it is why this is a thread.
+
+      Firing on every arrival, rate limited. Cheaper to reason about, but it
+      makes the trigger a visitor again -- a quieter visitor than a refused
+      one, but the box this is written for is the box nobody is visiting.
+
+      Watching the files for changes instead of re-reading them. It fires
+      exactly when the condition can newly become true, which is elegant, and
+      it buys nothing here: the answer is wanted within minutes, not
+      milliseconds, and a watch adds descriptors, a failure mode when a file is
+      replaced rather than written, and a second mechanism to keep true.
+
+      Making it fatal, or restarting ourselves when the configuration moves.
+      The warning's own text says the repair is to restart the front door.
+      Doing that unasked would drop every live session to fix a number that
+      only matters to arrivals, and the operator is the one who gets to choose
+      the moment.
+
+    Takes the windows and the reporter as parameters so it can be handed a pool
+    it did not read and a collector that is not the log -- the arms below are
+    exercised without a conf file, and a version that read its own inputs could
+    not have been.
+    """
+    say = log if say is None else say
+    if windows is None:
+        # The default reporter is swallowed here and nowhere else. idle_windows()
+        # shouts about an unreadable value, which is right on a path that runs
+        # once; on a path that runs every fifteen minutes forever it is the
+        # repetition this function exists to avoid. Nothing is lost: an
+        # unreadable window has its own complaint in the set below, and that one
+        # is printed on the transition like any other.
+        windows = idle_windows(complain=lambda _m: None)
+    now = set(cookie_policy_complaints(lifetime, windows))
+    for complaint in sorted(now - seen):
+        say("WARNING: %s" % complaint)
+        say("  Nobody was turned away to produce this line. The pool's"
+            " configuration has moved under an identity lifetime that was"
+            " pinned at start, so a desktop can now outlive the identity that"
+            " owns it -- and its owner then cannot reach it or close it.")
+    gone = seen - now
+    if gone:
+        say("the identity-lifetime warning no longer applies (%d cleared):"
+            " every configured window is now shorter than the pinned"
+            " identity." % len(gone))
+    return now
+
+
+def watch_cookie_policy(lifetime, seen=None, every=COOKIE_POLICY_EVERY):
+    """Run poll_cookie_policy() forever. Started as a daemon thread by main().
+
+    SEEN is seeded with what main() already printed, so a standing complaint is
+    stated once at start rather than again fifteen minutes later.
+
+    It sleeps FIRST and swallows nothing but its own failure to read: this runs
+    beside the accept loop, and a thread that dies takes the check with it
+    silently, which is the shape of defect the whole file is about. A failure
+    to read the pool is therefore reported and the loop continues.
+    """
+    seen = set() if seen is None else set(seen)
+    while True:
+        time.sleep(every)
+        try:
+            seen = poll_cookie_policy(seen, lifetime)
+        except Exception as e:      # noqa: BLE001 -- see above
+            log("WARNING: the identity-lifetime re-check failed: %r" % e)
+            log("  It will be tried again, but until it succeeds nothing is"
+                " watching for a widened idle window.")
+
+
 def assert_cookie_outlives_idle(derive=derive_cookie_lifetime):
     """Prove the derivation, in BOTH directions, at every start.
 
@@ -1787,10 +1896,26 @@ def main():
            ", ".join("%s=%s" % (i, describe_window(s))
                      for i, s in sorted(windows, key=lambda r: r[0]))
            or "none configured"))
-    for complaint in cookie_policy_complaints(COOKIE_LIFETIME, windows):
+    standing = cookie_policy_complaints(COOKIE_LIFETIME, windows)
+    for complaint in standing:
         log("WARNING: %s" % complaint)
         log("  While that holds, a desktop can outlive the identity that owns"
             " it -- and its owner then cannot reach it or close it.")
+
+    # AND ASKED AGAIN WHILE WE RUN. The lifetime above is pinned and the
+    # configuration is not, so an administrator who widens an idle window on a
+    # live box moves one clock and not the other. Until now the only thing that
+    # ever noticed was log_refusal(), which fires when the pool is exhausted --
+    # so on a box with a spare slot the warning had no trigger at all and the
+    # gap could stand indefinitely. Seeded with what was just printed, so the
+    # first thing this says is a CHANGE and not an echo.
+    threading.Thread(target=watch_cookie_policy,
+                     args=(COOKIE_LIFETIME, set(standing)),
+                     daemon=True).start()
+    # For the same reason as above: a thread that was never started is silent
+    # in exactly the way a thread with nothing to report is silent.
+    log("the identity lifetime is re-checked against the pool every %d minute(s)"
+        % int(COOKIE_POLICY_EVERY // 60))
 
     # The sweep's record is the second of the two columns the refusal log
     # prints. Whether it can be read at all is a property of this process, not

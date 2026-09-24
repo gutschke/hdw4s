@@ -1023,6 +1023,87 @@ def test_the_router_actually_runs_its_state_sweep(rig):
     assert n > len(m.STATE_INVENTORY), (
         "the router examined %d name(s), which is no more than the inventory "
         "lists -- that is a count restated, not a sweep performed" % n)
+    # And the other half of this seat's work: the re-check has to be running,
+    # not merely defined. Its steady state is silence too, so the same trap
+    # applies -- a thread nobody started looks exactly like a quiet one.
+    assert "re-checked against the pool every" in text, (
+        "the identity lifetime is not being re-checked while we run, so a "
+        "widened idle window would again wait for somebody to be refused:\n%s"
+        % text)
+
+
+def test_identity_lifetime_is_rechecked_without_a_refusal(rig=None):
+    """The staleness warning fires when nobody has been turned away.
+
+    Its only triggers were a start and an exhausted pool. An administrator who
+    widens an idle window on a running box moves the desktop clock and not the
+    identity clock, and on a box with a spare slot nothing would ever have said
+    so -- the check existed and had no way to run.
+
+    The second arm matters as much as the first: a timer that restated a
+    standing complaint every quarter hour is a check that fires on an ordinary
+    state, and those get switched off, after which they protect nothing.
+    """
+    m = load_demux()
+    life = 30 * 86400
+
+    def poll(seen, windows):
+        said = []
+        return m.poll_cookie_policy(seen, life, windows=windows,
+                                    say=said.append), said
+
+    # A correct pool is silent from cold. Without this the arm below could be
+    # satisfied by something that complains about everything.
+    _, quiet = poll(set(), [("ephemeral0", 7 * 86400)])
+    assert not quiet, "an ordinary pool produced a warning: %r" % quiet
+
+    # REFUSE ARM: a window widened past the pinned identity, nobody refused.
+    seen, said = poll(set(), [("ephemeral0", 45 * 86400)])
+    assert any("not shorter than" in s for s in said), (
+        "an idle window longer than the pinned identity went unreported with "
+        "no refusal to trigger it: %r" % said)
+    assert any("Nobody was turned away" in s for s in said), \
+        "the line does not say why it appeared, so a reader cannot act on it"
+
+    # THE ANTI-SPAM ARM. Same state, same answer, and it must be silent.
+    seen, again = poll(seen, [("ephemeral0", 45 * 86400)])
+    assert not again, (
+        "a standing complaint was restated: four lines an hour for as long as "
+        "the condition lasts is how a check gets disabled: %r" % again)
+
+    # A NEW slot going bad must not be hidden behind the standing one.
+    seen, more = poll(seen, [("ephemeral0", 45 * 86400), ("ephemeral1", 0)])
+    assert any("never reaped" in s for s in more), \
+        "a second slot went bad and was hidden by the first: %r" % more
+
+    # And the question is closed by the instrument that raised it.
+    seen, cleared = poll(seen, [("ephemeral0", 7 * 86400),
+                                ("ephemeral1", 7 * 86400)])
+    assert any("no longer applies" in s for s in cleared), (
+        "the condition cleared and the log still carries two warnings: a "
+        "warning nobody ever retracts teaches a reader to ignore them")
+    assert seen == set(), "it kept complaints that no longer apply"
+
+    # A poll that raises must not take the watcher down silently. A dead
+    # background thread looks exactly like a clean box.
+    said = []
+    real_log, real_windows = m.log, m.idle_windows
+    m.log = said.append
+
+    def boom(*a, **kw):
+        raise OSError("the pool table vanished")
+
+    m.idle_windows = boom
+    t = threading.Thread(target=m.watch_cookie_policy,
+                         args=(life, set()), kwargs=dict(every=0.05),
+                         daemon=True)
+    t.start()
+    time.sleep(0.4)
+    m.idle_windows, m.log = real_windows, real_log
+    assert any("re-check failed" in s for s in said), \
+        "a failed re-check was silent: %r" % said
+    assert t.is_alive(), \
+        "one failed poll killed the watcher, and nothing would have said so"
 
 
 def main():
@@ -1041,7 +1122,8 @@ def main():
              test_a_session_cannot_set_our_cookie,
              test_cookie_lifetime_guard, test_refresh_rate_limit,
              test_state_inventory_guard,
-             test_the_router_actually_runs_its_state_sweep]
+             test_the_router_actually_runs_its_state_sweep,
+             test_identity_lifetime_is_rechecked_without_a_refusal]
 
     # Tests whose rig is not the default one. A pool with no instance table
     # derives the floor and nothing else, so a test about the DERIVATION has to
