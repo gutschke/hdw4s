@@ -82,15 +82,28 @@ class Slot(threading.Thread):
         self.seen = False
 
     def reap(self):
-        """Stand in for the sweep stopping this desktop.
+        """Stand in for the sweep stopping this desktop -- READ THE LIMIT.
 
-        The LISTENER goes away and the socket FILE stays, which is what a
-        reaped session actually leaves behind: the path lives in a runtime
-        directory the router does not own, so connect() gives ECONNREFUSED
-        rather than ENOENT and the name is still enumerated by
-        available_slots(). Unlinking it instead would make the slot vanish from
-        the pool and would quietly test a different, easier world -- one where
-        exhaustion cures itself because the directory shrank.
+        WHAT IT REPRODUCES: the slot's name stays in available_slots() and its
+        desktop is gone. Unlinking the path instead would make the slot vanish
+        from the pool and would quietly test a different, easier world -- one
+        where exhaustion cures itself because the directory shrank.
+
+        WHAT IT DOES NOT REPRODUCE, found by reading the shipped units and NOT
+        yet observed on a box, so treat the severity as an upper bound:
+        `hdw4s reap` stops hdw4s-proxy@<inst>.service and the session unit and
+        does NOT stop hdw4s-proxy@<inst>.socket. That socket unit keeps
+        listening, so in the field a connect after a reap SUCCEEDS and
+        re-activates the relay, whose ExecStartPre=hdw4s-wait then waits for a
+        session that is not coming and fails into OnFailure=hdw4s-refuse@. A
+        reaped visitor there does not meet a refused connection at all; they
+        meet a long stall and then somebody else's page.
+
+        This stand-in refuses instead, which is the faster and more legible of
+        the two and drives the arms deterministically. That difference is load
+        bearing for arm 3 and NOT for arm 2 -- the table is monotonic whatever
+        the socket does -- and each arm says which it is relying on.
+
 
         Closing the listener ALONE is not enough and the first version of this
         did exactly that. A close from this thread does not interrupt the
@@ -313,7 +326,10 @@ class Rig:
         The stand-in desktops are deliberately NOT touched. That is the whole
         point of the case: systemd restarts this router on failure while every
         session it was routing to goes on running, so the slots outlive the
-        table that says who owns them.
+        table that says who owns them. No longer an inference from Restart=
+        on-failure in the packaged unit -- measured on ct154, where the session
+        kept its ExecMainPID and its start timestamp across a restart of the
+        router. The run is quoted above arm 5.
 
         wipe_state=False is the HONEST default and it is not the production
         one. See the comment on test_a_visited_slot_is_not_indistinguishable_
@@ -692,7 +708,10 @@ def test_a_restart_does_not_re_let_an_occupied_slot(rig):
     The ownership table lives in process memory and nothing writes it down, so
     a router that comes back has no idea which slots it let. systemd restarts
     it on failure and the sessions it was routing to are separate units that
-    never noticed, so the pool it sees as empty is in fact fully occupied.
+    never noticed, so the pool it sees as empty is in fact fully occupied. The
+    "never noticed" half is measured rather than reasoned: on ct154 the
+    session's ExecMainPID and start timestamp were unchanged across a restart
+    of the router. See the run quoted above arm 5.
 
     The oracle is the BACKEND: visitor B's response carries the name of the
     slot that served it, and that name being A's is not "a routing table
@@ -736,9 +755,11 @@ def test_a_reaped_slot_returns_to_the_pool_without_a_restart(rig):
     has slots and then stops serving anybody.
 
     What is asserted is the ARRIVAL being granted, not a picture. Whether a
-    desktop comes back up behind the freed slot is the slot unit's business --
-    it is socket-activated -- and the stand-in backends here do not restart, so
-    asserting on a 200 would be asserting about the fixture.
+    desktop comes back up behind the freed slot is the slot unit's business:
+    hdw4s-proxy@<inst>.socket is socket-activated and a reap does not stop it,
+    so the name stays live even with nothing behind it. The stand-in backends
+    here do not restart, so asserting on a 200 would be asserting about the
+    fixture rather than about the router.
     """
     for _ in range(len(rig.slots)):
         arrive(rig, rig.client())
@@ -746,8 +767,12 @@ def test_a_reaped_slot_returns_to_the_pool_without_a_restart(rig):
     assert st == 503, \
         "the pool was not full after one arrival per slot: %d" % st
 
-    # The sweep stops one desktop. The router is not restarted and is not told;
-    # in the field it finds out the same way, by the socket refusing.
+    # The sweep stops one desktop. The router is not restarted and is not told.
+    # It does not find out in the field the way it finds out here -- see
+    # Slot.reap() -- and for THIS arm that does not matter: instances_in_use()
+    # is monotonic whether the socket refuses, stalls or answers, so the 503
+    # below is reached by every route. The stand-in only has to free capacity,
+    # not to free it the same way.
     rig.slots[0].reap()
 
     st, h, _ = rig.client().get("/")
@@ -764,8 +789,13 @@ def test_a_reaped_visitor_reaches_the_gate_rather_than_a_dead_end(rig):
 
     The gate fires when a sid does not resolve. A reaped visitor's sid resolves
     perfectly -- the table it lives in knows nothing about reaping -- so they
-    fall through to the proxy, which cannot connect, and get a 502. The 410
-    page exists, is tested above, and cannot be reached by the case it is for.
+    fall through to the proxy instead of to the gate. That much is the defect
+    and it does not depend on the stand-in.
+
+    The 502 is THIS RIG's symptom, not a claim about the field. Under the
+    shipped units the same fall-through ends in a stall and a refusal page from
+    another component, per Slot.reap(); what both share, and what this arm is
+    about, is that the visitor never reaches the 410 page written for them.
     """
     a = rig.client()
     sid, slot = arrive_on_slot(rig, a)
@@ -780,11 +810,13 @@ def test_a_reaped_visitor_reaches_the_gate_rather_than_a_dead_end(rig):
 def test_a_reaped_visitor_is_not_handed_back_the_same_dead_address(rig):
     """DEFECT 3, second half, and it is a separate failure from the first.
 
-    The 502 page tells the visitor to "Open the front door again". They do, and
-    arrival resumes the most recent session this identity owns -- which is the
-    dead one. So the instruction the product gives them cannot be carried out:
-    the front door returns them to the address that just failed, for as long as
-    the router stays up.
+    Whatever the fall-through above ends in -- this rig's 502 page, or the
+    field's refusal page -- it sends the visitor back to the front door. They
+    go, and arrival resumes the most recent session this identity owns, which
+    is the dead one. So the instruction the product gives them cannot be
+    carried out: the front door returns them to the address that just failed,
+    for as long as the router stays up. This half holds whichever way the
+    stand-in differs, because it is decided by owned_by() and not by a socket.
 
     Asserted separately from the gate above so that a repair which fixes the
     resolution but leaves arrival resuming a corpse still goes red here.
@@ -879,8 +911,16 @@ def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
     survive a thousand restarts. The rmtree below is the fixture IMITATING
     systemd, not observing it -- it proves the router renders a wiped record
     indistinguishably, and proves nothing at all about whether the wipe
-    happens. The unit file is the oracle for that half, and it is checked by
-    the test after this one.
+    happens.
+
+    WHAT SETTLES IT, and this sentence replaces the one that used to be here.
+    It said the unit file was the oracle for that half. The unit file is a real
+    check and the arm after this one still makes it, but it is now the WEAKER
+    evidence: the wipe has since been observed on ct154 under real systemd,
+    across a clean restart and a kill -9, with the desktop untouched throughout.
+    That run is written out in the comment above this function, traps included.
+    A reader who stops at this docstring must not leave with the superseded
+    answer, which is why the correction is here and not only up there.
     """
     a = rig.client()
     _, visited = arrive_on_slot(rig, a)
@@ -926,14 +966,22 @@ def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
 
 
 def test_the_records_the_refusal_log_is_read_from_survive_a_restart():
-    """DEFECT 4's premise, against the only oracle that can settle it.
+    """DEFECT 4's premise, read from the configuration rather than from a box.
 
-    The test above imitates the wipe. This one asks whether the wipe is real,
-    and the thing that decides is the shipped unit file -- not this rig, which
-    cannot reach systemd, and not the running service, which does not exist:
-    hdw4s-demux has never run on the production box, so there is no instance
-    anywhere to observe and no incident history to learn from. A unit file read
-    is the whole of the available evidence.
+    The test above imitates the wipe. This one asks whether the shipped
+    configuration calls for it, and it answers from the unit file.
+
+    THIS DOCSTRING USED TO SAY the unit file was "the only oracle that can
+    settle it" and that "a unit file read is the whole of the available
+    evidence", because hdw4s-demux had never run on the production box and
+    nobody had stood one up elsewhere. Both sentences were true when written
+    and both are now false: it has since been run on ct154 under real systemd
+    and the wipe was watched happening. What survives is the weaker claim --
+    that this arm checks the CONFIGURATION, which is worth having because a
+    configuration can be changed back without anybody re-running a box.
+
+    Still true, and still worth saying: there is no production instance and no
+    incident history, so nothing downstream will catch what this file misses.
 
     Deliberately agnostic between the two repairs, because choosing one here
     would be this seat designing somebody else's fix: either the runtime
