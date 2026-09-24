@@ -35,9 +35,26 @@
 /org/gnome/desktop/session/idle-delay
 
 # WHAT USED TO BE HERE AND IS DELIBERATELY GONE: six background keys, locked
-# because "the background is the cue that this session keeps nothing". A true
-# reason for the wrong mechanism -- it made the wallpaper load-bearing for a
-# message that is not about the wallpaper, and defended it by taking a setting
-# away from its owner. That cue moves to the client page surround, which the
-# visitor does not own and cannot remove. It fails clause 2: changing your own
-# wallpaper is a legitimate thing to want.
+# because "the background is the cue that this session keeps nothing".
+#
+# THE REASON THEY WENT IS THE OWNER'S, AND IT STANDS ON ITS OWN: locking them
+# was enforcing policy, this project is reluctant to do that, and an ephemeral
+# visitor who misconfigures their own desktop harms nobody but themselves.
+# Changing your own wallpaper is a legitimate thing to want, so clause 2 fails
+# and the keys do not belong here. THAT ARGUMENT DEPENDS ON NOTHING ELSE.
+#
+# A SEPARATE NOTE, WHICH IS NOT THE JUSTIFICATION -- and the distinction is the
+# point. There is a design to carry "this session keeps nothing" on the client
+# page surround instead, which the visitor does not own and cannot remove; see
+# private/DESIGN-per-session-background.md. IT IS NOT IMPLEMENTED.
+#
+# An earlier version of this comment gave that as the reason the locks went. It
+# is a better-sounding reason and a WEAKER one, because it makes the decision
+# contingent on unbuilt work: somebody reading it later could reinstate the
+# locks on the grounds that the surround was never built, reversing a ruling
+# that never rested on it. Record the reason that was given, not the better one
+# you thought of.
+#
+# What IS true and worth acting on: until the surround carries it, this product
+# has dropped a signal and put nothing in its place. That is a gap to close, not
+# a reason to lock a key back.
