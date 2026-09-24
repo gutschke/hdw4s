@@ -47,16 +47,149 @@ trap 'trap "" INT TERM QUIT HUP EXIT
       [ "${#children[@]}" -eq 0 ] || kill "${children[@]}" 2>/dev/null || :' \
      INT TERM QUIT HUP EXIT
 
-# Only set a key if its schema is actually installed, and never wait long. A
-# missing schema makes gsettings abort, and every one of these calls goes to
-# the settings service over the session bus, where a service that is slow to
+# Only touch a key if its schema is actually installed, and never wait long. A
+# missing schema makes gsettings abort, and every write below goes to the
+# settings service over the session bus, where a service that is slow to
 # activate -- or that is never going to answer -- would otherwise block with no
 # timeout of its own.
+#
+# THE SHAPE THESE TWO USED TO HAVE, and the three separate defects in it,
+# because a reader who does not know them will simplify this back:
+#
+#     timeout 10 gsettings writable "$schema" "$key" >/dev/null 2>&1 || return 0
+#     timeout 10 gsettings set "$schema" "$key" "$value" 2>/dev/null ||
+#       echo "hdw4s: could not set ..." >&2
+#
+#  1. `gsettings set` EXITS 0 ON A LOST BUS, with the value unchanged. Measured,
+#     and written up in private/in-session.sh's own header after four straight
+#     measurements were void because of it: "a guessed or globbed
+#     DBUS_SESSION_BUS_ADDRESS makes `gsettings set` print 'failed to commit
+#     changes to dconf' AND EXIT 0". So the "|| echo" diagnostic was unreachable
+#     for exactly the failure the `timeout 10` in front of it exists to
+#     anticipate. A write that vanished looked identical to one that landed.
+#  2. `gsettings writable` prints true or false ON STDOUT and exits 0 either
+#     way. ">/dev/null 2>&1 || return 0" threw the verdict in the bin and
+#     branched on a status that carries none, so the early return could only
+#     fire when the command itself failed to run. Measured: it never once fired.
+#  3. That same line talks to the bus, so on a dead bus the function returned 0
+#     -- a silent skip indistinguishable from "the schema is not installed",
+#     which is the one thing it was written to detect.
+#
+# DEFECT 3 IS THE ONE A REVIEWER WILL THINK IS ALREADY FIXED, so it is spelled
+# out. Reading point 2 on its own suggests the repair is to stop throwing the
+# verdict away -- capture `gsettings writable`'s stdout and branch on true or
+# false. THAT CHANGES NOTHING ABOUT POINT 3. A dead bus makes that improved test
+# fail in exactly the way an absent schema makes it fail: no verdict, non-zero
+# or empty, return 0, nothing written and nothing said. The two causes are
+# indistinguishable AT THAT CALL, so no test applied to it can tell them apart,
+# however good the test is.
+#
+# The only thing that separates them is asking about the RESULT rather than
+# about the permission: did the value change to what was asked for. That is why
+# the repair is a read-back and not a better test, and this paragraph is here so
+# that a reviewer who thinks a better test would do can see why it would not.
+#
+# A BETTER EXIT-STATUS TEST FIXES NONE OF THEM, because there is no status to
+# test: the failing command returns success. Set, read back, compare against
+# what was asked for. That is the only primitive that survives all three, and
+# unlike the two above it rests on no stdout-or-status contract measured on one
+# box with one version of GLib.
+#
+# AND THE READ STILL WORKS WHERE THE WRITE DOES NOT, which is what makes it a
+# check rather than a second guess. dconf(7) serves a READ out of a memory map
+# of the databases; only a WRITE needs dconf-service on the session bus. So the
+# read-back answers precisely in the case where the write silently did nothing,
+# and it is also why it can be the presence test: a bus that is gone can no
+# longer disguise itself as a schema that is not installed.
+#
+# MEASURED, as the positive control for the whole repair: inside a live session
+# with DBUS_SESSION_BUS_ADDRESS pointing at nothing, "gsettings set" exited 0 and
+# a following "gsettings get" returned THE OLD VALUE. The write vanished and the
+# read-back saw that it had.
+#
+# THE READ MUST BE A SEPARATE PROCESS FROM THE WRITE, and that is the one thing
+# here somebody will tidy away. GSettings keeps an in-process cache: a read-back
+# sharing a process with the write can be answered from the writer's own memory
+# and return the value it just asked for, having committed nothing. That is a
+# verification built out of the defect it verifies -- it cannot fail. Two
+# separate "gsettings" invocations re-derive from the database, which is why this
+# is written as two commands and not as one helper, one Gio.Settings object or
+# one loop holding a handle. Collapsing them does not look like a behaviour
+# change and silently stops this checking anything.
+#
+# A LOCKED KEY IS AGREEMENT, NOT AN ERROR, and that one sentence is the shortest
+# statement of why the read-back is the right primitive.
+#
+# A key the administrator has locked in the dconf system database does not take
+# our write, and reads back with the value the lock enforces -- which is the
+# value we asked for, for every key this file writes, because dconf/10-policy
+# sets what dconf/locks/10-policy locks. The screensaver keys are all three.
+#
+# So an exit-status check does not merely fail to catch the defect: MADE FATAL,
+# IT WOULD KILL EVERY SESSION ON A CORRECTLY CONFIGURED BOX. The better the
+# administrator's configuration, the more of the pool it takes down. That is not
+# a judgement about how loud a lost write should be; it is a fact about the
+# option, and it is the reason the comparison is against the VALUE and never
+# against a status.
+
+# The value a key has RIGHT NOW, or nothing and non-zero if there is no such
+# schema or key here. One command, used for the presence test and for the
+# read-back, so the two cannot disagree about what they are looking at.
+gsettings_value() {
+  timeout 10 gsettings get "$1" "$2" 2>/dev/null
+}
+
+# Said in one place so that every one of these lines is greppable as one thing,
+# and so that the next person changing what a lost write costs changes it once.
+#
+# NOT FATAL, AND THAT IS A DECISION THIS SEAT DID NOT MAKE. The block below
+# carries a recorded ruling in the opposite direction -- "None is worth delaying
+# a desktop for, let alone preventing one from starting -- which is exactly what
+# happened when the settings service did not answer" -- and the screensaver
+# keys carry Markus's ruling that they are a footgun with no legitimate use.
+# Those two pull opposite ways for the same keys, and choosing between them
+# quietly here would be the wrong place to do it. What this does NOT do is claim
+# to be a guard while permitting everything: it reports, loudly, in a fixed
+# form, and nothing anywhere says the write was verified.
+settings_write_lost() {
+  local schema="$1" key="$2" want="$3" got="$4"
+  echo "hdw4s: SETTING NOT IN FORCE: ${schema} ${key}" >&2
+  echo "hdw4s:   asked for [${want}], the session has [${got}]" >&2
+  echo "hdw4s:   The write returned success. gsettings set exits 0 on a lost" \
+       'session bus with the value unchanged, so this was read back rather' \
+       'than believed.' >&2
+  # THE TWO CAUSES, both of them, because naming one invites the reader to stop
+  # there. The first live mismatch this reported was the second cause -- a value
+  # written as 'nothing' rather than "'nothing'" -- and a message that had named
+  # only the lost write would have sent somebody looking at the bus.
+  echo 'hdw4s:   Either the write did not reach the settings database, or the' \
+       'value above is spelled differently from the way gsettings prints it.' \
+       'Compare the two forms first; they are not always the same fault.' >&2
+}
+
 set_if_present() {
-  local schema="$1" key="$2" value="$3"
-  timeout 10 gsettings writable "${schema}" "${key}" >/dev/null 2>&1 || return 0
-  timeout 10 gsettings set "${schema}" "${key}" "${value}" 2>/dev/null ||
-    echo "hdw4s: could not set ${schema} ${key}" >&2
+  local schema="$1" key="$2" value="$3" got
+  # PRESENCE, from a read. See point 3 above: this is the line that used to
+  # turn a dead bus into a silent skip.
+  gsettings_value "${schema}" "${key}" >/dev/null || return 0
+  # The status is deliberately ignored. It is 0 for the failure that matters and
+  # non-zero for a locked key that is already correct, so it is not evidence in
+  # either direction; the read below is.
+  timeout 10 gsettings set "${schema}" "${key}" "${value}" 2>/dev/null || :
+  got=$(gsettings_value "${schema}" "${key}") || {
+    # The key was readable a moment ago and is not now. Nothing in normal
+    # operation does that, so it is reported rather than folded into "absent".
+    echo "hdw4s: ${schema} ${key} could not be read back after writing it" >&2
+    return 0
+  }
+  # TEXTUAL, on the GVariant printing, and said out loud because it is the one
+  # soft spot left. Every value this file writes prints back byte-identical to
+  # what it passes -- false, 'nothing', 'never', uint32 0, @as [] -- and that is
+  # checked on a real session rather than assumed. A future key whose printing
+  # differs from its input would report a mismatch that is not one; the repair
+  # then is to write the key in the form gsettings prints, not to weaken this.
+  [ "${got}" = "${value}" ] || settings_write_lost "${schema}" "${key}" \
+                                                   "${value}" "${got}"
 }
 
 # The other half of set_if_present, and not optional. A setting this session
@@ -64,11 +197,29 @@ set_if_present() {
 # back off in the configuration does not undo it, because nothing goes back to
 # look. Without this, HDW4S_INDEXING=on left the indexer with an empty list of
 # directories and no way to recover short of editing dconf by hand.
+#
+# WEAKER THAN THE ABOVE, AND THE ASYMMETRY IS REAL RATHER THAN AN OVERSIGHT
+# that a later reader should close by copying the comparison down here. "Set"
+# knows the value it is aiming at and can compare against it. "Reset" aims at
+# whatever the layers underneath happen to say, and the only way to learn that
+# is to read the key after resetting it -- which is the answer itself, so the
+# comparison would be a value against itself and could not fail. That shape is
+# named in the project's own rules as one of the three ways a check passes while
+# proving nothing, and writing it here would be worse than leaving the gap.
+#
+# WHAT THIS DOES GET, and it is the same two defects as above: the presence test
+# is a read, so a dead bus can no longer disguise itself as an absent schema,
+# and a key that stops being readable between the two calls is reported instead
+# of passed over. WHAT IT DOES NOT GET: a reset that vanished on a dead bus,
+# which still looks exactly like a key that was already at its default. Closing
+# that needs one probe of the write path per session rather than a per-key
+# check, and that is not built -- see the handback, not a TODO nobody reads.
 reset_if_present() {
   local schema="$1" key="$2"
-  timeout 10 gsettings writable "${schema}" "${key}" >/dev/null 2>&1 || return 0
-  timeout 10 gsettings reset "${schema}" "${key}" 2>/dev/null ||
-    echo "hdw4s: could not reset ${schema} ${key}" >&2
+  gsettings_value "${schema}" "${key}" >/dev/null || return 0
+  timeout 10 gsettings reset "${schema}" "${key}" 2>/dev/null || :
+  gsettings_value "${schema}" "${key}" >/dev/null ||
+    echo "hdw4s: ${schema} ${key} could not be read back after resetting it" >&2
 }
 
 # Applied in the background, once the desktop is on its way up. These three are
@@ -79,8 +230,21 @@ reset_if_present() {
 (
   set_if_present org.gnome.desktop.screensaver  lock-enabled     false
   set_if_present org.gnome.desktop.session      idle-delay       'uint32 0'
+  # "'nothing'" AND NOT 'nothing'. The shell strips the outer quotes, so the
+  # second form passes the bare word and gsettings parses it as the string
+  # "nothing" -- the right value, written in a spelling gsettings does not print
+  # back. The read-back below compares text, so it reported a mismatch on a
+  # session whose setting was perfectly correct: "asked for [nothing], the
+  # session has ['nothing']". Found by the read-back itself on its first live
+  # start, which is the only reason anybody looked; nothing else in the file
+  # distinguishes the two spellings and the value they produce is identical.
+  #
+  # The repair is to write the value the way gsettings prints it, never to
+  # loosen the comparison -- a comparison that forgives a quoting difference
+  # also forgives the next real difference. show-image-thumbnails below is
+  # already written this way; this was the one call site that was not.
   set_if_present org.gnome.settings-daemon.plugins.power \
-                                                sleep-inactive-ac-type 'nothing'
+                                              sleep-inactive-ac-type "'nothing'"
 ) &
 children+=($!)
 
