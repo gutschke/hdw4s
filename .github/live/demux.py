@@ -63,10 +63,38 @@ def expect_red(name, fn):
 class Slot(threading.Thread):
     """A backend that says which slot it is, so a mis-route is visible."""
 
-    def __init__(self, path, name):
+    def __init__(self, path, name, rundir):
         super().__init__(daemon=True)
         self.name = name
         self.path = path
+        # THE OCCUPANCY AUTHORITY, and it is the session's, not ours.
+        #
+        # /run/hdw4s/<instance> is the session unit's own RuntimeDirectory: it
+        # exists exactly while that session is up and systemd removes it when
+        # the unit stops. Until this existed here, an occupied slot and a free
+        # one were BYTE-IDENTICAL in this rig -- bare sockets in a tmpdir with
+        # no session runtime tree anywhere -- so the only thing a router could
+        # have consulted to tell them apart was its own memory, and the only
+        # implementation that could pass the restart arm was a table persisted
+        # under HDW4S_DEMUX_STATE. That table survives restart() here and is
+        # deleted by RuntimeDirectory= on the box, which is green in CI and
+        # broken in the field, and arm 4 of this very file documents the wipe.
+        #
+        # Derived the way the CLI derives it -- HDW4S_RUNDIR, default /run,
+        # then hdw4s/<instance> -- rather than spelled out again, because two
+        # spellings of one path are two paths the moment either is edited.
+        # IT DOES NOT EXIST YET, and that is the point rather than an
+        # oversight. The pool is minted at boot by hdw4s-ephemeral-slots and
+        # the sessions are SOCKET-ACTIVATED, so a slot that nobody has opened
+        # has a listening socket and no session: no unit, and therefore no
+        # RuntimeDirectory. It appears when the session actually starts, which
+        # is on the first connection, so serve() below creates it and reap()
+        # removes it. Creating it here instead -- which is what this did
+        # first -- would have made every slot look occupied from birth, and an
+        # honest router reading this authority would have refused the very
+        # first visitor. A stand-in that is wrong in that direction fails
+        # loudly, which is the only reason it was caught in one run.
+        self.rundir = rundir
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.s.bind(path)
         self.s.listen(16)
@@ -104,6 +132,15 @@ class Slot(threading.Thread):
         bearing for arm 3 and NOT for arm 2 -- the table is monotonic whatever
         the socket does -- and each arm says which it is relying on.
 
+        It also removes the session's RuntimeDirectory, which is what systemd
+        does when the unit stops and is the only thing here that tells an
+        occupied slot from a free one. Checked BOTH WAYS below rather than
+        assumed: present before, absent after. A reap that silently frees
+        something which was never occupied would make every arm that turns on
+        occupancy pass without ever having expressed the case -- absence of the
+        authority reading identically to absence of an occupant, which is the
+        empty result this project does not accept as a negative.
+
 
         Closing the listener ALONE is not enough and the first version of this
         did exactly that. A close from this thread does not interrupt the
@@ -116,6 +153,13 @@ class Slot(threading.Thread):
         return until it has WATCHED a connect() be refused. A stand-in whose
         effect is a race is worse than no stand-in: it produces a green.
         """
+        assert os.path.isdir(self.rundir), (
+            "%s had no runtime directory to free, so this reap proves nothing "
+            "about occupancy" % self.name)
+        import shutil
+        shutil.rmtree(self.rundir)
+        assert not os.path.exists(self.rundir), \
+            "%s still looks occupied after being reaped" % self.name
         self.stop = True
         try:
             self.s.close()
@@ -151,13 +195,33 @@ class Slot(threading.Thread):
             threading.Thread(target=self.serve, args=(c,), daemon=True).start()
 
     def serve(self, c):
-        self.seen = True
         f = c.makefile("rb")
         try:
             while True:
                 line = f.readline()
                 if not line:
                     return
+                # MARKED HERE, ON A REQUEST, AND NOT ON THE ACCEPT.
+                #
+                # Both of these used to be set the moment a connection was
+                # accepted, and the router OPENS ONE AT STARTUP to report
+                # reachability. So every slot was marked served before any
+                # visitor existed: the runtime directory sprang into being for
+                # all three, an honest router reading it refused the very first
+                # arrival with 503, and slots_in_use() answered "all of them"
+                # to every caller -- which is why the arm that counts desktops
+                # started by a returning tab compared 3 against 3 and could not
+                # have failed.
+                #
+                # The authority must not be created by the act of observing it.
+                # That is the property it was chosen for, and a stand-in that
+                # loses it is worse than none, because the loss shows up as a
+                # confident number rather than as an error.
+                self.seen = True
+                try:
+                    os.makedirs(self.rundir, mode=0o700, exist_ok=True)
+                except OSError:
+                    pass
                 while True:
                     h = f.readline()
                     if h in (b"\r\n", b"\n", b""):
@@ -275,15 +339,21 @@ class Rig:
             for name, days in windows:
                 with open(os.path.join(self.etc, name + ".conf"), "w") as f:
                     f.write("HDW4S_IDLE_DAYS=%s\n" % (days,))
+        # HDW4S_RUNDIR is what the CLI already reads, default /run. The
+        # sessions' runtime directories hang off it at hdw4s/<instance>.
+        self.hdw4s_rundir = os.path.join(self.tmp, "run")
+        os.makedirs(os.path.join(self.hdw4s_rundir, "hdw4s"))
         self.slots = []
         for i in range(nslots):
             name = "ephemeral%d" % i
-            s = Slot(os.path.join(self.rundir, name + ".sock"), name)
+            s = Slot(os.path.join(self.rundir, name + ".sock"), name,
+                     os.path.join(self.hdw4s_rundir, "hdw4s", name))
             s.start()
             self.slots.append(s)
         self.port = self.free_port()
         self.env = dict(os.environ,
                    HDW4S_PROXY_RUNDIR=self.rundir,
+                   HDW4S_RUNDIR=self.hdw4s_rundir,
                    HDW4S_ETCDIR=self.etc,
                    HDW4S_DEMUX_CRED=os.path.join(self.etc, "demux.auth.cred"),
                    HDW4S_DEMUX_STATE=os.path.join(self.tmp, "state"),
@@ -315,7 +385,7 @@ class Rig:
                          daemon=True).start()
         self.wait_up()
 
-    def restart(self, wipe_state=False):
+    def restart(self, wipe_state=True):
         """Stop the router and start another one against the SAME slots.
 
         The port is kept, so a client built before the restart still addresses
@@ -331,9 +401,17 @@ class Rig:
         kept its ExecMainPID and its start timestamp across a restart of the
         router. The run is quoted above arm 5.
 
-        wipe_state=False is the HONEST default and it is not the production
-        one. See the comment on test_a_visited_slot_is_not_indistinguishable_
-        from_a_never_visited_one for what a tmpdir cannot stand in for.
+        wipe_state DEFAULTS TO TRUE, and the default was the other way round
+        until the wipe was measured. STATE_DIR lives under the router's own
+        RuntimeDirectory= on the box, so systemd removes it on EVERY stop --
+        a clean restart and a kill -9 alike, both watched on ct154 and quoted
+        above arm 5. A rig that carried the state across a restart was
+        therefore modelling a world that does not exist, and it was not a
+        harmless simplification: it made a table persisted under
+        HDW4S_DEMUX_STATE sufficient to pass the restart arm, which is the one
+        implementation that is green here and broken in the field. Preserving
+        it is still available for the arm that needs it, and arm 5 asks for it
+        by name.
         """
         self.proc.terminate()
         try:
@@ -939,8 +1017,20 @@ def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
     # would read "0m ago" and the comparison would find a difference that the
     # test itself had created. Written that way first, and it went red for a
     # reason that was not the defect.
-    for _ in range(len(rig.slots)):
-        assert rig.client().get("/")[0] == 302, "an arrival was not admitted"
+    #
+    # DRAINED UNTIL IT REFUSES rather than exactly len(slots) times. How many
+    # arrivals the pool has left after a restart is an answer that DEPENDS ON
+    # THE IMPLEMENTATION -- this router thinks all of them, a router that reads
+    # the sessions' runtime directories knows one slot is still occupied -- and
+    # a fixed count silently asserts one of those. It was written as a fixed
+    # count and went red against a correct design, for a reason that had
+    # nothing to do with the records this arm is about. What this arm needs is
+    # a refusal to read, not a particular route to it.
+    for _ in range(len(rig.slots) + 1):
+        st = rig.client().get("/")[0]
+        if st == 503:
+            break
+        assert st == 302, "an arrival was neither routed nor refused: %d" % st
     st, _, _ = rig.client().get("/")
     assert st == 503, "the pool did not refuse, so there is no refusal to read"
     text = rig.stderr_text().split("--- router restarted ---")[-1]
