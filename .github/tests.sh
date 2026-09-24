@@ -1251,6 +1251,96 @@ echo '== the reaper works in seconds, and refuses to guess =='
   has   'but the reaper says it never will be' "${out}" 'never be freed'
 )
 
+echo '== the router is a second witness to idleness, and may only ever extend a life =='
+# The reaper's own stamp comes from a poll every few minutes, so a visitor who
+# connects, works and leaves inside one gap is invisible to every sample taken.
+# The router writes its record where the connection is ACCEPTED and cannot miss
+# one. Taking the maximum of the two is what stops a desktop being destroyed out
+# from under somebody with the journal saying nothing connected for a week --
+# and the destruction is silent, so nothing else would ever have gone red.
+#
+# Every arm below is paired. An extension that cannot be seen NOT happening
+# would pass just as well if this simply stopped reaping altogether, which is
+# the failure that empties the pool instead of the desktop.
+( set +e; sandbox; . "${SB}/setup.sh"
+  unset JOURNAL_STREAM
+  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
+  DEMUXDIR="${SB}/run/hdw4s-demux"
+  printf '%s\n' '1 eph0 ephemeral' > "${SLOTS}"
+  mkdir -p "${RUNDIR}/hdw4s/eph0" "${REAPDIR}" "${DEMUXDIR}/last-request"
+  ss() { :; }
+  STOPPED="${SB}/stopped"; : > "${STOPPED}"
+  systemctl() {
+    case "$1 ${3:-}" in
+      'is-active ') echo 'active';;
+      'show -p')    case "${4:-}" in MainPID) echo 4242;; *) echo '';; esac;;
+      'stop '*)     printf '%s\n' "$2" >> "${STOPPED}";;
+    esac
+  }
+  printf 'HDW4S_IDLE_DAYS=1h\n' > "${SB}/etc/eph0.conf"
+  now="$(date +%s)"
+  stale="$(( now - 86400 ))"
+  rstamp="${DEMUXDIR}/last-request/eph0"
+
+  # POSITIVE CONTROL FIRST. Without it every "not reaped" below is satisfied by
+  # a reaper that no longer reaps anything, and the whole block would be green
+  # on a pool that never frees a slot.
+  printf '%s\n' "${stale}" > "${REAPDIR}/eph0"
+  rm -f "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  has 'a stale slot with no router record is still reaped' "${out}" 'stopping eph0'
+  # Which is also the arm that matters when the router is DOWN: it contributes
+  # nothing to the maximum, so the reaper falls back to its own sample rather
+  # than treating silence as "nobody connected". Absence is no opinion.
+
+  # THE FIX. Same stale sample, and a router that saw somebody a minute ago.
+  : > "${STOPPED}"
+  printf '%s\n' "${stale}" > "${REAPDIR}/eph0"
+  printf '%s\n' "$(( now - 60 ))" > "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'a request the poll missed keeps the desktop alive' "${out}" 'stopping eph0'
+  is    'and nothing was stopped' "$(wc -l < "${STOPPED}")" '0'
+
+  # AND IT MAY ONLY EXTEND. An old router record against a fresh sample must not
+  # pull the deadline forward: this witness is a reason to believe somebody was
+  # here, never a reason to believe nobody was.
+  : > "${STOPPED}"
+  printf '%s\n' "$(( now - 60 ))" > "${REAPDIR}/eph0"
+  printf '%s\n' "${stale}" > "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'an old router record does not shorten a life' "${out}" 'stopping eph0'
+
+  # A record in the future is a fault, not an observation. Clamping it to now
+  # would re-clamp on every later run and the slot would never reap again, with
+  # no other symptom -- so it is dropped, and said out loud because a slot that
+  # stops reaping has nothing else to trace it back to.
+  : > "${STOPPED}"
+  printf '%s\n' "${stale}" > "${REAPDIR}/eph0"
+  printf '%s\n' "$(( now + 86400 ))" > "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  has 'a router record in the future is ignored' "${out}" 'stopping eph0'
+  has 'and the reaper says so'                   "${out}" 'in the future'
+
+  # Not a timestamp. Guessing at one on the destruction side is how a desktop
+  # gets stopped on a number nobody wrote.
+  : > "${STOPPED}"
+  printf 'yesterday\n' > "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  has 'an unreadable router record is ignored' "${out}" 'stopping eph0'
+  has 'and the reaper says so'                 "${out}" 'not a timestamp'
+
+  # A symlink is refused outright. The router only ever os.replace()s a regular
+  # file here, so a symlink is a fault rather than a shape to support -- and the
+  # reaper runs as root, so following one is how a read becomes a disclosure.
+  : > "${STOPPED}"
+  secret="${SB}/pretend-shadow"; printf 'root:$6$verysecret:1::\n' > "${secret}"
+  rm -f "${rstamp}"; ln -s "${secret}" "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  has   'a symlinked router record is refused' "${out}" 'symlink'
+  has   'and the slot is reaped on the sample alone' "${out}" 'stopping eph0'
+  hasnt 'and nothing of what it pointed at is printed' "${out}" 'verysecret'
+)
+
 echo '== the arrival and sharing arms are chosen at generation, and a bad one is refused =='
 # Written from the failure: a QA matrix once tested one transport twice because a
 # mis-set knob was silently ignored, so the generator must REFUSE a value it does not

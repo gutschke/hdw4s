@@ -52,6 +52,36 @@ SupplementaryGroups=www-data
 LoadCredential=demux.auth.cred:/etc/hdw4s/demux.auth.cred
 RuntimeDirectory=hdw4s-demux
 RuntimeDirectoryMode=0700
+# WITHOUT THIS, EVERYTHING THIS DIRECTORY HOLDS IS DELETED AT THE MOMENT IT IS
+# NEEDED, and the default is the deleting one. RuntimeDirectory= removes the
+# tree when the unit stops unless told otherwise, and a restart is a stop --
+# so the two things kept here are both erased by the event they exist for:
+#
+#   last-request/<slot>  the router's record of a connection it ACCEPTED, which
+#                        the reaper takes as a second witness to idleness. Lost,
+#                        every slot reads "no record", which is the same thing a
+#                        slot nobody has ever opened reads -- so an operator
+#                        setting the idle window from the refusal log cannot tell
+#                        a lost record from an idle desktop. Two router-suite
+#                        arms were already failing on exactly this before this
+#                        line was added; they named the cause and the cause was
+#                        this default.
+#   reserved/<slot>      a mint held while its session starts. SURVIVING THE
+#                        ROUTER'S DEATH IS THE ENTIRE PURPOSE of that file: it
+#                        exists so a crash inside the grace window cannot hand a
+#                        second visitor a slot the first is still walking to.
+#                        Deleted on restart it is strictly worse than useless --
+#                        it looks like a guard and refuses nothing.
+#
+# "restart" rather than "yes", deliberately: it is the narrower grant and it
+# covers both needs, because Restart=on-failure above is a restart. A deliberate
+# stop still clears the tree, and that is the safe direction -- the reaper falls
+# back to its own sample, which is what it did before any of this existed, and
+# stale reservations are ignored by their own mtime anyway.
+#
+# /run is a tmpfs, so none of this survives a boot, which is correct: these
+# records describe a machine that is currently up.
+RuntimeDirectoryPreserve=restart
 
 # Hardened deliberately rather than maximally. This is a small stdlib HTTP
 # router with no desktop behind it, so it tolerates far more than a session

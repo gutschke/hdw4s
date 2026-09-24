@@ -110,6 +110,12 @@ DROPIN='/etc/systemd/system'
 # hardcoded, it made every behaviour of cmd_reap untestable, which is why a
 # message that was wrong for half the session types survived unnoticed.
 REAPDIR="${HDW4S_REAP_STAMP_DIR:-/run/hdw4s-reap}"
+# The router's own runtime directory, where it records the last request it
+# ACCEPTED for each slot. The reaper reads that record and never writes it.
+#
+# Same environment variable hdw4s-demux reads, deliberately: two spellings of
+# one path is two paths as soon as either is edited.
+DEMUXDIR="${HDW4S_DEMUX_STATE:-/run/hdw4s-demux}"
 # The runtime tree a session publishes its own live state in. Overridable for
 # the same reason, and needed alongside REAPDIR rather than instead of it: the
 # reaper reads the stamp only for an instance whose directory here exists, so
@@ -1748,6 +1754,77 @@ reap_say() {
   fi
 }
 
+# The router's record of the last request it ACCEPTED for a slot, or nothing.
+#
+# WHY A SECOND WITNESS AT ALL. The reaper's own stamp comes from a poll every
+# few minutes, so a client that connects, does something and disconnects inside
+# one gap is invisible to every sample taken -- and the stamp then says "nobody
+# since yesterday" about a desktop somebody used twenty minutes ago, in a
+# confident, well-formed, wrong sentence. Shortening the idle window is exactly
+# what makes that reachable. The router writes its record where the connection
+# is ACCEPTED, so it cannot miss one.
+#
+# The two are consulted as a MAXIMUM, never merged, and the asymmetry is the
+# whole design:
+#
+#   * This may only ever EXTEND a life, never shorten one. It is an additional
+#     reason to believe somebody was here, never a reason to believe nobody
+#     was. So a router that is not running, has never run, or wrote nothing for
+#     this slot contributes NOTHING to the maximum and the reaper falls back to
+#     its own sample -- which is exactly the behaviour before this existed. The
+#     failure mode that would matter, a stopped router making the whole pool
+#     look idle and reap itself, cannot arise from a maximum.
+#   * ABSENCE IS "NO OPINION", NEVER "IDLE". Returning "0" or "the epoch" for a
+#     missing record would be a refusal to look wearing the shape of an
+#     observation, and it would be spent as a verdict on the destruction side.
+#   * The two stamps stay in SEPARATE FILES. Merged into one, a router that is
+#     not running becomes indistinguishable from one reporting that nobody has
+#     connected, and there is no third answer left to give.
+#
+# Reading, never writing: the hazard the reaper's own stamp avoids by living
+# somewhere only root can write is a WRITE hazard -- root truncating whatever a
+# symlink points at. This only reads. It still refuses a symlink, because this
+# directory belongs to the router's dynamic user rather than to root and the
+# router itself only ever os.replace()s a regular file here, so a symlink is a
+# fault and not a shape we have to support. And the value is never printed,
+# only classified: a diagnostic quoting the contents of a file somebody else
+# chose would hand the journal whatever that file turned out to be.
+# RESULT IN A VARIABLE, NOT ON STDOUT, and that is not a style choice. The first
+# version printed the timestamp and called reap_say() for the faults, and was
+# called in a command substitution -- which captured every one of those messages
+# into the variable instead of the journal. Three arms went green while the
+# diagnostic they asserted existed nowhere. Same shape as idle_seconds()/
+# IDLE_WHY above, and for the same reason: a function whose answer is a value
+# cannot also speak.
+RLAST=''
+RLAST_WHY=''
+router_last_request() {
+  local inst="${1}" path="${DEMUXDIR}/last-request/${1}" raw=''
+  RLAST=''; RLAST_WHY=''
+  # -L before -r: a symlink that resolves to a readable file passes -r.
+  if [ -L "${path}" ]; then
+    RLAST_WHY='it is a symlink'
+    return 1
+  fi
+  [ -f "${path}" ] && [ -r "${path}" ] || return 1
+  raw="$(cat "${path}" 2>/dev/null)" || return 1
+  # Digits only. Anything else is not a timestamp, and guessing at one on the
+  # destruction side is how a desktop gets stopped on a number nobody wrote.
+  case "${raw}" in ''|*[!0-9]*)
+    RLAST_WHY='it is not a timestamp'
+    return 1;; esac
+  # A record in the future is not an observation, it is a fault -- and CLAMPING
+  # it to now would be worse than dropping it: every later run would clamp it
+  # again, so the slot would never reap and the pool would never refill, with
+  # no other symptom. Dropping it costs one sampling gap of accuracy, which is
+  # bounded. Said out loud for the same reason.
+  if [ "${raw}" -gt "${2}" ]; then
+    RLAST_WHY='it is in the future'
+    return 1
+  fi
+  RLAST="${raw}"
+}
+
 # How many clients are attached to a session.
 #
 # Not "established connections on the session's port", which is what this used
@@ -1883,6 +1960,27 @@ cmd_reap() {
       printf '%s\n' "${last}" > "${stamp}" 2>/dev/null || :
     fi
     case "${last}" in ''|*[!0-9]*) continue;; esac
+    # THE SECOND WITNESS, and it may only ever move the deadline LATER. The
+    # reaper's stamp above is a poll and can miss a whole visit between two
+    # samples; the router's record is written where the connection is accepted
+    # and cannot. Taking the maximum means a missing, unreadable or absent
+    # router record contributes nothing and this falls back to the sample --
+    # today's behaviour exactly -- while a router that did see somebody keeps
+    # their desktop alive. See router_last_request() for why it is a maximum
+    # over two files rather than one merged record.
+    if router_last_request "${inst}" "${now}"; then
+      [ "${RLAST}" -le "${last}" ] || last="${RLAST}"
+    elif [ -n "${RLAST_WHY}" ]; then
+      # A record that is PRESENT and unusable is a fault worth a line every run:
+      # the desktop it should have protected has no other symptom, and the
+      # person it gets stopped under is a visitor who will assume it broke.
+      # An ABSENT record says nothing and is silent -- that is the normal state
+      # of a slot nobody has opened, and of every slot when the router is not
+      # running. The message names the fault and never quotes the contents: the
+      # reaper runs as root, and a diagnostic repeating a file somebody else
+      # chose is how a read becomes a disclosure.
+      reap_say "hdw4s: ${inst}: ignoring the router's last-request record: ${RLAST_WHY}."
+    fi
     # Seconds throughout. The day-granularity arithmetic this replaces was what
     # made a sub-day value truncate to zero and read as "never reap"; with
     # seconds there is nothing left to truncate.

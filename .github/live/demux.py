@@ -973,32 +973,38 @@ def test_a_reaped_visitor_is_not_handed_back_the_same_dead_address(rig):
 
 
 def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
-    """DEFECT 4, and READ THE STAND-IN BEFORE BELIEVING THIS ONE.
+    """DEFECT 4, AND ITS PREMISE HAS SINCE BEEN REPAIRED -- READ THIS FIRST.
 
-    What is real here: the rendering. A slot with no readable record renders
-    "no record", and a slot that has never been visited renders "no record",
-    and those are the same eight characters -- so an operator reading a refusal
-    cannot tell "this desktop is idle and can be reaped" from "I lost my
-    notes". That much is measured, in this process, against the shipped code.
+    THIS ARM USED TO IMITATE A WIPE. It called restart(wipe_state=True) and
+    asserted the sad half: that a slot whose record systemd had just deleted
+    renders "no record", which is the same eight characters a slot nobody has
+    ever opened renders, so an operator reading a refusal cannot tell "this
+    desktop is idle and can be reaped" from "I lost my notes". The wipe was
+    real -- RuntimeDirectory=hdw4s-demux with no RuntimeDirectoryPreserve=,
+    STATE_DIR defaulting inside it, watched happening on a development
+    container across a clean restart and a kill -9.
 
-    What is STOOD IN FOR, and it is the premise rather than a detail: the WIPE.
-    The shipped unit has RuntimeDirectory=hdw4s-demux with no
-    RuntimeDirectoryPreserve=, and STATE_DIR defaults inside it, so systemd
-    removes the records every time the service stops. This rig's state lives in
-    a tmpdir that has no relationship to RuntimeDirectory= whatsoever and would
-    survive a thousand restarts. The rmtree below is the fixture IMITATING
-    systemd, not observing it -- it proves the router renders a wiped record
-    indistinguishably, and proves nothing at all about whether the wipe
-    happens.
+    hdw4s-demux.service now carries RuntimeDirectoryPreserve=restart, which is
+    one of the two repairs the arm below this one was deliberately agnostic
+    between. So the wipe no longer happens, and an arm that went on imitating
+    it would be asserting a property of a configuration this package does not
+    ship -- green forever, about nothing. That is the failure this file exists
+    to catch, arriving at this file.
 
-    WHAT SETTLES IT, and this sentence replaces the one that used to be here.
-    It said the unit file was the oracle for that half. The unit file is a real
-    check and the arm after this one still makes it, but it is now the WEAKER
-    evidence: the wipe has since been observed on a development container under real systemd,
-    across a clean restart and a kill -9, with the desktop untouched throughout.
-    That run is written out in the comment above this function, traps included.
-    A reader who stops at this docstring must not leave with the superseded
-    answer, which is why the correction is here and not only up there.
+    SO THE ARM IS INVERTED RATHER THAN DELETED, and it is stronger inverted: it
+    now restarts WITHOUT wiping, the way the shipped unit behaves, and asserts
+    that a slot which served a visitor is still distinguishable afterwards.
+    Before the repair this assertion fails, because the record is gone; after
+    it, it passes because the record is there. The rendering concern it was
+    built for survives inside it -- what is being compared is still the text an
+    operator reads, not the file on disk.
+
+    WHAT IS STILL STOOD IN FOR: this rig's state lives in a tmpdir with no
+    relationship to RuntimeDirectory= whatsoever, so not wiping it models the
+    preserved configuration rather than observing it. The arm below reads the
+    unit file and is the evidence for that half. Neither of them has watched
+    systemd preserve the directory on a real box, and until somebody does, the
+    pair is a configuration check and a rendering check and not a measurement.
     """
     a = rig.client()
     _, visited = arrive_on_slot(rig, a)
@@ -1009,7 +1015,9 @@ def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
         time.sleep(0.05)
     assert os.path.exists(path), "no record was written for %s" % visited
 
-    rig.restart(wipe_state=True)
+    # NOT wiped: the shipped unit preserves this tree across a restart, so
+    # wiping it here would model a configuration this package does not ship.
+    rig.restart(wipe_state=False)
 
     # Exhausted with BARE front-door requests, which mint and redirect and
     # stop there. Following each redirect the way arrive() does would send a
@@ -1051,8 +1059,9 @@ def test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one(rig):
     assert any(stripped != o for o in others), (
         "a slot that served a visitor before the restart reads EXACTLY like "
         "one nobody has ever opened (%r) -- the operator who sets the idle "
-        "window from this line is reading a lost record as an idle desktop"
-        % stripped)
+        "window from this line is reading a lost record as an idle desktop, "
+        "and the reaper reads the same lost record as a second witness that "
+        "nobody was here" % stripped)
 
 
 def test_the_records_the_refusal_log_is_read_from_survive_a_restart():
