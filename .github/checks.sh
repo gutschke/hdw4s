@@ -703,6 +703,33 @@ for check in static selftest; do
 done
 okif 'uid invariant'
 
+# Nothing on the router's arrival path may open, connect to or create anything.
+# The slots are socket-activated, so asking whether one is alive is the way to
+# make it alive: a startup banner that connect()ed to each slot started a full
+# GNOME desktop on every free one and then reported correctly, having made its
+# own report true. The repair was written down as a paragraph asking the next
+# person not to reach for something that opens, and a rig built against that
+# paragraph created its stand-in directory anyway.
+#
+# The same "it has to SAY what it found" rule as the loop above, for the same
+# reason: a bare non-zero status cannot be told apart from the checker failing
+# to start, and a crash that scores as a successful rejection is a check that
+# reports green for the rest of its life.
+begin
+for check in check selftest; do
+  if out="$(python3 "$(dirname "$0")/observer-purity.py" "${check}" 2>&1)"; then
+    :
+  elif grep -q 'FAIL:' <<<"${out}"; then
+    printf '%s\n' "${out}" | grep 'FAIL:' | sed 's/^/  /'
+    bad "observer purity ${check}" 'reported the above'
+  else
+    printf '%s\n' "${out}" | sed 's/^/  /'
+    bad "observer purity ${check}" \
+        'exited non-zero without rejecting anything: it did not run'
+  fi
+done
+okif 'observation path acts on nothing'
+
 echo
 section 'documentation'
 # A converter that silently writes nothing is the failure mode worth guarding:
