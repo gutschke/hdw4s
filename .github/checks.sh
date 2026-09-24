@@ -871,27 +871,27 @@ echo
 # is only one thing to answer with. Two implementations that happen to agree
 # today would pass that check and fail this one.
 begin
-# WHICH FILES ARE "THE TREE". Enumerated from git rather than walked with find,
-# and the difference is not cosmetic: a filesystem walk reached .claude/worktrees
-# (stale seat checkouts that live INSIDE the repo) and debian/hdw4s (a build
-# staging copy), and reported 107 failures about files nothing ships. Both are
-# gitignored, so --exclude-standard drops them without a list of names that would
-# rot the moment a new one appeared.
-#
-# WHY --others AND NOT JUST --cached: the opposite defect exists and was found in
-# this same file this week -- an index-only enumeration is blind to work that has
-# not been staged, so a defect introduced and not yet committed passes. Tracked
-# plus untracked-but-not-ignored is the set that means "what this tree is".
+# WHICH FILES ARE "THE TREE". Reuses SCAN_FILES rather than enumerating again,
+# and the second enumeration is exactly the defect this section exists to name:
+# one grammar, in one place. A private walk here reached .claude/worktrees (stale
+# seat checkouts, which live INSIDE the repository) and debian/hdw4s (a build
+# staging copy), and reported 107 failures about files nothing ships. A replacement
+# private git call then broke the OTHER path -- the build copy has no repository,
+# where SCAN_FILES deliberately falls back to a pruned walk, and the check died
+# rather than running. Both mistakes were one mistake: a second enumeration.
 scan_grammar_files() {
-  git ls-files -z --cached --others --exclude-standard 2>/dev/null |
-    grep -zv -e '^\.github/' -e '^private/' -e '^tmp/' -e '__pycache__/'
+  local f
+  for f in "${SCAN_FILES[@]}"; do
+    case "${f}" in .github/*|private/*|tmp/*|*__pycache__/*) continue;; esac
+    printf '%s\0' "${f}"
+  done
 }
 # The two constants systemd uses for the units that have no fixed length -- a
 # month of 30.44 days and a year of 365.25 -- keyed on because nothing else in
 # this tree has any reason to name them. A second unit table is the defect
 # returning, and it will carry these whether or not it is spelled the same way.
 for n in 2629800 31557600; do
-  holders="$(scan_grammar_files | xargs -0 grep -lF "${n}" 2>/dev/null | sort)"
+  holders="$(scan_grammar_files | xargs -0 -r grep -lF "${n}" 2>/dev/null | sort)"
   case "${holders}" in
     'hdw4s-duration') ;;
     '') bad 'duration grammar' "${n} is in no shipped file: hdw4s-duration has lost its unit table" ;;
@@ -903,7 +903,7 @@ done
 # component naming the key and not the parser is a component with a reading of
 # its own, which is the shape the router had. Derived from the tree rather than
 # listed: a list would be right until the next component reads it.
-readers="$(scan_grammar_files | xargs -0 grep -lF 'HDW4S_IDLE_DAYS' 2>/dev/null | sort)"
+readers="$(scan_grammar_files | xargs -0 -r grep -lF 'HDW4S_IDLE_DAYS' 2>/dev/null | sort)"
 # POSITIVE CONTROL. An empty list passes this loop in silence, and a broken
 # grep looks exactly like a tree where nothing reads the setting.
 case "${readers}" in
