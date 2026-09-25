@@ -5,6 +5,12 @@ hdw4s-firewall           usr/lib/hdw4s
 hdw4s-ephemeral-slots    usr/lib/hdw4s
 hdw4s-refuse             usr/lib/hdw4s
 hdw4s-incarnation        usr/lib/hdw4s
+# The per-session background generator. Shipped rather than kept beside the
+# measurements it came from, because the SESSION has to run it at every start:
+# a tool that lives only in a private tree is a feature that works on one
+# machine. python3 is already a dependency and nothing here renders, so this
+# costs no package.
+hdw4s-background         usr/lib/hdw4s
 hdw4s-update             usr/lib/hdw4s
 hdw4s-wait             usr/lib/hdw4s
 # The idle window's grammar. Installed BESIDE the components rather than under

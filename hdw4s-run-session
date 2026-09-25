@@ -485,6 +485,47 @@ case "${HDW4S_WEBCAM}" in
   *) webcam=(--webcam-enabled='false|locked') ;;
 esac
 
+# The per-session desktop background, written before the desktop starts. GNOME
+# reads picture-uri as it comes up; a file that arrives afterwards is a
+# wallpaper nobody sees appear.
+#
+# WHY IT IS WRITTEN HERE AND NOWHERE ELSE. The image has to be per session, and
+# the file has to be inside the session: /home/user is a tmpfs that exists only
+# in this unit's mount namespace, so nothing outside it can write there at all.
+# hdw4s-ephemeral-slots runs once at boot, as root, outside every namespace --
+# it can set the dconf value and it cannot produce the file. hdw4s-incarnation
+# runs at the right moment and still in the wrong namespace. This script is the
+# first thing that is inside, running as the occupant, before the desktop.
+#
+# DERIVED, NEVER ASSUMED: it asks dconf what picture-uri is ACTUALLY in force
+# and writes only when the answer is the path this product owns. One line, and
+# it buys three things. An administrator with a 50-template layer keeps their
+# wallpaper -- that layer outranks ours, measured with a control -- because the
+# value read back is theirs and not ours, and nothing here has to know the
+# template exists. An administrator who set HDW4S_EPHEMERAL_BACKGROUND to a
+# flat colour or to an image of their own gets no file written. And the setting
+# keeps exactly ONE parser, in hdw4s-ephemeral-slots, rather than gaining a
+# second one here to disagree with it the way the idle window's setting did.
+#
+# A dconf READ needs no session bus -- the system database is a direct memory
+# map, which is the whole reason this profile is a system-db -- so this answers
+# correctly even on a session whose settings service never came up. What it
+# reads is the layer in force, which is the question being asked.
+if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+  background_file="${HOME}/.hdw4s/background.svg"
+  if [ "$(gsettings_value org.gnome.desktop.background picture-uri)" = \
+       "'file://${background_file}'" ]; then
+    "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-background" write \
+        "${instance}" "${background_file}" || {
+      # Reported and not fatal. A desktop nobody can tell apart is a worse
+      # product; a desktop that will not start is a worse outcome.
+      echo 'hdw4s: no per-session background was written, so this desktop' >&2
+      echo '  comes up on the flat fallback colour and looks exactly like' >&2
+      echo '  every other ephemeral desktop on this machine.' >&2
+    }
+  fi
+fi
+
 # shellcheck disable=SC2086
 ${webcam_preload} ${HDW4S_SESSION} &
 children+=($!)

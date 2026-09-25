@@ -61,11 +61,18 @@ enable-monitors=false
 index-recursive-directories=@as []
 index-single-directories=@as []
 
-# The visual cue that this session keeps nothing is NOT here: the colour is an
-# administrator's choice, so hdw4s-ephemeral-slots generates it into
-# 20-background from HDW4S_EPHEMERAL_BACKGROUND. The lock file beside this one
-# still names every background key, because gnome-control-center rewrites all of
-# them together when a stock wallpaper is picked.
+# The visual cue that this session keeps nothing is NOT here: the background is
+# an administrator's choice, so hdw4s-ephemeral-slots generates it into
+# 20-background from HDW4S_EPHEMERAL_BACKGROUND. In its default form that value
+# names a per-session file the session itself writes, so 20-background carries
+# one constant URI and there is still no per-slot database.
+#
+# THE LOCK FILE BESIDE THIS ONE NAMES NO BACKGROUND KEY, and an earlier version
+# of this comment said it named all six. They went on 2026-09-24 by owner
+# ruling: locking them was enforcing policy, and a visitor who changes their own
+# wallpaper harms nobody. The reason that comment survived the change is the
+# reason it is called out here -- a stale explanation passes every test, because
+# the thing it explains still works.
 
 [org/gnome/desktop/interface]
 enable-hot-corners=false
