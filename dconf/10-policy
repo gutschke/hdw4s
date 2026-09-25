@@ -18,6 +18,27 @@ idle-activation-enabled=false
 [org/gnome/desktop/session]
 idle-delay=uint32 0
 
+# ---- the screen must not sleep, because nothing can wake it ----------------
+# A remote desktop has no keyboard attached to the machine running it. When the
+# power plugin blanks or suspends the display, the stream stops updating and the
+# visitor has no input that reaches the thing that would wake it: they see a
+# frozen picture and cannot tell it from a crash.
+#
+# THIS IS HERE RATHER THAN IN A RUNTIME WRITE because the write is not reliable.
+# hdw4s-run-session sets it at session start, and that write reports success
+# whether or not it happened -- measured. This key was its ONLY mechanism, so a
+# settings bus that was not answering left a desktop that would freeze with
+# nothing anywhere going red. The two keys above it were already here and were
+# therefore never at risk; this one was.
+#
+# Markus, 2026-09-24, on why this is not the policy we refuse to enforce: "this
+# is exactly the thing that is required for technical reasons and thus doesn't
+# fall under our 'no policy, only tools' ruling." NOT LOCKED, deliberately -- a
+# default delivers it, and a visitor who wants their screen to sleep may still
+# say so.
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+
 # ---- nothing follows the user out of the session ---------------------------
 # All of this would otherwise be written into a profile that is destroyed
 # anyway, so the point is not storage: it is that a fresh session must not
