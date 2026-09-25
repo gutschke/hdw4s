@@ -2116,8 +2116,35 @@ cmd_reap() {
     # points at and write a timestamp into it. /etc/shadow, /etc/sudoers, take
     # your pick. The stamp is the reaper's own bookkeeping and belongs somewhere
     # only the reaper can write.
+    #
+    # AND IT MUST STILL BE READABLE BY THE ROUTER, which 0700 root:root was not.
+    # hdw4s-demux prints two columns on every refusal -- when a slot last had a
+    # request, and when the idle sweep last saw a connection on it -- and the
+    # second is the one an operator sizes HDW4S_IDLE_DAYS from. The router runs
+    # under DynamicUser=, so with 0700 it could not so much as traverse here:
+    # measured, every start logged "the idle sweep's record under this directory
+    # cannot be read here (unreadable (Permission denied))" and that column was
+    # blank on every refusal, permanently. Nobody reading a 503 ever saw the
+    # figure the release is actually judged on.
+    #
+    # 0750 root:www-data GRANTS EXACTLY ONE READER. The router is in www-data --
+    # that group membership is how it reaches the slot sockets at all, and it is
+    # stated in hdw4s-demux.service. A session account is NOT: it is minted into
+    # its own group and nothing else, and www-data holds only the services put
+    # there deliberately. So the untrusted population this stamp was moved away
+    # from still cannot read it, and the write side is unchanged -- root only,
+    # which was the whole reason it is not under the session's own runtime
+    # directory.
+    #
+    # FAILS CLOSED, LOUDLY. If www-data does not exist -- a stock box with no web
+    # server, which this package does not require -- the group change fails and
+    # the fallback is exactly the old 0700. The router then prints the same
+    # warning it prints today, so the degraded case announces itself rather than
+    # producing a blank column nobody can account for. Do not turn that warning
+    # off; it is the only thing that distinguishes the two.
     local stampdir="${REAPDIR}"
-    install -d -m0700 -o root -g root "${stampdir}" 2>/dev/null || :
+    install -d -m0750 -o root -g www-data "${stampdir}" 2>/dev/null ||
+      install -d -m0700 -o root -g root "${stampdir}" 2>/dev/null || :
     [ -d "${RUNDIR}/hdw4s/${inst}" ] || continue
     local stamp="${stampdir}/${inst}"
     # "unknown" first: it is not a number, and treating it as one would be an
