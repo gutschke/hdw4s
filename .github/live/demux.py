@@ -487,6 +487,32 @@ class Client:
             self.close()
         return status, headers, body
 
+    def post(self, path, auth=True):
+        """A POST with no body. Separate from get() rather than a flag on it,
+        because the console's whole safety rests on the two being different
+        requests: ending a desktop must not be reachable by opening a link."""
+        if self.sock is None:
+            self.connect()
+        req = ["POST %s HTTP/1.1" % path, "Host: demux.test", "Content-Length: 0"]
+        if self.auth and auth:
+            req.append("Authorization: Basic " + self.auth)
+        if self.cookie:
+            req.append("Cookie: hdw4s_id=" + self.cookie)
+        req.append("Connection: keep-alive")
+        self.sock.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
+        status = int(self.rf.readline().split()[1])
+        headers = {}
+        while True:
+            line = self.rf.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+            k, _, v = line.decode("latin-1").partition(":")
+            headers.setdefault(k.strip().lower(), []).append(v.strip())
+        n = int(headers.get("content-length", ["0"])[0])
+        body = self.rf.read(n) if n else b""
+        self.close()
+        return status, headers, body
+
     def learn_cookie(self, headers):
         for sc in headers.get("set-cookie", []):
             if sc.startswith("hdw4s_id="):
@@ -1006,6 +1032,133 @@ def test_shipped_default_resumes_a_returning_browser():
         assert sid2 != sid1, "a fresh browser was given somebody else's session"
     finally:
         rig.stop()
+
+
+def test_the_console_lists_only_your_own_sessions(rig):
+    """The scope, from the ownership table rather than from the markup.
+
+    Two visitors, two desktops. Neither list may carry the other's address --
+    and the assertion is on the BYTES THE VISITOR RECEIVES, not on an internal
+    call, because "the page does not render it" is exactly the kind of boundary
+    that holds until somebody changes the template.
+    """
+    a, b = rig.client(), rig.client()
+    sid_a, _ = arrive(rig, a)
+    sid_b, _ = arrive(rig, b)
+    assert sid_a != sid_b, "the rig gave two visitors one session"
+
+    st, _, body = a.get("/sessions/")
+    assert st == 200, "the console did not serve: %d" % st
+    text = body.decode()
+    assert sid_a in text, "a visitor's own session was missing from their list"
+    assert sid_b not in text, \
+        "ONE VISITOR'S LIST CARRIED ANOTHER VISITOR'S SESSION ADDRESS"
+
+    st, _, body = b.get("/sessions/")
+    text = body.decode()
+    assert sid_b in text, "a visitor's own session was missing from their list"
+    assert sid_a not in text, \
+        "ONE VISITOR'S LIST CARRIED ANOTHER VISITOR'S SESSION ADDRESS"
+
+
+def test_one_visitor_cannot_end_anothers_session(rig):
+    """SEEN REFUSING. The negative the console is worth nothing without.
+
+    A session list is the obvious way to reopen cross-occupant reach, and the
+    refusal has to be where the request is SERVED: this test hands B a sid it
+    could never have been shown, which is precisely what an attacker has and a
+    page-level check does not see.
+
+    The oracle is the FILESYSTEM, not the status code. A 403 with the teardown
+    recorded anyway is the defect wearing a refusal, and only the file can tell
+    the two apart.
+    """
+    a, b = rig.client(), rig.client()
+    sid_a, _ = arrive(rig, a)
+    arrive(rig, b)
+    before = sorted(os.listdir(rig.teardowndir))
+
+    st, _, _ = b.post("/sessions/%s/end" % sid_a)
+    assert st == 403, \
+        "a visitor was allowed to end somebody else's desktop: %d" % st
+    assert sorted(os.listdir(rig.teardowndir)) == before, \
+        "THE TEARDOWN WAS RECORDED ANYWAY -- the 403 refused nothing"
+
+    # A sid that exists for nobody must be answered IDENTICALLY, or the status
+    # code tells a stranger which sids are real.
+    st2, _, _ = b.post("/sessions/%s/end" % ("0" * 32))
+    assert st2 == st, \
+        "a nonexistent session answered %d and somebody else's answered %d, " \
+        "which tells a stranger which sids exist" % (st2, st)
+
+
+def test_a_visitor_can_end_their_own_session(rig):
+    """The positive control, without which the refusal above proves nothing.
+
+    A guard that refuses everybody satisfies every rule anybody writes down and
+    is then deleted -- this project has already deleted one.
+    """
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    rec_instance = None
+    st, h, _ = a.post("/sessions/%s/end" % sid)
+    assert st == 303, "ending your own desktop did not redirect: %d" % st
+    assert h["location"][0] == "/sessions/", \
+        "ending a desktop sent the visitor somewhere unexpected"
+    left = os.listdir(rig.teardowndir)
+    assert len(left) == 1, \
+        "ending a desktop recorded %r rather than one request" % (left,)
+    # The request names the SLOT, because that is what a teardown acts on, and
+    # it must be the slot this visitor's session is actually in.
+    assert left[0].startswith("ephemeral"), \
+        "the teardown request was not named after a slot: %r" % left
+
+    # And the list then says so rather than offering the button again.
+    st, _, body = a.get("/sessions/")
+    assert st == 200
+    assert "being shut down" in body.decode(), \
+        "a session already being ended still offered an End button"
+
+
+def test_opening_the_end_address_does_not_end_anything(rig):
+    """A GET must not destroy a desktop.
+
+    One browser prefetch, one link preview or one crawler is otherwise enough
+    to end somebody's session without them asking, and they would have no idea
+    what happened.
+    """
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    st, _, _ = a.get("/sessions/%s/end" % sid)
+    assert st == 405, "a GET to the end address was not refused: %d" % st
+    assert os.listdir(rig.teardowndir) == [], \
+        "A GET ENDED A DESKTOP. That is one prefetch away from happening unasked."
+
+
+def test_the_console_never_mints(rig):
+    """THE FAILURE THAT WOULD BE SILENT, and the reason the parser has a guard.
+
+    Everything the console's dispatch does not claim falls through to arrival(),
+    which mints. So a console address that stopped being recognised would not
+    404 -- it would hand somebody a NEW DESKTOP every time they tried to end
+    one, and the symptom would be a pool that fills up while people are trying
+    to empty it.
+
+    Asserted for a visitor with NO sessions, which is the case that would hide
+    it: with a session already owned, the shipped gate arm resumes and the
+    mint never happens, so the test would pass against the broken router.
+    """
+    c = rig.client()
+    for path in ("/sessions", "/sessions/"):
+        st, h, _ = c.get(path)
+        assert st == 200, "%s did not serve the console: %d" % (path, st)
+        assert "location" not in h, \
+            "%s REDIRECTED, which is what minting a desktop looks like" % path
+        c.learn_cookie(h)
+    st, _, body = c.get("/sessions/")
+    assert "no desktops on this machine" in body.decode(), \
+        "a visitor who has never arrived was shown desktops"
+    assert os.listdir(rig.teardowndir) == [], "listing sessions recorded a teardown"
 
 
 def test_exhaustion(rig):
@@ -2124,6 +2277,40 @@ def _remove_scratch_demuxes():
             os.unlink(path)
         except OSError:
             pass
+SCOPE_CHECKED_BY_THE_PAGE = """
+
+# Appended by the red arm: a console that trusts the sid it was handed. This is
+# exactly what "the page only renders your own sessions" amounts to the moment
+# somebody types an address the page never showed them, which is the whole
+# reason the shipped check is at the server rather than in the markup.
+_shipped_console = console
+
+
+def console(own, wf, identity, new_identity, what, sid, method):
+    if what == "end" and method == b"POST":
+        rec = own.lookup(sid)
+        if rec is not None:
+            request_teardown(rec["instance"])
+            respond(wf, 303, b"", [("Location", "/sessions/")]
+                    + refresh_headers(own, identity, new_identity))
+            return
+    return _shipped_console(own, wf, identity, new_identity, what, sid, method)
+"""
+
+CONSOLE_PARSER_STOPS_MATCHING = """
+
+# Appended by the red arm: a console dispatch that claims nothing. The point is
+# that this does NOT produce a 404 -- everything the dispatch declines falls
+# through to arrival(), which MINTS.
+def console_target(path):
+    return None, None
+"""
+
+NO_CONSOLE_STARTUP_GUARD = """
+
+def assert_console_shows_only_your_own(target=None):
+    return None
+"""
 
 
 def scratch_demux(suffix, extra):
@@ -2239,6 +2426,70 @@ def red_pool_from_the_directory():
     finally:
         rig.stop()
         _remove_scratch_demuxes()
+
+
+def red_scope_checked_by_the_page():
+    """THE ONE THAT MATTERS. A console whose scope is the markup, not the server.
+
+    The green arm hands one visitor another's sid -- an address the page could
+    never have shown them, which is precisely what somebody probing has and a
+    page-level check cannot see. Against this router the 403 is gone and the
+    teardown is recorded, so the arm must fail on the FILESYSTEM assertion
+    rather than on the status code: a refusal that refuses nothing is the shape
+    being guarded against, and only the file can tell the two apart.
+    """
+    path = scratch_demux("-scope", SCOPE_CHECKED_BY_THE_PAGE)
+    rig = Rig(demux=path)
+    try:
+        test_one_visitor_cannot_end_anothers_session(rig)
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
+def red_a_console_address_that_stops_being_claimed_mints():
+    """The silent one: a parser that quietly stops matching hands out desktops.
+
+    Not a 404. Everything the console dispatch declines falls through to
+    arrival(), so a visitor trying to END a desktop is given ANOTHER ONE, and
+    the symptom is a pool that fills up while people are trying to empty it.
+    The start-up guard is put back too, so this fails where the green arm
+    asserts rather than at start-up -- the separate arm below is the one about
+    start-up.
+    """
+    path = scratch_demux("-console", CONSOLE_PARSER_STOPS_MATCHING
+                         + NO_CONSOLE_STARTUP_GUARD)
+    rig = Rig(demux=path)
+    try:
+        test_the_console_never_mints(rig)
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
+def red_startup_guard_notices_a_console_address_that_moved():
+    """And the start-up guard alone must refuse that router.
+
+    Separate on purpose, for the same reason the pool has two arms: the one
+    above proves the damage is visible to a test, this one proves the router
+    declines to come up at all rather than waiting for a visitor to be handed a
+    desktop they did not ask for.
+    """
+    path = scratch_demux("-console-guard", CONSOLE_PARSER_STOPS_MATCHING)
+    try:
+        rig = Rig(demux=path)
+    except RuntimeError as e:
+        os.unlink(path)
+        # NAMED, not merely "the process died", for the reason the pool's arm
+        # sets out at length: a typo in the scratch copy and an import that
+        # cannot find its way both satisfy "it refused to start", and both have
+        # been reported as clean reds on this project.
+        if "assert_console_shows_only_your_own" not in str(e):
+            raise RuntimeError(
+                "the router failed to start, but not in the guard: %s" % e)
+        raise AssertionError("start-up guard refused, as it must")
+    rig.stop()
+    os.unlink(path)
 
 
 def red_startup_guard_notices_the_directory_listing():
@@ -2678,7 +2929,14 @@ def main():
              test_a_restart_does_not_re_let_a_slot_whose_desktop_is_still_starting,
              test_a_reaped_slot_returns_to_the_pool_without_a_restart,
              test_a_reaped_visitor_reaches_the_gate_rather_than_a_dead_end,
-             test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one]
+             test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one,
+             # The rescue console. The refusal and the admission are a PAIR and
+             # are listed together so that neither can be removed alone.
+             test_the_console_lists_only_your_own_sessions,
+             test_one_visitor_cannot_end_anothers_session,
+             test_a_visitor_can_end_their_own_session,
+             test_opening_the_end_address_does_not_end_anything,
+             test_the_console_never_mints]
 
     # Tests whose rig is not the default one. A pool with no instance table
     # derives the floor and nothing else, so a test about the DERIVATION has to
@@ -2766,7 +3024,10 @@ def main():
                red_startup_guard_notices_the_directory_listing,
                red_the_window_is_open_again,
                red_a_logout_still_consumes_the_slot,
-               red_reclaim_on_mismatch_alone):
+               red_reclaim_on_mismatch_alone,
+               red_scope_checked_by_the_page,
+               red_a_console_address_that_stops_being_claimed_mints,
+               red_startup_guard_notices_a_console_address_that_moved):
         expect_red(fn.__name__, fn)
 
     print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))

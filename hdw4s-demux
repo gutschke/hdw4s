@@ -3472,6 +3472,308 @@ def arrival(own, wf, identity, query, new_identity):
 
 
 # --------------------------------------------------------------------------
+# The rescue console
+# --------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. The owner, describing what the product is for when a machine
+# goes wrong: *"it would be helpful if we still had enough resources to allow a
+# user to open a new tab to the door, find their misbehaving session, and kill
+# it from the door."* Measured on this tree before any of it was written: NO
+# VISITOR-FACING CONTROL ENDS A SESSION. hdw4s-gate-index says so in as many
+# words and deliberately does not tell anybody to close their desktop, because
+# anything documented must be possible to do. The door he was describing did
+# not exist.
+#
+# THE RULING THIS IS BUILT AROUND, and it separates two things that had been
+# fused: *"never block the door. but potentially block new session creation."*
+# Reaching the door, seeing your sessions and ending one must work when the box
+# is unwell -- that is the rescue path, and the person who most needs it is the
+# person who already has a desktop, because theirs may be the one misbehaving.
+# Minting a NEW desktop is the expensive act we are permitted to decline.
+#
+# SCOPE IS ENFORCED HERE, NOT BY WHAT THE PAGE RENDERS. The list is built from
+# own.owned_by(identity) and from nothing else -- it cannot enumerate the pool,
+# so there is no version of this page that shows a stranger's desktop by
+# accident. The end action re-checks ownership against the record on the way in
+# rather than trusting the sid it was handed. A session list is the obvious way
+# to reopen the cross-occupant reach that the commit this branch stands on
+# closed, and "the page does not render it" is not a boundary.
+#
+# ENDING IS A POST. A GET that destroys a desktop is one browser prefetch, one
+# link preview or one crawler away from doing it unasked, and the visitor would
+# have no idea what happened.
+
+TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", "/run/hdw4s-teardown")
+
+
+def console_target(path):
+    """(what, sid) for a console request, or (None, None).
+
+    Parsed here rather than in parse_target() because parse_target answers a
+    different question -- "is this a session address" -- and every caller of it
+    treats a None sid as "this is an arrival". Adding a second meaning to that
+    return value is how a path that must never mint comes to mint.
+    """
+    if path in (b"/sessions", b"/sessions/"):
+        return "list", None
+    parts = path.split(b"/")
+    # /sessions/<sid>/end  ->  ['', 'sessions', '<sid>', 'end']
+    if len(parts) == 4 and parts[1] == b"sessions" and parts[2] and parts[3] == b"end":
+        return "end", parts[2].decode("ascii", "replace")
+    return None, None
+
+
+# Where a session's own cgroup lives. Derived from the instance name because
+# that is what systemd derives it from; a constant here would be a wrong answer
+# waiting for a second slot layout to exist.
+SESSION_CGROUP_ROOT = os.environ.get("HDW4S_SESSION_CGROUP_ROOT",
+                                     "/sys/fs/cgroup/hdw4s.slice")
+
+
+def slot_memory_kb(instance, root=None):
+    """What this slot's session is ALREADY charged, in kB, or None.
+
+    Read from the cgroup the product itself puts the session in, not from a sum
+    over ps: a process sum needs a rule for whose process is whose and gets it
+    wrong for anything shared. None is "no reading", and every caller here
+    treats it as "we cannot say" rather than as zero -- which is the same rule
+    this page follows everywhere else, because a page that admits what it
+    cannot know beats one that mislabels a person's own desktop back to them.
+    """
+    base = SESSION_CGROUP_ROOT if root is None else root
+    path = os.path.join(base, "hdw4s-%s.slice" % instance, "memory.current")
+    try:
+        with open(path, "r") as f:
+            return int(f.read().strip()) // 1024
+    except (OSError, ValueError):
+        return None
+
+
+def slot_pids(instance, root=None):
+    """How many processes this slot's session is running, or None."""
+    base = SESSION_CGROUP_ROOT if root is None else root
+    path = os.path.join(base, "hdw4s-%s.slice" % instance, "pids.current")
+    try:
+        with open(path, "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def teardown_requested(instance, root=None):
+    """True when somebody has already asked for this slot to be torn down."""
+    base = TEARDOWN_DIR if root is None else root
+    try:
+        return os.path.exists(os.path.join(base, instance))
+    except OSError:
+        return False
+
+
+def request_teardown(instance, root=None):
+    """Ask for this slot to be torn down. Returns None, or why it could not.
+
+    THE ROUTER CANNOT DO THIS ITSELF AND MUST NOT BE ABLE TO. It runs as a
+    DynamicUser with an empty CapabilityBoundingSet; stopping a unit or writing
+    to a cgroup needs privilege this component deliberately does not have, and
+    giving it any would put the box's teardown behind an HTTP surface that
+    strangers reach. So the router's whole part is to write a file whose NAME is
+    the slot, into a directory it can reach because of the same group membership
+    that lets it reach the slot sockets -- the access story this component
+    already has, rather than a second one.
+    """
+    base = TEARDOWN_DIR if root is None else root
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        # O_EXCL so a second click is not a second request. An existing file is
+        # success from the visitor's point of view: what they asked for is
+        # already happening.
+        os.close(os.open(os.path.join(base, instance),
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o660))
+        return None
+    except FileExistsError:
+        return None
+    except OSError as e:
+        return e.strerror or str(e)
+
+
+def describe_session(rec, sid, now=None):
+    """One row's worth of what this router can HONESTLY say about a session.
+
+    WHAT IS DELIBERATELY NOT HERE: any column that says idle, active, in use or
+    unused. 2026-09-25, measured on the only real visitor's session anybody has
+    observed on this product: its desktop ran for TWENTY-FOUR MINUTES with
+    nothing connected to it, between being started and its owner's browser first
+    reaching the picture -- while being the freshest session on the box. Both
+    cheap readings of "in use" score that as idle. A page that confidently
+    mislabels a person's own desktop back to them is worse than one that admits
+    what it cannot know, and this page is shown to somebody who is already
+    having a bad time.
+
+    WHAT IS HERE INSTEAD, AND WHY IT IS THE RIGHT COLUMN FOR HIS VERB. He said
+    FIND the misbehaving session, and he described what makes it findable:
+    *"a program that surprisingly uses way more memory than the user expected...
+    and when that happens, it's not just by a little but by a lot."* Memory is
+    therefore not a diagnostic dressed up for a visitor -- it is the actual
+    subject, it is readable from the cgroup the product itself puts the session
+    in, and "by a lot" is a comparison a person makes at a glance between two
+    rows without being taught anything. Crude, stated, and no heuristic.
+    """
+    now = time.time() if now is None else now
+    inst = rec["instance"]
+    kb = slot_memory_kb(inst)
+    return {
+        "sid": sid,
+        "instance": inst,
+        "age": max(0.0, now - rec.get("minted", now)),
+        "memory_mb": None if kb is None else kb // 1024,
+        "pids": slot_pids(inst),
+        "started": bool(rec.get("live")) or slot_occupied(inst),
+        "ending": teardown_requested(inst),
+    }
+
+
+def console_page(rows, note=None):
+    """The visitor's own sessions, and one button each.
+
+    IT MUST RENDER ON AN UNWELL MACHINE, so it is static HTML with no script, no
+    font, no image and no request after the first: a rescue that needs anything
+    to load is not a rescue. The numbers come from three small reads of files
+    the kernel keeps in memory.
+    """
+    if not rows:
+        body = ("<p>You have no desktops on this machine right now.</p>"
+                "<p><a href=\"/\">Open a desktop</a></p>")
+    else:
+        body = ""
+        for r in rows:
+            if r["ending"]:
+                state = "<b>ending</b>"
+                button = "<p>This desktop is being shut down.</p>"
+            elif not r["started"]:
+                state = "starting"
+                button = ("<form method=\"post\" action=\"/sessions/%s/end\">"
+                          "<button type=\"submit\">End this desktop</button>"
+                          "</form>" % r["sid"])
+            else:
+                state = "running"
+                button = ("<form method=\"post\" action=\"/sessions/%s/end\">"
+                          "<button type=\"submit\">End this desktop</button>"
+                          "</form>" % r["sid"])
+            body += (
+                "<div style=\"border:1px solid #444;padding:1rem;margin:1rem 0\">"
+                "<p><a href=\"/s/%s/\">Open this desktop</a> &mdash; %s, "
+                "started %s ago</p>"
+                "<p>using <b>%s</b> of memory, %s processes</p>"
+                "%s</div>"
+                % (r["sid"], state, describe_age(r["age"]),
+                   "unknown" if r["memory_mb"] is None
+                   else "%d MB" % r["memory_mb"],
+                   "an unknown number of" if r["pids"] is None else r["pids"],
+                   button))
+        body += ("<p>If one of these is using far more memory than the others, "
+                 "that is the one misbehaving. Ending it frees the machine "
+                 "for the rest.</p>")
+    if note:
+        body = "<p><b>%s</b></p>" % note + body
+    return page("Your desktops on this machine", body)
+
+
+def describe_age(seconds):
+    """Coarse on purpose: nobody rescuing a machine needs seconds."""
+    seconds = int(seconds)
+    if seconds < 90:
+        return "less than a minute"
+    if seconds < 5400:
+        return "%d minutes" % (seconds // 60)
+    if seconds < 172800:
+        return "%d hours" % (seconds // 3600)
+    return "%d days" % (seconds // 86400)
+
+
+def console(own, wf, identity, new_identity, what, sid, method):
+    """Serve the console. NEVER mints, whatever it is asked.
+
+    The one thing this whole surface must not do is start a desktop: it is the
+    page somebody reaches when the machine is already in trouble, and the front
+    door one path away mints on sight.
+    """
+    extra = refresh_headers(own, identity, new_identity)
+    owned = own.owned_by(identity)
+
+    if what == "end":
+        if method != b"POST":
+            # A GET that destroys a desktop is one prefetch away from doing it
+            # unasked. Answered with the list rather than an error, so a person
+            # who reached this address by going backwards in their history sees
+            # their sessions instead of a dead end.
+            respond(wf, 405, console_page(
+                [describe_session(own.lookup(s), s) for s in owned
+                 if own.lookup(s) is not None],
+                "That address ends a desktop, and ending one has to be asked "
+                "for with the button rather than by opening a link."), extra)
+            return
+        rec = own.lookup(sid)
+        if rec is None or rec["identity"] != identity:
+            # THE INVARIANT, REFUSING, AND IT IS CHECKED HERE RATHER THAN BY THE
+            # PAGE. Identical answer for "no such session" and "not yours", on
+            # purpose: distinguishing them tells a stranger which sids exist.
+            log("refused a teardown of %s: it is not this visitor's session"
+                % sid)
+            respond(wf, 403, page(
+                "Not your desktop",
+                "This address belongs to a different browser."), extra)
+            return
+        why = request_teardown(rec["instance"])
+        if why is not None:
+            log("could not record a teardown request for %s: %s"
+                % (rec["instance"], why))
+            respond(wf, 503, page(
+                "This machine could not take that request",
+                "Nothing has been shut down. Try again, and tell whoever runs "
+                "this machine if it keeps happening."), extra)
+            return
+        log("a visitor asked to end their own session: slot %s, session %s"
+            % (rec["instance"], sid))
+        # 303, not 200: the browser must not repeat the POST if the person
+        # reloads the page they land on.
+        respond(wf, 303, b"", [("Location", "/sessions/")] + extra)
+        return
+
+    rows = []
+    for s in owned:
+        rec = own.lookup(s)
+        if rec is not None:
+            rows.append(describe_session(rec, s))
+    respond(wf, 200, console_page(rows), extra)
+
+
+def assert_console_shows_only_your_own(target=None):
+    """Prove the console's scope comes from the OWNERSHIP TABLE, not the page.
+
+    Runs at every start beside the others. What it catches is a path shape that
+    LOOKS like a console address and is not -- because the cost of getting that
+    wrong is not a 404: anything this parser does not claim falls through to
+    arrival(), which MINTS A DESKTOP. A console URL that stopped being
+    recognised would quietly hand somebody a new desktop every time they tried
+    to end one.
+    """
+    target = console_target if target is None else target
+    assert target(b"/sessions") == ("list", None), "the console list moved"
+    assert target(b"/sessions/") == ("list", None), "the console list moved"
+    assert target(b"/sessions/abc/end") == ("end", "abc"), "the end action moved"
+    # Things that must NOT be read as the console, because each of them would
+    # otherwise be routed somewhere that acts.
+    for path in (b"/", b"/s/abc/", b"/sessions/abc", b"/sessions/abc/",
+                 b"/sessions/abc/end/more", b"/sessionsabc/end",
+                 b"/sessions//end"):
+        what, _ = target(path)
+        assert what != "end", "%r was read as an END action" % path
+
+
+# --------------------------------------------------------------------------
 # Proxying
 # --------------------------------------------------------------------------
 
@@ -3711,6 +4013,17 @@ def serve(sock, own, expected_b64):
                 continue
 
             if sid is None:
+                # THE CONSOLE IS CLAIMED BEFORE THE ARRIVAL, and the order is
+                # the whole safety of it. Everything this dispatch does not
+                # claim falls through to arrival(), which MINTS A DESKTOP -- so
+                # a console address that stopped being recognised would not 404,
+                # it would hand somebody a new desktop every time they tried to
+                # end one. That is why console_target() has a start-up guard of
+                # its own rather than being trusted to keep working.
+                what, csid = console_target(rest)
+                if what is not None:
+                    console(own, wf, identity, new_identity, what, csid, method)
+                    continue
                 arrival(own, wf, identity, query, new_identity)
                 continue
 
@@ -3883,6 +4196,10 @@ def main():
     # that it expires, and that it has no way to say yes to anybody.
     assert_reservation_only_refuses(reserve_slot, reserved_slots, release_slot,
                                     reservation_fresh)
+    # And the console's address parsing, for the reason given in its own
+    # docstring: what this does not claim is MINTED, so a parser that quietly
+    # stopped matching would turn "end my desktop" into "give me another one".
+    assert_console_shows_only_your_own(console_target)
 
     # The third guard REPORTS and does not refuse, and the asymmetry with the
     # two above is deliberate. Those two fail closed because what they catch is
