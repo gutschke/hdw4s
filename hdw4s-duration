@@ -117,7 +117,26 @@ def parse(text, floor=MIN_SECONDS):
     quietly honours is the same two-readings-of-one-value defect in a smaller
     costume.
     """
-    text = "" if text is None else str(text)
+    # REFUSE A NUMBER THAT IS ALREADY A NUMBER. This used to be str(text), so
+    # feeding back a value this function had RETURNED -- whole seconds -- read
+    # it as a count of DAYS: parse(604800) answered 52,254,720,000 seconds,
+    # about 1,656 years, which the reaper honours as "never". Measured
+    # 2026-09-24. No caller does that today; both shipped ones pass a string
+    # off the config line, and the round trip is the kind of thing a later
+    # refactor introduces without noticing, because nothing fails -- the
+    # session simply never gets reaped.
+    #
+    # A bare STRING digit still means days ("7" -> a week). That is the
+    # documented nudge for config files and stays. The refusal is about the
+    # TYPE, which says where the value came from: a str came from a human or a
+    # config line, an int came from our own arithmetic.
+    if text is not None and not isinstance(text, str):
+        raise DurationError(
+            "duration must be text, not %s -- got %r. A number here is almost "
+            "always seconds that this function already returned, and reading "
+            "it as days would silently mean 'never'."
+            % (type(text).__name__, text))
+    text = "" if text is None else text
 
     # Split the trailing unit off at the last digit or decimal point. "30s" ->
     # "s"; "30" -> ""; "0.5h" -> "h"; and "1h30m" -> "m" with "1h30" left over,

@@ -1878,6 +1878,43 @@ def scratch_demux(suffix, extra):
     return path
 
 
+def test_a_duration_already_in_seconds_is_refused(rig=None):
+    """The round trip that means "never reaped", and it cannot be tested from the CLI.
+
+    DURATION.parse takes text off a config line, and a BARE NUMBER there means
+    days -- "7" is a week, which is the documented nudge. The old entry point
+    ran str() over whatever it was handed, so an int went down that same path:
+    parse(604800), a value this function had itself RETURNED, answered
+    52,254,720,000 seconds. About 1,656 years. The reaper honours that as
+    never, and nothing anywhere fails -- the sessions simply accumulate.
+
+    No shipped caller does this today; both pass a string. It is guarded
+    because the failure is silent and a later refactor that moves a computed
+    value back through the parser has no way to find out. Note this CANNOT be
+    an arm of the duration group in tests.sh: that group goes through argv,
+    where every value is already a string, so the defect is invisible from
+    there. It is a property of the Python boundary and has to be tested at it.
+    """
+    m = load_demux()
+    parse = m.DURATION.parse
+
+    # The permit arm first. Without it the refusals below are satisfied by a
+    # parser that refuses everything.
+    assert parse("7") == 604800, parse("7")
+    assert parse("7d") == 604800, parse("7d")
+
+    for bad in (604800, 7, 0, 7.0):
+        try:
+            got = parse(bad)
+        except Exception as e:
+            assert "must be text" in str(e), "refused for the wrong reason: %s" % e
+        else:
+            raise AssertionError(
+                "parse(%r) was accepted and answered %r seconds (%.0f years) -- "
+                "a number that is already seconds read as days"
+                % (bad, got, got / 31557600.0))
+
+
 def red_pool_from_the_directory():
     """The arm above, against a router whose pool is the directory listing.
 
@@ -1987,6 +2024,7 @@ def main():
     # unpinned -- the shipped default cannot be exercised by a rig that sets it.
     for fn in (test_shipped_default_resumes_a_returning_browser,
                test_a_slot_that_is_never_reaped_is_reported_at_start,
+               test_a_duration_already_in_seconds_is_refused,
                test_the_records_the_refusal_log_is_read_from_survive_a_restart):
         try:
             fn()
