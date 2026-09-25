@@ -67,9 +67,17 @@ if [ "$1" = 'configure' ]; then
       case "${idx}" in ''|\#*) continue;; esac
       d="${UNITDIR}/hdw4s-proxy@${inst}.service.d"
       [ -d "${d}" ] || continue
+      # Both ephemeral-shaped types take the ephemeral unit. The CLI decides this
+      # in ephemeral_shaped(); an installer cannot call it -- it may be repairing
+      # a tree that has no working hdw4s yet -- so the list is spelled out, and
+      # .github/tests.sh compares the two spellings so they cannot drift apart.
+      # A "template" row left on the default arm got BindsTo=hdw4s@<inst>, which
+      # is a named-desktop unit that will never run an authoring session: the
+      # relay listens, every start fails on the dependency, and the front door
+      # goes on accepting connections it can never serve.
       case "${type}" in
-        ephemeral) sunit="hdw4s-ephemeral@${inst}.service";;
-        *)         sunit="hdw4s@${inst}.service";;
+        ephemeral|template) sunit="hdw4s-ephemeral@${inst}.service";;
+        *)                  sunit="hdw4s@${inst}.service";;
       esac
       # Existing drop-ins are migrated, not skipped. They were written with
       # "Requires=", which does not end a relay whose session EXITS ON ITS OWN --
@@ -194,7 +202,10 @@ if [ "$1" = 'configure' ]; then
     # of this table uses, and for the same reason.
     while read -r idx inst type; do
       case "${idx}" in ''|\#*) continue;; esac
-      [ "${type:-desktop}" = 'ephemeral' ] || continue
+      # Ephemeral-shaped, not "ephemeral": an authoring session is reachable
+      # only through the front door on this machine, so a port serves no caller
+      # it has and every caller it must not have.
+      case "${type:-desktop}" in ephemeral|template) ;; *) continue;; esac
       if grep -qs '^[[:space:]]*HDW4S_TRANSPORT=.*unix' \
               "/etc/hdw4s/${inst}.conf"; then
         continue
