@@ -234,7 +234,10 @@ belongs to the copy of the streaming server, of which there is one.
     alone unless you know why you are changing it: the socket unit in front is
     the only way in, and the firewall decides who may reach that. Binding
     anything wider publishes the streaming server directly, at a port in the
-    second block, which the firewall does not cover and nothing authenticates.
+    second block, which nothing authenticates and which the firewall does not
+    cover for connections arriving from off the machine. It does cover it in
+    the other direction: a desktop may not open a connection to a session port
+    on this machine at all, whichever address it is bound to.
 
   * `HDW4S_ALLOW_SYSTEM_USER`:
     Set to `yes` to permit a session for an account below UID 1000.
@@ -734,6 +737,33 @@ The rules cover the whole port block rather than the ports currently in use. A
 rule written per session goes stale the moment a session moves, which is how a
 firewall ends up guarding a port nothing listens on while live sessions sit
 unprotected beside it.
+
+The table also stops one desktop reaching another. A desktop is meant to be
+reached through its own front door, which is where authentication happens;
+before this rule existed, anything running inside one session could open a
+connection straight to another session's port over loopback, with no credential
+-- past the reverse proxy for a named desktop, and past every boundary there is
+for an ephemeral one, whose occupant is a stranger running untrusted code. The
+rule matches the *sender*: a connection to a session port is refused when it
+comes from a process inside `hdw4s.slice`, which is every desktop and nothing
+else. The relay that serves the sessions runs under `system.slice` and is
+unaffected, as is anything an administrator runs. Nothing per session is
+recorded, so there is nothing here to go stale when a slot moves.
+
+Two exceptions, both deliberate. Connections made as `root` from inside a
+session are allowed, because the session's own startup check of what its server
+is serving is made that way; the occupant of an ephemeral slot is in no
+sudo-capable group and cannot become root, and on a named desktop anyone who
+could would be able to flush the table outright. And the rule needs a kernel
+that can match a socket by its cgroup -- 6.11 or newer inside a container.
+Where that is not available, `hdw4s firewall --apply` says so on standard error
+and `hdw4s firewall --check` reports `cross-reach NOT CLOSED`. There is no
+port-range fallback for this one: the relay talks to the same ports the
+desktops do, so a rule written by port would either close the product or close
+nothing.
+
+A desktop that needs to reach a service elsewhere goes out over the network and
+authenticates like any other client.
 
 The table is also checked periodically, not just applied once at session start.
 `nft flush ruleset` removes every table on the machine, including this one, and

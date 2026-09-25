@@ -395,5 +395,29 @@ ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
 # An argument cannot be overridden by a configuration file.
 ExecStart=/usr/lib/hdw4s/hdw4s-session %i --ephemeral
 
+# What is actually SERVED, asked of the running server rather than of the file we
+# generated. Selkies decides at startup whether to use the configured web root, and
+# if it declines it logs one warning and serves the packaged client -- after which
+# this session comes up, notifies ready, and every health check reports health while
+# the gate is simply absent. Failing here stops the session, which is the point.
+#
+# "!" and NOT nothing: this runs as root, deliberately. A desktop may no longer open
+# a connection to a session port on this machine -- that is the firewall's
+# sessions_out chain, and it is what stops one visitor's desktop reaching another's
+# -- and this request has exactly the shape being refused. Root is how the session's
+# own check is told apart from its occupant, who cannot become root here. Run it
+# without the "!" and every session on the machine fails to start.
+#
+# "!" and NOT "+", for the reason the ExecStartPre above sets out at length: "+"
+# keeps BindPaths= and TemporaryFileSystem= while dropping ProtectHome=, which lands
+# this unit's /home/user mount on the real /home.
+#
+# It waits for the port itself and does not rely on running after the readiness
+# notification. Measured: with NotifyAccess=all something inside the desktop
+# sends READY= before the streaming server has bound, so this line runs first and
+# a version of it without its own wait killed every session it was meant to
+# verify.
+ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot serving-gate %i
+
 [Install]
 WantedBy=multi-user.target

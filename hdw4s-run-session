@@ -944,83 +944,36 @@ stream+=(--web-root="${webroot}")
 children+=($!)
 stream_pid="$!"
 
-# The third check, and the only one that can see what is actually SERVED. The two
-# before it look at the file we generated; this one asks the running server for its
-# index and looks for the gate in the bytes that come back.
+# THE THIRD CHECK -- the only one that can see what is actually SERVED -- IS NOT
+# HERE ANY MORE. It is "ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot serving-gate"
+# in the session units, and it moved for a reason that is not tidiness.
 #
-# What it is for: Selkies decides at startup whether to use the configured web root,
-# and if it declines -- it logs a single warning and serves the packaged client -- the
-# session still comes up, notifies ready, and every state check in this product reports
-# health while the gate is simply absent.
+# What it does is unchanged: ask the running server for its index and look for
+# the gate in the bytes that come back, because Selkies decides at startup
+# whether to use the configured web root and, if it declines, logs one warning
+# and serves the packaged client -- after which the session comes up, notifies
+# ready, and every health check in this product reports health while the gate is
+# simply absent. Do not narrow it without narrowing the file check above it;
+# withholding the web root without this ships a feature that is GREEN AND ABSENT.
 #
-# What is NOT established, and the comment should not pretend otherwise: no case has
-# been constructed where this fires and the file check above does not. The obvious
-# candidate, a web root the server cannot read, is caught by that check instead, because
-# it runs in this same namespace and sees exactly what the server sees. So this is
-# defence against a served/file divergence that has not been reproduced -- kept because
-# it costs one request and the failure it guards against is silent, not because it has
-# ever caught anything.
+# Why it cannot run here: this script is the session, the unit sets User=%i, and
+# a desktop is no longer allowed to open a connection to a session port on this
+# machine. That refusal is the fix for one visitor's desktop being able to reach
+# another's, and this check's own request has exactly the shape being refused.
+# The unit runs it as root instead, with "!", which the occupant cannot be.
 #
-# In the background, because the server is not listening yet and the session must not
-# wait on its own front door to come up.
-# EVERY session type, since the gate now applies to all of them. This guard is
-# the half that makes the other half real: withholding the web root without
-# this check ships a feature that is GREEN AND ABSENT. A session pointed at a
-# missing or unreadable web root serves the stock ungated client, logs one
-# warning, notifies ready, and passes every health check in this product while
-# the gate -- the entire point -- is simply not there. Do not narrow one of
-# these two without narrowing the other.
-(
-  for _ in $(seq 1 60); do
-    (exec 3<>"/dev/tcp/127.0.0.1/${HDW4S_PORT}") 2>/dev/null && break
-    sleep 1
-  done
-  # The credential goes down a PIPE, never in argv. "-u user:pass" here put it
-  # in /proc/<pid>/cmdline of both this helper and its curl, readable by every
-  # process of this uid -- and in an ephemeral session that uid is the
-  # occupant's, so it was published to exactly the party it exists to keep out.
-  # printf is a shell builtin, so the value never becomes a process argument;
-  # hdw4s-webroot passes its own stdin straight to "curl --config -" without
-  # reading it, so the bytes live in one pipe and one process, not on disk and
-  # not in a file name.
-  #
-  # This closes the argv hole and nothing more. The same secret is still in
-  # this process's environment -- the streaming server is configured through
-  # SELKIES_BASIC_AUTH_PASSWORD and there is no other way to tell it -- and
-  # still in $CREDENTIALS_DIRECTORY/hdw4s-auth, mode 0400 owned by this user.
-  # An occupant who wants it reads it from either. What must not be true is
-  # that the credential outlives the occupant who saw it; see "hdw4s auth".
-  #
-  # curl's config format reads an unquoted value to end of line, which is
-  # exactly right for what "hdw4s auth" mints -- base64 with "=/+" removed,
-  # so [A-Za-z0-9] only -- and wrong for anything carrying a quote, a
-  # backslash or whitespace, which it would re-interpret. Refuse rather than
-  # authenticate with a silently mangled credential: a 401 from a mangled
-  # secret looks identical to an ungated client and would stop the session
-  # for the wrong reason.
-  case "${SELKIES_BASIC_AUTH_USER:-}${SELKIES_BASIC_AUTH_PASSWORD:-}" in
-    *[!A-Za-z0-9_.-]*)
-      # Fail CLOSED. This runs in a background subshell, so "exit" here would
-      # end the subshell and leave the session up with its one safety property
-      # never checked -- the exact shape of failure the rest of this file is
-      # written to avoid. Stop the stream instead, as the ungated branch does.
-      echo 'hdw4s: the basic-auth credential contains characters this check' >&2
-      echo '  cannot pass to curl without quoting ambiguity, so the served' >&2
-      echo '  client cannot be verified; stopping the session rather than' >&2
-      echo '  leaving it up unverified.' >&2
-      kill "${stream_pid}" 2>/dev/null || :
-      exit 1 ;;
-  esac
-  if ! printf 'user = %s:%s\n' \
-         "${SELKIES_BASIC_AUTH_USER:-}" "${SELKIES_BASIC_AUTH_PASSWORD:-}" |
-       "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" serving \
-         "http://127.0.0.1:${HDW4S_PORT}/" --auth-stdin; then
-    echo 'hdw4s: this session is serving an UNGATED client; stopping it rather than' >&2
-    echo '  handing the next arrival a desktop that is not theirs.' >&2
-    kill "${stream_pid}" 2>/dev/null || :
-  fi
-) &
-children+=($!)
+# The sixty-second /dev/tcp wait that used to stand here went WITH it, into
+# hdw4s-webroot, and it had to. The first version of this change dropped the
+# wait, on the reasoning that ExecStartPost= runs after the readiness
+# notification below and that notification is sent only once the port is bound.
+# Measured false on the first run: the check fired a second before the streaming
+# server announced its port and took the session down. NotifyAccess=all lets
+# anything in this cgroup send READY=, and something does, so "started" is not
+# the claim it reads as -- do not rebuild an ordering argument on it here.
+#
+# Failure is still fatal to the session, and now more simply: a failing
+# ExecStartPost= stops the unit, where this code had to kill the streaming
+# server from a background subshell and hope the main loop noticed.
 
 # Report ready only once the stream is actually accepting connections, so that
 # "systemctl start" blocks until the session can be reached and a dependent

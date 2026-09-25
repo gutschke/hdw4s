@@ -48,6 +48,7 @@ usage: hdw4s-webroot build     <instance> <web-root> [<session name>]
        hdw4s-webroot check     <web-root> [<instance>]
        hdw4s-webroot gate      <instance>
        hdw4s-webroot serving <url> [--auth-stdin] [<curl args>...]
+       hdw4s-webroot serving-gate <instance>
 
   --auth-stdin  read a curl config line ("user = <user>:<password>") from stdin
                 and hand it to curl as its own config. Never pass a credential
@@ -253,6 +254,87 @@ cmd_serving() {
   esac
 }
 
+# "serving" with the URL and the credential derived, run by the unit as root.
+#
+# IT RUNS AS ROOT ON PURPOSE, and that is the whole reason this subcommand
+# exists rather than the four lines it replaces inside hdw4s-run-session. A
+# desktop may no longer open a connection to a session port on this machine --
+# the firewall's sessions_out chain refuses it, because every other visitor's
+# desktop used to be one unauthenticated request away. The session's own check
+# of its own front door is the one connection of that shape that is legitimate,
+# and the way it is told apart from the occupant's is that it is made by root:
+# the occupant of an ephemeral slot is in no sudo-capable group and cannot
+# become root, and on a named session anyone who can would be able to flush the
+# table anyway.
+#
+# So: do not move this back inside the session, and do not run it without the
+# "!" prefix in the unit. Either one puts it back on the occupant's uid, where
+# the firewall refuses it -- and it fails CLOSED, so the symptom is every
+# session on the machine refusing to start, with this file's message.
+#
+# The port comes from the environment, which systemd fills from
+# /etc/hdw4s/<instance>.conf OUTSIDE the namespace. It cannot be read from that
+# file here: the session unit hides /etc/hdw4s with InaccessiblePaths=, and "!"
+# keeps the mount namespace.
+cmd_serving_gate() {
+  local inst="$1" port="${HDW4S_PORT:-}"
+  [ -n "${port}" ] ||
+    die "HDW4S_PORT is not set: this must be run from the session unit, which
+takes it from /etc/hdw4s/${inst}.conf"
+
+  # Wait for the server to bind. An earlier version of this did not, on the
+  # reasoning that ExecStartPost= runs after the readiness notification and the
+  # session notifies ready only once the port is bound. MEASURED FALSE on the
+  # first run: the check fired a second BEFORE "Selkies server running on
+  # http://127.0.0.1:<port>" appeared in the journal, failed to connect, and
+  # took the session down with it. The unit sets NotifyAccess=all, so anything
+  # in the desktop's cgroup can send READY= and something evidently does --
+  # which makes "started" a claim about the wrong thing and makes any ordering
+  # argument here worthless. So the wait is explicit and this check depends on
+  # no ordering at all.
+  #
+  # Sixty seconds, the same budget the equivalent loop inside the session had.
+  # A refusal from the firewall arrives instantly and repeatedly, so a guard
+  # that wrongly refuses this costs a minute per session and then says so
+  # loudly, rather than passing quietly.
+  for _ in $(seq 1 60); do
+    (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && break
+    sleep 1
+  done
+
+  # No credential configured -- every ephemeral slot, because "hdw4s auth"
+  # refuses one for a slot by design. Ask plainly.
+  if [ "${HDW4S_AUTH:-none}" != 'basic' ] ||
+     [ -z "${CREDENTIALS_DIRECTORY:-}" ] ||
+     [ ! -r "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ]; then
+    cmd_serving "http://127.0.0.1:${port}/"
+    return
+  fi
+
+  # The same derivation the session itself uses, and it has to stay the same:
+  # an instance is the account name, stripped at the colon for an instance named
+  # "<user>:<session>" by a version that still created them.
+  local user pass
+  user="${inst%%:*}"
+  pass="$(cat "${CREDENTIALS_DIRECTORY}/hdw4s-auth")"
+  # curl's config format reads an unquoted value to end of line, which is right
+  # for what "hdw4s auth" mints -- base64 with "=/+" removed, so [A-Za-z0-9]
+  # only -- and wrong for anything carrying a quote, a backslash or whitespace,
+  # which it would re-interpret. Refuse rather than authenticate with a silently
+  # mangled credential: a 401 from a mangled secret looks identical to an
+  # ungated client and would stop the session for the wrong reason.
+  case "${user}${pass}" in
+    *[!A-Za-z0-9_.-]*)
+      die "the basic-auth credential contains characters this check cannot pass
+to curl without quoting ambiguity, so the served client cannot be verified" ;;
+  esac
+  # Down a pipe, never in argv: /proc/<pid>/cmdline is readable by every process
+  # of this uid. cmd_serving hands its own stdin straight to curl without
+  # reading it, so the bytes live in one pipe and one process.
+  printf 'user = %s:%s\n' "${user}" "${pass}" |
+    cmd_serving "http://127.0.0.1:${port}/" --auth-stdin
+}
+
 [ "$#" -ge 1 ] || usage
 case "$1" in
   build)   shift; [ "$#" -ge 2 ] || usage; cmd_build "$@" ;;
@@ -276,5 +358,6 @@ case "$1" in
            cmd_build "${1}" "${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${1}" \
                      "${2:-Desktop}" ;;
   serving) shift; [ "$#" -ge 1 ] || usage; cmd_serving "$@" ;;
+  serving-gate) shift; [ "$#" -ge 1 ] || usage; cmd_serving_gate "$1" ;;
   *) usage ;;
 esac

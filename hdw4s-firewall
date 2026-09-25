@@ -57,6 +57,29 @@ internal_last=$(( HDW4S_BASE_PORT + 2 * HDW4S_BLOCK_SIZE - 1 ))
 # exactly how a firewall ends up guarding a port nothing listens on while the
 # live sessions sit unprotected next to it. Covering the block means the
 # ruleset is correct before any session starts and stays correct afterwards.
+# Can this kernel match a socket's cgroup at all? Two callers now depend on the
+# answer -- the media chain and the cross-reach chain -- so it is asked once,
+# here, rather than twice in two places that would drift apart.
+#
+# Matching a cgroup by namespace-relative level was broken until kernel 6.11
+# (nft_socket_cgroup_subtree_level). Below that, inside a container, the level a
+# rule names points at the container's own top slice instead of ours -- the path
+# exists, nft accepts the expression, and the rule then matches nothing while
+# looking perfectly healthy. A guard that cannot tell you it is not guarding is
+# worse than no guard, so where that combination holds we say so and do
+# something else.
+cgroup_level_usable() {
+  local kmaj kmin kver
+  kver="$(uname -r)"; kmaj="${kver%%.*}"; kmin="${kver#*.}"; kmin="${kmin%%.*}"
+  case "${kmaj}${kmin}" in
+    *[!0-9]*) return 1;;
+  esac
+  if [ "${kmaj}" -lt 6 ] || { [ "${kmaj}" -eq 6 ] && [ "${kmin}" -lt 11 ]; }; then
+    [ "$(systemd-detect-virt --container 2>/dev/null)" = 'none' ] || return 1
+  fi
+  [ -d /sys/fs/cgroup/hdw4s.slice ]
+}
+
 generate() {
   local v4='' v6='' addr
   for addr in ${HDW4S_PROXIES}; do
@@ -114,16 +137,7 @@ generate() {
     # matches nothing while looking perfectly healthy. A guard that cannot tell
     # you it is not guarding is worse than no guard, so where that combination
     # holds, use the port range and say why.
-    local kmaj kmin kver cgroup_ok='yes'
-    kver="$(uname -r)"; kmaj="${kver%%.*}"; kmin="${kver#*.}"; kmin="${kmin%%.*}"
-    case "${kmaj}${kmin}" in
-      *[!0-9]*) cgroup_ok='no';;
-      *) if [ "${kmaj}" -lt 6 ] || { [ "${kmaj}" -eq 6 ] && [ "${kmin}" -lt 11 ]; }; then
-           [ "$(systemd-detect-virt --container 2>/dev/null)" = 'none' ] || cgroup_ok='no'
-         fi;;
-    esac
-
-    if [ "${cgroup_ok}" = 'yes' ] && [ -d /sys/fs/cgroup/hdw4s.slice ] &&
+    if cgroup_level_usable &&
        nft -c -f - >/dev/null 2>&1 <<'PROBE'
 table inet hdw4s_probe {
         chain c { type filter hook input priority filter; policy accept;
@@ -181,6 +195,119 @@ CHAIN
     fi
   fi
 
+  # ---- one desktop must not reach another --------------------------------
+  #
+  # A desktop is reached through its own front door, which is where
+  # authentication happens. Nothing else on this machine has any business
+  # opening a connection to a session port -- and a session least of all: an
+  # ephemeral occupant is a stranger running untrusted code, and every other
+  # visitor's desktop was one unauthenticated request away over loopback.
+  # Measured, twice, at two depths, before this chain existed.
+  #
+  # WHY THE SENDER AND NOT THE PORT. The three obvious shapes were all wrong
+  # here. Closing the port breaks the relay, which is the one caller that must
+  # get through. Giving a session a credential is not available: a slot has none
+  # and cannot be given one by design, and the standing ruling is that the repair
+  # for a reachability problem is the transport rather than a secret. Naming each
+  # session in a rule of its own goes stale the moment a slot moves -- the same
+  # reasoning that keeps the input chain covering the whole block. What is left
+  # is the property that actually distinguishes the two callers: the relay runs
+  # under system.slice and a desktop runs under hdw4s.slice, whatever port,
+  # whatever uid, and however many sessions exist. Nothing per-session is
+  # recorded here, so nothing here can go stale.
+  #
+  # WHY uid 0 IS LET THROUGH, and it is not a hole. The session verifies its own
+  # front door at startup -- "is this server really serving the gated client" --
+  # and that request comes from inside the session's own cgroup. It is run as
+  # root by the unit (ExecStartPost=!), which is a privilege the occupant does
+  # not have: an ephemeral slot account is in no sudo-capable group, and on a
+  # named session anyone who can become root can flush this table outright, so
+  # the exception concedes nothing that was being defended. Measured before the
+  # change: with a counting-only copy of this chain loaded, a session start
+  # produced 11 packets from the occupant's uid to its own port and 0 from uid 0
+  # -- which is exactly why moving that check is part of this change and not a
+  # tidy-up. A drop without it stops every session from starting.
+  #
+  # BOTH BLOCKS, not just the internal one. The public block is what a named
+  # session on the TCP transport listens on, and reaching it over loopback
+  # bypasses the reverse proxy that enforces SSO -- the owner's own description
+  # of this defect.
+  #
+  # "fib daddr type local" rather than a list of loopback addresses: the question
+  # is "a session port on THIS machine", and that is what it asks. A session
+  # whose HDW4S_ADDR was pointed at a real interface is covered without anyone
+  # having to remember to widen an address list.
+  #
+  # reject, not drop: a refusal that hangs presents as a broken desktop and is
+  # diagnosed for hours; a reset is immediate and reads as what it is, nothing
+  # listening here for you.
+  #
+  # "meta skuid 0-4294967295" looks like a tautology and is not: a uid match
+  # fails when the packet has no local sending socket at all, so the full range
+  # is how the rule says "this really was sent by something on this machine".
+  # Measured, and it is the difference between a refusal counter that means
+  # something and one that does not. The socket expression falls back to a
+  # lookup by address when the packet carries no sender, and on loopback that
+  # lookup finds the DESTINATION -- a session's own listener, which is in
+  # hdw4s.slice -- so two ownerless packets per session start were being
+  # attributed to the sender's cgroup and refused. Nothing depended on them, but
+  # a guard whose counter moves for traffic it was not built to stop cannot be
+  # read, and this project reads that counter.
+  local xreach_chain='' xreach_counters=''
+  if cgroup_level_usable &&
+     nft -c -f - >/dev/null 2>&1 <<'PROBE'
+table inet hdw4s_probe {
+	chain c {
+		type filter hook output priority filter; policy accept;
+		socket cgroupv2 level 1 "system.slice" fib daddr type local drop
+	}
+}
+PROBE
+  then
+    xreach_counters="$(cat <<'COUNTERS'
+
+        # Two counters, because one cannot answer the question. A rule that
+        # matches nothing looks exactly like a rule that is never reached, and
+        # the refusal counter is silent in both cases. "seen" moves for every
+        # packet that reaches this chain, including the ones it then allows, so a
+        # reading can tell a quiet guard from an absent one.
+        counter hdw4s_xreach_seen {
+        }
+
+        counter hdw4s_xreach_refused {
+        }
+COUNTERS
+)"
+    xreach_chain="$(cat <<CHAIN
+
+        # Connections from a desktop to a session port on this machine.
+        chain sessions_out {
+                type filter hook output priority filter; policy accept;
+
+                meta l4proto != tcp accept
+                tcp dport != ${first}-${internal_last} accept
+                counter name "hdw4s_xreach_seen"
+
+                # The session's own startup checks; see above.
+                meta skuid 0 accept
+
+                meta skuid 0-4294967295 socket cgroupv2 level 1 "hdw4s.slice" \
+                        fib daddr type local \
+                        counter name "hdw4s_xreach_refused" reject with tcp reset
+        }
+CHAIN
+)"
+  else
+    echo 'hdw4s: this kernel cannot match a socket by its cgroup, so one' >&2
+    echo '       desktop can reach another desktop on this machine directly,' >&2
+    echo '       without passing the front door that authenticates. There is' >&2
+    echo '       no port-range fallback for this one: the relay that serves' >&2
+    echo '       every session talks to the same ports, so a range rule would' >&2
+    echo '       either close the product or close nothing. Run sessions of' >&2
+    echo '       one trust domain only on this machine, or move to a kernel' >&2
+    echo '       6.11 or newer.' >&2
+  fi
+
   cat <<EOF
 #!/usr/sbin/nft -f
 #
@@ -196,7 +323,8 @@ CHAIN
 table inet hdw4s {}
 delete table inet hdw4s
 
-table inet hdw4s {
+table inet hdw4s {${xreach_counters}
+
         set proxies4 {
                 type ipv4_addr
                 flags interval$( [ -z "${v4}" ] || printf '\n                elements = { %s }' "${v4}" )
@@ -229,6 +357,7 @@ table inet hdw4s {
                 counter drop
         }
 ${media_chain}
+${xreach_chain}
 }
 EOF
 }
@@ -261,6 +390,51 @@ for o in d.get("nftables",[]):
         if isinstance(rt,int):
             print("%d %d"%(rt,rt)); sys.exit(0)
 ' 2>/dev/null
+}
+
+# The cgroup a chain's socket-match rule actually names, as the kernel resolves
+# it back to a path. nft stores the number, not the string: if the slice was
+# destroyed and recreated -- a reboot, a stop, a garbage collection of an empty
+# slice -- the number no longer resolves, it prints as a bare integer, and the
+# rule silently matches nothing while looking perfectly healthy. Reading it back
+# is the only way to tell a working rule from a dead one.
+#
+# One function for both chains. It was written twice before this, once per
+# chain, which is two things to keep in step and one of them to forget.
+rule_cgroup() {
+  nft -j list chain inet hdw4s "$1" 2>/dev/null |
+  "${PYTHON:-python3}" -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+def walk(o):
+    if isinstance(o,dict):
+        if o.get("socket",{}).get("key")=="cgroupv2": return True
+        for v in o.values():
+            if walk(v): return True
+    elif isinstance(o,list):
+        for v in o:
+            if walk(v): return True
+    return False
+for o in d.get("nftables",[]):
+    r=o.get("rule")
+    if r and walk(r.get("expr",[])):
+        for e in r["expr"]:
+            m=e.get("match")
+            if m and walk(m.get("left")): print(m.get("right","")); sys.exit(0)' 2>/dev/null
+}
+
+# A named counter's packet count, or nothing if the object is not there.
+counter_packets() {
+  nft -j list counters 2>/dev/null |
+  "${PYTHON:-python3}" -c '
+import json,sys
+want=sys.argv[1]
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for o in d.get("nftables",[]):
+    c=o.get("counter")
+    if c and c.get("name")==want: print(c.get("packets")); sys.exit(0)' "$1" 2>/dev/null
 }
 
 cmd_apply() {
@@ -464,26 +638,7 @@ cmd_check() {
       # and prints as a bare integer, while the rule silently matches nothing.
       # Reading it back is the only way to tell a working rule from a dead one.
       local cg
-      cg="$(nft -j list chain inet hdw4s media 2>/dev/null |
-            "${PYTHON:-python3}" -c '
-import json,sys
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
-def walk(o):
-    if isinstance(o,dict):
-        if o.get("socket",{}).get("key")=="cgroupv2": return True
-        for v in o.values():
-            if walk(v): return True
-    elif isinstance(o,list):
-        for v in o:
-            if walk(v): return True
-    return False
-for o in d.get("nftables",[]):
-    r=o.get("rule")
-    if r and walk(r.get("expr",[])):
-        for e in r["expr"]:
-            m=e.get("match")
-            if m and walk(m.get("left")): print(m.get("right","")); sys.exit(0)' 2>/dev/null)"
+      cg="$(rule_cgroup media)"
       # The two forms have opposite blind spots, so which one is loaded is
       # the answer an administrator actually needs. Naming the form is also
       # the only way to notice that a machine fell back to the port range
@@ -505,6 +660,38 @@ for o in d.get("nftables",[]):
       echo "            run 'hdw4s firewall --apply' to add the media chain"
       rc=1
     fi
+  fi
+
+  # Whether one desktop can reach another. Read from the loaded table and from
+  # the counters, never from this script's own opinion of what it would have
+  # generated -- a check that recomputes the answer compares the configuration
+  # against itself.
+  if nft list chain inet hdw4s sessions_out >/dev/null 2>&1; then
+    local xcg seen refused
+    xcg="$(rule_cgroup sessions_out)"
+    if [ "${xcg}" != 'hdw4s.slice' ]; then
+      echo "cross-reach  STALE -- the rule no longer names hdw4s.slice (${xcg:-none});"
+      echo "            one desktop can reach another. Run 'hdw4s firewall --apply'."
+      rc=1
+    else
+      seen="$(counter_packets hdw4s_xreach_seen)"
+      refused="$(counter_packets hdw4s_xreach_refused)"
+      # The pair, not either alone. "refused 0" means the guard has never
+      # refused anything, which is the expected state of a machine nobody has
+      # attacked -- and also the state of a rule that is never reached. "seen"
+      # is what separates them: every session that starts moves it.
+      echo "cross-reach  closed (seen ${seen:-?}, refused ${refused:-?} since the table was loaded)"
+      if [ "${seen:-0}" = '0' ]; then
+        echo '            nothing has reached this chain yet, so the refusal'
+        echo '            count says nothing; start a session and look again'
+      fi
+    fi
+  else
+    echo 'cross-reach  NOT CLOSED -- a desktop can open a connection to another'
+    echo "            desktop on this machine. Run 'hdw4s firewall --apply',"
+    echo '            and read its output: on a kernel that cannot match a'
+    echo '            socket by cgroup there is no fallback for this.'
+    rc=1
   fi
 
   state="$({ ss -Hltn; ss -Hlun; } 2>/dev/null |

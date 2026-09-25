@@ -161,7 +161,7 @@ Two consecutive blocks are actually reserved: the first is what the reverse prox
 .IP "" 0
 
 .IP "\[ci]" 4
-\fBHDW4S_ADDR\fR: The address the streaming server binds\. Defaults to \fB127\.0\.0\.1\fR\. Leave it alone unless you know why you are changing it: the socket unit in front is the only way in, and the firewall decides who may reach that\. Binding anything wider publishes the streaming server directly, at a port in the second block, which the firewall does not cover and nothing authenticates\.
+\fBHDW4S_ADDR\fR: The address the streaming server binds\. Defaults to \fB127\.0\.0\.1\fR\. Leave it alone unless you know why you are changing it: the socket unit in front is the only way in, and the firewall decides who may reach that\. Binding anything wider publishes the streaming server directly, at a port in the second block, which nothing authenticates and which the firewall does not cover for connections arriving from off the machine\. It does cover it in the other direction: a desktop may not open a connection to a session port on this machine at all, whichever address it is bound to\.
 .IP "\[ci]" 4
 \fBHDW4S_ALLOW_SYSTEM_USER\fR: Set to \fByes\fR to permit a session for an account below UID 1000\.
 .IP "\[ci]" 4
@@ -380,6 +380,12 @@ The remedy for all of it is the same as it has always been, and it is why \fBHDW
 The package owns one nftables table, \fBinet hdw4s\fR\. It restricts and does not grant\. A drop in this table overrides any other table's accept, so the port block can be closed reliably\. An accept in it is only advisory: if another firewall on the machine drops the packet first, nothing here brings it back, so opening the block to the proxy may need a rule wherever that firewall is configured\.
 .P
 The rules cover the whole port block rather than the ports currently in use\. A rule written per session goes stale the moment a session moves, which is how a firewall ends up guarding a port nothing listens on while live sessions sit unprotected beside it\.
+.P
+The table also stops one desktop reaching another\. A desktop is meant to be reached through its own front door, which is where authentication happens; before this rule existed, anything running inside one session could open a connection straight to another session's port over loopback, with no credential \-\- past the reverse proxy for a named desktop, and past every boundary there is for an ephemeral one, whose occupant is a stranger running untrusted code\. The rule matches the \fIsender\fR: a connection to a session port is refused when it comes from a process inside \fBhdw4s\.slice\fR, which is every desktop and nothing else\. The relay that serves the sessions runs under \fBsystem\.slice\fR and is unaffected, as is anything an administrator runs\. Nothing per session is recorded, so there is nothing here to go stale when a slot moves\.
+.P
+Two exceptions, both deliberate\. Connections made as \fBroot\fR from inside a session are allowed, because the session's own startup check of what its server is serving is made that way; the occupant of an ephemeral slot is in no sudo\-capable group and cannot become root, and on a named desktop anyone who could would be able to flush the table outright\. And the rule needs a kernel that can match a socket by its cgroup \-\- 6\.11 or newer inside a container\. Where that is not available, \fBhdw4s firewall \-\-apply\fR says so on standard error and \fBhdw4s firewall \-\-check\fR reports \fBcross\-reach NOT CLOSED\fR\. There is no port\-range fallback for this one: the relay talks to the same ports the desktops do, so a rule written by port would either close the product or close nothing\.
+.P
+A desktop that needs to reach a service elsewhere goes out over the network and authenticates like any other client\.
 .P
 The table is also checked periodically, not just applied once at session start\. \fBnft flush ruleset\fR removes every table on the machine, including this one, and several common tools issue it \-\- \fBufw reload\fR and \fBnetfilter\-persistent\fR among them\. Without a check, the table would vanish while every session carried on serving, and nothing would say so\. \fBhdw4s\-firewall\.timer\fR notices and puts it back\.
 .P
