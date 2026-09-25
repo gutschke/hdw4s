@@ -181,6 +181,34 @@ COOKIE_REFRESH_EVERY = 3600.0
 COOKIE_FLOOR_DAYS = 30
 COOKIE_FLOOR_SECONDS = COOKIE_FLOOR_DAYS * 86400
 
+# A CEILING THE BROWSER IMPOSES, not one we chose, and the reason the
+# derivation below can no longer be read as a promise.
+#
+# MEASURED 2026-09-24, Chrome, through the product's own front door: with an
+# idle window of 500d the router logged "an identity lasts 1000 day(s)" and
+# raised no complaint, while Chrome's live cookie store AND its on-disk SQLite
+# both held 400 days. Reproduced across four runs, read from the STORE and never
+# from the Set-Cookie header we wrote -- the header is the layer we built. A
+# ladder with its own positive control: 400 stores as 400; 401, 410, 500 and
+# 1000 all store as 400.
+#
+# So the desktop outlived its owner's identity by 100 days, and every check we
+# had said fine, because they all described an integer this process computed
+# rather than a cookie a browser kept.
+#
+# UNMEASURED, deliberately named: Firefox and Safari. RFC 6265bis 5.5 makes it a
+# MUST and Chrome 104+ implements it, but we have exercised ONE browser. The
+# settling experiment is the same ladder under geckodriver reading
+# moz_cookies.expiry.
+#
+# NOT enforced at write time, and that is a decision rather than an omission.
+# This is a property of BROWSERS. A stock install driven by a kiosk browser or
+# by non-browser automation has no such cap, so refusing the value an
+# administrator types would let one browser's policy decide what this tool
+# accepts. We clamp what we CLAIM, and complain about the gap.
+BROWSER_COOKIE_CAP_DAYS = 400
+BROWSER_COOKIE_CAP_SECONDS = BROWSER_COOKIE_CAP_DAYS * 86400
+
 # Replaced in main() by the value derived from the pool. The floor stands in
 # until then so that importing this module -- which the trial harness does, to
 # exercise the guards without a network -- never depends on main() having run.
@@ -669,7 +697,20 @@ def derive_cookie_lifetime(windows):
     for _, secs in windows:
         if secs:
             longest = max(longest, secs)
-    return max(COOKIE_FLOOR_SECONDS, 2 * longest)
+
+    # CLAMPED TO WHAT A BROWSER WILL ACTUALLY KEEP. Without the min() this
+    # returned 2 * longest unbounded, so a 500d window produced "an identity
+    # lasts 1000 day(s)" -- a sentence about a cookie that has never existed.
+    # Everything downstream then reasoned from it, including the check whose
+    # whole job is to notice the owner being locked out.
+    #
+    # Clamping does not FIX a window past the crossover; nothing here can. It
+    # makes the number honest, which is what lets cookie_policy_complaints()
+    # see the gap -- it compares each window against this value, so handed the
+    # true ceiling it reports the lockout unprompted. The repair is one
+    # subtraction from the same place the defect came from.
+    return min(BROWSER_COOKIE_CAP_SECONDS,
+               max(COOKIE_FLOOR_SECONDS, 2 * longest))
 
 
 def cookie_policy_complaints(lifetime, windows):
@@ -838,13 +879,46 @@ def assert_cookie_outlives_idle(derive=derive_cookie_lifetime):
     # names -- could not be represented at all: they truncated to zero, which
     # this file reads as "never reaped". A repair that only fixed the parsing
     # would have turned a silent week into a silent forever.
+    # THE CEILING OF THIS LIST WAS THE SECOND HALF OF THE DEFECT. It stopped at
+    # 31536000 -- 365 days -- which sits BELOW the 400-day browser cap, so every
+    # probe landed in the region where the derivation happens to be unclamped
+    # and the check could not reach the case it exists to find. A guard whose
+    # inputs all avoid the failing region passes forever without being wrong
+    # about any of them.
     for secs in (5400, 43200, 86400, 604800, 1209600, 2592000, 7776000,
-                 31536000):
+                 31536000, 34560000, 43200000):
         got = derive([("probe", secs)])
-        assert got > secs, (
-            "an identity lasting %d second(s) does not outlive a desktop kept "
-            "for %d second(s): the owner is locked out of a session that is "
-            "still running" % (got, secs))
+        # THE CROSSOVER IS THE CAP ITSELF, not half of it. Written first as
+        # `secs * 2 <= cap`, which is where the clamp starts BITING -- but a
+        # clamped 400-day identity still outlives a 365-day desktop perfectly
+        # well. That version demanded a complaint about a pool that is fine,
+        # and the suite said so. The guarantee survives right up to the cap.
+        if secs < BROWSER_COOKIE_CAP_SECONDS:
+            assert got > secs, (
+                "an identity lasting %d second(s) does not outlive a desktop "
+                "kept for %d second(s): the owner is locked out of a session "
+                "that is still running" % (got, secs))
+            continue
+
+        # PAST THE CROSSOVER THE GUARANTEE IS NOT AVAILABLE, and saying so is
+        # the honest arm rather than a weaker one. No value we return can make
+        # an identity outlive a desktop kept longer than the browser will hold
+        # the cookie. Two things must then be true, and BOTH are checked
+        # because either alone is satisfiable by a broken derivation:
+        #
+        #   the number must be clamped -- claiming more is describing a cookie
+        #   that does not exist, which is precisely what shipped;
+        #   and the operator must be TOLD -- a clamp on its own converts a loud
+        #   wrong number into a quiet right one, which is worse.
+        assert got <= BROWSER_COOKIE_CAP_SECONDS, (
+            "the derivation claimed an identity of %d second(s), longer than "
+            "the %d second(s) a browser will keep the cookie: a promise about "
+            "a cookie that does not exist"
+            % (got, BROWSER_COOKIE_CAP_SECONDS))
+        assert cookie_policy_complaints(got, [("probe", secs)]), (
+            "a desktop kept for %d second(s) outlives the %d second(s) the "
+            "browser keeps the identity, and nothing complained"
+            % (secs, got))
 
     # PERMIT ARM. A pool with nothing to derive from, one whose slots are never
     # reaped at all, and one whose window cannot be read, must each still
