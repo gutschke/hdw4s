@@ -1,0 +1,313 @@
+#!/usr/bin/python3
+"""Write one ephemeral session's desktop background, so that two desktops on
+one machine do not look pixel-for-pixel identical.
+
+    hdw4s-background write <instance> <output.svg> [--incarnation <file>]
+    hdw4s-background check [--anchors L:h,L:h,...]
+
+WHY THIS EXISTS. Every ephemeral session reads the same machine-wide dconf
+database, so the perceptual distance between any two live desktops is exactly
+zero: the only thing on screen that differs is the browser's address bar, and
+the cheap screenshot reader resolved one address bar in four. A visitor with
+two desktops open cannot tell which tab is which, and neither can anybody
+reading a screenshot afterwards.
+
+WHAT IT PRODUCES. Perlin noise over one of three brand anchors, varying HUE as
+well as lightness. Two independently seeded turbulence fields, and that is the
+point rather than an embellishment: a single field makes hue and lightness move
+together, so a viewer who loses one channel loses both at once. Measured with
+two fields, a dichromat keeps roughly 70% of the per-session distance.
+
+The anchors, the band and the field strength are NOT tunable here and are not
+guesses. Three anchors, band L* 29-45, k = 1.5, approved 2026-09-24 against a
+rendered sheet; the measurements behind each number are in
+private/DESIGN-per-session-background.md sections 4.9 and 4.10. The band is
+bounded below by taste and above by contrast: white icon labels sit on this
+field, and at the lightest pixel of band E they read 8.2:1, above WCAG AAA.
+
+NO NEW PACKAGE DEPENDENCY, and that is why this emits SVG text rather than
+pixels. GNOME rasterises the wallpaper itself through gdk-pixbuf's SVG loader,
+which is the loader it already uses for every other image; nothing here has to
+render, so nothing here needs a rendering library. python3 is already a
+dependency of this package.
+
+HOW THE HUE WALK IS BUILT, because SVG filters cannot rotate hue per pixel:
+feColorMatrix's hueRotate takes ONE angle for a whole layer. So two layers are
+composited at hue h-swing and h+swing, the upper masked by its own turbulence
+field -- where the noise is high the pixel reads as the warmer hue, where it is
+low as the cooler one. A second, independently seeded field at a different base
+frequency drives lightness on top of that.
+
+THE VIEWBOX IS 480x270 AND THE IMAGE IS NOT. feTurbulence's baseFrequency is
+per USER UNIT, so the pattern's feature size follows the viewBox and not the
+pixel size. Every measurement behind the approved parameters was taken on a
+480-unit-wide field; emitting width=1920 with a 1920-unit viewBox would quarter
+the feature size and render a design nobody has looked at. The nominal pixel
+size is large so that the loader rasterises something worth scaling.
+"""
+
+import argparse
+import hashlib
+import math
+import os
+import sys
+import tempfile
+
+# The approved palette: three anchors across band L* 29-45, at three hues from
+# the published Ubuntu brand palette. Hue first, lightness spread across the
+# band -- a fourth anchor is ruled out by a SIGN and not by a threshold (the
+# deuteranopic between/within ratio inverts as the band widens), so widening
+# the band does not buy one back and neither does lowering the bar.
+ANCHORS = ((29.0, 342.2), (37.0, 46.0), (45.0, 330.9))
+
+# The band the rendered field must stay inside. The floor is taste -- the owner
+# called the previous band too dark, at 84% black in the terms he used. The
+# ceiling is contrast: white text falls to 7:1, WCAG AAA, at field L* 37.8, and
+# an anchor at the top of this band renders a field reaching L* 33.4.
+BAND_LO, BAND_HI = 29.0, 45.0
+
+# Field strength. Bought from the band rather than from k: band E at k = 1.5
+# beats the old band at k = 2.5 on every axis that matters.
+HUE_SWING, LIGHT_SWING = 10.0 * 1.5, 6.0 * 1.5
+
+# The colour a failed generation falls back to, and the one the dconf layer
+# names for primary-color. Canonical aubergine from the brand palette.
+FALLBACK = "#772953"
+
+WEBROOT = os.environ.get("HDW4S_WEBROOT_DIR", "/usr/share/hdw4s/webroot")
+
+
+def lch_to_hex(L, C, h):
+    a, b = C * math.cos(math.radians(h)), C * math.sin(math.radians(h))
+    fy = (L + 16) / 116
+    fx, fz = fy + a / 500, fy - b / 200
+    g = lambda t: t ** 3 if t ** 3 > 0.008856 else (t - 16 / 116) / 7.787
+    X, Y, Z = g(fx) * 0.95047, g(fy), g(fz) * 1.08883
+    r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z
+    gr = -0.9689 * X + 1.8758 * Y + 0.0415 * Z
+    bl = 0.0557 * X - 0.2040 * Y + 1.0570 * Z
+    out = []
+    for c in (r, gr, bl):
+        c = max(0.0, min(1.0, c))
+        c = 1.055 * c ** (1 / 2.4) - 0.055 if c > 0.0031308 else 12.92 * c
+        out.append(int(round(max(0, min(1, c)) * 255)))
+    return "#%02x%02x%02x" % tuple(out)
+
+
+def max_chroma(L, h):
+    """The most chroma this hue can carry at this lightness before a channel
+    clips. Derived by bisection rather than tabulated, so that moving an anchor
+    cannot silently move it outside the gamut."""
+    lo, hi = 0.0, 130.0
+    for _ in range(24):
+        m = (lo + hi) / 2
+        hx = lch_to_hex(L, m, h)
+        r, g, b = (int(hx[i:i + 2], 16) for i in (1, 3, 5))
+        lo, hi = (m, hi) if 0 < r < 255 and 0 < g < 255 and 0 < b < 255 else (lo, m)
+    return lo
+
+
+def svg(L, C, h, seed, w=1920, hgt=1080, units_w=480, units_h=270,
+        hue_swing=HUE_SWING, light_swing=LIGHT_SWING):
+    s = seed
+    dL = ((s) % 7) - 3.0
+    dC = ((s >> 3) % 5) - 2.0
+    dh = ((s >> 6) % 13) - 6.0
+    ox = 12 + (s >> 9) % 76
+    oy = 12 + (s >> 15) % 76
+    f_h = 0.0013 + ((s >> 21) % 1000) / 1000 * 0.0016   # hue field, coarser
+    f_l = 0.0020 + ((s >> 11) % 1000) / 1000 * 0.0022   # lightness field, finer
+    sh = s % 65536
+    sl = (s >> 7) % 65536
+    Lb, Cb, hb = L + dL, max(0.0, C + dC), h + dh
+    cool = lch_to_hex(Lb, Cb, hb - hue_swing)
+    warm = lch_to_hex(Lb, Cb, hb + hue_swing)
+    glow = lch_to_hex(Lb + light_swing * 0.9, min(Cb + 5, Cb * 1.4 + 3),
+                      hb + hue_swing * 0.4)
+    lift = lch_to_hex(min(48, Lb + light_swing * 3.2), Cb + 6, hb)
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{hgt}" viewBox="0 0 {units_w} {units_h}" preserveAspectRatio="none">
+ <defs>
+  <radialGradient id="r" cx="0.{ox}" cy="0.{oy}" r="0.8">
+   <stop offset="0" stop-color="{glow}" stop-opacity="0.75"/>
+   <stop offset="1" stop-color="{cool}" stop-opacity="0"/></radialGradient>
+  <!-- HUE field: a coarse, heavily blurred turbulence used only as a mask. -->
+  <filter id="fh" x="0" y="0" width="100%" height="100%">
+   <feTurbulence type="fractalNoise" baseFrequency="{f_h:.4f}" numOctaves="3" seed="{sh}" result="t"/>
+   <feGaussianBlur in="t" stdDeviation="7" result="tb"/>
+   <feColorMatrix in="tb" type="matrix"
+     values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.55 0.35 0.10 0 -0.15" result="m"/>
+   <feComposite in="m" in2="SourceGraphic" operator="in"/></filter>
+  <!-- LIGHTNESS field: independently seeded, finer, lighter touch. -->
+  <filter id="fl" x="0" y="0" width="100%" height="100%">
+   <feTurbulence type="fractalNoise" baseFrequency="{f_l:.4f}" numOctaves="3" seed="{sl}" result="t"/>
+   <feGaussianBlur in="t" stdDeviation="5" result="tb"/>
+   <feColorMatrix in="tb" type="matrix"
+     values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.30 0.30 0.12 0 -0.10" result="m"/>
+   <feComposite in="m" in2="SourceGraphic" operator="in"/></filter>
+ </defs>
+ <rect width="{units_w}" height="{units_h}" fill="{cool}"/>
+ <rect width="{units_w}" height="{units_h}" fill="{warm}" filter="url(#fh)"/>
+ <rect width="{units_w}" height="{units_h}" fill="url(#r)"/>
+ <rect width="{units_w}" height="{units_h}" fill="{lift}" filter="url(#fl)"/>
+</svg>'''
+
+
+def solid(colour=FALLBACK, w=1920, hgt=1080):
+    """The fallback, PRODUCED rather than relied upon. GNOME's behaviour when
+    picture-uri names a file that is not there is not something this product
+    measured until 2026-09-25, and a wallpaper that silently goes black is
+    worse than the flat colour we had. So there is always a file."""
+    return ('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d">'
+            '<rect width="%d" height="%d" fill="%s"/></svg>\n'
+            % (w, hgt, w, hgt, colour))
+
+
+def slot_number(instance):
+    """The slot's own number, taken from the instance name this process was
+    handed rather than from a count of anything. The prefix is an administrator
+    setting, so it is the TRAILING digits that identify the slot and not a
+    fixed-length prefix."""
+    digits = ""
+    for ch in reversed(instance):
+        if not ch.isdigit():
+            break
+        digits = ch + digits
+    return int(digits) if digits else 0
+
+
+def choose(instance, token):
+    """Which anchor, and which field.
+
+    THE ANCHOR IS THE SLOT'S, AND THE FIELD IS THE START'S, and the split is
+    deliberate. Two desktops that are up at the same time are in different
+    slots, always, so a slot-derived anchor separates concurrent sessions BY
+    CONSTRUCTION -- no birthday collisions and no randomness to be unlucky
+    with. It does nothing for two successive occupants of one slot, which is
+    why the field is seeded from the incarnation token instead: that value is
+    fresh at every start, so the same slot never renders the same image twice.
+
+    WHAT THIS DOES NOT DO, said out loud because the design asks for it and
+    this is less. The design's rejection rule draws an anchor at least d_min
+    from the slot's own PREVIOUS anchor as well as from its siblings', which
+    would make the returning-tab case distinct by construction too. It cannot
+    be done here: the record of what the previous start published is
+    /run/hdw4s-incarnation/<slot>, root-owned 0600, and this runs as the
+    occupant. Doing it properly means publishing the choice from
+    hdw4s-incarnation, which is the design's own answer and a larger change.
+    Measured consequence, from the design: successive occupants of one slot
+    differ by about dE 3 -- around the just-noticeable threshold, not "noticed
+    without looking"."""
+    L, h = ANCHORS[slot_number(instance) % len(ANCHORS)]
+    seed = int.from_bytes(hashlib.sha256(token).digest()[:8], "big")
+    return L, max_chroma(L, h) * 0.9, h, seed
+
+
+def write_atomically(path, text):
+    """Written beside the target and renamed over it. Opening a file for write
+    truncates it first, and GNOME may be reading this one: a reader that
+    arrives inside that window gets an empty document, which it reports as a
+    broken image rather than as a file being replaced."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".background.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.rename(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def cmd_write(args):
+    inc = args.incarnation or os.path.join(WEBROOT, args.instance,
+                                           "hdw4s-incarnation")
+    try:
+        with open(inc, "rb") as f:
+            token = f.read().strip()
+        if not token:
+            raise ValueError("the incarnation record is empty")
+    except (OSError, ValueError) as e:
+        # NOT fatal, and not silent either. The session's own gate refuses to
+        # start a session whose token is missing, so reaching this means
+        # something changed underneath us; a random field is still a correct
+        # per-session cue, it has simply stopped being tied to the incarnation.
+        print("hdw4s-background: no incarnation record at '%s' (%s); seeding "
+              "this field from the kernel instead, so it is still unique to "
+              "this start but no longer derived from the published identity."
+              % (inc, e), file=sys.stderr)
+        token = os.urandom(16)
+
+    try:
+        L, C, h, seed = choose(args.instance, token)
+        text = svg(L, C, h, seed)
+    except Exception as e:                        # noqa: BLE001 -- see below
+        # Broad on purpose. Every branch of the arithmetic above is reachable
+        # only with the constants in this file, so a failure here is a defect
+        # in this file rather than a condition to handle -- and the session it
+        # would take down is a desktop somebody is waiting for. Say what
+        # happened, ship the flat colour, and let the desktop come up.
+        print("hdw4s-background: could not generate a field (%s); writing the "
+              "flat fallback colour instead." % e, file=sys.stderr)
+        text = solid()
+
+    write_atomically(args.output, text)
+    return 0
+
+
+def cmd_check(args):
+    """THE GUARD, AND WHAT IT IS NOT.
+
+    This asserts on the ANCHORS, which is the input, and the design says in so
+    many words that a guard pointed at the input passes while the thing it
+    protects fails: an anchor at L* 16 renders a field whose lightest pixel is
+    L* 21.6. So this is a bound and not a measurement, and it is written here
+    only because it is the half that can run with no rendering library.
+
+    THE OTHER HALF IS private/redarm-background-band.sh, which rasterises the
+    field through the same loader GNOME uses and measures the pixels. Do not
+    read a green line here as the band having been checked."""
+    anchors = ANCHORS
+    if args.anchors:
+        anchors = tuple(tuple(float(x) for x in a.split(":"))
+                        for a in args.anchors.split(","))
+    bad = [a for a in anchors if not BAND_LO <= a[0] <= BAND_HI]
+    for L, h in anchors:
+        print("anchor L*=%5.1f h=%6.1f C=%5.1f  %s"
+              % (L, h, max_chroma(L, h) * 0.9,
+                 "outside the band" if not BAND_LO <= L <= BAND_HI else "in band"))
+    if bad:
+        print("hdw4s-background: %d anchor(s) outside the approved band L* "
+              "%.1f-%.1f. The band's floor is the owner's judgement that a "
+              "darker field is too black; its ceiling is white icon labels, "
+              "which fall below WCAG AAA above it."
+              % (len(bad), BAND_LO, BAND_HI), file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="hdw4s-background",
+                                description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    w = sub.add_parser("write", help="write one session's background")
+    w.add_argument("instance")
+    w.add_argument("output")
+    w.add_argument("--incarnation", default=None,
+                   help="the published identity to seed the field from; "
+                        "defaults to this slot's own record in the web root")
+    w.set_defaults(func=cmd_write)
+    c = sub.add_parser("check", help="are the anchors inside the band?")
+    c.add_argument("--anchors", default=None,
+                   help="L:h[,L:h...] to check instead of the shipped table")
+    c.set_defaults(func=cmd_check)
+    args = p.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
