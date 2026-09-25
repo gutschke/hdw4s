@@ -28,7 +28,7 @@ SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s
 #
 # Globbed against the tree, so adding a unit file is the whole of adding it here.
 UNITS=()
-for u in hdw4s*.service hdw4s*.socket hdw4s*.timer hdw4s*.slice; do
+for u in hdw4s*.service hdw4s*.socket hdw4s*.timer hdw4s*.slice hdw4s*.path; do
   [ -e "${u}" ] && UNITS+=("${u}")
 done
 # A glob that matches nothing expands to itself, and an empty UNITS would make
@@ -594,7 +594,7 @@ else
 fi
 
 # debian/rules. Every unit gets a line, or an exemption with a reason above.
-rules_named="$(grep -oE 'hdw4s[^[:space:]]*\.(service|socket|timer|slice)' debian/rules |
+rules_named="$(grep -oE 'hdw4s[^[:space:]]*\.(service|socket|timer|slice|path)' debian/rules |
                sort -u)"
 for u in "${UNITS[@]}"; do
   case " ${RULES_EXEMPT[*]} " in *" ${u} "*) continue;; esac

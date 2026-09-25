@@ -22,6 +22,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration}
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
          hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index
          hdw4s-refuse hdw4s-refuse@.service
+         hdw4s-teardown hdw4s-teardown@.service hdw4s-teardown@.path
          hdw4s-incarnation hdw4s-incarnation@.service
          hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-demux hdw4s-demux.socket hdw4s-demux.service

@@ -4,6 +4,7 @@ hdw4s-run-session        usr/lib/hdw4s
 hdw4s-firewall           usr/lib/hdw4s
 hdw4s-ephemeral-slots    usr/lib/hdw4s
 hdw4s-refuse             usr/lib/hdw4s
+hdw4s-teardown           usr/lib/hdw4s
 hdw4s-incarnation        usr/lib/hdw4s
 hdw4s-update             usr/lib/hdw4s
 hdw4s-wait             usr/lib/hdw4s
@@ -24,6 +25,7 @@ chrome-policies/hdw4s-ephemeral.json  etc/hdw4s/chrome-policies
 hdw4s*.service           usr/lib/systemd/system
 hdw4s*.socket            usr/lib/systemd/system
 hdw4s*.timer             usr/lib/systemd/system
+hdw4s*.path              usr/lib/systemd/system
 hdw4s*.slice             usr/lib/systemd/system
 hdw4s-webroot            usr/lib/hdw4s
 hdw4s-gate-index         usr/lib/hdw4s

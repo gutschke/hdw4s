@@ -1,0 +1,23 @@
+[Unit]
+Description=Watch for a request to end the HDW4S ephemeral desktop in slot %i
+Documentation=man:hdw4s(8)
+After=hdw4s-ephemeral-slots.service
+Requires=hdw4s-ephemeral-slots.service
+# The directory this watches is created by hdw4s-ephemeral-slots, which also
+# starts one of these per ephemeral slot. Requires=, because a path unit
+# watching a directory that does not exist is a unit that reports active and
+# can never fire -- the shape this project calls a guard that has never been
+# seen refusing, wearing a green light.
+
+[Path]
+# THE FILE'S NAME IS THE SLOT, AND THAT IS THE WHOLE AUTHORISATION MODEL. The
+# router is a DynamicUser with no privilege; it can create a file in one
+# directory, and the only thing it can say by doing so is "this slot". It cannot
+# name a unit, a pid, a cgroup or a command. Everything privileged happens on
+# this side of the line, keyed by %i, which systemd fills in from the unit's own
+# name rather than from anything the router wrote.
+PathExists=/run/hdw4s-teardown/%i
+Unit=hdw4s-teardown@%i.service
+
+[Install]
+WantedBy=multi-user.target

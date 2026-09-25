@@ -1,0 +1,184 @@
+#!/bin/bash -e
+# END ONE EPHEMERAL SESSION, BECAUSE THE PERSON WHO OWNS IT ASKED.
+#
+#   hdw4s-teardown <slot>
+#
+# Run by hdw4s-teardown@<slot>.service, which is triggered by a file appearing
+# in the request directory. The router writes that file and can do nothing else:
+# it runs as a DynamicUser with an empty capability set, and giving an HTTP
+# surface that strangers reach the privilege to stop units would be a far worse
+# trade than the one this arrangement makes.
+#
+# ---------------------------------------------------------------------------
+# WHY THE LADDER IS NOT "GENTLE, THEN FIRM, THEN BRUTAL"
+# ---------------------------------------------------------------------------
+# The owner, on why a polite shutdown fails when it fails: "we asked nicely and
+# it didn't comply (possibly because the gnome component that would have
+# complied no longer exists)."
+#
+# That single remark retires the obvious design. The polite rung does NOT fail
+# randomly, and it does not usually fail SLOWLY -- it fails because the session
+# is already damaged, most often because the kernel's OOM killer has taken the
+# very process that would have answered. The same event that caused the problem
+# reaches forward and breaks the remedy.
+#
+# So the rungs are "IS THERE ANYBODY THERE TO ASK, AND IF NOT, STOP ASKING."
+# A timeout would have been the wrong instrument and was the first thing
+# reached for: a box under memory pressure is slow at everything, so a clock
+# cannot tell slow from dead, and waiting one out spends the rescue's time on a
+# case that was already decided.
+#
+# ---------------------------------------------------------------------------
+# WHY THE LAST RUNG IS ALLOWED TO BE ABRUPT
+# ---------------------------------------------------------------------------
+# Ruled by the owner: an ephemeral session is nearly stateless BY CONSTRUCTION,
+# so there is essentially nothing to protect, and "killing it without giving
+# full time for an orderly shutdown is generally safe."
+#
+# TWO OBLIGATIONS COME WITH THAT RULING AND THEY LIVE HERE, BESIDE THE DECISION,
+# rather than in a findings file nobody will read again:
+#
+#   * THE DAY ANYBODY ADDS AN ExecStopPost= TO A SESSION UNIT, THIS STOPS BEING
+#     SAFE AND NOTHING WILL NOTICE. What makes the cgroup kill safe today is
+#     that no code of ours runs on the stop path at all: the home, the profile
+#     and /dev/shm are TemporaryFileSystem= mounts reclaimed when the namespace
+#     dies, RuntimeDirectory= and RemoveIPC= are pid 1's work, and the
+#     incarnation unit is a separate cgroup. Measured 2026-09-25: there is no
+#     ExecStopPost= anywhere in this package. A reclaimer added inside the
+#     session's cgroup would be killed by this along with everything else, and
+#     the traces the ephemeral promise exists to prevent would be left behind
+#     silently, on the failure path, where nobody is looking. The same warning
+#     is repeated in hdw4s-ephemeral@.service.
+#
+#   * A FUTURE SHARED FOLDER IS A CAVEAT, NOT AN EXPIRY, and it is written down
+#     so that a later reader does not rediscover it as a crisis. Ruled: most of
+#     the statelessness argument still holds even then -- the worst case is a
+#     truncated write, saves are normally fast, and a save slow enough to be cut
+#     short was probably not going to finish anyway, so killing did not make an
+#     already bad situation worse. DO NOT ADD HESITATION HERE FOR IT.
+#
+# An abrupt kill also presents to a network PEER as a dropped connection rather
+# than a clean close. Nothing of ours reconnects on that signal today; anything
+# that starts to should be read against this line first.
+#
+# ---------------------------------------------------------------------------
+# WHY cgroup.kill AND NOT A SIGNAL
+# ---------------------------------------------------------------------------
+# The owner's shorthand was "kill -9 -1", and he said in the same breath that
+# the real command may look very different and must be well targeted. A signal
+# to -1 is the wrong primitive precisely because ITS BLAST RADIUS IS A PROPERTY
+# OF THE CONTEXT IT RUNS IN: in the session's namespace as the slot's uid it
+# clears that session, and one namespace out, or as root, it takes the machine.
+# This project has twice been surprised by that exact class -- Exec*=+ keeping
+# BindPaths= while dropping ProtectHome=, and a probe that stayed in root's
+# cgroup while appearing to be an occupant.
+#
+# cgroup.kill's scope is a property of THE FILE YOU OPEN. Writing 1 to one
+# slot's cgroup kills every process in it, atomically, and cannot reach a
+# neighbour however this script is invoked or whatever it inherits. That is the
+# same reasoning that made the cross-reach chain match the sender rather than
+# the port: prefer the boundary you cannot be standing on the wrong side of.
+
+LC_ALL=C; export LC_ALL
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+
+SLOT="${1:?usage: hdw4s-teardown <slot>}"
+REQDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
+CGROOT="${HDW4S_SESSION_CGROUP_ROOT:-/sys/fs/cgroup/hdw4s.slice}"
+UNIT="hdw4s-ephemeral@${SLOT}.service"
+
+# THE NAME IS CHECKED BEFORE IT IS USED IN A PATH. This runs as root and the
+# name reaches it through a file created by a network-facing service; the
+# service template makes %i the only thing it can be, but a second check costs
+# nothing and the failure it prevents is unrecoverable.
+case "${SLOT}" in
+  *[!a-zA-Z0-9_-]*|'') echo "hdw4s-teardown: refusing the slot name ${SLOT}" >&2; exit 2;;
+esac
+
+say() { echo "hdw4s-teardown: $*"; }
+
+# THE REQUEST IS CLEARED FIRST, and it is deliberate rather than tidy: the path
+# unit fires on the file EXISTING, so a run that failed with the file still
+# there would be started again immediately, for ever, and the loop would be
+# hardest to break on exactly the unwell machine this exists for.
+rm -f "${REQDIR}/${SLOT}"
+
+state="$(systemctl show -p ActiveState --value "${UNIT}" 2>/dev/null || echo unknown)"
+if [ "${state}" != active ]; then
+  say "${SLOT} is ${state}, so there is nothing to end."
+  exit 0
+fi
+
+cg="${CGROOT}/hdw4s-${SLOT}.slice"
+
+alive() {  # how many processes are in this session's cgroup, or 0 if unreadable
+  local n
+  n="$(find "${cg}" -name cgroup.procs -exec cat {} + 2>/dev/null | wc -l)"
+  echo "${n}"
+}
+
+# IS THERE ANYBODY THERE TO ASK? The compositor is what would act on a polite
+# request, and it is also the thing the kernel's OOM killer has actually taken
+# on this product -- measured: org.gnome.Shell, signal 9, leaving the unit
+# `active` and the desktop blank. So its absence from a session that is still
+# running is the crude, stated signal that the polite rung has nobody to talk
+# to. Crude on purpose: the owner's ceiling is "sane-ish", and a cleverer
+# predicate here would be a heuristic nobody can check.
+responder=''
+# A while-read over find's output rather than a for-loop over its expansion:
+# pids cannot contain whitespace, so the loop would have worked, and a habit
+# that is only safe because of what the data happens to be is the wrong habit
+# to leave beside a destructive act.
+while read -r pcandidate; do
+  [ -n "${pcandidate}" ] || continue
+  # /proc/<pid>/comm, not a pattern over ps output: a command-line search
+  # matches the searcher itself, which is a trap this project has paid for.
+  case "$(cat "/proc/${pcandidate}/comm" 2>/dev/null || :)" in
+    gnome-shell) responder="${pcandidate}"; break;;
+  esac
+done <<EOT
+$(find "${cg}" -name cgroup.procs -exec cat {} + 2>/dev/null)
+EOT
+
+if [ -n "${responder}" ]; then
+  say "${SLOT}: asking it to stop (the compositor is still there, pid ${responder})."
+  systemctl stop --no-block "${UNIT}" 2>/dev/null || :
+  # A COURTESY BOUND, NOT A DIAGNOSIS, and the distinction is the point. This
+  # unit takes the full stop timeout to die -- 91 seconds, measured from the
+  # journal, because several of GNOME's gsd-* helpers do not exit on SIGTERM.
+  # Waiting that out is exactly what the owner said we need not do. So the
+  # session is given a short, stated window to go on its own, and then the
+  # question stops being asked. Nothing here concludes anything from the wait
+  # expiring; it is not evidence about the session, only about our patience.
+  waited=0
+  while [ "${waited}" -lt 100 ]; do
+    [ "$(alive)" -gt 0 ] || break
+    sleep 0.1
+    waited=$(( waited + 1 ))
+  done
+else
+  say "${SLOT}: nothing in it would answer a polite request, so none is made."
+fi
+
+if [ "$(alive)" -eq 0 ]; then
+  say "${SLOT}: it went on its own."
+else
+  # THE LAST RUNG. Scope is the file, not this process's context.
+  if [ -w "${cg}/cgroup.kill" ]; then
+    say "${SLOT}: ending every process in its own cgroup ($(alive) of them)."
+    echo 1 > "${cg}/cgroup.kill"
+  else
+    # An older kernel has no cgroup.kill. systemctl kill --kill-whom=all is the
+    # fallback and its scope is the UNIT, which is the same set of processes by
+    # a different route -- stated rather than assumed, because "the same set" is
+    # true here only because this unit owns its slice alone.
+    say "${SLOT}: no cgroup.kill on this kernel; killing the unit's processes."
+    systemctl kill --kill-whom=all -s KILL "${UNIT}" 2>/dev/null || :
+  fi
+fi
+
+# And settle the unit, so the slot is free rather than held by a unit systemd
+# still believes is running. Not --no-block: the caller is a oneshot and the
+# point of this line is that it has finished.
+systemctl stop "${UNIT}" 2>/dev/null || :
+say "${SLOT}: ended."
