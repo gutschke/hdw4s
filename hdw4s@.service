@@ -8,6 +8,30 @@ Wants=network-online.target
 # between this session and the network, so a session must not outlive it.
 # The package is careful never to stop it during an upgrade.
 Requires=hdw4s-firewall.service
+
+# WHICH INCARNATION OF THIS DESKTOP IS RUNNING, published where the occupant
+# cannot forge it and any page this session serves can read it -- exactly as the
+# ephemeral unit does, and for a reason a named desktop turns out to share.
+#
+# MEASURED 2026-09-25, by the owner on his own named desktop: a tab that is
+# hidden and comes back meets the reconnect card EVERY TIME. Its console shows
+# `/hdw4s-incarnation 404` on the first line. The gate's resume path compares
+# the identity this tab connected to against the one published in the web root,
+# and a MISSING file is a refusal -- failing closed, which is right, into a card
+# shown on every single return with nothing behind it.
+#
+# So the repair that fixed this for the pool could not work here, and nothing
+# said so: every rig ran against ephemeral slots, and the one thing a named
+# desktop has that an ephemeral one does not is the ABSENCE of this file.
+#
+# Wants=, deliberately, not Requires=, for the reason the ephemeral unit states
+# at length: the postcondition in "hdw4s-webroot check" already refuses to start
+# a session whose token is missing, unchanged, or not the one this generation
+# wrote, which catches more cases than Requires= would -- and Requires= would
+# charge a stop-propagation footgun for it, where stopping a dead oneshot takes
+# a live desktop down with it. After= is what actually orders it.
+Wants=hdw4s-incarnation@%i.service
+After=hdw4s-incarnation@%i.service
 # A home directory that arrives over the network has to be there before a
 # desktop tries to read settings out of it.
 

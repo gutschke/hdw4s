@@ -1620,6 +1620,32 @@ echo '== the fresh-desktop card tells the truth about how long the desktop lasts
        'could not be found'
 )
 
+echo '== BOTH session kinds publish an identity, or the gate refuses forever =='
+# THE ARM THAT WAS MISSING, AND WHY IT WAS MISSING. The gate's resume path
+# compares the identity a tab connected to against the one published in the web
+# root, and treats a MISSING file as a refusal -- failing closed, which is
+# correct. Every test of that path used an ephemeral slot, and every rig that
+# validated the repair drove the pool. So nobody noticed that hdw4s@.service
+# carried no publisher at all.
+#
+# MEASURED on a live named desktop 2026-09-25: a hidden tab coming back met the
+# card EVERY time, with "/hdw4s-incarnation 404" on the first line of its
+# console. The repair worked for the pool and could not work here, and the one
+# thing a named desktop has that an ephemeral one does not is the ABSENCE of
+# that file -- which is exactly the shape a test comparing the two would have
+# caught and a test of either alone could not.
+#
+# Asserting on the UNIT FILES rather than on a running system: this is the
+# workstation half of the tier, and the claim is about what ships.
+for u in hdw4s@.service hdw4s-ephemeral@.service; do
+  case "$(cat "${ROOT}/${u}" 2>/dev/null)" in
+    *'Wants=hdw4s-incarnation@%i.service'*'After=hdw4s-incarnation@%i.service'*)
+      ok "${u} publishes an incarnation";;
+    *) bad "${u} publishes an incarnation" \
+           'no Wants=/After= pair -- its gate can only ever refuse a resume';;
+  esac
+done
+
 echo '== a rebuild of a running slot keeps its published identity =='
 # Written from the failure: a re-mint stripped hdw4s-incarnation from a LIVE web root
 # and nothing noticed for a day. Nothing can notice -- the builder never passes an
@@ -2249,7 +2275,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=366   # update when tests are added; a wrong number is the point
+EXPECTED=368   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
