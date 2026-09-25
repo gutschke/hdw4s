@@ -195,15 +195,26 @@ class Slot(threading.Thread):
         from the pool and would quietly test a different, easier world -- one
         where exhaustion cures itself because the directory shrank.
 
-        WHAT IT DOES NOT REPRODUCE, found by reading the shipped units and NOT
-        yet observed on a box, so treat the severity as an upper bound:
+        WHAT IT DOES NOT REPRODUCE, and the second half of this was MEASURED
+        WRONG and is corrected here rather than left to be rediscovered.
         `hdw4s reap` stops hdw4s-proxy@<inst>.service and the session unit and
         does NOT stop hdw4s-proxy@<inst>.socket. That socket unit keeps
-        listening, so in the field a connect after a reap SUCCEEDS and
-        re-activates the relay, whose ExecStartPre=hdw4s-wait then waits for a
-        session that is not coming and fails into OnFailure=hdw4s-refuse@. A
-        reaped visitor there does not meet a refused connection at all; they
-        meet a long stall and then somebody else's page.
+        listening, so in the field a connect after a reap SUCCEEDS -- that much
+        holds. What was written next was a source read that self-labelled as an
+        unobserved upper bound, and the bound was wrong: it said the woken
+        relay's ExecStartPre=hdw4s-wait would wait for a session that is not
+        coming and fail into OnFailure=hdw4s-refuse@, so a visitor would meet a
+        long stall and then somebody else's page.
+
+        MEASURED 2026-09-25 on a container, in
+        private/evidence/slot-recycle/2026-09-25-mechanism.txt: nothing waits
+        and nothing fails. The per-instance drop-in "hdw4s enable" writes
+        carries BindsTo=hdw4s-ephemeral@<inst>.service, so systemd satisfies it
+        by STARTING A FRESH SESSION, and the caller gets HTTP 200 in about two
+        seconds with a NEW incarnation. The real damage is therefore the
+        opposite of a stall: the connection silently creates the thing it was
+        checking for. That is the slot-recycling leak, and it is why the
+        probe in this file may never connect.
 
         This stand-in refuses instead, which is the faster and more legible of
         the two and drives the arms deterministically. That difference is load
