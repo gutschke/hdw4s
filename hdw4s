@@ -319,6 +319,27 @@ slot_of() {
     '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}"
 }
 
+# The third column of the slot table. Every value the product writes is here,
+# because a reader that tests one value against a literal cannot be audited for
+# the values it does not mention -- which is how a fourth type came to mean
+# "named desktop" at SEVENTEEN separate sites at once -- twelve here, one in
+# the router, two in each installer. Add a type here and the
+# two predicates below are the only places that decide what it behaves like.
+#
+#   desktop    one person's long-lived session, at their own hostname
+#   ephemeral  a pooled slot a stranger is handed at the well-known hostname
+#   template   the administrator's authoring slot: ephemeral in every mechanical
+#              respect -- same unit, tmpfs home at /home/user, namespaced passwd,
+#              filesystem socket, no per-session password -- and NOT in the pool
+#
+# "unreadable" is not a type. It is what type_of() answers when the table is
+# there and could not be read, and it exists because the old code answered
+# "desktop" to that -- a fabricated answer to a question that had none. ABSENT
+# IS NOT EQUAL: every test below reads "is it ephemeral", so the fabrication
+# made each one answer NO and fail open, most damagingly at cmd_transport,
+# where it permits TCP for what may well be a pooled slot.
+SESSION_TYPES='desktop ephemeral template'
+
 # What kind of session an instance is. Recorded in the table rather than guessed
 # from the name, because six readers need the answer long after "hdw4s enable"
 # has exited, and a name prefix would make a configurable string load-bearing in
@@ -326,9 +347,52 @@ slot_of() {
 # "desktop", which is what every session was when it was written.
 type_of() {
   local t=''
-  [ ! -r "${SLOTS}" ] ||
+  # -e and not -r is precisely "the table exists and I could not look at it".
+  # A table that does not exist at all is a machine with no slots, and an
+  # instance with no row there is untyped: "desktop" is information, not a guess.
+  if [ -e "${SLOTS}" ]; then
+    [ -r "${SLOTS}" ] || { echo 'unreadable'; return 0; }
     t="$(awk -v i="${1}" '$1 !~ /^#/ && $2 == i { print $3; exit }' "${SLOTS}")"
+  fi
   echo "${t:-desktop}"
+}
+
+# Does this TYPE get the ephemeral machinery? Takes the type and not the
+# instance, because cmd_reap already has the type in hand from its own read of
+# the table and a second lookup there would be a second chance to disagree.
+#
+# THE QUESTION IS DELIBERATELY NOT "is it ephemeral". Seventeen call sites ask
+# that, and for the authoring slot the honest answer is yes to sixteen of them
+# and no to the one that matters -- pool membership, which is in_ephemeral_pool()
+# below and lives in the router. Splitting them means a site added later has to
+# NAME which of the two it wants, instead of inheriting the wrong one from a
+# string literal.
+#
+# It dies rather than returning false on "unreadable" so that the refusal is
+# seen. Returning false would be the fail-open this whole comment is about, and
+# it would be silent. The message names the FILE, because that is where the
+# repair is; naming the slot sends somebody to look at a session that is fine.
+ephemeral_shaped() {
+  case "${1}" in
+    ephemeral|template) return 0 ;;
+    unreadable)
+      die "hdw4s: cannot read ${SLOTS}, so what kind of session this is is unknown." \
+          '  Refusing rather than guessing: every check in this program asks' \
+          '  whether a slot is ephemeral, and a guess of "desktop" would turn' \
+          '  each one off at once -- putting a pooled slot on a TCP port, giving' \
+          '  it a password that means nothing, and binding its relay to a unit' \
+          '  that will never start. Fix the file and run this again.' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Is this TYPE pool capacity -- a slot a visitor may be minted onto? Only
+# "ephemeral". The router owns the operative copy of this question
+# (hdw4s-demux's ephemeral_slots(), which is what actually decides a mint);
+# this one exists so the CLI answers it the same way and so that the two
+# questions have different names here as well.
+in_ephemeral_pool() {
+  [ "${1}" = 'ephemeral' ]
 }
 
 # The systemd unit that runs a given instance's desktop. One place, because a
@@ -336,10 +400,11 @@ type_of() {
 # site that silently acts on the wrong unit -- and acting on the wrong unit is
 # quiet: it starts something, so nothing reports an error.
 unit_of() {
-  case "$(type_of "${1}")" in
-    ephemeral) echo "hdw4s-ephemeral@${1}.service";;
-    *)         echo "hdw4s@${1}.service";;
-  esac
+  if ephemeral_shaped "$(type_of "${1}")"; then
+    echo "hdw4s-ephemeral@${1}.service"
+  else
+    echo "hdw4s@${1}.service"
+  fi
 }
 
 # Where that unit's drop-ins live. Writing one into the other unit's directory is
@@ -407,6 +472,19 @@ alloc_slot() {
     echo "  Raise HDW4S_BLOCK_SIZE in ${CONF} and rerun 'hdw4s firewall --apply'." >&2
     return 1
   fi
+  # The table is the authority every other reader trusts, so an unrecognised
+  # type must not reach it. It would be carried verbatim by the router's parser
+  # and then fall through the default arm of every reader here -- which is the
+  # named-desktop arm, so a typo'd "ephemerel" would be given a real home, a
+  # password that means something and a TCP port, and nothing would report it.
+  # Refused at the one place that WRITES the column rather than guarded at the
+  # seventeen places that read it.
+  case " ${SESSION_TYPES} " in
+    *" ${type} "*) ;;
+    *) exec {lock}<&-
+       echo "hdw4s: '${type}' is not a session type; known types are ${SESSION_TYPES}." >&2
+       return 1;;
+  esac
   printf '%s %s %s\n' "${idx}" "${inst}" "${type}" >> "${SLOTS}"
   exec {lock}<&-
   echo "${idx}"
@@ -445,7 +523,7 @@ setting_with_source() {
   # session, and an isolation mode it does not run with. Ask systemd rather than
   # keeping a second copy of the unit's values here, which would be one more
   # thing able to disagree with it.
-  if [ "$(type_of "${inst}")" = 'ephemeral' ]; then
+  if ephemeral_shaped "$(type_of "${inst}")"; then
     v="$(systemctl show "$(unit_of "${inst}")" -p Environment --value 2>/dev/null |
            tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n1)"
     [ -z "${v}" ] || { printf '%s\t%s' "${v}" "$(unit_of "${inst}")"; return 0; }
@@ -773,7 +851,11 @@ cmd_check() {
     # tab has to ask "is this the desktop I had" because a slot is REUSED behind
     # one well-known hostname; a named desktop is one person's, at their own
     # name, and is not handed to somebody else when it restarts.
-    [ "$(type_of "${inst}")" = 'ephemeral' ] || continue
+    # in_ephemeral_pool(), because the comment above says why: the question is
+    # whether a slot is REUSED behind one hostname. The authoring slot is not --
+    # nothing is ever minted onto it -- so it belongs out of this census with
+    # the named desktops, however ephemeral its machinery is.
+    in_ephemeral_pool "$(type_of "${inst}")" || continue
     state="$(systemctl show -p ActiveState --value "$(unit_of "${inst}")" \
              2>/dev/null || echo unknown)"
     [ "${state}" = 'active' ] || continue
@@ -927,7 +1009,16 @@ cmd_show() {
 
 cmd_enable() {
   local type='desktop'
-  if [ "${1:-}" = '--ephemeral' ]; then type='ephemeral'; shift; fi
+  case "${1:-}" in
+    --ephemeral) type='ephemeral'; shift;;
+    # The administrator's authoring slot. It takes the ephemeral machinery --
+    # ephemeral_shaped() says so in one place, so nothing here repeats the
+    # list -- and differs from a pooled slot in exactly one way that matters
+    # to a stranger: the router's pool is the rows typed "ephemeral", so this
+    # row is never minted onto. That is the whole of "it is not in the pool",
+    # and it is a property of the table rather than of a filename.
+    --template)  type='template';  shift;;
+  esac
   local inst="$1" idx prof fresh='no'
   # An ephemeral slot is not an account anybody named: it is minted by
   # hdw4s-ephemeral-slots, and the checks below are about a human's account.
@@ -1108,7 +1199,7 @@ cmd_enable() {
   # /run/hdw4s-proxy, which the session unit already hides with
   # InaccessiblePaths=. The question is removed rather than guarded.
   local want='tcp'
-  if [ "${type}" = 'ephemeral' ]; then
+  if ephemeral_shaped "${type}"; then
     want='unix'
   else
     want="$(setting_of "${inst}" HDW4S_TRANSPORT tcp)"
@@ -1416,6 +1507,9 @@ duration_words() {
 # slots minted has nothing to protect yet.
 has_ephemeral_slots() {
   [ -r "${SLOTS}" ] || return 1
+  # "ephemeral" and not ephemeral_shaped(): this asks whether visitors can be
+  # minted, which is in_ephemeral_pool()'s question, and an authoring slot is
+  # not capacity. A box carrying only a template row has nothing to hand out.
   awk '$1 !~ /^#/ && $3 == "ephemeral" { found = 1 }
        END { exit !found }' "${SLOTS}"
 }
@@ -1441,7 +1535,14 @@ guard_never_reap() {
   [ "${IDLE_SECONDS}" -eq 0 ] || return 0
 
   if [ -n "${inst}" ]; then
-    [ "$(type_of "${inst}")" = 'ephemeral' ] || return 0
+    # in_ephemeral_pool() and NOT ephemeral_shaped(), and the reason is the
+    # sentence below: the refusal is about CAPACITY. "Never reap" is incoherent
+    # for a slot a stranger is waiting for and merely unwise for the authoring
+    # slot, which has no next visitor -- nobody is ever minted onto it. An
+    # administrator who wants an authoring session to sit until they come back
+    # to it is asking for something coherent, and this used to refuse it purely
+    # because the test was spelled "is it ephemeral".
+    in_ephemeral_pool "$(type_of "${inst}")" || return 0
     die "hdw4s: ${inst} is an ephemeral slot, and 0 would never free it." \
         '  Reaping is the only thing that ever frees a slot: a visitor who' \
         '  closes the tab tells nothing, so with no window the slot stays' \
@@ -1816,8 +1917,14 @@ cmd_transport() {
   # 'unix' unconditionally, and a second copy of the rule there would not stop
   # an administrator typing this command. A named desktop is a different thing
   # and keeps the choice -- its reverse proxy is routinely on another machine.
-  if [ "${mode}" = 'tcp' ] && [ "$(type_of "${inst}")" = 'ephemeral' ]; then
-    die "hdw4s: ${inst} is an ephemeral slot and cannot be put on TCP." \
+  if [ "${mode}" = 'tcp' ] && ephemeral_shaped "$(type_of "${inst}")"; then
+    # The noun is derived from the row rather than written in, because this
+    # refusal now covers two types and "is an ephemeral slot" is false of one
+    # of them. A refusal that misdescribes what it refused sends the reader to
+    # look at the wrong thing.
+    local what='an ephemeral slot'
+    [ "$(type_of "${inst}")" != 'template' ] || what='the template-authoring slot'
+    die "hdw4s: ${inst} is ${what} and cannot be put on TCP." \
         '  Nothing outside this machine addresses an ephemeral session: a' \
         '  visitor reaches one well-known hostname and a front door running' \
         '  here chooses the slot. A port would therefore serve no caller the' \
@@ -2093,7 +2200,9 @@ cmd_reap() {
       # Legal for a named session and refused at "set" time for a slot, so
       # reaching this with a slot means the file was edited by hand. Say so
       # every run: the pool filling up has no other symptom to trace back.
-      [ "${stype}" != 'ephemeral' ] ||
+      # Pool membership again, for the same reason as the refusal at "set":
+      # what this warns about is the pool filling up.
+      ! in_ephemeral_pool "${stype}" ||
         reap_say "hdw4s: ${inst} has HDW4S_IDLE_DAYS=0, so this slot will never be freed."
       continue
     fi
@@ -2194,7 +2303,7 @@ cmd_reap() {
     [ "${age}" -ge "${window}" ] || continue
 
     reap_say "hdw4s: stopping ${inst}; nothing has connected for $(duration_words "${age}")."
-    if [ "${stype}" = 'ephemeral' ]; then
+    if ephemeral_shaped "${stype}"; then
       reap_say '  This was an ephemeral session: its home and its settings lived'
       reap_say '  in memory and are now gone. The slot is free for a new session.'
     else
@@ -2236,7 +2345,7 @@ cmd_reap() {
 # neither requires nor encourages one there is a separate matter, and it is his
 # to decide per deployment rather than ours to enforce.
 auth_is_meaningless() {
-  [ "$(type_of "$1")" = 'ephemeral' ]
+  ephemeral_shaped "$(type_of "$1")"
 }
 
 cmd_auth() {
@@ -2346,13 +2455,29 @@ cmd_proxy() {
   # minted and not yet enabled -- which is the very case this branch was moved up
   # to serve. So ask the MACHINE as well: minting creates a runtime profile
   # directory per slot, and that exists before any row does.
-  local looks_ephemeral='no'
-  [ "$(type_of "${inst}")" != 'ephemeral' ] || looks_ephemeral='yes'
+  local looks_ephemeral='no' whatitis
+  ! ephemeral_shaped "$(type_of "${inst}")" || looks_ephemeral='yes'
   [ ! -d "/run/hdw4s-profile/${inst}" ] || looks_ephemeral='yes'
+  # What it IS, derived from the row, because the guidance below is the same for
+  # both and the first sentence is not: an authoring slot is reached through the
+  # pool's front door and still is not one slot of the pool. Saying it is would
+  # be a comment in a generated file asserting something untrue about the very
+  # slot it was generated for.
+  # Keyed on "template" itself rather than on the negation of pool membership,
+  # because looks_ephemeral is also set by the runtime-profile probe above for a
+  # slot minted and not yet enabled -- which is typed "desktop" and is not the
+  # authoring slot. A negation would have called that one a template.
+  if [ "$(type_of "${inst}")" = 'template' ]; then
+    whatitis="is the template-authoring slot, reached through the same front door
+# as the pool and never handed to a visitor, so it is not configured slot by slot
+# either"
+  else
+    whatitis="is one slot of the ephemeral pool, and a pool is not configured slot
+# by slot"
+  fi
   if [ "${looks_ephemeral}" = 'yes' ]; then
     cat <<EOF
-# ${inst} is one slot of the ephemeral pool, and a pool is not configured slot
-# by slot. Visitors arrive at ONE hostname for the whole pool; the pool chooses
+# ${inst} ${whatitis}. Visitors arrive at ONE hostname for the whole pool; the pool chooses
 # which slot each visitor gets, and gives a returning visitor back the session
 # they already have. A block pointing nginx at this slot's own socket would bypass
 # that -- every visitor would land on ${inst}, and the arrival rule that decides
@@ -2434,7 +2559,7 @@ EOF
   # minted but not yet enabled has no file at all, and one enabled by an older
   # version has a file still saying "tcp". Either would print a port block for
   # a session that does not listen on one.
-  [ "$(type_of "${inst}")" != 'ephemeral' ] || transport='unix'
+  ! ephemeral_shaped "$(type_of "${inst}")" || transport='unix'
   if [ "${transport}" = 'unix' ]; then
     upstream="        # A filesystem socket: who may connect is a question of
         # permissions, not of source address. Add nginx's user to the group
@@ -2816,12 +2941,51 @@ cmd_release() {
   esac
 }
 
+# REFUSE AN UNREADABLE SLOT TABLE HERE, ONCE, BEFORE ANY COMMAND RUNS.
+#
+# Every predicate below asks the table what kind of session a slot is, and
+# type_of answers "unreadable" when it cannot read it. ephemeral_shaped then
+# refuses rather than guessing -- which is right, and which FAILS OPEN at the
+# only place it matters: unit_of() consults it, and all nineteen callers of
+# unit_of use $(unit_of ...). A die inside a command substitution kills the
+# SUBSHELL, so the message is printed in full and the caller carries on with an
+# empty string.
+#
+# MEASURED on this tree, table at mode 000, before this guard existed:
+#
+#     type_of eph0   -> unreadable
+#     unit_of eph0   -> ""            <- the die was printed and swallowed
+#     dropin_of eph0 -> ${DROPIN}/.d
+#
+# So "systemctl stop ''", a BindsTo= written into a drop-in directory named
+# ".d", and hdw4s set writing there. That is this project's own recorded trap --
+# die inside $(...) fails OPEN, loud and stopping nothing -- reproduced inside
+# the commit whose own message warns about it.
+#
+# The repair is not to make the predicate die harder; a predicate that dies is
+# the trap. It is to ensure NOTHING EVER SEES "unreadable" THROUGH A
+# SUBSTITUTION. The table is read by every command that takes a slot, so one
+# refusal here covers all of them and leaves the predicate's own die as an
+# unreachable backstop rather than the load-bearing check.
+#
+# Absence is NOT this case: a missing table is a box with no slots yet, which
+# several commands handle and which "hdw4s enable" exists to fix. Only a table
+# that is PRESENT AND UNREADABLE is refused, because that is the state where
+# every answer below would be a guess.
+if [ -e "${SLOTS}" ] && [ ! -r "${SLOTS}" ]; then
+  die "hdw4s: ${SLOTS} exists but cannot be read." \
+      '  Every command here asks that file what kind of session a slot is, so' \
+      '  continuing would mean guessing -- and a wrong guess puts a pooled slot' \
+      '  on a TCP port and binds its relay to a unit that will never start.' \
+      '  Check its permissions and run this again.'
+fi
+
 case "${1:-}" in
   list)     shift; cmd_list "$@";;
   check)    shift; [ $# -eq 0 ] || usage_error; cmd_check "$@";;
   show)     shift; [ $# -eq 1 ] || usage_error; cmd_show "$@";;
   enable)   shift
-            case "${1:-}" in --ephemeral) [ $# -eq 2 ] || usage_error;;
+            case "${1:-}" in --ephemeral|--template) [ $# -eq 2 ] || usage_error;;
                          *)           [ $# -eq 1 ] || usage_error;; esac
             cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || usage_error; cmd_disable "$@";;

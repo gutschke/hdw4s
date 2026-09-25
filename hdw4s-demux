@@ -603,6 +603,7 @@ def assert_pool_is_typed(read_table=slot_table, pool=ephemeral_slots):
             f.write("1 named0 desktop\n")
             f.write("2 eph1 ephemeral\n")
             f.write("3 legacy\n")
+            f.write("4 tmpl template\n")
         table = read_table(path)
         assert table is not None, \
             "a readable slot table was reported unreadable, so every refusal" \
@@ -623,6 +624,17 @@ def assert_pool_is_typed(read_table=slot_table, pool=ephemeral_slots):
         assert "zz-probe" not in got, \
             "a name that is in no table at all reached the pool, so the pool" \
             " is still being computed from something other than the table"
+        # THE ARM THIS FEATURE RESTS ON. The administrator's authoring slot is
+        # ephemeral in every mechanical respect the CLI cares about -- same
+        # unit, same tmpfs home, same filesystem socket -- and the ONE thing
+        # that keeps it away from strangers is that this filter names
+        # "ephemeral" exactly rather than "ephemeral-shaped". Handing it out
+        # gives a visitor the desktop the template is authored in, with the
+        # submit control in it. There is no second check behind this one.
+        assert "tmpl" not in got, \
+            "a row typed 'template' was offered as ephemeral capacity: the" \
+            " next visitor at the well-known hostname is handed the" \
+            " administrator's authoring desktop"
 
         # The unreadable case, and it must be told apart from an empty one.
         missing = read_table(os.path.join(d, "no-such-file"))

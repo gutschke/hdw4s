@@ -767,11 +767,142 @@ echo '== a slot records what kind of session it is =='
   is 'drop-ins follow the unit' "$(dropin_of eph0)" \
      "${DROPIN}/hdw4s-ephemeral@eph0.service.d"
 
+  # -- the fourth type ------------------------------------------------------
+  #
+  # WHY THESE ARE HERE AND NOT BESIDE THE FEATURE. "template" is not a feature
+  # of its own; it is a value that seventeen existing readers of this table each
+  # decide something from, and every one of them used to fall through to the
+  # named-desktop arm. The damage was never in one place, so neither is the
+  # check: what is asserted below is that each reader asks one of the two
+  # NAMED questions, and that the two questions give different answers.
+  printf '%s\n' '# comment' '0 alice' '1 eph0 ephemeral' '2 tmpl template' \
+    > "${SLOTS}"
+  is 'the template row is read'   "$(type_of tmpl)" 'template'
+  # The whole point: it runs the ephemeral unit, so it gets the tmpfs home at
+  # /home/user, the namespaced passwd and the Chrome policy bind -- the same
+  # machinery a visitor gets, which is what makes the template it produces
+  # correct in every slot. On the named unit it would author against a real
+  # home and bake /home/<admin> into every path it emits.
+  is 'and runs the ephemeral unit' "$(unit_of tmpl)" 'hdw4s-ephemeral@tmpl.service'
+  is 'so its drop-ins follow it too' "$(dropin_of tmpl)" \
+     "${DROPIN}/hdw4s-ephemeral@tmpl.service.d"
+
+  # The two questions, and they must disagree about exactly this row.
+  ephemeral_shaped template && ok 'template is ephemeral-shaped' \
+    || bad 'template is ephemeral-shaped' 'it is not'
+  in_ephemeral_pool template && bad 'template is NOT pool capacity' \
+    'it was offered as capacity' || ok 'template is NOT pool capacity'
+  ephemeral_shaped ephemeral && ok 'ephemeral is ephemeral-shaped' \
+    || bad 'ephemeral is ephemeral-shaped' 'it is not'
+  in_ephemeral_pool ephemeral && ok 'ephemeral IS pool capacity' \
+    || bad 'ephemeral IS pool capacity' 'it was not'
+  ephemeral_shaped desktop && bad 'desktop is neither' 'shaped said yes' \
+    || ok 'desktop is not ephemeral-shaped'
+
+  # RED ARM for the pair. A predicate that answered yes to everything would
+  # satisfy every permit above, so it is made to refuse something it must.
+  ephemeral_shaped nonsense && bad 'an unknown type is not ephemeral-shaped' \
+    'it was accepted' || ok 'an unknown type is not ephemeral-shaped'
+
+  # -- the table that cannot be read ----------------------------------------
+  #
+  # ABSENT IS NOT EQUAL. type_of() used to answer "desktop" here, which is a
+  # fabricated answer to a question that had none -- and since every reader
+  # asks "is it ephemeral", one unreadable file turned all of them off at once.
+  # The failure is not that a template row is misread; it is that a POOLED row
+  # is, and lands on a TCP port.
+  # The predicate half runs everywhere, because it needs no unreadable file:
+  # it is handed the sentinel directly.
+  ( ephemeral_shaped unreadable >/dev/null 2>&1 ) \
+    && bad 'the sentinel refuses rather than guessing' 'it answered' \
+    || ok 'the sentinel refuses rather than guessing'
+  # The message has to send somebody to the FILE. "unknown type" sends them to
+  # look at a session that is fine.
+  case "$( ( ephemeral_shaped unreadable ) 2>&1 )" in
+    *"${SLOTS}"*) ok 'and the refusal names the table';;
+    *) bad 'and the refusal names the table' 'it does not';;
+  esac
+  # RED ARM: without this, both arms above are satisfied by a predicate that
+  # refuses everything, which would refuse every slot on a healthy machine.
+  ephemeral_shaped ephemeral && ok 'and a real type still permits' \
+    || bad 'and a real type still permits' 'it refused'
+
+  # The reader half needs a file it genuinely cannot read, which permissions
+  # cannot produce for root. NOT skipped when root -- a skip that records
+  # nothing is the shape this harness was rewritten to stop -- so the structure
+  # is asserted instead, and it is asserted for everyone.
+  # shellcheck disable=SC2016  # matching the literal source text, not expanding it
+  case "$(sed -n '/^type_of()/,/^}/p' "${ROOT}/hdw4s")" in
+    *'-e "${SLOTS}"'*'-r "${SLOTS}"'*unreadable*)
+      ok 'type_of tells "no table" apart from "cannot read it"';;
+    *) bad 'type_of tells "no table" apart from "cannot read it"' \
+          'the -e/-r pair or the sentinel is gone';;
+  esac
+  chmod 000 "${SLOTS}"
+  if [ -r "${SLOTS}" ]; then
+    # Running as root: the arm below cannot be built here. Say so as a
+    # measurement of the ENVIRONMENT rather than as a result about the code.
+    printf '  --   %s\n' 'reading as root; the unreadable-table arm needs a non-root run'
+  else
+    is 'an unreadable table is not "desktop"' "$(type_of eph0)" 'unreadable'
+
+    # THE ARM THE BRANCH SHIPPED WITHOUT, AND WHAT IT ACTUALLY GUARDS.
+    #
+    # Every arm above exercises the predicate DIRECTLY, where its die stops the
+    # shell. Nothing went through unit_of -- and all nineteen of its callers
+    # write $(unit_of ...), where a die kills only the SUBSHELL. Measured on
+    # this tree before the dispatcher guard existed: unit_of answered the EMPTY
+    # STRING with its refusal printed in full, and dropin_of answered
+    # "${DROPIN}/.d". So "systemctl stop ''" and a drop-in written into a
+    # directory named ".d", from a guard that had loudly refused.
+    #
+    # The repair is NOT to make the predicate die harder -- a predicate that
+    # dies inside a substitution is the trap itself. It is that nothing ever
+    # REACHES those functions with an unreadable table, refused once at the
+    # dispatcher. So this asserts the refusal a real invocation meets, not the
+    # behaviour of a function called out of context: sourcing the functions and
+    # calling unit_of by hand still fails open, deliberately and harmlessly,
+    # because no command can get there.
+    # HDW4S_ETCDIR passed EXPLICITLY. Without it the binary reads the real
+    # /etc/hdw4s, never sees this sandbox, and dies "no such instance" -- which
+    # is also exit 1, so the status assertion below passed for entirely the
+    # wrong reason on the first cut. An arm that goes red for a different cause
+    # proves nothing, which is why the two message assertions are here rather
+    # than a bare status check.
+    out="$( ( HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" show eph0 ) 2>&1 )"; rc=$?
+    is 'an unreadable table refuses before any command runs' "${rc}" '1'
+    # Matching the SENTENCE rather than the path: the harness and the binary
+    # derive ETCDIR separately, so asserting the exact filename here tests
+    # whether two variables agree rather than whether the refusal is useful.
+    has 'and the refusal says it cannot READ the file' "${out}" 'cannot be read'
+    has 'and it names the table rather than the slot' "${out}" 'instances'
+    hasnt 'and no command got far enough to build a unit name' "${out}" '.d'
+  fi
+  chmod 644 "${SLOTS}"
+
+  # A table that does not exist at all is a different fact from one that
+  # cannot be read, and it must not be swept into the refusal: a machine with
+  # no slots has an untyped instance, and "desktop" there is information.
+  rm -f "${SLOTS}"
+  is 'no table at all still defaults to desktop' "$(type_of alice)" 'desktop'
+
   rm -f "${SLOTS}"
   alloc_slot newone ephemeral >/dev/null
   is 'alloc_slot records the type' "$(awk '$2=="newone"{print $3}' "${SLOTS}")" 'ephemeral'
   alloc_slot plain >/dev/null
   is 'and defaults it when not given' "$(awk '$2=="plain"{print $3}' "${SLOTS}")" 'desktop'
+  alloc_slot tmpl template >/dev/null
+  is 'and records the template type' "$(awk '$2=="tmpl"{print $3}' "${SLOTS}")" 'template'
+  # RED ARM for the write side. A type nobody recognises is refused HERE, at the
+  # only place that writes the column -- not guarded at the seventeen that read
+  # it, every one of whose default arm is the named-desktop arm. "ephemerel"
+  # would otherwise be given a real home, a password that means something and a
+  # TCP port, with nothing reporting it.
+  ( alloc_slot typo ephemerel >/dev/null 2>&1 ) \
+    && bad 'an unknown type is refused where it is written' 'it was accepted' \
+    || ok 'an unknown type is refused where it is written'
+  is 'and no row was left behind' \
+     "$(awk '$2=="typo"{print $3}' "${SLOTS}")" ''
 
   # The trap this field creates: "read -r idx inst" does not drop the third
   # field, it appends it to the name -- so the slot is indexed under a session
@@ -814,6 +945,23 @@ echo '== an ephemeral slot cannot be put on the network =='
   [ ! -e "${DROPIN}/hdw4s-proxy@${me}.socket.d/50-listen.conf" ] &&
     ok 'and writes no listener drop-in' ||
     bad 'and writes no listener drop-in' 'the port drop-in was written anyway'
+
+  # The authoring slot is kept off a port by the SAME refusal, and it is the
+  # site the type mattered at most: an ephemeral row and a template row are
+  # both reachable only through the front door on this machine, so a port
+  # serves no caller either has and every caller neither must have. A template
+  # row used to fall through to the named-desktop arm and be accepted here.
+  printf '%s\n' "0 ${me} template" > "${SLOTS}"
+  rm -f "${DROPIN}/hdw4s-proxy@${me}.socket.d/50-listen.conf"
+  out="$( ( cmd_transport "${me}" tcp ) 2>&1 )"; rc=$?
+  is 'tcp is refused for the authoring slot too' "${rc}" '1'
+  # And it says WHICH slot it refused. One refusal now covers two types, so the
+  # noun is derived from the row: calling this one "an ephemeral slot" would
+  # send the reader to look at the pool.
+  has 'and calls it what it is' "${out}" 'the template-authoring slot'
+  [ ! -e "${DROPIN}/hdw4s-proxy@${me}.socket.d/50-listen.conf" ] &&
+    ok 'and writes no listener drop-in for it either' ||
+    bad 'and writes no listener drop-in for it either' 'the port drop-in was written'
 
   # The control, and it is the half that makes the refusal mean something: the
   # same call on a desktop slot must still succeed, or the test above passes
@@ -923,8 +1071,10 @@ echo '== the relay names no session unit, and enable supplies one =='
   mkdir -p "${SB}/etc/hdw4s" "${SB}/units/hdw4s-proxy@alice.service.d" \
            "${SB}/units/hdw4s-proxy@bob.service.d" \
            "${SB}/units/hdw4s-proxy@dave.service.d" \
-           "${SB}/units/hdw4s-proxy@eve.service.d"
+           "${SB}/units/hdw4s-proxy@eve.service.d" \
+           "${SB}/units/hdw4s-proxy@tmpl.service.d"
   printf '%s\n' '# comment' '0 alice' '1 bob' '2 carol' '3 dave ephemeral' '4 eve' \
+                 '5 tmpl template' \
     > "${SB}/etc/hdw4s/instances"
   printf 'keep me\n' > "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf"
   # A drop-in from before the BindsTo fix. An upgrade has to correct it, because
@@ -955,6 +1105,16 @@ echo '== the relay names no session unit, and enable supplies one =='
   case "$(cat "${SB}/units/hdw4s-proxy@dave.service.d/30-session.conf" 2>/dev/null)" in
     *'BindsTo=hdw4s-ephemeral@dave.service'*) ok 'an ephemeral slot names the ephemeral unit';;
     *) bad 'an ephemeral slot names the ephemeral unit' 'missing or wrong';;
+  esac
+  # The fourth type, in the same run. The installers cannot call the CLI's
+  # ephemeral_shaped() -- they may be repairing a tree whose hdw4s does not run
+  # yet -- so they carry their own copy of the list, and this is what keeps the
+  # copy honest. A template row on the default arm got BindsTo=hdw4s@tmpl,
+  # which never starts an authoring session: the relay listens and every start
+  # fails on the dependency, with the front door still accepting.
+  case "$(cat "${SB}/units/hdw4s-proxy@tmpl.service.d/30-session.conf" 2>/dev/null)" in
+    *'BindsTo=hdw4s-ephemeral@tmpl.service'*) ok 'and so does the template slot';;
+    *) bad 'and so does the template slot' 'missing or wrong';;
   esac
   case "$(cat "${SB}/units/hdw4s-proxy@eve.service.d/30-session.conf" 2>/dev/null)" in
     *'BindsTo=hdw4s@eve.service'*) ok 'an old Requires= drop-in is migrated';;
@@ -1180,6 +1340,22 @@ echo '== never reaping is a choice for a named session and a leak for a slot =='
   ( cmd_set 'dora' 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
     && ok  'a named session still may' \
     || bad 'a named session still may'
+
+  # And so may the authoring slot, which is the whole reason this guard asks
+  # in_ephemeral_pool() rather than "is it ephemeral". Every sentence in the
+  # refusal above is about the NEXT VISITOR -- the pool filling, the 503 -- and
+  # nobody is ever minted onto a template row. Refusing it would be this
+  # project's own recurring shape: a guard firing on a resemblance rather than
+  # on the property it was written for.
+  printf '%s\n' '0 dora' '1 eph0 ephemeral' '2 tmpl template' > "${SLOTS}"
+  ( cmd_set 'tmpl' 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
+    && ok  'and so may the template-authoring slot' \
+    || bad 'and so may the template-authoring slot' 'it was refused'
+  # CONTROL, in the same table, so the permit above cannot be a broken guard:
+  # the pooled row beside it must still be refused.
+  ( cmd_set 'eph0' 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
+    && bad 'CONTROL: the pooled slot beside it is still refused' 'it was accepted' \
+    || ok  'CONTROL: the pooled slot beside it is still refused'
 
   # Machine-wide, the value reaches the slots too, so it is refused -- but only
   # on a machine that HAS slots. A check that fails on a correct state is one
@@ -2073,7 +2249,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=338   # update when tests are added; a wrong number is the point
+EXPECTED=366   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
