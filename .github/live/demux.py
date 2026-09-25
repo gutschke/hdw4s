@@ -21,6 +21,7 @@ passes while the defect is live. Here the two requests are deliberately sent
 down ONE connection.
 """
 
+import atexit
 import base64
 import os
 import socket
@@ -63,7 +64,56 @@ def expect_red(name, fn):
 class Slot(threading.Thread):
     """A backend that says which slot it is, so a mis-route is visible."""
 
-    def __init__(self, path, name, rundir, webroot=None):
+    # THE DOOR. One file stands in for /proc/net/tcp and every slot's door is a
+    # row in it, guarded by a lock because the slots are threads. The router
+    # reads it through HDW4S_PROC_NET_TCP exactly as it reads the real one --
+    # same parser, same st=0A requirement -- so what is stood in for here is the
+    # KERNEL, not the check.
+    doors = {}
+    doors_lock = threading.Lock()
+    doors_file = None
+
+    @classmethod
+    def write_doors(cls):
+        if cls.doors_file is None:
+            return
+        rows = ["  sl  local_address rem_address   st tx_queue rx_queue tr"
+                " tm->when retrnsmt   uid  timeout inode\n"]
+        with cls.doors_lock:
+            open_ports = sorted(p for p, up in cls.doors.items() if up)
+            shut_ports = sorted(p for p, up in cls.doors.items() if not up)
+        i = 0
+        for port in open_ports:
+            rows.append("%4d: 0100007F:%04X 00000000:0000 0A 00000000:00000000"
+                        " 00:00000000 00000000     0        0 0 1 0 100 0 0 10"
+                        " 0\n" % (i, port))
+            i += 1
+        # A SHUT DOOR LEAVES A TIME_WAIT BEHIND, because that is what the
+        # connection the session was serving turns into when the session dies.
+        # Written on purpose: a router that looked for the port anywhere in this
+        # file rather than for state 0A would read every one of these as OPEN
+        # and the whole repair would be green and inert.
+        for port in shut_ports:
+            rows.append("%4d: 0100007F:%04X 0100007F:D431 06 00000000:00000000"
+                        " 00:00000000 00000000     0        0 0 1 0 100 0 0 10"
+                        " 0\n" % (i, port))
+            i += 1
+        tmp = cls.doors_file + ".new"
+        with open(tmp, "w") as f:
+            f.write("".join(rows))
+        os.replace(tmp, cls.doors_file)
+
+    def open_door(self):
+        with Slot.doors_lock:
+            Slot.doors[self.port] = True
+        Slot.write_doors()
+
+    def shut_door(self):
+        with Slot.doors_lock:
+            Slot.doors[self.port] = False
+        Slot.write_doors()
+
+    def __init__(self, path, name, rundir, webroot=None, port=None):
         super().__init__(daemon=True)
         self.name = name
         self.path = path
@@ -80,6 +130,9 @@ class Slot(threading.Thread):
         # "no slot publishes an incarnation ... what it cannot see is a slot
         # reaped and re-let to somebody else between two visits."
         self.webroot = webroot
+        # The port this slot's session listens on, which is what the router
+        # reads out of the instance config and then asks the kernel about.
+        self.port = port
         # None means "no session is running here". A token appears when one
         # starts, which in this product is when something CONNECTS: these slots
         # are socket-activated, so the first request is what brings a desktop
@@ -164,11 +217,49 @@ class Slot(threading.Thread):
             "%s had no session to log out of, so this proves nothing about a "
             "recycled slot" % self.name)
         self.incarnation = None
+        # THE DOOR SHUTS BEFORE THE RUNTIME DIRECTORY GOES, which is the
+        # measured shape and the whole reason the check exists: relay inactive
+        # at t=4.45, door shut at 4.69, runtime directory still there until
+        # 5.22. Reproducing them in the other order would test a world where
+        # there is nothing to repair.
+        if self.port is not None:
+            self.shut_door()
         if not leave_rundir:
             import shutil
             shutil.rmtree(self.rundir, ignore_errors=True)
             assert not os.path.exists(self.rundir), \
                 "%s still looks occupied after its session ended" % self.name
+
+    def finish_logout(self):
+        """systemd removing the RuntimeDirectory -- the far edge of the window.
+
+        A SEPARATE STEP FROM logout(), because the gap between them IS the
+        window: measured, the session went inactive at t=4.45 and the directory
+        was still there until t=5.22. A stand-in that removed both at once
+        would close the window by fiat and every arm about it would pass
+        against a router that had not been repaired.
+        """
+        import shutil
+        shutil.rmtree(self.rundir, ignore_errors=True)
+        assert not os.path.exists(self.rundir), \
+            "%s still looks occupied after its session ended" % self.name
+
+    def resurrect(self):
+        """A fresh desktop appears in this slot, started by somebody else.
+
+        WHAT THIS IS FOR, now that the window is closed. The router no longer
+        proxies into a slot whose session has stopped, so the router can no
+        longer be the thing that resurrects one. It is not the only thing that
+        can: root, an administrator restarting a unit by hand, and the idle
+        sweep followed by any later connection all still put a fresh desktop in
+        a slot that is let to somebody. Those are the cases the RECLAIM covers
+        and the door check does not, so they are reproduced here directly
+        rather than through the router -- which would now, correctly, refuse.
+        """
+        os.makedirs(self.rundir, mode=0o700, exist_ok=True)
+        self.publish()
+        if self.port is not None:
+            self.open_door()
 
     def torn_down(self):
         """Stand in for hdw4s-teardown having run against this slot.
@@ -184,6 +275,8 @@ class Slot(threading.Thread):
         leaves things, because it stops the session unit and not the socket.
         """
         self.incarnation = None
+        if self.port is not None:
+            self.shut_door()
         import shutil
         shutil.rmtree(self.rundir, ignore_errors=True)
 
@@ -319,6 +412,13 @@ class Slot(threading.Thread):
                 # exactly when a request arrives at a slot that has none.
                 if self.incarnation is None:
                     self.publish()
+                    # A SESSION THAT HAS STARTED IS LISTENING. Opened here and
+                    # not at bind time, for the same reason the runtime
+                    # directory is created here: a slot nobody has opened has a
+                    # listening SLOT SOCKET and no session behind it, so no
+                    # door of its own.
+                    if self.port is not None:
+                        self.open_door()
                 while True:
                     h = f.readline()
                     if h in (b"\r\n", b"\n", b""):
@@ -439,6 +539,22 @@ class Rig:
         with open(self.instances, "w") as f:
             for i, name in enumerate(names):
                 f.write("%d %s ephemeral\n" % (i, name))
+        # EVERY SLOT GETS A PORT IN ITS OWN CONFIG, because every real one has
+        # one: "hdw4s enable" writes HDW4S_PORT into the instance file AND into
+        # the relay's drop-in. Until this existed the rig could not express the
+        # door instrument at all -- instance_port() would have read None for
+        # every slot and slot_door_open() would have answered "cannot ask" for
+        # the whole pool, which is a silence the router correctly refuses to
+        # spend. Every arm about the door would have been green and empty.
+        self.ports = {}
+        for i, name in enumerate(names + list(strays)):
+            self.ports[name] = 7300 + i
+        Slot.doors = {}
+        Slot.doors_file = os.path.join(self.tmp, "proc-net-tcp")
+        Slot.write_doors()
+        for name in names + list(strays):
+            with open(os.path.join(self.etc, name + ".conf"), "a") as f:
+                f.write("HDW4S_PORT=%d\n" % self.ports[name])
         if windows is not None:
             # "%s", NOT "%d", and this is the fixture that let the defect ship.
             # An integer format specifier cannot put "30d", "12h" or "90m" in
@@ -447,7 +563,10 @@ class Rig:
             # input that breaks it. Every green here was a green about integers.
             # A window is written EXACTLY as an administrator would write it.
             for name, days in windows:
-                with open(os.path.join(self.etc, name + ".conf"), "w") as f:
+                # APPEND. It used to truncate, which was harmless while this
+                # file held one setting and would have silently deleted the
+                # port line the moment a second one existed.
+                with open(os.path.join(self.etc, name + ".conf"), "a") as f:
                     f.write("HDW4S_IDLE_DAYS=%s\n" % (days,))
         # HDW4S_RUNDIR is what the CLI already reads, default /run. The
         # sessions' runtime directories hang off it at hdw4s/<instance>.
@@ -466,7 +585,7 @@ class Rig:
             name = "ephemeral%d" % i
             s = Slot(os.path.join(self.rundir, name + ".sock"), name,
                      os.path.join(self.hdw4s_rundir, "hdw4s", name),
-                     webroot=self.webroot)
+                     webroot=self.webroot, port=self.ports.get(name))
             s.start()
             self.slots.append(s)
         # NAMES IN THE SOCKET DIRECTORY THAT ARE IN NO TABLE ROW, which is the
@@ -489,7 +608,7 @@ class Rig:
         for name in strays:
             s = Slot(os.path.join(self.rundir, name + ".sock"), name,
                      os.path.join(self.hdw4s_rundir, "hdw4s", name),
-                     webroot=self.webroot)
+                     webroot=self.webroot, port=self.ports.get(name))
             s.start()
             self.strays.append(s)
         self.port = self.free_port()
@@ -502,6 +621,7 @@ class Rig:
                    HDW4S_REAP_STAMP_DIR=self.reapdir,
                    HDW4S_WEBROOT_DIR=self.webroot,
                    HDW4S_TEARDOWN_DIR=self.teardowndir,
+                   HDW4S_PROC_NET_TCP=Slot.doors_file,
                    HDW4S_DEMUX_BIND="127.0.0.1",
                    HDW4S_DEMUX_PORT=str(self.port),
                    **({"HDW4S_GATE_MODE": gate} if gate is not None else {}))
@@ -1993,6 +2113,19 @@ def assert_pool_is_typed(read_table=None, pool=None):
 """
 
 
+_SCRATCH = []
+
+
+@atexit.register
+def _remove_scratch_demuxes():
+    """Whatever scratch_demux() made, gone, however this process ended."""
+    for path in _SCRATCH:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def scratch_demux(suffix, extra):
     """A copy of the shipped router with EXTRA appended. Returns its path.
 
@@ -2015,6 +2148,18 @@ def scratch_demux(suffix, extra):
     with os.fdopen(fd, "w") as f:
         f.write(open(DEMUX).read().replace(
             'if __name__ == "__main__":', extra + '\nif __name__ == "__main__":'))
+    # REGISTERED FOR REMOVAL HERE, WHERE IT IS CREATED, rather than left to
+    # each caller's finally:. Every caller writes
+    #     path = scratch_demux(...)
+    #     rig = Rig(..., demux=path)
+    #     try: ... finally: os.unlink(path)
+    # and a mutation that the router's own STARTUP GUARDS catch makes Rig()
+    # raise on that middle line -- before the try: that would have cleaned up.
+    # So exactly the arms that work best leave a copy of the router lying in
+    # the tree, named like a hidden file so nobody notices. Two were found that
+    # way. The callers keep their unlink; this is the one that cannot be
+    # skipped.
+    _SCRATCH.append(path)
     return path
 
 
@@ -2093,7 +2238,7 @@ def red_pool_from_the_directory():
         test_a_socket_outside_the_table_is_never_minted(rig)
     finally:
         rig.stop()
-        os.unlink(path)
+        _remove_scratch_demuxes()
 
 
 def red_startup_guard_notices_the_directory_listing():
@@ -2153,26 +2298,39 @@ def red_startup_guard_notices_the_directory_listing():
 # Slot.torn_down() for exactly what is stood in for.
 
 
-def logout_and_return(rig, client, sid, slot):
-    """The owner's sequence, in the rig: log out, let the reload resurrect,
-    come back. Returns the status of the visit AFTER the resurrection.
+def logout_and_reload(rig, client, sid, slot):
+    """The owner's sequence: log out, and reload INSIDE the window.
 
-    THE ORDER IS THE MEASUREMENT, not a convenience. The reload happens INSIDE
-    the window -- while the runtime directory is still there and the router
-    still believes the letting is healthy -- because that is what makes the leak
-    four-out-of-four rather than occasional. A rig that logged out and then
-    waited would be testing the easy world, where the router gates and no
-    resurrection happens at all.
+    THE ORDER IS THE MEASUREMENT, not a convenience. The reload happens while
+    the runtime directory is still there -- measured, the session went inactive
+    at t=4.45 and the directory survived to t=5.22 -- because that is the
+    instant the whole defect lives in. A rig that logged out and then waited
+    would be testing the easy world, where occupancy alone gates and there is
+    nothing to repair.
+
+    Returns the status the visitor got. It asserts nothing about it, so the
+    same helper serves the repaired router and the red arm that undoes it.
+    """
+    slot.logout(leave_rundir=True)
+    st, _, _ = client.get("/s/%s/" % sid)
+    return st
+
+
+def recycled_underneath(rig, client, sid, slot):
+    """The slot ends up running a desktop that is not the one it was let for.
+
+    NOT VIA THE ROUTER, and that is the point since the window closed: a
+    repaired router refuses to proxy into a stopped session, so it can no
+    longer be the thing that starts the replacement. Somebody else does --
+    root, an admin restarting a unit, the sweep plus any later connection --
+    and the RECLAIM is what covers those. Returns the status of the visit after
+    the replacement is in place.
     """
     before = slot.incarnation
     slot.logout(leave_rundir=True)
-    st, _, _ = client.get("/s/%s/" % sid)
-    assert st == 200, (
-        "the reload inside the window was not proxied into the slot, so no "
-        "fresh desktop was started and this proves nothing: %d" % st)
-    assert slot.incarnation is not None and slot.incarnation != before, (
-        "%s did not come back with a NEW incarnation, so the slot was not "
-        "recycled underneath the letting" % slot.name)
+    slot.resurrect()
+    assert slot.incarnation is not None and slot.incarnation != before, \
+        "%s did not come back with a NEW incarnation" % slot.name
     st, _, _ = client.get("/s/%s/" % sid)
     return st
 
@@ -2197,14 +2355,20 @@ def four_correct_logouts(rig, asked=None):
         sid, name = arrive_on_slot(rig, c)
         used.append(name)
         slot = slot_named(rig, name)
-        st = logout_and_return(rig, c, sid, slot)
+        st = logout_and_reload(rig, c, sid, slot)
         assert st == 410, (
-            "round %d: the visitor was not gated after their slot was "
-            "recycled: %d" % (i + 1, st))
+            "round %d: the reload inside the window was PROXIED into a slot "
+            "whose session had stopped (%d). That connection is what starts a "
+            "fresh desktop in a slot somebody else is still let." % (i + 1, st))
+        assert slot.incarnation is None, (
+            "round %d: a fresh desktop was started in %s by the visitor's own "
+            "reload -- the slot was recycled underneath the letting"
+            % (i + 1, name))
         if asked is not None:
             asked.append(rig.teardown_requests())
-        # The machine doing its half. Not an assertion: see Rig.run_teardowns()
-        # for what is stood in for and what is not.
+        # systemd finishing what the logout started. Not an assertion: this is
+        # the far edge of the window, and the slot is only free after it.
+        slot.finish_logout()
         rig.run_teardowns()
     return used
 
@@ -2218,10 +2382,11 @@ def test_a_correct_logout_does_not_consume_the_slot(rig):
     """
     asked = []
     used = four_correct_logouts(rig, asked)
-    for i, (name, request) in enumerate(zip(used, asked)):
-        assert request == [name], (
-            "round %d: the router gated the visitor and left a full desktop "
-            "running in %s for nobody -- asked for %r" % (i + 1, name, request))
+    for i, request in enumerate(asked):
+        assert request == [], (
+            "round %d: a teardown was requested, which means a desktop had "
+            "been started for nobody and needed ending. With the window shut "
+            "there should have been nothing to reclaim: %r" % (i + 1, request))
     assert len(set(used)) <= len(rig.slots), \
         "more slots were handed out than exist: %r" % (used,)
     assert len(set(used)) < len(used), (
@@ -2248,9 +2413,12 @@ def test_a_slot_this_router_did_not_let_is_not_reclaimed(rig):
     c = rig.client()
     sid, name = arrive_on_slot(rig, c)
     slot = slot_named(rig, name)
-    slot.logout(leave_rundir=True)
-    st, _, _ = c.get("/s/%s/" % sid)
-    assert st == 200, "the reload was not proxied into the slot: %d" % st
+    st = recycled_underneath(rig, c, sid, slot)
+    assert st == 410, "the visitor was not gated at a recycled slot: %d" % st
+    rig.run_teardowns()
+    # And now a SECOND replacement, with the router restarted in between so it
+    # holds no letting for this session at all.
+    slot.resurrect()
     rig.restart()
     st, _, _ = c.get("/s/%s/" % sid)
     assert st == 410, "a tab with an unknown session id was not gated: %d" % st
@@ -2338,6 +2506,70 @@ def reclaimable(own, sid, rec, rundir=None, webroot=None):
 """
 
 
+NO_DOOR_CHECK = """
+def assert_door_only_refuses_what_it_measured(ports=None, door=None,
+                                              replaced=None, factory=None):
+    # Stubbed so the arm can REACH the rig. Run either mutation below without
+    # this and the router refuses to start, which is the startup guard catching
+    # it unaided -- the first place each of these was watched go red.
+    return None
+
+def slot_door_open(instance, ports=None, etc=None):
+    # THE WINDOW, REOPENED: the router goes back to deciding on the runtime
+    # directory alone, which outlives the session it describes. "None" is the
+    # honest shape of the old behaviour -- the question was never asked.
+    return None
+"""
+
+
+NO_DOOR_AND_NO_RECLAIM = """
+def assert_door_only_refuses_what_it_measured(ports=None, door=None,
+                                              replaced=None, factory=None):
+    # Stubbed so the arm can REACH the rig. Run either mutation below without
+    # this and the router refuses to start, which is the startup guard catching
+    # it unaided -- the first place each of these was watched go red.
+    return None
+
+def slot_door_open(instance, ports=None, etc=None):
+    return None
+
+
+def reclaim_slot(own, sid, rec, why, request=None, rundir=None, webroot=None):
+    return False
+"""
+
+
+def red_the_window_is_open_again():
+    """RED ARM: without the door check, the visitor's own reload recycles the slot.
+
+    THE PRECISE ONE FOR THIS BRANCH. It does not go looking for exhaustion --
+    it checks the single step the repair is about: a reload arriving while the
+    runtime directory is still there gets PROXIED into a socket whose session
+    has stopped, and that connection starts a fresh desktop under the old
+    letting. Four-out-of-four in the field, because the client reloads every
+    five seconds and the directory survives the session by about half a second.
+    """
+    path = scratch_demux("-nodoor.py", NO_DOOR_CHECK)
+    rig = Rig(nslots=2, demux=path)
+    try:
+        c = rig.client()
+        sid, name = arrive_on_slot(rig, c)
+        slot = slot_named(rig, name)
+        before = slot.incarnation
+        slot.logout(leave_rundir=True)
+        st, _, _ = c.get("/s/%s/" % sid)
+        if st != 200:
+            raise RuntimeError(
+                "the red arm went red for the wrong reason: the reload was "
+                "not proxied even with the door check removed (%d)" % st)
+        assert slot.incarnation in (None, before), (
+            "a fresh desktop was started in %s by the visitor's own reload, "
+            "under a letting that is still somebody else's" % name)
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 NO_RECLAIM_AT_ALL = """
 
 def reclaim_slot(own, sid, rec, why, request=None, rundir=None, webroot=None):
@@ -2358,19 +2590,36 @@ def red_a_logout_still_consumes_the_slot():
     round: two slots, two of them burned, and the third arrival has nowhere to
     go.
     """
-    path = scratch_demux("-noreclaim.py", NO_RECLAIM_AT_ALL)
+    # BOTH REPAIRS UNDONE, and it has to be both now, which is itself the
+    # finding. With only the reclaim removed the pool no longer empties,
+    # because the door check stops the desktop being started at all; with only
+    # the door removed it no longer empties either, because the reclaim ends
+    # what got started. They cover the same leak from the two ends, so the
+    # original failure -- one visitor consuming four slots in seven minutes by
+    # behaving correctly -- needs both gone before it comes back.
+    path = scratch_demux("-noneither.py", NO_DOOR_AND_NO_RECLAIM)
     rig = Rig(nslots=2, demux=path)
     try:
+        c = rig.client()
         try:
-            four_correct_logouts(rig)
+            for _ in range(4):
+                sid, name = arrive_on_slot(rig, c)
+                slot = slot_named(rig, name)
+                slot.logout(leave_rundir=True)
+                c.get("/s/%s/" % sid)      # the reload, which resurrects
+                c.get("/s/%s/" % sid)      # and the next one, which gates
+                rig.run_teardowns()
         except AssertionError as e:
             if "arrival did not redirect: 503" not in str(e):
                 raise RuntimeError(
                     "the red arm went red for the wrong reason: %s" % e)
             raise
+        raise AssertionError(
+            "four rounds of the owner's sequence ran on a two-slot pool "
+            "without exhausting it, so nothing leaked")
     finally:
         rig.stop()
-        os.unlink(path)
+        _remove_scratch_demuxes()
 
 
 def red_reclaim_on_mismatch_alone():
@@ -2400,7 +2649,7 @@ def red_reclaim_on_mismatch_alone():
             raise
     finally:
         rig.stop()
-        os.unlink(path)
+        _remove_scratch_demuxes()
 
 
 def main():
@@ -2515,6 +2764,7 @@ def main():
     # the repair undone, so they cannot share the one above.
     for fn in (red_pool_from_the_directory,
                red_startup_guard_notices_the_directory_listing,
+               red_the_window_is_open_again,
                red_a_logout_still_consumes_the_slot,
                red_reclaim_on_mismatch_alone):
         expect_red(fn.__name__, fn)
