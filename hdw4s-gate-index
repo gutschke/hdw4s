@@ -104,6 +104,21 @@ OVERLAY = r"""
   var SRC = __SRC__;
   var KEY = 'hdw4s_booted_' + location.pathname;
   var EXPECT = KEY + ':expect-reload';
+  var INC = KEY + ':incarnation';
+  // WHETHER ANYONE WAS LOOKING AT THIS TAB WHEN IT LOADED, read at the first
+  // statement of the overlay and never again: by the time the arrival decision
+  // is taken the answer may have changed, and the question is about the load.
+  //
+  // This is the whole discriminator the repair below rests on, so it is worth
+  // saying why it is one. A person pressing F5 is LOOKING at the tab, so their
+  // load is visible. The streaming client's own recovery reload happens while
+  // the tab is in the background, because that is the only state that produces
+  // it: the client sends STOP_VIDEO when the document hides, goes quiet, the
+  // server's thirty-second heartbeat finds the socket gone, and the client
+  // reloads the page to reconnect. Measured 2026-09-25 on the owner's own
+  // session: STOP_VIDEO at 11:36:41, disconnect at 11:37:11, three times in
+  // five minutes, thirty seconds apart to the second each time.
+  var LOADED_HIDDEN = (document.visibilityState === 'hidden');
   var gate = document.getElementById('hdw4s-gate');
   var body = document.getElementById('hdw4s-body');
   var go   = document.getElementById('hdw4s-go');
@@ -231,6 +246,28 @@ OVERLAY = r"""
     + '<p>This browser on this device is what reaches it. Another browser, or another '
     + 'device, gets a different desktop.</p>';
   var MINT_GO = 'Start a fresh desktop';
+
+  // The desktop's published identity, read from the tree that is serving THIS page
+  // rather than from anything the tab remembers about the world. A session start
+  // republishes it, so two desktops behind one address never share a value.
+  // Every failure -- not served, not readable, empty -- answers null, and null is a
+  // refusal everywhere it is used. A resume that cannot establish which desktop it is
+  // resuming must not happen: that is the logged-out row collapsing into the resume
+  // row, which is the one outcome the arrival design exists to prevent.
+  function fetchIncarnation(cb){
+    var done = false;
+    function once(v){ if (!done) { done = true; cb(v); } }
+    // A hidden tab's timers are throttled but its network is not; the timeout is
+    // here so a hung request cannot leave the person looking at a blank page.
+    setTimeout(function(){ once(null); }, 5000);
+    try {
+      fetch('hdw4s-incarnation', {cache: 'no-store'}).then(function(r){
+        if (!r.ok) return once(null);
+        return r.text().then(function(t){ once((t || '').trim() || null); },
+                             function(){ once(null); });
+      }, function(){ once(null); });
+    } catch(e) { once(null); }
+  }
 
   function show(k, label){
     body.innerHTML = k;
@@ -455,6 +492,13 @@ OVERLAY = r"""
 
   function boot(){
     try { sessionStorage.setItem(KEY,'1'); } catch(e){}
+    // Which desktop this tab is connecting to, remembered so that a later
+    // silent resume can refuse to resume a DIFFERENT one. Asynchronous and
+    // unchecked on purpose: nothing here depends on it, and the resume path
+    // treats a missing value as a refusal rather than as permission.
+    fetchIncarnation(function(v){
+      try { if (v) sessionStorage.setItem(INC, v); else sessionStorage.removeItem(INC); } catch(e){}
+    });
     // Before the card comes down, never after: between hiding it and clearing the
     // text there is a window the 500 ms poller can land in.
     clearStaleStatus();
@@ -541,11 +585,22 @@ OVERLAY = r"""
   // reload this tab". It is consumed on read, so it authorises exactly one
   // arrival and cannot accumulate.
   //
-  // Consequence worth knowing, and it is deliberate under the owner's ruling that
-  // unknown input gates and active intent is preferable: a recovery reload the
-  // CLIENT performs by itself is not marked, so it will show the card rather than
-  // reconnecting silently. That is a click where there used to be none, on a path
-  // that is rare, and it is the safe direction of the two.
+  // That consequence used to be accepted here in one sentence: a recovery reload the
+  // client performs by itself is not marked, so it shows the card rather than
+  // reconnecting silently -- "a click where there used to be none, ON A PATH THAT IS
+  // RARE, and the safe direction of the two."
+  //
+  // THE PATH IS NOT RARE. It is every visitor who looks away for thirty seconds, and
+  // the reason is in the streaming client's design rather than in any fault: it stops
+  // the stream when the document hides, which is right and saves real bandwidth, and
+  // it reconnects by itself when the tab comes back, which is why nobody using the
+  // stock client ever notices. We were the ones turning that invisible optimisation
+  // into a card. The owner found it in an hour of ordinary use -- four times in forty
+  // minutes -- and re-ruled it with the true frequency in front of him: a client that
+  // reconnects because its window got focus again does not warrant the gate.
+  //
+  // So there is a second marked arrival below, and it is marked by facts about THIS
+  // TAB rather than by a moment in time: see AN UNWATCHED LOAD IS NOT AN ARRIVAL.
   var expected=false;
   try {
     expected = sessionStorage.getItem(EXPECT)==='1';
@@ -558,6 +613,69 @@ OVERLAY = r"""
   // that is taken away silently is worse than one that was never asked, and that is
   // not the question being decided here.
   if (GATE === 'off') return boot();
+
+  // AN UNWATCHED LOAD IS NOT AN ARRIVAL.
+  //
+  // Three conditions, ALL of them facts about this tab and this desktop, and none of
+  // them a time or a sequence. A "reconnect shortly after a STOP_VIDEO" inference was
+  // considered and rejected: a stranger arriving with a stale address shortly after
+  // somebody else's legitimate pause satisfies it, and the whole danger here is a
+  // stranger being let in silently.
+  //
+  //   1. NOBODY WAS LOOKING when this page loaded. A person pressing F5 is watching
+  //      the tab they pressed it in, so their load is visible; the client's recovery
+  //      reload happens in a backgrounded one. This is the condition that keeps the
+  //      owner's own steal -- "i force a reload of the page ... i also managed to
+  //      steal the session without a gate" -- gated, and it is why the flag below can
+  //      be the per-tab one that was retired for exactly that defect.
+  //   2. THIS TAB HAS BEEN THROUGH THE GATE for this address. sessionStorage is per
+  //      tab and per origin, so a stranger's tab, a new tab, and a tab on another
+  //      device all have nothing here and all meet the card. It cannot be minted by
+  //      anybody except the person who was already connected in this tab.
+  //   3. IT IS THE SAME DESKTOP. The identity published in the web root is compared
+  //      against the one this tab connected to; anything else -- a different value, a
+  //      missing file, an unreadable one -- is a refusal, so the resume fails CLOSED
+  //      into the ordinary card. A tab that resumed a desktop it had never been in
+  //      would be the minting damage wearing a resume's clothes.
+  //
+  // WHAT IT DOES NOT ESTABLISH, said plainly because it is the cost of the ruling:
+  // whether somebody else is connected RIGHT NOW. Measured, and stated on the share
+  // panel already: a page cannot tell. So a tab that resumes on focus can take the
+  // desktop back from another tab without the warning the card would have given. What
+  // that replaces is a card the returning person clicked through every time anyway --
+  // four times in forty minutes, measured -- so the warning was already being spent
+  // on the wrong event.
+  //
+  // The verdict is published rather than merely acted on: a probe must be able to
+  // assert that a tab came back through THIS path and not because the card failed to
+  // draw, which is the same failure this file has shipped once before.
+  window.__hdw4sResume = {loadedHidden: LOADED_HIDDEN, verdict: null};
+  var knownInc = null;
+  try { knownInc = sessionStorage.getItem(INC); } catch(e){}
+  if (LOADED_HIDDEN && knownInc) {
+    var decide = function(){
+      fetchIncarnation(function(served){
+        var same = !!served && served === knownInc;
+        window.__hdw4sResume.served = !!served;
+        window.__hdw4sResume.verdict = same ? 'resumed' : 'refused';
+        if (same) return boot();
+        return (GATE === 'mint') ? show(MINT, MINT_GO) : show(COLD, COLD_GO);
+      });
+    };
+    // Never while hidden: reconnecting an unwatched tab would evict whoever IS
+    // watching, and the ruling is about a window getting focus, not about a window
+    // being in the background. The card is not drawn in the meantime because there is
+    // nobody to read it; the decision happens when somebody arrives to see it.
+    if (!document.hidden) return decide();
+    var onVisible = function(){
+      if (document.hidden) return;
+      document.removeEventListener('visibilitychange', onVisible);
+      decide();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return;
+  }
+
   if (GATE === 'mint') return show(MINT, MINT_GO);
   show(COLD, COLD_GO);
 })();
