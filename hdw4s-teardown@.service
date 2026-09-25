@@ -1,0 +1,28 @@
+[Unit]
+Description=End the HDW4S ephemeral desktop in slot %i
+Documentation=man:hdw4s(8)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/hdw4s/hdw4s-teardown %i
+# NOT hardened the way the session units are, and the reason is that this unit's
+# whole job is to reach OUTSIDE itself: it writes to another cgroup's
+# cgroup.kill and stops another unit. ProtectControlGroups= would make the
+# first impossible and the failure would be a teardown that reports success and
+# ends nothing, which is the worst available outcome for a rescue path.
+#
+# What it does not need, it does not get.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelModules=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# It runs briefly and must not be able to sit there: a teardown that hangs is a
+# slot that is never freed, on a machine somebody is already rescuing.
+TimeoutStartSec=120

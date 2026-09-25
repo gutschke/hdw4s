@@ -130,6 +130,20 @@ ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectProc=invisible
 ProtectSystem=strict
+# THE ONE PLACE OUTSIDE ITS OWN RuntimeDirectory= THIS SERVICE MAY WRITE, and
+# the write is one empty file whose NAME is a slot. That is the entirety of what
+# the router can say about tearing a desktop down: it cannot name a unit, a pid,
+# a cgroup or a command, and everything privileged happens in
+# hdw4s-teardown@<slot>.service, keyed by the instance name systemd fills in
+# rather than by anything written here.
+#
+# WITHOUT THIS LINE THE WRITE FAILS AND THE FAILURE IS THE GOOD KIND: strict
+# makes the whole filesystem read-only except the runtime directory, so the
+# router would answer a visitor "this machine could not take that request" and
+# log the errno, rather than reporting success and ending nothing. That is the
+# right way round, and it is why the console reports the error instead of
+# assuming the write worked.
+ReadWritePaths=/run/hdw4s-teardown
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

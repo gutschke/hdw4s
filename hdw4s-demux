@@ -1058,6 +1058,24 @@ class Ownership:
         with self._lock:
             return {r["instance"] for r in self._by_sid.values()}
 
+    def holders_of(self, instance, besides=None):
+        """Every sid whose letting names INSTANCE, other than BESIDES.
+
+        ASKED RATHER THAN INFERRED FROM CALL ORDER, and that is the whole reason
+        it is a method here instead of a set difference at the call site. The
+        one caller wants "has anybody ELSE been let this slot", and it runs
+        beside a forget() of its own sid -- so a version written as "is this
+        instance in instances_in_use()" would answer correctly only while the
+        forget stayed on the right side of it, and would start answering "yes,
+        me" the day somebody moved one line. The answer it would then give
+        permits nothing, but the call site that depends on it DESTROYS a
+        desktop, and a guard whose correctness is a property of statement order
+        is not a guard.
+        """
+        with self._lock:
+            return [s for s, r in self._by_sid.items()
+                    if r["instance"] == instance and s != besides]
+
     def forget(self, sid):
         """Drop a sid whose session is gone. Its slot is NOT reassigned here."""
         with self._lock:
@@ -2209,6 +2227,155 @@ def assert_probe_does_not_activate(probe=slot_unreachable,
         shutil.rmtree(d, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------
+# Is the session still answering on its own door?
+# --------------------------------------------------------------------------
+#
+# THE WINDOW THIS CLOSES, measured on a container 2026-09-25 and recorded in
+# private/evidence/slot-recycle/2026-09-25-window-instruments.txt:
+#
+#     t      relay      session       rundir   door
+#     3.71   active     active        present  open
+#     4.45   INACTIVE   deactivating  present  OPEN
+#     4.69   inactive   deactivating  present  SHUT
+#     5.22   inactive   failed        ABSENT   shut
+#
+# A GNOME logout -- the documented, correct way to finish -- stops the session,
+# but its RuntimeDirectory survives for another half second or more, and
+# slot_occupied() reads that directory. So for that interval this router still
+# believes the letting is healthy and PROXIES, and the proxy connection lands in
+# a socket unit that is still listening, whose BindsTo= then starts a FRESH
+# desktop in the slot. The disconnected client reloads every five seconds by
+# design, so something lands in that window essentially every time: four slots
+# consumed in seven minutes by one person behaving correctly four times.
+#
+# The runtime directory is therefore the right authority for "is anything
+# there" and the wrong one for "is it still serving". This asks the kernel the
+# second question instead, one hop further in than the slot socket that
+# listening_paths() already asks about, and it opens nothing: a socket-activated
+# slot treats a connection as an instruction, never as a question.
+#
+# WHY THE PORT AND NOT SOMETHING OF SYSTEMD'S. HDW4S_PORT is written by
+# "hdw4s enable" into the instance's own config AND into the relay's drop-in,
+# and this router already reads that file for the idle window. So the identifier
+# is derived from the thing being examined. The candidate that was rejected --
+# the relay unit's cgroup directory -- would have required constructing
+# /sys/fs/cgroup/system.slice/system-hdw4s\x2dproxy.slice/hdw4s-proxy@<slot>.service,
+# carrying systemd's own escaping and its per-prefix slice grouping, which this
+# service cannot ask systemd for because it has no bus.
+#
+# THE RESIDUAL, AND IT IS 0.25 SECONDS WIDE. Read the table again: the relay is
+# already gone at 4.45 while the door is still open, and it shuts at 4.69. A
+# request landing in that quarter second passes this check, is proxied, and
+# STILL RESURRECTS THE SLOT. The cgroup instrument closes that quarter second
+# because it goes in the same sample as the relay; asking both -- gate if EITHER
+# says the session is going -- would close it while degrading to this 0.25 s
+# when the cgroup could not be found.
+#
+# THAT IS NOT BUILT, AND THE REASON IS A PRECONDITION RATHER THAN A PREFERENCE:
+# nobody has shown how the router DISCOVERS that cgroup path instead of spelling
+# it. Graceful degradation protects us from the path being ABSENT, not from it
+# being WRONG -- a constructed path that silently matches nothing looks exactly
+# like this check working, and one that matches the wrong cgroup is worse than
+# having no second instrument at all. So: add the cgroup arm the day somebody
+# can discover the path without spelling systemd's convention, and not before.
+# What is left uncovered here is covered by the reclaim, which ends the desktop
+# the slot was left running: one in twenty rather than one in one, and then
+# healed.
+#
+# WHAT IS UNMEASURED: that a healthy session's door is open CONTINUOUSLY for the
+# whole of its life. It was open on every sample of the healthy period in the
+# runs above -- eleven samples over 3.7 s -- which is a positive, not a
+# lifetime. The experiment that would settle it is to sample one session's port
+# from start to logout and show no gap. If there are gaps, this gates a live
+# visitor, which is the expensive direction; that is why it may only speak for a
+# record whose desktop ALREADY ANSWERED us, below.
+
+PROC_NET_TCP = tuple(os.environ.get(
+    "HDW4S_PROC_NET_TCP", "/proc/net/tcp /proc/net/tcp6").split())
+
+
+def instance_port(instance, etc=None):
+    """The TCP port this slot's session listens on, or None.
+
+    Read exactly the way read_idle_window() reads its setting -- the instance's
+    own file, then the site file -- because two readers that parse the same
+    files differently are two configurations.
+    """
+    base = ETC_DIR if etc is None else etc
+    v = conf_value(os.path.join(base, instance + ".conf"), "HDW4S_PORT")
+    if v is None:
+        v = conf_value(os.path.join(base, "hdw4s.conf"), "HDW4S_PORT")
+    if v is None:
+        return None
+    try:
+        port = int(v)
+    except ValueError:
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def listening_tcp_ports(paths=None):
+    """Every local port the kernel has a LISTENING socket on, or None.
+
+    THE SAME QUESTION listening_paths() ASKS OF AF_UNIX, one family over, and
+    with the same two disciplines because the same two mistakes are available.
+
+      * STATE 0A AND NOTHING ELSE. Column 4 of /proc/net/tcp is the socket
+        state and 0A is TCP_LISTEN. A check that merely looked for the port
+        anywhere in the file would count a lingering TIME_WAIT from the
+        connection that just died -- reporting the door OPEN for a session that
+        has gone. That is a FALSE OPEN, which keeps the leak rather than gating
+        a visitor, so it is the quiet direction and the one to guard.
+      * A FAILURE TO READ IS NOT AN EMPTY SET. Returning one would say "nothing
+        is listening anywhere", which would gate every visitor on the box. The
+        caller is handed None and says so.
+
+    Both files are read because a listener on :: appears only in tcp6 and one
+    on 127.0.0.1 only in tcp. Getting ONE of them is enough to answer; getting
+    neither is the None above.
+    """
+    ports = set()
+    read_any = False
+    for path in (PROC_NET_TCP if paths is None else paths):
+        try:
+            with open(path, "r", errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        read_any = True
+        for line in lines[1:]:
+            f_ = line.split()
+            if len(f_) < 4 or f_[3] != "0A":
+                continue
+            local = f_[1].rsplit(":", 1)
+            if len(local) != 2:
+                continue
+            try:
+                ports.add(int(local[1], 16))
+            except ValueError:
+                continue
+    return ports if read_any else None
+
+
+def slot_door_open(instance, ports=None, etc=None):
+    """True, False, or None when the question could not be asked.
+
+    THREE-VALUED ON PURPOSE. False is "this desktop has stopped answering" and
+    it costs a visitor their session, so it may only be returned when the
+    instrument actually ran: no port configured, or no /proc/net/tcp, is None
+    and not False. An empty result is not a negative, and here the empty result
+    is what a missing instrument produces.
+    """
+    port = instance_port(instance, etc)
+    if port is None:
+        return None
+    live = listening_tcp_ports() if ports is None else ports
+    if live is None:
+        return None
+    return port in live
+
+
 def occupancy_readable(rundir=None):
     """True when the occupancy authority is present and can be consulted.
 
@@ -2288,7 +2455,8 @@ def slot_incarnation(instance, root=None):
     return v or None
 
 
-def session_replaced(rec, instance, at=None, rundir=None, webroot=None):
+def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
+                     door=None):
     """Why this record no longer describes the desktop behind INSTANCE, or None.
 
     The two questions in one place, in the order that matters: is anything there
@@ -2327,6 +2495,30 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None):
 
     if not occupied:
         return "the desktop behind %s has stopped" % instance
+    # THE WINDOW, CLOSED. Occupancy says something is there; this says whether
+    # it is still SERVING. The runtime directory outlives the session by half a
+    # second or more, and proxying into that gap is what resurrects the slot --
+    # see the table above slot_door_open().
+    #
+    # ONLY FOR A RECORD WHOSE DESKTOP ALREADY ANSWERED US. A session that is
+    # STARTING has a runtime directory and no listener yet -- hdw4s-wait exists
+    # precisely because the relay must wait for it -- so asking this of a
+    # pending record would gate every visitor at the instant they arrive, which
+    # is what an earlier version of the check two lines down did to thirty-one
+    # tests at once. rec["live"] means a desktop answered a request of ours
+    # through that very port, so the door has been seen open for this letting.
+    #
+    # WHAT ACTUALLY PROTECTS THE PENDING CASE IS ITS EARLY RETURN ABOVE, not
+    # this conjunct, and saying so is the point: a pending record never reaches
+    # this line. The test proves the ORDER rather than the condition, by moving
+    # this check above that branch and watching every arrival get gated. Keep
+    # both -- the condition costs nothing and survives somebody rearranging the
+    # function -- but do not read it as the thing standing between us and
+    # gating the whole pool.
+    ask_door = slot_door_open if door is None else door
+    if rec.get("live") and ask_door(instance) is False:
+        return "the desktop behind %s has stopped answering on its own port" \
+            % instance
     was = rec.get("incarnation")
     now = slot_incarnation(instance, webroot)
     if was is None and now is None:
@@ -2413,6 +2605,19 @@ def assert_occupancy_is_read_not_created(occupied=slot_occupied,
     """
     import shutil
     import tempfile
+
+    # THIS GUARD IS ABOUT OCCUPANCY AND THE TOKEN, so the door is given no
+    # opinion here rather than left to consult the real /proc/net/tcp, where it
+    # would answer about whatever this machine happens to be listening on and
+    # refuse every record below. Stubbed rather than removed: the door has its
+    # own guard, assert_door_only_refuses_what_it_measured(), with both arms.
+    # A guard that silently started testing two things would fail for the wrong
+    # reason, which is the failure that looks most like success.
+    _replaced = replaced
+
+    def replaced(*a, **kw):
+        kw.setdefault("door", lambda inst: None)
+        return _replaced(*a, **kw)
 
     def LIVE(token, minted=0.0):
         """A record that has ATTACHED: a desktop answered and we noted which."""
@@ -2507,6 +2712,419 @@ def assert_occupancy_is_read_not_created(occupied=slot_occupied,
         shutil.rmtree(web)
         assert replaced(LIVE(None), "ephemeral0", rundir=rundir, webroot=web) is None, \
             "a pool that publishes no tokens gated a live session anyway"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Reclaiming a slot this router knows it let
+# --------------------------------------------------------------------------
+#
+# THE RULING, AND THE PERMISSION IS IN THE QUALIFIER RATHER THAN THE VERB:
+# "yes, the router can reclaim a slot it KNOWS IT LET." Its own letting record
+# is the licence, and nothing else is. A slot that merely LOOKS wrong is not
+# covered, and the difference is not a shade of meaning -- it is a live
+# visitor's desktop.
+#
+# WHAT IS BEING RECLAIMED, because the word was got wrong once already and the
+# wrong word produces the wrong repair. A GNOME logout stops the session; the
+# slot's socket unit keeps listening, so the first connection after that starts
+# a FRESH desktop in the same slot -- measured, with its control: 45 seconds
+# with nothing connecting produced no desktop, and one connection produced a new
+# incarnation. The client reloads every five seconds on stream loss, so that
+# connection is the visitor's own browser, essentially every time. What is left
+# behind is NOT AN EMPTY SLOT. It is a full desktop running for nobody, burning
+# memory and CPU, and a repair shaped as "mark it free" would hand the next
+# visitor a live stranger's desktop -- the one outcome this exists to prevent.
+# So the act is a TEARDOWN, and only then is the slot free.
+#
+# WHY THE LICENCE HAS TO BE THE RECORD AND NOT THE MISMATCH. Between the logout
+# and the runtime directory going away there is a window, measured at roughly
+# 0.7 to 2 seconds, in which the slot reads FREE to slots_in_use(). A second
+# visitor can be minted onto it in that window. If they are, the first
+# visitor's stale record still points at that slot, and the desktop there still
+# fails to match it -- so a repair that reclaimed on mismatch alone would
+# destroy the second visitor's desktop, seconds old, while they were looking at
+# it. The same is true after a restart of this service, where the table is empty
+# and every returning tab presents a letting we no longer hold.
+#
+# Hence: a letting we can still produce, that we SAW a desktop answer for, whose
+# slot NOBODY ELSE now holds. Any one of those missing and we decline. Every
+# decline is logged, because a guard whose refusal is silent cannot be told from
+# one that never ran.
+
+TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", "/run/hdw4s-teardown")
+
+
+def teardown_requested(instance, root=None):
+    """True when somebody has already asked for this slot to be torn down."""
+    base = TEARDOWN_DIR if root is None else root
+    try:
+        return os.path.exists(os.path.join(base, instance))
+    except OSError:
+        return False
+
+
+def request_teardown(instance, root=None):
+    """Ask for this slot to be torn down. Returns None, or why it could not.
+
+    THE ROUTER CANNOT DO THIS ITSELF AND MUST NOT BE ABLE TO. It runs as a
+    DynamicUser with an empty CapabilityBoundingSet; stopping a unit or writing
+    to a cgroup needs privilege this component deliberately does not have, and
+    giving it any would put the box's teardown behind an HTTP surface that
+    strangers reach. So the router's whole part is to write a file whose NAME is
+    the slot, into a directory it can reach because of the same group membership
+    that lets it reach the slot sockets -- the access story this component
+    already has, rather than a second one.
+    """
+    base = TEARDOWN_DIR if root is None else root
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        # O_EXCL so a second request is not a second teardown. An existing file
+        # is success: what was asked for is already happening.
+        os.close(os.open(os.path.join(base, instance),
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o660))
+        return None
+    except FileExistsError:
+        return None
+    except OSError as e:
+        return e.strerror or str(e)
+
+
+def reclaimable(own, sid, rec, rundir=None, webroot=None):
+    """None when this router may tear down what is in REC's slot, else why not.
+
+    Every branch below returns a REASON rather than False, and the reasons are
+    logged, because this is the one caller of the teardown that fires with
+    nobody watching. The visitor's own discard has a person who clicked it and
+    will notice if nothing happens; this one runs on a returning tab's request
+    and nobody is reading the answer. So its refusals have to be legible after
+    the fact or they are not evidence of anything.
+
+    Takes its two roots as parameters for the same reason every other guard in
+    this file does: a version that read only the module globals could be proved
+    against nothing but the machine it was already running on.
+    """
+    if rec is None:
+        # A RESTART LANDS HERE, and it is the case the qualifier was written
+        # for. The table is in memory; after a restart every returning tab
+        # presents a letting this router cannot produce, while the desktops it
+        # was routing to go on running. "I do not know this session" must never
+        # become "so I will destroy what is in its slot".
+        return "there is no letting on record for that session"
+    instance = rec.get("instance")
+    if not instance:
+        return "the letting on record names no slot"
+    if not occupancy_readable(rundir):
+        # The instrument is missing, so "nothing is there" and "I could not
+        # look" are the same answer. An empty result is not a negative, and
+        # here the empty result is the default one.
+        return "%s could not be read, so nothing here knows what is in %s" \
+            % (SESSION_RUNDIR if rundir is None else rundir, instance)
+    if not rec.get("live"):
+        # WE NEVER SAW A DESKTOP ANSWER FOR THIS LETTING, so we cannot say which
+        # one we let -- only that we let the slot. Whatever is in it now may be
+        # the session our own redirect started and which simply has not come
+        # back to us yet, and tearing that down would end a desktop in the
+        # seconds between handing it out and its first request.
+        return "this router never saw a desktop answer for %s, so it cannot " \
+            "say which one it let" % instance
+    if not slot_occupied(instance, rundir):
+        # Nothing is running, so there is nothing to reclaim. Said rather than
+        # done: asking for a teardown here would put a line in the log claiming
+        # a desktop was ended when none existed.
+        return "no desktop is running in %s, so there is nothing to reclaim" \
+            % instance
+    was = rec.get("incarnation")
+    now = slot_incarnation(instance, webroot)
+    if was is None or now is None:
+        # ABSENT IS NOT EQUAL, and it is not DIFFERENT either. Without a token
+        # on both sides there is no way to tell the desktop we let from the one
+        # that replaced it, and the safe direction for THIS act is the opposite
+        # of the safe direction for resuming: there, absence refuses to hand
+        # somebody a desktop; here, absence refuses to destroy one.
+        return "%s cannot be told apart from the desktop this letting is for" \
+            % instance
+    if was == now:
+        return "%s is still running the desktop this letting is for" % instance
+    others = own.holders_of(instance, besides=sid)
+    if others:
+        # RE-LET IN THE INTERVAL. The window between a logout and the runtime
+        # directory going away is wide enough to mint onto, measured at roughly
+        # 0.7 to 2 seconds, so this is not a theoretical ordering -- it is the
+        # case the measuring seat was worried about, and it is exactly where a
+        # mismatch-only repair evicts a real person.
+        return "%s has been let to somebody else since" % instance
+    return None
+
+
+def reclaim_slot(own, sid, rec, why, request=None, rundir=None, webroot=None):
+    """Tear down what is in REC's slot if this router let it. True when asked.
+
+    WHY IT IS NOT DONE HERE. The teardown is privileged -- it stops a unit and
+    writes to another cgroup -- and this process is a DynamicUser with no
+    capabilities on purpose. It writes one file whose name is a slot, and
+    hdw4s-teardown@<slot>.service does the rest, keyed by the instance name
+    systemd fills in rather than by anything written here.
+
+    SO THE RECLAIM IS ASYNCHRONOUS AND THE VISITOR IN FRONT OF US DOES NOT WAIT
+    FOR IT. They are gated in the same breath, which is the right answer for
+    them whether or not the slot ever comes back; the slot returns to the pool a
+    second or two later, for whoever arrives next.
+    """
+    no = reclaimable(own, sid, rec, rundir=rundir, webroot=webroot)
+    if no is not None:
+        log("did not reclaim a slot: %s" % no)
+        return False
+    instance = rec["instance"]
+    if teardown_requested(instance):
+        log("%s is already being torn down; not asking twice." % instance)
+        return True
+    err = (request_teardown if request is None else request)(instance)
+    if err is not None:
+        # Loud, and it changes nothing else: the visitor was gated either way.
+        # The failure this most likely is -- a read-only filesystem because the
+        # ReadWritePaths= line went missing -- reports itself here rather than
+        # succeeding and ending nothing.
+        log("could not ask for %s to be reclaimed: %s" % (instance, err))
+        return False
+    log("reclaiming %s: %s, and this router is the one that let it"
+        % (instance, why))
+    return True
+
+
+def assert_reclaim_needs_a_letting(judge=None, factory=None):
+    """Prove the reclaim acts on OUR letting and on nothing else, at every start.
+
+    Runs beside the other guards. What it catches is silent and expensive in one
+    direction only: a reclaim that fires without a letting ends a desktop
+    somebody is using, and the visitor sees a black screen and a gate, with
+    nothing anywhere saying that we did it. The permit arm is not optional
+    either -- a version that refused everything would leave the leak in place
+    and look perfectly well behaved.
+
+    Handed the real functions and given real directories to read, because a red
+    arm that has to edit the module under test proves nothing.
+    """
+    import shutil
+    import tempfile
+
+    judge = reclaimable if judge is None else judge
+    factory = Ownership if factory is None else factory
+
+    d = tempfile.mkdtemp(prefix="hdw4s-reclaim-")
+    try:
+        rundir = os.path.join(d, "run")
+        web = os.path.join(d, "web")
+        os.makedirs(os.path.join(rundir, "ephemeral0"))
+        os.makedirs(os.path.join(web, "ephemeral0"))
+
+        def publish(token):
+            with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"),
+                      "w") as f:
+                f.write(token + "\n")
+
+        def let(live_as=None):
+            """A letting, minted the way the front door mints one."""
+            own = factory()
+            sid = own.mint_session("visitor", "ephemeral0")
+            if live_as is not None:
+                own.attach(sid, live_as)
+            return own, sid
+
+        publish("SECOND")
+
+        # 1. THE CASE THE RULING PERMITS. We let the slot, we saw a desktop
+        #    answer and noted which, something else is in there now, and no
+        #    other letting names it.
+        own, sid = let(live_as="FIRST")
+        assert judge(own, sid, own.lookup(sid), rundir=rundir,
+                     webroot=web) is None, \
+            "the router would not reclaim a slot it let and watched be replaced"
+
+        # 2. NO LETTING ON RECORD. This is what a restart of this service leaves
+        #    behind for every tab on the box, and it must never reclaim.
+        assert judge(own, "nosuchsid", None, rundir=rundir, webroot=web), \
+            "a session with NO letting on record was reclaimed anyway"
+
+        # 3. RE-LET TO SOMEBODY ELSE IN THE INTERVAL. The stale letting still
+        #    points here and still mismatches; the slot is not ours to end.
+        own2, sid2 = let(live_as="FIRST")
+        stale = own2.lookup(sid2)
+        own2.forget(sid2)
+        own2.mint_session("a different visitor", "ephemeral0")
+        assert judge(own2, sid2, stale, rundir=rundir, webroot=web), \
+            "a slot re-let to somebody else was reclaimed out from under them"
+
+        # 4. MINTED BUT NEVER ANSWERED. The desktop in there may be the one our
+        #    own redirect started moments ago.
+        own3, sid3 = let()
+        assert judge(own3, sid3, own3.lookup(sid3), rundir=rundir,
+                     webroot=web), \
+            "a slot whose desktop had never answered us was reclaimed"
+
+        # 5. STILL OURS. The commonest case, and the most expensive to get
+        #    wrong: this is a healthy session being routed to.
+        own4, sid4 = let(live_as="SECOND")
+        assert judge(own4, sid4, own4.lookup(sid4), rundir=rundir,
+                     webroot=web), \
+            "a slot still running the desktop it was let for was reclaimed"
+
+        # 6. NOTHING RUNNING. Nothing to end, so nothing is claimed to be.
+        shutil.rmtree(os.path.join(rundir, "ephemeral0"))
+        assert judge(own, sid, own.lookup(sid), rundir=rundir, webroot=web), \
+            "a slot with no desktop in it produced a teardown request"
+        os.makedirs(os.path.join(rundir, "ephemeral0"))
+
+        # 7. NO TOKEN TO COMPARE. A pool that publishes nothing cannot tell the
+        #    two desktops apart, and must not guess in the destroying direction.
+        shutil.rmtree(web)
+        assert judge(own, sid, own.lookup(sid), rundir=rundir, webroot=web), \
+            "a slot was reclaimed on a comparison that could not be made"
+        os.makedirs(os.path.join(web, "ephemeral0"))
+        publish("SECOND")
+
+        # 8. THE INSTRUMENT MISSING. "I could not look" is spent as neither a
+        #    permit nor a refusal anywhere else in this file, and least of all
+        #    here.
+        gone = os.path.join(d, "no-such-run")
+        assert judge(own, sid, own.lookup(sid), rundir=gone, webroot=web), \
+            "a slot was reclaimed while the occupancy authority was unreadable"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def assert_door_only_refuses_what_it_measured(ports=None, door=None,
+                                              replaced=None, factory=None):
+    """Prove the door instrument, in both directions, at every start.
+
+    THE ONE IT EXISTS FOR IS THE FALSE OPEN. A check that looked for the port
+    anywhere in /proc/net/tcp would find the TIME_WAIT left by the connection
+    that died with the session and report the door open -- keeping the leak
+    while looking like a working repair. That is the quiet direction, so it is
+    the first case below and it is built from a real fixture rather than
+    reasoned about.
+
+    The loud direction is guarded too, because it costs a person their desktop:
+    a missing instrument must answer None and never False, and a session that
+    is STARTING must not be gated for not listening yet.
+    """
+    import shutil
+    import tempfile
+
+    ports = listening_tcp_ports if ports is None else ports
+    door = slot_door_open if door is None else door
+    replaced = session_replaced if replaced is None else replaced
+    factory = Ownership if factory is None else factory
+
+    d = tempfile.mkdtemp(prefix="hdw4s-door-")
+    try:
+        etc = os.path.join(d, "etc")
+        os.makedirs(etc)
+        with open(os.path.join(etc, "ephemeral0.conf"), "w") as f:
+            f.write("HDW4S_PORT=7372\n")
+        # A slot whose port is not written down anywhere.
+        with open(os.path.join(etc, "ephemeral9.conf"), "w") as f:
+            f.write("# nothing here\n")
+        with open(os.path.join(etc, "hdw4s.conf"), "w") as f:
+            f.write("# and no site-wide port either\n")
+
+        head = ("  sl  local_address rem_address   st tx_queue rx_queue tr"
+                " tm->when retrnsmt   uid  timeout inode\n")
+
+        def netfile(name, rows):
+            path = os.path.join(d, name)
+            with open(path, "w") as f:
+                f.write(head)
+                for i, row in enumerate(rows):
+                    local, st = row[0], row[1]
+                    rem = row[2] if len(row) > 2 else "00000000:0000"
+                    f.write("%4d: %s %s %s 00000000:00000000"
+                            " 00:00000000 00000000     0        0 0 1 0 100"
+                            " 0 0 10 0\n" % (i, local, rem, st))
+            return path
+
+        # DERIVED FROM THE HEX THIS FILE ACTUALLY WRITES, never spelled twice.
+        # The first version wrote "7316" beside 1C90 and the guard refused it:
+        # 0x1C90 is 7312. A constant restating a value that is already in the
+        # fixture is a second source for one fact.
+        def port_of(hexpair):
+            return int(hexpair.split(":")[1], 16)
+
+        LISTEN, TIME_WAIT, ESTABLISHED = "0A", "06", "01"
+
+        # 1. THE FALSE OPEN. 1CCC is 7372. Present twice and LISTENING neither
+        #    time: once as the TIME_WAIT the dead session left behind, once as
+        #    a live connection FROM somewhere else to a different port. A check
+        #    that grepped for the port would call this door open.
+        f1 = netfile("tcp-timewait", [("0100007F:1CCC", TIME_WAIT),
+                                      ("0100007F:1C90", LISTEN)])
+        got = ports([f1])
+        assert 7372 not in got, \
+            "a TIME_WAIT socket was counted as a listening door -- the door " \
+            "would read OPEN for a session that has gone, and the leak stays"
+        assert port_of("0100007F:1C90") in got, \
+            "a genuinely listening port was missed, so this parser cannot " \
+            "find a positive and none of its negatives mean anything"
+
+        # 2. THE PERMIT ARM. The same port, actually listening.
+        f2 = netfile("tcp-listen", [("0100007F:1CCC", LISTEN)])
+        assert 7372 in ports([f2]), "a listening port was not found"
+        # And the REMOTE column must not be read as a local one. Here 7372 is
+        # where an outgoing connection went, not something we are listening on;
+        # a parser splitting the wrong field reports the door open for it.
+        f3 = netfile("tcp-remote", [("0100007F:9001", ESTABLISHED,
+                                     "0100007F:1CCC")])
+        assert 7372 not in ports([f3]), \
+            "a REMOTE port was read as a local listener, so the door would " \
+            "read open for a session we merely connected to"
+
+        # 3. A FAILURE TO READ IS NOT AN EMPTY SET.
+        assert ports([os.path.join(d, "no-such-file")]) is None, \
+            "an unreadable /proc/net/tcp was reported as 'nothing is " \
+            "listening', which would gate every visitor on the box"
+        # But reading ONE of the two is enough to answer.
+        assert ports([os.path.join(d, "no-such-file"), f2]) == {7372}, \
+            "one unreadable file suppressed an answer the other one had"
+
+        # 4. THE DOOR ITSELF, three-valued.
+        assert door("ephemeral0", ports=ports([f2]), etc=etc) is True
+        assert door("ephemeral0", ports=ports([f1]), etc=etc) is False
+        assert door("ephemeral9", ports=ports([f2]), etc=etc) is None, \
+            "a slot with no port configured answered a question nobody could " \
+            "ask -- a missing instrument must never refuse"
+        # 5. AND IN session_replaced, WHERE IT COSTS SOMETHING. The door may
+        #    only speak for a record whose desktop already answered us.
+        rundir = os.path.join(d, "run")
+        web = os.path.join(d, "web")
+        os.makedirs(os.path.join(rundir, "ephemeral0"))
+        os.makedirs(os.path.join(web, "ephemeral0"))
+        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+            f.write("TOKEN\n")
+
+        LIVE = {"live": True, "incarnation": "TOKEN", "minted": 0.0}
+        PENDING = {"live": False, "incarnation": None, "minted": time.time()}
+        SHUT, OPEN, CANNOT = (lambda i: False), (lambda i: True), (lambda i: None)
+
+        why = replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web, door=SHUT)
+        assert why and "own port" in why, \
+            "a session that had stopped answering was routed to anyway, which " \
+            "is the proxy connection that resurrects the slot: %r" % why
+        assert replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web,
+                        door=OPEN) is None, \
+            "a healthy session was gated by the door check"
+        assert replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web,
+                        door=CANNOT) is None, \
+            "a door that could not be asked was spent as a refusal"
+        # THE ONE THAT COSTS EVERY VISITOR IF IT IS WRONG. A session that is
+        # starting has a runtime directory and is not listening yet.
+        assert replaced(PENDING, "ephemeral0", rundir=rundir, webroot=web,
+                        door=SHUT) is None, \
+            "a session that was still STARTING was gated for not listening " \
+            "yet -- that gates every visitor at the instant they arrive"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -2796,6 +3414,11 @@ def arrival(own, wf, identity, query, new_identity):
             release_slot(rec["instance"])
             log_arrival("dropped a dead session", identity, rec["instance"],
                         candidate, why)
+            # The same reclaim as the gate's, and for the same reason: a
+            # visitor who comes back to the FRONT DOOR rather than to their
+            # session address reaches this path instead, and the slot they left
+            # behind is in exactly the same state either way.
+            reclaim_slot(own, candidate, rec, why)
     if sid is None:
         # MINTING IS RIGHT HERE AND ONLY HERE. This is the front door: the
         # visitor has asked for a desktop, so starting one is the thing they
@@ -3100,6 +3723,13 @@ def serve(sock, own, expected_b64):
                     own.forget(sid)
                     log("gated a returning visitor at %s: %s"
                         % (rec["instance"], why))
+                    # AND THE SLOT IS RECLAIMED IF WE LET IT. Gating alone
+                    # leaves a full desktop running in that slot for nobody --
+                    # which is the leak: one visitor ending four sessions
+                    # correctly consumed four slots in seven minutes. The
+                    # qualifier is everything here; reclaim_slot() declines,
+                    # out loud, for anything this router cannot say it let.
+                    reclaim_slot(own, sid, rec, why)
                     rec = None
             if rec is None:
                 # GATE. Not a mint, and the difference is the whole point.
@@ -3216,6 +3846,20 @@ def main():
     # than spent, and that the incarnation token can only ever refuse.
     assert_occupancy_is_read_not_created(slot_occupied, occupancy_readable,
                                          session_replaced)
+    # And the one that DESTROYS. Every other guard here refuses somebody a
+    # desktop when it fires wrongly; this one ends a desktop somebody is
+    # using, with nobody watching, and the only thing standing between those
+    # two outcomes is whether this router can produce the letting it is acting
+    # on. Proved at every start, in both directions.
+    assert_reclaim_needs_a_letting(reclaimable, Ownership)
+    # And the door, which is the other half of the same leak: the reclaim ENDS
+    # a desktop the slot was left running, this stops one being started. Its
+    # dangerous direction is the quiet one -- a false OPEN keeps the leak while
+    # looking like a working repair -- so the TIME_WAIT case is built from a
+    # real fixture rather than reasoned about.
+    assert_door_only_refuses_what_it_measured(listening_tcp_ports,
+                                              slot_door_open, session_replaced,
+                                              Ownership)
     # And the fifth, which is WHICH SLOTS EXIST at all -- the question the four
     # above all take an answer to. It was computed from a directory listing for
     # as long as this file has existed, and was sighted three times without

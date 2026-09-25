@@ -45,6 +45,10 @@ DROPDIR="${HDW4S_DROPIN_DIR:-/run/systemd/system}"
 # They belong to this script for the same reason USERDB does -- it is the one thing
 # ordered early enough that nothing can run before it. See the install -d below.
 PROXYDIR="${HDW4S_PROXY_RUNDIR:-/run/hdw4s-proxy}"
+# Where a visitor's request to end their own desktop is recorded. Created here
+# for the same reason PROXYDIR is: nothing else creates it, and a path unit
+# watching a directory that does not exist reports active and can never fire.
+TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
 INCARNDIR="${HDW4S_INCARNATION_DIR:-/run/hdw4s-incarnation}"
 # shellcheck source=/dev/null
 [ ! -r "${ETCDIR}/hdw4s.conf" ] || . "${ETCDIR}/hdw4s.conf"
@@ -168,6 +172,12 @@ fi
 # that unit -- so the script failing for any reason leaves the session to die on the
 # directory instead of on the thing that failed.
 install -d -m 0755 "${USERDB}" "${NSDIR}" "${DROPDIR}" "${PROFILEDIR}" "${PROXYDIR}"
+# THE SAME ACCESS STORY THE SLOT SOCKETS ALREADY HAVE, rather than a second one:
+# root owns it, www-data may write into it, and the router is in www-data for
+# exactly this class of reason. 0770 and not 0777 -- what may be written here is
+# a request to destroy somebody's desktop, and the group is the whole of who may
+# ask. The name inside it is a slot and nothing else; see hdw4s-teardown@.path.
+install -d -m 0770 -g www-data "${TEARDOWNDIR}"
 # 0700, not 0755: this one holds a token per live slot, so its listing is a list of
 # which slots exist. Made separately rather than loosened into the line above.
 install -d -m 0700 "${INCARNDIR}"
@@ -320,6 +330,21 @@ done
 
 
 [ -z "${reload}" ] || systemctl daemon-reload
+
+# ONE WATCHER PER SLOT, started here rather than enabled in the package, for the
+# same reason the slots themselves are minted here: how many there are is a
+# setting, so the set of instances cannot be known at packaging time. Started
+# and not enabled, because /run is a tmpfs -- the directory these watch does not
+# survive a boot, and neither should a watcher for a slot that may not exist in
+# the next configuration.
+i=0
+while [ "${i}" -lt "${HDW4S_EPHEMERAL_SLOTS}" ]; do
+  name="${HDW4S_EPHEMERAL_PREFIX}${i}"
+  # --no-block: this runs at boot, before the pool is servable, and a path unit
+  # that is slow to come up must not hold the rest of it.
+  systemctl start --no-block "hdw4s-teardown@${name}.path" 2>/dev/null || :
+  i=$(( i + 1 ))
+done
 
 # The desktop background every ephemeral session starts with, generated because
 # the colour is the administrator's to choose. Rewritten only when it changes:
