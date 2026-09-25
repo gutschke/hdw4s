@@ -175,8 +175,10 @@ usage() {
 Usage: hdw4s <command> [arguments]
 
   list                    show every configured session and its current state
-  check                   report any running session that is not publishing the
-                          identity a returning browser tab compares against
+  check                   report anything that stops this machine handing out a
+                          desktop, and any running session that is not
+                          publishing the identity a returning tab compares
+                          against
   show <instance>         show one session's settings and where each came from
   enable <instance>       allocate a slot for a session and arm its front door
   disable <instance>      stop a session and keep its slot reserved
@@ -345,6 +347,25 @@ unit_of() {
 # session fails for a reason the file would have fixed.
 dropin_of() {
   echo "${DROPIN}/$(unit_of "${1}").d"
+}
+
+# IS ANYTHING BOUND, as opposed to a file existing where a socket should be?
+# The two came apart in the field: an orphaned socket file was enumerated as a
+# live slot while connect() was refused, and the pool handed a visitor a name
+# nothing was listening on. "ls" answers a question about the filesystem; these
+# ask the kernel, which is the authority for "would a connection be accepted".
+#
+# Both are written as a FILTER rather than as a search through ss's output,
+# because a command that greps for its own argument is a trap this tree has paid
+# for more than once. An empty answer here means "nothing bound", and the empty
+# answer was seen beside a known positive on the same machine before either was
+# believed: /run/hdw4s-proxy/ephemeral0.sock listed, a name that does not exist
+# empty.
+unix_listener() {
+  [ -n "$(ss -H -lx "src = $1" 2>/dev/null || :)" ]
+}
+tcp_listener() {
+  [ -n "$(ss -H -lnt "sport = :$1" 2>/dev/null || :)" ]
 }
 
 alloc_slot() {
@@ -586,7 +607,7 @@ cmd_list() {
 # what it finds is one nobody reads, and this one's whole value is that somebody
 # is told which slot and why.
 cmd_check() {
-  local idx inst state served recorded live=0 bad=0
+  local idx inst state served recorded live=0 bad=0 pool_bad=0 failed=''
   local incarn="${HDW4S_INCARNATION_DIR:-${RUNDIR}/hdw4s-incarnation}"
   local webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}"
   local readable='yes'
@@ -598,10 +619,141 @@ cmd_check() {
   # check fails is the property; this one fails toward saying so.
   [ -d "${incarn}" ] && [ -x "${incarn}" ] || readable='no'
 
-  [ -r "${SLOTS}" ] || {
+  # A table that is not there at all describes a machine where nobody has ever
+  # configured a session, and that machine is not broken. A table that EXISTS
+  # and cannot be read is a different answer wearing the same shape: the router
+  # refuses every visitor in exactly that state -- permanently, and with nothing
+  # in its log naming the file -- so this must not pass it over. "I could not
+  # look" and "there is nothing to look at" are not the same answer, which is
+  # the rule the incarnation half of this command already follows one line up.
+  if [ ! -r "${SLOTS}" ]; then
+    if [ -e "${SLOTS}" ]; then
+      printf '%s\n' \
+        "hdw4s: ${SLOTS} exists and cannot be read from here." \
+        '  The router reads the same file to decide who may be let into a slot,' \
+        '  and answers every arrival 503 while it cannot. Re-run this as root;' \
+        '  if root cannot read it either, that is the outage.' >&2
+      trap '' INT TERM QUIT HUP EXIT ERR
+      exit 1
+    fi
     echo 'hdw4s: no slot table, so no sessions to check.'
     return 0
-  }
+  fi
+
+  # ---- can this machine hand anybody a desktop? -----------------------------
+  #
+  # WHY THIS ARM EXISTS AT ALL, and it is not the arm below it. The incarnation
+  # arm asks a question about sessions that are RUNNING; an ephemeral pool is
+  # socket-activated, so a healthy machine nobody is using has none running and
+  # the arm below has nothing to examine. It then reported the same clean
+  # sentence, and exit 0, that it reports when everything is fine -- measured on
+  # a development box on 2026-09-24 with every slot door shut and again with
+  # every session start broken: the visitor got 503 at all three slots and this
+  # command printed "0 running ephemeral session(s)" and exited 0 both times.
+  # An operator, this command's own timer, and any monitor above it all saw a
+  # pass on a machine that could not serve anybody.
+  #
+  # AND WHY IT IS NOT A CHECK ON THE COUNT. Zero running sessions is the NORMAL
+  # state of a healthy idle pool. Reddening on the count would fail on the most
+  # common correct state there is, and a check that is red on a correct machine
+  # is one that gets switched off. So every predicate below is a POSITIVE
+  # observation of something that is missing, and a box with no ephemeral slots
+  # configured is not a pool and is not examined at all.
+  #
+  # WHAT IT DELIBERATELY CANNOT SEE. A slot whose door is listening, whose units
+  # are all healthy, and which the ROUTER has already let to a visitor who never
+  # arrived, reads as perfectly serviceable here and answers 503 to the next
+  # person. Nothing in the unit layer distinguishes a let slot from a free one,
+  # and the authority for that question is the router's own records, not this
+  # command's reading of systemd. That state needs an instrument that belongs to
+  # the router; pretending this arm covers it would be worse than the silence.
+  local slot_total=0 doors=0 shut='' listen port
+  while read -r idx inst _; do
+    case "${idx}" in ''|\#*) continue;; esac
+    case "${inst}" in *:*) continue;; esac
+    [ "$(type_of "${inst}")" = 'ephemeral' ] || continue
+    slot_total=$(( slot_total + 1 ))
+    if unix_listener "${RUNDIR}/hdw4s-proxy/${inst}.sock"; then
+      doors=$(( doors + 1 ))
+    else
+      shut="${shut} ${inst}"
+    fi
+  done < <(sort -n "${SLOTS}")
+
+  if [ "${slot_total}" -gt 0 ]; then
+    # The accounts the slots run as are minted at boot into a tmpfs. Without
+    # them User= does not resolve and every start dies 217/USER, which reads as
+    # a broken service rather than as a missing account.
+    if [ "$(systemctl show -p ActiveState --value \
+            hdw4s-ephemeral-slots.service 2>/dev/null || echo unknown)" != 'active' ]; then
+      printf '%s\n' \
+        'hdw4s: the ephemeral slot identities have not been minted.' \
+        '  hdw4s-ephemeral-slots.service is not active, so the accounts the' \
+        '  slots run as do not resolve and every session start fails 217/USER.' \
+        '  Start it: systemctl start hdw4s-ephemeral-slots.service' >&2
+      pool_bad=$(( pool_bad + 1 ))
+    fi
+
+    # The one TCP port on the machine. Read from the socket unit rather than
+    # from the configuration, because the unit is what the kernel was asked to
+    # bind, and asked of the kernel rather than of systemd, because a unit can
+    # be "active" while nothing is bound.
+    listen="$(systemctl show -p Listen --value hdw4s-demux.socket 2>/dev/null || :)"
+    port="${listen##*:}"; port="${port%% *}"
+    case "${port}" in
+      ''|*[!0-9]*)
+        printf '%s\n' \
+          'hdw4s: the front door has no listening address.' \
+          '  hdw4s-demux.socket reports nothing systemd was asked to bind, so' \
+          '  nothing outside this machine can reach any ephemeral session.' >&2
+        pool_bad=$(( pool_bad + 1 ));;
+      *)
+        if ! tcp_listener "${port}"; then
+          printf '%s\n' \
+            "hdw4s: nothing is listening on the front door port ${port}." \
+            '  hdw4s-demux.socket names it, and the kernel has no listener on' \
+            '  it, so every arrival is refused before any session is reached.' \
+            '  Start it: systemctl start hdw4s-demux.socket' >&2
+          pool_bad=$(( pool_bad + 1 ))
+        fi;;
+    esac
+
+    # A slot listed in the table with nothing bound at its socket is not a
+    # capacity shortfall, it is a trap: the router mints a visitor onto the name
+    # and the request fails with the slot consumed.
+    if [ "${doors}" -eq 0 ]; then
+      printf '%s\n' \
+        "hdw4s: none of the ${slot_total} ephemeral slot(s) has a listening door." \
+        "  Nothing is bound at ${RUNDIR}/hdw4s-proxy/<slot>.sock, so no arrival" \
+        '  can start a desktop and every visitor is refused. This is what a' \
+        '  teardown that does not re-arm the sockets leaves behind.' \
+        '  Arm them: systemctl start hdw4s-proxy@<slot>.socket' >&2
+      pool_bad=$(( pool_bad + 1 ))
+    elif [ -n "${shut}" ]; then
+      printf '%s\n' \
+        "hdw4s: ${doors} of ${slot_total} ephemeral slot(s) have a listening door." \
+        "  Not listening:${shut}" \
+        '  A visitor minted onto one of those gets a failed request and the' \
+        '  slot is consumed. Arm them: systemctl start hdw4s-proxy@<slot>.socket' >&2
+      pool_bad=$(( pool_bad + 1 ))
+    fi
+
+    # A latched unit is the shape this pool fails into: the relay's start limit
+    # fires, systemd refuses to start it again, and it stays failed until
+    # somebody clears it. It is reported here rather than left to "systemctl
+    # --failed" because nothing on this machine runs that on a timer.
+    failed="$(systemctl list-units --failed --plain --no-legend \
+              'hdw4s-demux.*' 'hdw4s-ephemeral*' 'hdw4s-proxy@*' 2>/dev/null \
+              | awk '{print $1}' | tr '\n' ' ' || :)"
+    if [ -n "${failed% }" ]; then
+      printf '%s\n' \
+        "hdw4s: the pool has failed unit(s): ${failed}" \
+        '  A unit that has latched into failed is not started again by an' \
+        '  arrival, so whatever it serves stays unreachable until it is' \
+        "  cleared: systemctl reset-failed <unit>" >&2
+      pool_bad=$(( pool_bad + 1 ))
+    fi
+  fi
 
   while read -r idx inst _; do
     case "${idx}" in ''|\#*) continue;; esac
@@ -682,17 +834,30 @@ cmd_check() {
     fi
   done < <(sort -n "${SLOTS}")
 
-  if [ "${bad}" -gt 0 ]; then
-    printf '%s\n' '' \
+  if [ "${bad}" -gt 0 ] || [ "${pool_bad}" -gt 0 ]; then
+    [ "${bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${bad} of ${live} running session(s) failed this check." >&2
+    [ "${pool_bad}" -eq 0 ] || printf '%s\n' '' \
+      "hdw4s: ${pool_bad} thing(s) stop this machine handing out a desktop." >&2
     trap '' INT TERM QUIT HUP EXIT ERR
     exit 1
   fi
   # Says how many were looked at, not just that nothing was wrong. A check that
   # examined nothing reports the same clean bill of health as one that examined
   # everything, and the number is the only thing that tells them apart.
-  echo "hdw4s: ${live} running ephemeral session(s); each publishes the identity" \
-       'its own start recorded.'
+  #
+  # THE DOOR COUNT IS THE HALF THAT WAS MISSING. "0 running" is the honest
+  # reading of an idle pool and was also the reading of a pool that could not
+  # start anything; saying how many doors are listening separates the two in the
+  # one line an operator actually reads.
+  if [ "${slot_total}" -gt 0 ]; then
+    echo "hdw4s: ${slot_total} ephemeral slot(s), ${doors} with a listening door," \
+         "${live} running; each running one publishes the identity its own" \
+         'start recorded.'
+  else
+    echo "hdw4s: no ephemeral slots configured; ${live} running ephemeral" \
+         'session(s).'
+  fi
 }
 
 cmd_show() {

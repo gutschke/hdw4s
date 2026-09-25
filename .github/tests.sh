@@ -1754,12 +1754,43 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # one slot that was actually wrong among rows that never could be right.
   printf '%s\n' '0 eph0 ephemeral' '1 eph1 ephemeral' '2 alice desktop' > "${SLOTS}"
 
+  # THE POOL AROUND THE SESSIONS, stood in for so this group can go on being
+  # about incarnation tokens. "hdw4s check" now asks first whether the machine
+  # can hand out a desktop at all, and a sandbox has no listening doors -- so
+  # without these stubs every assertion below would be red for a reason that has
+  # nothing to do with what it is testing. Each stand-in is named here because a
+  # constant in a comparison is a claim: the doors, the front-door port and the
+  # failed-unit list are ASSUMED sound in this group and are exercised, in both
+  # directions, in the group that follows.
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/eph0.sock ${RUNDIR}/hdw4s-proxy/eph1.sock"
+  STUB_PORT='7280'
+  STUB_FAILED=''
+  STUB_SLOTS='active'
+  # shellcheck disable=SC2317
+  ss() {
+    case "$*" in
+      *'sport = :'*) [ -n "${STUB_PORT}" ] && echo 'LISTEN 0 4096 *:7280 *:*';;
+      *'src = '*)
+        for d in ${STUB_DOORS}; do
+          case "$*" in *"${d}") echo "u_str LISTEN 0 4096 ${d} 1 * 0";; esac
+        done;;
+    esac
+    return 0
+  }
   # Every slot running. "${2:-}" rather than "$2": the script runs under
   # nounset, the stub inherits it, and a bare positional aborts the stub with an
   # unset-variable error the caller's redirection swallows -- after which every
   # session looks inactive and the group passes while checking nothing.
   # shellcheck disable=SC2317
-  systemctl() { case "$1 ${2:-}" in 'show -p') echo 'active';; esac; }
+  systemctl() {
+    case "$*" in
+      *'list-units --failed'*) printf '%s' "${STUB_FAILED}";;
+      *'-p Listen --value hdw4s-demux.socket'*) echo "[::]:${STUB_PORT} (Stream)";;
+      *'hdw4s-ephemeral-slots.service'*) echo "${STUB_SLOTS}";;
+      *) case "$1 ${2:-}" in 'show -p') echo "${STUB_STATE:-active}";; esac;;
+    esac
+    return 0
+  }
 
   # The positive control first: a check that cannot pass proves nothing when it
   # fails. Both slots sound.
@@ -1772,7 +1803,10 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # Two, not three: the named desktop beside them is running and is not counted.
   # The number is the whole control here -- a restriction that skipped everything
   # would pass this group just as quietly, and would say "0".
-  has 'and says how many it looked at' "${out}" '2 running ephemeral session(s)'
+  has 'and says how many it looked at'  "${out}" '2 running'
+  # The door count is the half that was missing: "0 running" used to be printed
+  # by an idle pool AND by a pool that could not start anything.
+  has 'and how many doors are listening' "${out}" '2 ephemeral slot(s), 2 with a listening door'
   hasnt 'the running named desktop is not accused' "${out}" 'alice'
 
   # The defect itself: a live slot publishing nothing.
@@ -1824,11 +1858,146 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # nothing because nothing is there to publish, and reporting it would bury
   # the one row that matters.
   printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
-  # shellcheck disable=SC2317
-  systemctl() { case "$1 ${2:-}" in 'show -p') echo 'inactive';; esac; }
+  STUB_STATE='inactive'
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
-  is  'a stopped pool passes'             "${rc}" '0'
-  has 'having looked at no running slots' "${out}" '0 running ephemeral session(s)'
+  is  'an IDLE pool with its doors open passes' "${rc}" '0'
+  has 'having looked at no running slots'       "${out}" '0 running'
+  # THE STATE THE WHOLE SERVICEABILITY ARM EXISTS FOR, asserted here because it
+  # is the one an operator reads: an idle pool and a dead one must not print the
+  # same line. This is the green half; the red half is the group below.
+  has 'and saying the doors are open'           "${out}" '2 with a listening door'
+)
+
+echo '== a pool that cannot hand out a desktop is not a healthy pool =='
+# MEASURED, on a development container, 2026-09-24, BEFORE this arm existed:
+# with every slot door stopped, a visitor got no answer at all three slots and
+# "hdw4s check" printed "0 running ephemeral session(s)" and exited 0. With
+# every session start broken instead, the visitor got 503 at all three, three
+# units sat in "failed", and it printed the same sentence and exited 0 again.
+# The command was doing its documented job -- it asks about sessions that are
+# RUNNING, and a pool that can start nothing has none -- which is exactly why
+# the silence was total: an operator, this command's own timer and any monitor
+# above it all saw a pass on a machine nobody could get a desktop from.
+#
+# EVERY ARM BELOW IS RUN IN BOTH DIRECTIONS. A predicate is only worth what its
+# red arm is worth, and a serviceability check that reddened on an idle pool
+# would be switched off within a week -- so each state is broken, seen red, and
+# repaired, seen green, against the same sandbox.
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s" > "${SB}/lib.sh"
+  HDW4S_ETCDIR="${SB}/etc"; mkdir -p "${HDW4S_ETCDIR}"
+  SLOTS="${HDW4S_ETCDIR}/instances"
+  RUNDIR="${SB}/run"
+  HDW4S_INCARNATION_DIR="${SB}/run/hdw4s-incarnation"
+  HDW4S_WEBROOT_DIR="${SB}/webroot"
+  mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}"
+  export HDW4S_ETCDIR HDW4S_RUNDIR="${RUNDIR}" HDW4S_INCARNATION_DIR HDW4S_WEBROOT_DIR
+  # shellcheck source=/dev/null
+  . "${SB}/lib.sh" 2>/dev/null || :
+  trap - ERR
+  trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
+  SLOTS="${HDW4S_ETCDIR}/instances"; RUNDIR="${SB}/run"
+  printf '%s\n' '0 eph0 ephemeral' '1 eph1 ephemeral' > "${SLOTS}"
+
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/eph0.sock ${RUNDIR}/hdw4s-proxy/eph1.sock"
+  STUB_PORT='7280'; STUB_FAILED=''; STUB_SLOTS='active'
+  # shellcheck disable=SC2317
+  ss() {
+    case "$*" in
+      *'sport = :'*) [ -n "${STUB_PORT}" ] && echo 'LISTEN 0 4096 *:7280 *:*';;
+      *'src = '*)
+        for d in ${STUB_DOORS}; do
+          case "$*" in *"${d}") echo "u_str LISTEN 0 4096 ${d} 1 * 0";; esac
+        done;;
+    esac
+    return 0
+  }
+  # shellcheck disable=SC2317
+  systemctl() {
+    case "$*" in
+      *'list-units --failed'*) printf '%s' "${STUB_FAILED}";;
+      *'-p Listen --value hdw4s-demux.socket'*) echo "[::]:${STUB_PORT} (Stream)";;
+      *'hdw4s-ephemeral-slots.service'*) echo "${STUB_SLOTS}";;
+      *) echo 'inactive';;
+    esac
+    return 0
+  }
+
+  # THE POSITIVE CONTROL FIRST. A sound idle pool -- doors listening, nothing
+  # running -- must pass, or every red below it is just a check that is always
+  # red, which is read as noise and switched off.
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a sound idle pool passes'   "${rc}" '0'
+  has 'and says the doors are open' "${out}" '2 ephemeral slot(s), 2 with a listening door, 0 running'
+
+  # Every door shut: the state a teardown that does not re-arm the sockets
+  # leaves behind, and the state with no witness anywhere else on the box --
+  # nothing failed, nothing running, the table still listing the slots.
+  STUB_DOORS=''
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a pool with no listening door fails' "${rc}" '1'
+  has 'and says so in the visitor''s terms' "${out}" 'none of the 2 ephemeral slot(s) has a listening door'
+  has 'and names the repair'                "${out}" 'systemctl start hdw4s-proxy@'
+
+  # One door shut. Not a capacity shortfall: the router mints a visitor onto the
+  # name and the request fails with the slot consumed.
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/eph0.sock"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'one slot with no listener fails'  "${rc}" '1'
+  has 'and names WHICH slot'             "${out}" 'Not listening: eph1'
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/eph0.sock ${RUNDIR}/hdw4s-proxy/eph1.sock"
+
+  # The front door. Asked of the kernel, not of systemd: a socket unit can be
+  # active while nothing is bound.
+  STUB_PORT=''
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a front door with no address fails' "${rc}" '1'
+  has 'and says which door'                "${out}" 'front door has no listening address'
+  STUB_PORT='7280'
+
+  # A latched unit. This is the shape the pool fails into when a relay's start
+  # limit fires, and it stays that way until somebody clears it.
+  STUB_FAILED='hdw4s-ephemeral@eph0.service failed failed'
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a latched pool unit fails the check' "${rc}" '1'
+  has 'and names the unit'                  "${out}" 'hdw4s-ephemeral@eph0.service'
+  has 'and names the repair'                "${out}" 'reset-failed'
+  STUB_FAILED=''
+
+  # The identities the slots run as. Without them User= does not resolve and
+  # every start dies 217/USER, naming nothing anybody would search for.
+  STUB_SLOTS='inactive'
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'unminted slot identities fail' "${rc}" '1'
+  has 'and say what breaks'           "${out}" '217/USER'
+  STUB_SLOTS='active'
+
+  # A table that EXISTS and cannot be read is not "no sessions to check": the
+  # router answers every arrival 503 in exactly that state.
+  chmod 000 "${SLOTS}"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  chmod 644 "${SLOTS}"
+  if [ "$(id -u)" = '0' ]; then
+    skip 'an unreadable slot table fails' 'root reads anything'
+  else
+    is  'an unreadable slot table fails' "${rc}" '1'
+    has 'and does not call it "no sessions"' "${out}" 'exists and cannot be read'
+  fi
+
+  # And a machine that was never configured at all is NOT broken. This is the
+  # arm that keeps the check off boxes it has no business reddening.
+  rm -f "${SLOTS}"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a machine with no slot table passes' "${rc}" '0'
+  has 'and says why'                        "${out}" 'no slot table'
+
+  # A box with named desktops and no pool is not a pool: no doors, no front
+  # door, and it must still pass.
+  printf '%s\n' '0 alice desktop' > "${SLOTS}"
+  STUB_DOORS=''; STUB_PORT=''
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a box with no ephemeral slots passes' "${rc}" '0'
+  has 'and says there is no pool'            "${out}" 'no ephemeral slots configured'
 )
 
 echo '== the tool and the router agree about what a setting means =='
@@ -1904,7 +2073,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=316   # update when tests are added; a wrong number is the point
+EXPECTED=338   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

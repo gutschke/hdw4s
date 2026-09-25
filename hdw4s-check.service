@@ -1,5 +1,5 @@
 [Unit]
-Description=Check that every running HDW4S session publishes its own identity
+Description=Check that HDW4S can hand out a desktop and that every running session publishes its own identity
 Documentation=man:hdw4s(8)
 
 [Service]

@@ -829,14 +829,32 @@ working in, at an hour chosen by a timer, is an updater that gets switched off.
 ## DIAGNOSTICS
 
     hdw4s list                       what exists and whether it is running
-    hdw4s check                      whether every running session is sound
+    hdw4s check                      whether a desktop can be handed out at all
     hdw4s show <instance>            effective settings and their source
     hdw4s firewall --check           whether the table is loaded and what it covers
     hdw4s --version                  which version this is
     systemctl status hdw4s@<i>       includes the display and port when running
     journalctl -xeu hdw4s@<i>        session output, including the X server
 
-`hdw4s check` asks one question of every session that is running now: is it
+`hdw4s check` asks two questions, and the first one is about the machine rather
+than about any session: can it hand anybody a desktop? On a box with ephemeral
+slots configured it reports a slot table that exists and cannot be read, slot
+identities that were never minted, a front door with nothing bound to its port,
+a slot whose socket has no listener, and any unit of the pool's that has latched
+into `failed`. Each of those is a state in which an arrival is refused while
+every session on the machine looks fine, because there are none: an ephemeral
+pool starts a desktop when somebody knocks, so ZERO RUNNING SESSIONS IS THE
+NORMAL STATE OF A HEALTHY IDLE MACHINE, and it is also what a pool that can
+start nothing looks like. The count alone cannot tell them apart, which is why
+the summary line says how many slot doors are listening as well as how many
+sessions are running.
+
+One state it does not see, and the omission is deliberate rather than pending: a
+slot the router has already let to a visitor who never arrived is listening,
+unfailed and unserviceable. Whether a slot is let is the router's own record,
+not systemd's, so the answer has to come from the router.
+
+The second question is asked of every session that is running now: is it
 serving the incarnation token its own start published? A returning browser tab
 compares its saved token against the served one to decide whether it is looking
 at the desktop it had. A session serving nothing makes that comparison empty on
@@ -850,7 +868,7 @@ reported `active` by everything that looks. A restart fixes one; the check is
 what notices the next one.
 
 It is run every fifteen minutes by `hdw4s-check.timer`, which marks
-`hdw4s-check.service` failed when it finds one, so `systemctl --failed` names
+`hdw4s-check.service` failed when it finds anything, so `systemctl --failed` names
 it. Run as root: the record it compares against is readable by root only, and
 asked by anyone else the command reports that it could not tell rather than that
 nothing was wrong.

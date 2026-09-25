@@ -1,5 +1,5 @@
 [Unit]
-Description=Notice a running HDW4S session that publishes no identity
+Description=Notice an HDW4S pool that cannot serve, or a session that publishes no identity
 Documentation=man:hdw4s(8)
 
 [Timer]
