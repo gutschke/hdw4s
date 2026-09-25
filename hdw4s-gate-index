@@ -182,10 +182,31 @@ OVERLAY = r"""
   // Two states, kept apart on purpose. Cold: this tab has never connected and cannot
   // know what is open elsewhere, so the consequence is conditional. Lost: this tab WAS
   // connected and was disconnected, which is a fact and is stated as one.
+  //
+  // THE CONDITIONAL IS NOT CAUTION, IT IS THE ONLY HONEST FORM, and that is now
+  // measured rather than reasoned. Every signal this product has for "somebody is
+  // connected" was falsified twice in one day: the occupancy probe asked a port an
+  // ephemeral slot never uses and answered zero for every session under every
+  // condition, and a real visitor's session read as having nobody on it for the first
+  // twenty-four minutes of its life while being the freshest session on the box. So
+  // nothing here may assert who else is connected -- not because we are being careful,
+  // but because we would be wrong.
+  //
+  // AND THE ORDER OF THE SENTENCES IS THE REPAIR. This used to open by telling the
+  // reader that connecting "will take it over", which is written for a stranger
+  // arriving at somebody else's desktop. On the commonest path by far it is the same
+  // person's own tab coming back -- returning from a backgrounded tab, or after the
+  // stream dropped -- and that reader was being warned they were about to steal from
+  // themselves. The consequence is still stated in full, because it is real and the
+  // person may indeed have another tab open; it is stated SECOND, after the case that
+  // is usually theirs, and without the vocabulary of theft. Found by opening the
+  // picture rather than by reading a verdict.
   var COLD = '<p>This tab is not connected.</p>'
-    + '<p>If this desktop is open in another tab or on another device, connecting here '
-    + 'will take it over. That tab will stop streaming and keep showing its last '
-    + 'picture until it is closed.</p>';
+    + '<p>Usually that just means it is a new tab, or one that has been sitting idle. '
+    + 'Connecting brings the desktop back here as it was.</p>'
+    + '<p>If you also have this desktop open in another tab or on another device, that '
+    + 'one will stop streaming and keep showing its last picture until you close it. '
+    + 'Nothing in the desktop is lost either way.</p>';
   var LOST = '<p>This tab was disconnected: the desktop was opened somewhere else.</p>'
     + '<p>Nothing has been lost. The desktop is still running, and you can bring it '
     + 'back here.</p>';
