@@ -99,6 +99,29 @@ UNITS = {
 # "%d" and come back as something that was not a number at all.
 MAX_SECONDS = 2 ** 63 - 1
 
+# A POLICY CEILING, which MAX_SECONDS is not. MAX_SECONDS is a representation
+# limit -- 2**63 seconds is about 292 billion years -- so it refuses nothing a
+# person could plausibly type wrong. A hundred years does.
+#
+# The case it catches is the other half of the round trip. The int refusal at
+# the entry point closes the in-process half, but A CONFIG FILE ALWAYS DELIVERS
+# A STRING, so "604800" -- seconds, pasted where days were meant -- came
+# straight through and answered 1656 years. The reaper honours that as never,
+# which is the exact inversion the int refusal was written against, arriving by
+# the documented channel instead of a function call.
+#
+# Refusing it costs nothing that anybody means, because THERE IS ALREADY A WAY
+# TO SAY NEVER: zero, and zero is a statement a person typed on purpose. A
+# multi-century window is not a second way of saying it; it is a units error.
+#
+# Measured 2026-09-24: no shipped surface prints a bare seconds count for this
+# key -- describe_window() always attaches a unit, the start-up line says days,
+# and the shell remedies all name 30d or 0 -- so no CURRENT path feeds a person
+# the number they would paste back. That is why this is a cheap guard rather
+# than an incident, and it is also why it is worth having: the absence of such
+# a surface is not a property anybody is maintaining.
+MAX_REASONABLE_SECONDS = 100 * 31557600
+
 
 class DurationError(ValueError):
     """A value that cannot be read. Never a default -- there isn't one."""
@@ -181,6 +204,12 @@ def parse(text, floor=MIN_SECONDS):
         raise DurationError("'%s' is too large to be a duration." % text)
     if secs > MAX_SECONDS:
         raise DurationError("'%s' is too large to be a duration." % text)
+    if secs > MAX_REASONABLE_SECONDS:
+        raise DurationError(
+            "'%s' is %.0f years, which is not a window anybody means. A bare "
+            "number here is DAYS, so this is usually a value already in "
+            "seconds. Write 0 if you mean never."
+            % (text, secs / 31557600.0))
 
     if secs == 0:
         if float(num) == 0:

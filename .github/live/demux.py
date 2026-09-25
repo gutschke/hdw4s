@@ -1903,6 +1903,30 @@ def test_a_duration_already_in_seconds_is_refused(rig=None):
     assert parse("7") == 604800, parse("7")
     assert parse("7d") == 604800, parse("7d")
 
+    # THE STRING HALF, which is the one a config file can actually reach. The
+    # isinstance guard below closes only the in-process round trip; a conf line
+    # always delivers text, so "604800" used to come through as 1656 years and
+    # the reaper honours that as never. Caught by a policy ceiling, not by the
+    # type check -- two different guards for two halves of one defect, and the
+    # type check alone reads as if it had closed both.
+    for text, why in (("604800", "seconds pasted where days were meant"),
+                      ("2592000", "a month in seconds"),
+                      ("36600d", "just over the hundred-year ceiling")):
+        try:
+            got = parse(text)
+        except Exception as e:
+            assert "years" in str(e), "refused for the wrong reason: %s" % e
+        else:
+            raise AssertionError(
+                "parse(%r) (%s) was accepted and answered %r seconds (%.0f "
+                "years), which the reaper honours as never"
+                % (text, why, got, got / 31557600.0))
+
+    # And the ceiling must not eat a long window somebody means. Ten years is
+    # absurd as a reap window and still legal; the guard is against units, not
+    # against ambition.
+    assert parse("3650d") == 3650 * 86400, parse("3650d")
+
     for bad in (604800, 7, 0, 7.0):
         try:
             got = parse(bad)
