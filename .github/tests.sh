@@ -1630,6 +1630,13 @@ echo '== a credential is refused where it can exclude nobody =='
   # rather than a compromise.
   # shellcheck disable=SC2317
   require_slot() { :; }
+  # STILL PRINTS, and that is the point of the assertion below rather than an
+  # oversight. The real make_credential has no return channel any more -- it
+  # used to print the plaintext and both callers discarded it. A stub that also
+  # printed nothing would make the test below pass for free, on a stand-in
+  # rather than on the code. This one emits a secret the caller must NOT pass
+  # on, so the assertion is about cmd_auth's handling rather than about the
+  # stub's silence.
   # shellcheck disable=SC2317
   make_credential() { echo 'stub-secret'; }
   printf '%s\n' '0 eph0 ephemeral' '1 alice' '2 bob' > "${SLOTS}"
@@ -1642,6 +1649,14 @@ echo '== a credential is refused where it can exclude nobody =='
   is 'a session on the network may still have one' "${rc}" '0'
   has 'and the setting is written' \
       "$(cat "${ETCDIR}/alice.conf")" 'HDW4S_AUTH=basic'
+
+  # THE SECRET MUST NOT COME BACK OUT. cmd_auth used to capture the plaintext
+  # into a variable it only ever unset, so it crossed a subshell boundary for no
+  # consumer. It now calls make_credential without capturing, which means
+  # anything the callee prints goes straight to the user's terminal -- so this
+  # assertion is also what stops the return channel being reinstated by
+  # somebody who assumes the caller is still swallowing it.
+  hasnt 'and the secret never reaches the user' "${out}" 'stub-secret'
 
   # Now the refusal.
   printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/eph0.conf"
@@ -1889,7 +1904,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=315   # update when tests are added; a wrong number is the point
+EXPECTED=316   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

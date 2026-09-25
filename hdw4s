@@ -1613,7 +1613,21 @@ make_credential() {
     "LoadCredentialEncrypted=hdw4s-${name}:${cred}" \
     > "$(dropin_of "${inst}")/${order}-${name}.conf"
   systemctl daemon-reload
-  printf '%s' "${pw}"
+
+  # NO RETURN CHANNEL, DELIBERATELY. This used to end by printing the secret on
+  # stdout, and BOTH callers threw it away -- one captured it into a variable it
+  # only ever unset, the other redirected it to /dev/null. So the plaintext
+  # crossed a subshell boundary, sat in a shell variable and in a pipe, for no
+  # consumer at all.
+  #
+  # The secret is already where it belongs by this point: encrypted into
+  # ${cred} and named in the drop-in. Anything that needs it asks systemd for
+  # it. Handing it back is a leak surface with nothing on the other end, and the
+  # rule is to compute the property rather than move the secret around.
+  #
+  # Removing the substitution has a second effect worth keeping: `die` inside
+  # $( ) runs in a SUBSHELL, so it printed its message and let the caller carry
+  # on. Called directly, its exit reaches the shell that matters.
 }
 
 require_slot() {
@@ -2034,7 +2048,7 @@ auth_is_meaningless() {
 }
 
 cmd_auth() {
-  local inst="$1" pw
+  local inst="$1"
   # Refused, not warned about, and refused HERE because this is the only thing
   # in the tree that writes HDW4S_AUTH=basic for one session -- "hdw4s enable"
   # reaches the same shape by calling this function, so one refusal covers both.
@@ -2061,7 +2075,13 @@ cmd_auth() {
         '  either transport.'
   fi
   require_slot "${inst}"
-  pw="$(make_credential "${inst}" 'auth' 70)"
+  # >/dev/null although make_credential no longer prints anything: the caller
+  # does not get to depend on the callee staying silent. Without it, the day
+  # somebody reinstates a return channel, the plaintext lands on the user's
+  # terminal -- which is exactly what the test with the printing stub
+  # demonstrates. NOT a capture: $( ) would put it back in a variable, and it
+  # would also put `die` in a subshell where its exit reaches nobody.
+  make_credential "${inst}" 'auth' 70 >/dev/null
   config_write "${ETCDIR}/${inst}.conf" 'HDW4S_AUTH' 'basic'
 
   echo "Session ${inst} will now require a credential of its own, in addition"
@@ -2072,7 +2092,6 @@ cmd_auth() {
   echo
   echo "Restart the session for this to take effect:"
   echo "  systemctl restart $(unit_of "${inst}")"
-  unset pw
 }
 
 cmd_noauth() {
