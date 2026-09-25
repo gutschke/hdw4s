@@ -845,6 +845,38 @@ echo '== a slot records what kind of session it is =='
     printf '  --   %s\n' 'reading as root; the unreadable-table arm needs a non-root run'
   else
     is 'an unreadable table is not "desktop"' "$(type_of eph0)" 'unreadable'
+
+    # THE ARM THE BRANCH SHIPPED WITHOUT, AND WHAT IT ACTUALLY GUARDS.
+    #
+    # Every arm above exercises the predicate DIRECTLY, where its die stops the
+    # shell. Nothing went through unit_of -- and all nineteen of its callers
+    # write $(unit_of ...), where a die kills only the SUBSHELL. Measured on
+    # this tree before the dispatcher guard existed: unit_of answered the EMPTY
+    # STRING with its refusal printed in full, and dropin_of answered
+    # "${DROPIN}/.d". So "systemctl stop ''" and a drop-in written into a
+    # directory named ".d", from a guard that had loudly refused.
+    #
+    # The repair is NOT to make the predicate die harder -- a predicate that
+    # dies inside a substitution is the trap itself. It is that nothing ever
+    # REACHES those functions with an unreadable table, refused once at the
+    # dispatcher. So this asserts the refusal a real invocation meets, not the
+    # behaviour of a function called out of context: sourcing the functions and
+    # calling unit_of by hand still fails open, deliberately and harmlessly,
+    # because no command can get there.
+    # HDW4S_ETCDIR passed EXPLICITLY. Without it the binary reads the real
+    # /etc/hdw4s, never sees this sandbox, and dies "no such instance" -- which
+    # is also exit 1, so the status assertion below passed for entirely the
+    # wrong reason on the first cut. An arm that goes red for a different cause
+    # proves nothing, which is why the two message assertions are here rather
+    # than a bare status check.
+    out="$( ( HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" show eph0 ) 2>&1 )"; rc=$?
+    is 'an unreadable table refuses before any command runs' "${rc}" '1'
+    # Matching the SENTENCE rather than the path: the harness and the binary
+    # derive ETCDIR separately, so asserting the exact filename here tests
+    # whether two variables agree rather than whether the refusal is useful.
+    has 'and the refusal says it cannot READ the file' "${out}" 'cannot be read'
+    has 'and it names the table rather than the slot' "${out}" 'instances'
+    hasnt 'and no command got far enough to build a unit name' "${out}" '.d'
   fi
   chmod 644 "${SLOTS}"
 
@@ -2217,7 +2249,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=362   # update when tests are added; a wrong number is the point
+EXPECTED=366   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

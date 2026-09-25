@@ -2941,6 +2941,45 @@ cmd_release() {
   esac
 }
 
+# REFUSE AN UNREADABLE SLOT TABLE HERE, ONCE, BEFORE ANY COMMAND RUNS.
+#
+# Every predicate below asks the table what kind of session a slot is, and
+# type_of answers "unreadable" when it cannot read it. ephemeral_shaped then
+# refuses rather than guessing -- which is right, and which FAILS OPEN at the
+# only place it matters: unit_of() consults it, and all nineteen callers of
+# unit_of use $(unit_of ...). A die inside a command substitution kills the
+# SUBSHELL, so the message is printed in full and the caller carries on with an
+# empty string.
+#
+# MEASURED on this tree, table at mode 000, before this guard existed:
+#
+#     type_of eph0   -> unreadable
+#     unit_of eph0   -> ""            <- the die was printed and swallowed
+#     dropin_of eph0 -> ${DROPIN}/.d
+#
+# So "systemctl stop ''", a BindsTo= written into a drop-in directory named
+# ".d", and hdw4s set writing there. That is this project's own recorded trap --
+# die inside $(...) fails OPEN, loud and stopping nothing -- reproduced inside
+# the commit whose own message warns about it.
+#
+# The repair is not to make the predicate die harder; a predicate that dies is
+# the trap. It is to ensure NOTHING EVER SEES "unreadable" THROUGH A
+# SUBSTITUTION. The table is read by every command that takes a slot, so one
+# refusal here covers all of them and leaves the predicate's own die as an
+# unreachable backstop rather than the load-bearing check.
+#
+# Absence is NOT this case: a missing table is a box with no slots yet, which
+# several commands handle and which "hdw4s enable" exists to fix. Only a table
+# that is PRESENT AND UNREADABLE is refused, because that is the state where
+# every answer below would be a guess.
+if [ -e "${SLOTS}" ] && [ ! -r "${SLOTS}" ]; then
+  die "hdw4s: ${SLOTS} exists but cannot be read." \
+      '  Every command here asks that file what kind of session a slot is, so' \
+      '  continuing would mean guessing -- and a wrong guess puts a pooled slot' \
+      '  on a TCP port and binds its relay to a unit that will never start.' \
+      '  Check its permissions and run this again.'
+fi
+
 case "${1:-}" in
   list)     shift; cmd_list "$@";;
   check)    shift; [ $# -eq 0 ] || usage_error; cmd_check "$@";;
