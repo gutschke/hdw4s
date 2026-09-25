@@ -34,7 +34,7 @@ PROFILE_PREFIX = "hdw4s-live-"
 
 class Browser:
     def __init__(self, port, tag, headers=None, display=None,
-                 fake_media_ui=True):
+                 fake_media_ui=True, window=None):
         # `fake_media_ui=False` keeps --use-fake-ui-for-media-stream OFF, so the
         # browser asks about the camera and microphone the way a person's does.
         # Every other caller wants it on -- accepting the prompt silently is
@@ -50,6 +50,15 @@ class Browser:
         # way a person does, and the browser reads the X selection that the
         # local desktop actually holds.
         self.display = display
+        # `window` is (x, y, w, h) on that display. Two browsers both took
+        # position 0,0 at 1280x800, so on a 1280x800 Xvfb the second one
+        # COVERED the first -- and an occluded renderer is throttled, which
+        # freezes its frame counter and is indistinguishable in the log from
+        # the session having been taken away. Three FAILs in this file's first
+        # run were that. Placing two visitors side by side removes the confound
+        # at its source, so both counters can be read in the SAME window of
+        # time rather than alternately with Page.bringToFront.
+        self.window = window or (0, 0, 1280, 800)
         self.port, self.tag = port, tag
         self.headers = headers or {}
         self.profile = tempfile.mkdtemp(prefix=PROFILE_PREFIX + tag + "-",
@@ -95,8 +104,8 @@ class Browser:
             # prompt to actually happen.
             *(["--use-fake-ui-for-media-stream"] if self.fake_media_ui else []),
             "--use-fake-device-for-media-stream",
-            "--window-position=0,0",
-            "--window-size=1280,800",
+            "--window-position=%d,%d" % (self.window[0], self.window[1]),
+            "--window-size=%d,%d" % (self.window[2], self.window[3]),
             "about:blank",
         ], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -215,8 +224,15 @@ class Browser:
             time.sleep(gap)
         return last
 
-    def screenshot(self):
+    def screenshot(self, save=None):
         """Raw RGB pixels of what is on the screen, as (width, height, bytes).
+
+        `save` writes the capture's ORIGINAL PNG bytes to that path. Not a
+        convenience: this method decoded the picture, counted it and threw the
+        bytes away, so every rig built on it could assert on a screen nobody
+        could ever open -- and a rig that re-captured afterwards to get a file
+        saved a DIFFERENT moment than the one it asserted on. The file written
+        here is the exact image the caller's count is about.
 
         Decoded here rather than measured in the page on purpose. Anything
         evaluated in the page is the client's own account of itself, and the
@@ -227,6 +243,10 @@ class Browser:
         r = self.call("Page.captureScreenshot", {"format": "png"}, timeout=60)
         if not r or "data" not in r:
             return None
+        if save:
+            os.makedirs(os.path.dirname(os.path.abspath(save)), exist_ok=True)
+            with open(save, "wb") as f:
+                f.write(base64.b64decode(r["data"]))
         return _decode_png(r["data"])
 
     def stop(self):
@@ -315,6 +335,32 @@ def colours(shot, step=7):
     for i in range(0, len(data) - pixel, pixel * step):
         seen.add(data[i:i + 3])
     return len(seen)
+
+
+def difference(a, b, step=7):
+    """Fraction of sampled pixels where two captures disagree, 0.0 to 1.0.
+
+    The question a colour count cannot answer: are these two browsers looking
+    at the SAME desktop? Two pictures of one desktop score near zero here; two
+    different desktops, or one desktop before and after something happened on
+    it, score high. Returns None when the two captures are not the same shape,
+    because a resize makes the number meaningless rather than large.
+    """
+    if not a or not b:
+        return None
+    wa, ha, da, pa = a
+    wb, hb, db, pb = b
+    if (wa, ha) != (wb, hb) or pa != pb:
+        # A differing stride would make the byte offsets below name different
+        # pixels in the two images, and the answer would be a large number with
+        # no meaning. Refuse rather than return it.
+        return None
+    n = same = 0
+    for i in range(0, min(len(da), len(db)) - pa, pa * step):
+        n += 1
+        if da[i:i + 3] == db[i:i + 3]:
+            same += 1
+    return None if not n else 1.0 - same / n
 
 
 def kill_strays():
