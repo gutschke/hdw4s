@@ -1061,7 +1061,7 @@ def test_the_console_lists_only_your_own_sessions(rig):
         "ONE VISITOR'S LIST CARRIED ANOTHER VISITOR'S SESSION ADDRESS"
 
 
-def test_one_visitor_cannot_end_anothers_session(rig):
+def test_one_visitor_cannot_discard_anothers_session(rig):
     """SEEN REFUSING. The negative the console is worth nothing without.
 
     A session list is the obvious way to reopen cross-occupant reach, and the
@@ -1078,7 +1078,7 @@ def test_one_visitor_cannot_end_anothers_session(rig):
     arrive(rig, b)
     before = sorted(os.listdir(rig.teardowndir))
 
-    st, _, _ = b.post("/sessions/%s/end" % sid_a)
+    st, _, _ = b.post("/sessions/%s/discard" % sid_a)
     assert st == 403, \
         "a visitor was allowed to end somebody else's desktop: %d" % st
     assert sorted(os.listdir(rig.teardowndir)) == before, \
@@ -1086,13 +1086,13 @@ def test_one_visitor_cannot_end_anothers_session(rig):
 
     # A sid that exists for nobody must be answered IDENTICALLY, or the status
     # code tells a stranger which sids are real.
-    st2, _, _ = b.post("/sessions/%s/end" % ("0" * 32))
+    st2, _, _ = b.post("/sessions/%s/discard" % ("0" * 32))
     assert st2 == st, \
         "a nonexistent session answered %d and somebody else's answered %d, " \
         "which tells a stranger which sids exist" % (st2, st)
 
 
-def test_a_visitor_can_end_their_own_session(rig):
+def test_a_visitor_can_discard_their_own_session(rig):
     """The positive control, without which the refusal above proves nothing.
 
     A guard that refuses everybody satisfies every rule anybody writes down and
@@ -1101,7 +1101,7 @@ def test_a_visitor_can_end_their_own_session(rig):
     a = rig.client()
     sid, _ = arrive(rig, a)
     rec_instance = None
-    st, h, _ = a.post("/sessions/%s/end" % sid)
+    st, h, _ = a.post("/sessions/%s/discard" % sid)
     assert st == 303, "ending your own desktop did not redirect: %d" % st
     assert h["location"][0] == "/sessions/", \
         "ending a desktop sent the visitor somewhere unexpected"
@@ -1116,11 +1116,11 @@ def test_a_visitor_can_end_their_own_session(rig):
     # And the list then says so rather than offering the button again.
     st, _, body = a.get("/sessions/")
     assert st == 200
-    assert "being shut down" in body.decode(), \
-        "a session already being ended still offered an End button"
+    assert "discarding" in body.decode(), \
+        "a session already being discarded still offered a Discard link"
 
 
-def test_opening_the_end_address_does_not_end_anything(rig):
+def test_opening_the_discard_address_only_asks(rig):
     """A GET must not destroy a desktop.
 
     One browser prefetch, one link preview or one crawler is otherwise enough
@@ -1129,10 +1129,16 @@ def test_opening_the_end_address_does_not_end_anything(rig):
     """
     a = rig.client()
     sid, _ = arrive(rig, a)
-    st, _, _ = a.get("/sessions/%s/end" % sid)
-    assert st == 405, "a GET to the end address was not refused: %d" % st
+    st, _, body = a.get("/sessions/%s/discard" % sid)
+    assert st == 200, "the discard confirmation did not serve: %d" % st
     assert os.listdir(rig.teardowndir) == [], \
-        "A GET ENDED A DESKTOP. That is one prefetch away from happening unasked."
+        "A GET DISCARDED A DESKTOP. That is one prefetch away from happening " \
+        "unasked, and the visitor would have no idea what happened."
+    text = body.decode()
+    assert "cannot be undone" in text, \
+        "the confirmation did not say the act is irreversible"
+    assert "Keep it" in text, \
+        "the confirmation had no safe half for a trained reflex to land on"
 
 
 def test_the_console_never_mints(rig):
@@ -2287,7 +2293,7 @@ _shipped_console = console
 
 
 def console(own, wf, identity, new_identity, what, sid, method):
-    if what == "end" and method == b"POST":
+    if what == "discard" and method == b"POST":
         rec = own.lookup(sid)
         if rec is not None:
             request_teardown(rec["instance"])
@@ -2441,10 +2447,44 @@ def red_scope_checked_by_the_page():
     path = scratch_demux("-scope", SCOPE_CHECKED_BY_THE_PAGE)
     rig = Rig(demux=path)
     try:
-        test_one_visitor_cannot_end_anothers_session(rig)
+        test_one_visitor_cannot_discard_anothers_session(rig)
     finally:
         rig.stop()
         os.unlink(path)
+
+
+def test_the_row_says_when_the_desktop_goes_by_itself(rig=None):
+    """The one claim this page makes about the future, PER SLOT.
+
+    The mock calls it the promise that abandonment needs no cleanup, made
+    before the fact rather than after it. It has to be this machine's answer
+    for THIS slot: the windows genuinely differ between slots on a box under
+    experiment, and a page quoting one number for the pool would be telling
+    some visitors something untrue about their own desktop.
+
+    Two slots, two different windows, written the way an administrator writes
+    them -- which is also the spelling that a "%d" fixture could not express
+    and that let a duration defect ship once already.
+    """
+    rig = Rig(windows=[("ephemeral0", "30d"), ("ephemeral1", "15m")])
+    try:
+        a, b = rig.client(), rig.client()
+        arrive(rig, a)
+        arrive(rig, b)
+        _, _, body_a = a.get("/sessions/")
+        _, _, body_b = b.get("/sessions/")
+        texts = [body_a.decode(), body_b.decode()]
+        assert any("30 days" in t for t in texts), \
+            "no row quoted the 30d window: %r" % texts
+        assert any("15 minutes" in t for t in texts), \
+            "no row quoted the 15m window, so the page is not reading per slot"
+        # And neither visitor was told the OTHER slot's number, which is what a
+        # page reading one value for the pool would do.
+        for t in texts:
+            assert not ("30 days" in t and "15 minutes" in t), \
+                "one visitor's page carried both slots' windows"
+    finally:
+        rig.stop()
 
 
 def red_a_console_address_that_stops_being_claimed_mints():
@@ -2933,9 +2973,9 @@ def main():
              # The rescue console. The refusal and the admission are a PAIR and
              # are listed together so that neither can be removed alone.
              test_the_console_lists_only_your_own_sessions,
-             test_one_visitor_cannot_end_anothers_session,
-             test_a_visitor_can_end_their_own_session,
-             test_opening_the_end_address_does_not_end_anything,
+             test_one_visitor_cannot_discard_anothers_session,
+             test_a_visitor_can_discard_their_own_session,
+             test_opening_the_discard_address_only_asks,
              test_the_console_never_mints]
 
     # Tests whose rig is not the default one. A pool with no instance table
@@ -3018,6 +3058,14 @@ def main():
             expect_red(fn.__name__, lambda: fn(rig))
         finally:
             rig.stop()
+    # Builds its own rig, because its whole subject is two slots configured
+    # DIFFERENTLY, which the shared rig cannot express.
+    try:
+        test_the_row_says_when_the_desktop_goes_by_itself()
+        check(test_the_row_says_when_the_desktop_goes_by_itself.__name__, True)
+    except Exception as e:
+        check(test_the_row_says_when_the_desktop_goes_by_itself.__name__,
+              False, repr(e))
     # These two build their OWN rigs, against a scratch copy of the router with
     # the repair undone, so they cannot share the one above.
     for fn in (red_pool_from_the_directory,

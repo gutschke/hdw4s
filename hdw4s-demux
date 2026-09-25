@@ -3517,9 +3517,16 @@ def console_target(path):
     if path in (b"/sessions", b"/sessions/"):
         return "list", None
     parts = path.split(b"/")
-    # /sessions/<sid>/end  ->  ['', 'sessions', '<sid>', 'end']
-    if len(parts) == 4 and parts[1] == b"sessions" and parts[2] and parts[3] == b"end":
-        return "end", parts[2].decode("ascii", "replace")
+    # /sessions/<sid>/discard  ->  ['', 'sessions', '<sid>', 'discard']
+    #
+    # DISCARD is the word, and it is not a synonym chosen here. It comes from
+    # the session directory mock this page is a refinement of, where it is one
+    # word, used nowhere else in the product, at the opposite end of the row
+    # from the thing you click. "End" and "Close" were both in use elsewhere
+    # for softer things; a destructive verb that is also an ordinary one is how
+    # a reflex trained somewhere else lands on the irreversible half.
+    if len(parts) == 4 and parts[1] == b"sessions" and parts[2] and parts[3] == b"discard":
+        return "discard", parts[2].decode("ascii", "replace")
     return None, None
 
 
@@ -3624,6 +3631,14 @@ def describe_session(rec, sid, now=None):
     now = time.time() if now is None else now
     inst = rec["instance"]
     kb = slot_memory_kb(inst)
+    # WHEN IT GOES BY ITSELF, read PER SLOT and never pinned. The mock calls
+    # this the promise that abandonment needs no cleanup, made before the fact
+    # rather than after it -- and it is the only claim on this page about the
+    # future, so it has to be this machine's answer rather than the shipped
+    # default. The windows genuinely differ between slots on a box under
+    # experiment, and a page quoting one number for the pool would be telling
+    # some visitors something untrue about their own desktop.
+    window = dict(idle_windows()).get(inst)
     return {
         "sid": sid,
         "instance": inst,
@@ -3631,58 +3646,86 @@ def describe_session(rec, sid, now=None):
         "memory_mb": None if kb is None else kb // 1024,
         "pids": slot_pids(inst),
         "started": bool(rec.get("live")) or slot_occupied(inst),
-        "ending": teardown_requested(inst),
+        "discarding": teardown_requested(inst),
+        "idle_window": window,
     }
 
 
 def console_page(rows, note=None):
-    """The visitor's own sessions, and one button each.
+    """The visitor's own desktops. A REFINEMENT of the session-directory mock.
+
+    WHAT IS TAKEN FROM THE MOCK AND WHY, because these are decisions somebody
+    already made carefully and re-deriving them would have lost the reasons:
+
+      * ROWS, NOT CARDS. No border, no fill, no shadow, no radius. "One object
+        on this page looks pressable" is the whole mechanism for leading the
+        habitual click, and it is why the discard control cannot be a second
+        button competing with the thing you actually came to press.
+      * EVERY ROW CARRIES WHEN IT DISAPPEARS. That line is the promise that
+        abandonment needs no cleanup, made before the fact rather than after it.
+      * DISCARD SITS AT THE OPPOSITE END OF THE ROW from the thing you click,
+        and it asks first. Its confirmation's prominent button is KEEP IT, and
+        deliberately not the accent colour, so the reflex trained by the big
+        button lands on the safe half.
+
+    WHERE CREATE WILL GO, and it is left as a place rather than built: ruled
+    2026-09-25, this surface is the product's control surface rather than a
+    doorway -- see what you have, resume one, discard one, and ask for another.
+    Create is not in this round. The layout puts it after the list, on its own,
+    because that is also where a REFUSAL has to render when the machine cannot
+    make one: the deferred question "what does the create button do when there
+    is nothing to create" and the refusal page being designed elsewhere are the
+    same page for the same reason.
 
     IT MUST RENDER ON AN UNWELL MACHINE, so it is static HTML with no script, no
     font, no image and no request after the first: a rescue that needs anything
-    to load is not a rescue. The numbers come from three small reads of files
-    the kernel keeps in memory.
+    to load is not a rescue. The numbers are three small reads of files the
+    kernel keeps in memory.
+
+    WHAT IS DELIBERATELY NOT TAKEN FROM THE MOCK: its "Resume" versus "Move
+    here" distinction, which turns on whether you are connected somewhere else.
+    That is a true and valuable difference and this page cannot tell it today.
+    Every signal we have for "connected" has been falsified twice over in one
+    day -- once by a tool that could not observe a connection at all, and once
+    by a real visitor's session reading as having nobody on it for its first
+    twenty-four minutes. Offering "Move here" on a reading that wrong would say
+    out loud what it costs and then be wrong about whether it costs anything.
+    One verb until the signal is real.
     """
     if not rows:
         body = ("<p>You have no desktops on this machine right now.</p>"
                 "<p><a href=\"/\">Open a desktop</a></p>")
     else:
-        body = ""
+        body = "<p>These are yours. Nobody else can see them.</p>"
         for r in rows:
-            if r["ending"]:
-                state = "<b>ending</b>"
-                button = "<p>This desktop is being shut down.</p>"
-            elif not r["started"]:
-                state = "starting"
-                button = ("<form method=\"post\" action=\"/sessions/%s/end\">"
-                          "<button type=\"submit\">End this desktop</button>"
-                          "</form>" % r["sid"])
-            else:
-                state = "running"
-                button = ("<form method=\"post\" action=\"/sessions/%s/end\">"
-                          "<button type=\"submit\">End this desktop</button>"
-                          "</form>" % r["sid"])
-            body += (
-                "<div style=\"border:1px solid #444;padding:1rem;margin:1rem 0\">"
-                "<p><a href=\"/s/%s/\">Open this desktop</a> &mdash; %s, "
-                "started %s ago</p>"
-                "<p>using <b>%s</b> of memory, %s processes</p>"
-                "%s</div>"
-                % (r["sid"], state, describe_age(r["age"]),
-                   "unknown" if r["memory_mb"] is None
-                   else "%d MB" % r["memory_mb"],
-                   "an unknown number of" if r["pids"] is None else r["pids"],
-                   button))
-        body += ("<p>If one of these is using far more memory than the others, "
-                 "that is the one misbehaving. Ending it frees the machine "
-                 "for the rest.</p>")
+            body += row_html(r)
+        # WHERE CREATE LANDS, and where a refusal will render in its place.
+        body += ("<p style=\"margin-top:2rem\">"
+                 "<a href=\"/\">Open another desktop</a></p>")
+        if any(r["memory_mb"] is not None for r in rows) and len(rows) > 1:
+            body += ("<p style=\"color:#8a8a8a\">If one of these is using far "
+                     "more memory than the others, that is the one "
+                     "misbehaving.</p>")
     if note:
         body = "<p><b>%s</b></p>" % note + body
-    return page("Your desktops on this machine", body)
+    return page("Your desktops", body)
 
 
-def describe_age(seconds):
-    """Coarse on purpose: nobody rescuing a machine needs seconds."""
+def describe_span(seconds):
+    """A length of time in words, for a person.
+
+    NOT describe_age(), and the near-miss is the point: that one renders
+    "30d00h" and "0m", which is an operator's format in an operator's log. This
+    page is read by somebody whose machine is misbehaving, so it says "30 days"
+    and "less than a minute". The two were briefly one function -- the second
+    definition silently replaced the first, every number on this page came out
+    in the log's format, and a test caught it only because it asserted on the
+    WORDS a visitor sees rather than on the value behind them.
+
+    Coarse on purpose: nobody rescuing a machine needs seconds.
+    """
+    if seconds is None:
+        return "an unknown time"
     seconds = int(seconds)
     if seconds < 90:
         return "less than a minute"
@@ -3693,61 +3736,128 @@ def describe_age(seconds):
     return "%d days" % (seconds // 86400)
 
 
-def console(own, wf, identity, new_identity, what, sid, method):
-    """Serve the console. NEVER mints, whatever it is asked.
+def row_html(r):
+    """One row. Quiet, and with exactly one pressable thing in it."""
+    if r["discarding"]:
+        right = "<span style=\"color:#8a8a8a\">discarding</span>"
+    else:
+        right = ("<a href=\"/sessions/%s/discard\" "
+                 "style=\"color:#8a8a8a\">Discard</a>" % r["sid"])
+    facts = []
+    facts.append("started %s ago" % describe_span(r["age"]))
+    if r["memory_mb"] is not None:
+        facts.append("using %d MB" % r["memory_mb"])
+    if r["pids"] is not None:
+        facts.append("%d processes" % r["pids"])
+    if not r["started"]:
+        facts.append("still starting")
+    when = ("" if r["idle_window"] is None else
+            "<div style=\"color:#8a8a8a;font-size:0.9em\">"
+            "Goes by itself once nobody has connected for %s.</div>"
+            % describe_span(r["idle_window"]))
+    return ("<div style=\"display:flex;justify-content:space-between;"
+            "align-items:baseline;padding:0.75rem 0\">"
+            "<div><a href=\"/s/%s/\">Resume</a>"
+            "<div style=\"color:#b9b9b9;font-size:0.9em\">%s</div>%s</div>"
+            "<div>%s</div></div>"
+            % (r["sid"], ", ".join(facts), when, right))
 
-    The one thing this whole surface must not do is start a desktop: it is the
-    page somebody reaches when the machine is already in trouble, and the front
-    door one path away mints on sight.
+
+def discard_confirmation_page(r):
+    """ASK FIRST, and put the reflex on the safe half.
+
+    The confirmation IS the information: it names what dies. The prominent
+    button is "Keep it" and it is not the accent colour, because the reflex a
+    person arrives with was trained by the big button on the page before.
+
+    WHAT IS MISSING AND IS NOT AN OVERSIGHT: the mock also has a ten-second
+    UNDO after the act, on the grounds that a confirmation is the first thing
+    habit learns to defeat. It is not here, and the reason is that it cannot be
+    a page trick. The request this page produces is a file the router writes and
+    a privileged unit acts on the moment it appears, so an undo has to be
+    cancellable on the FAR side of that line -- which means either holding the
+    write for ten seconds in a router that may die, or a two-file protocol where
+    the privileged half honours a stamp and re-checks before acting. The second
+    is right and is a small piece of work; it is named here rather than
+    half-built, because a "Undo" that sometimes silently does nothing is worse
+    than no undo at all.
+    """
+    return page(
+        "Discard this desktop?",
+        "<p>It has been running for %s and is using %s. Everything in it goes: "
+        "anything open, anything downloaded, and anything you are signed in to."
+        "</p><p><b>This cannot be undone.</b></p>"
+        "<p style=\"margin-top:2rem\">"
+        "<a href=\"/sessions/\" style=\"display:inline-block;padding:0.6rem 1.2rem;"
+        "border:1px solid #888;color:#ddd;text-decoration:none\">Keep it</a>"
+        "&nbsp;&nbsp;&nbsp;"
+        "<form method=\"post\" action=\"/sessions/%s/discard\" "
+        "style=\"display:inline\">"
+        "<button type=\"submit\" style=\"background:none;border:none;"
+        "color:#8a8a8a;text-decoration:underline;cursor:pointer;"
+        "font:inherit\">Discard</button></form></p>"
+        % (describe_span(r["age"]),
+           "an unknown amount of memory" if r["memory_mb"] is None
+           else "%d MB of memory" % r["memory_mb"],
+           r["sid"]))
+
+
+def console(own, wf, identity, new_identity, what, sid, method):
+    """Serve the directory. NEVER mints, whatever it is asked.
+
+    The one thing this whole surface must not do is start a desktop: it is what
+    somebody reaches when the machine is already in trouble, and the front door
+    one path away mints on sight.
     """
     extra = refresh_headers(own, identity, new_identity)
-    owned = own.owned_by(identity)
 
-    if what == "end":
-        if method != b"POST":
-            # A GET that destroys a desktop is one prefetch away from doing it
-            # unasked. Answered with the list rather than an error, so a person
-            # who reached this address by going backwards in their history sees
-            # their sessions instead of a dead end.
-            respond(wf, 405, console_page(
-                [describe_session(own.lookup(s), s) for s in owned
-                 if own.lookup(s) is not None],
-                "That address ends a desktop, and ending one has to be asked "
-                "for with the button rather than by opening a link."), extra)
-            return
+    def rows():
+        out = []
+        for s in own.owned_by(identity):
+            rec = own.lookup(s)
+            if rec is not None:
+                out.append(describe_session(rec, s))
+        return out
+
+    if what == "discard":
         rec = own.lookup(sid)
         if rec is None or rec["identity"] != identity:
             # THE INVARIANT, REFUSING, AND IT IS CHECKED HERE RATHER THAN BY THE
-            # PAGE. Identical answer for "no such session" and "not yours", on
+            # PAGE. The same answer for "no such session" and "not yours", on
             # purpose: distinguishing them tells a stranger which sids exist.
-            log("refused a teardown of %s: it is not this visitor's session"
+            # Checked on the GET as well as the POST, so the confirmation page
+            # cannot be used to find out whether a session is real either.
+            log("refused a discard of %s: it is not this visitor's session"
                 % sid)
             respond(wf, 403, page(
                 "Not your desktop",
                 "This address belongs to a different browser."), extra)
             return
+
+        if method != b"POST":
+            # A GET ASKS; only a POST acts. One browser prefetch, link preview
+            # or crawler is otherwise enough to destroy somebody's desktop
+            # without them asking, and they would have no idea what happened.
+            respond(wf, 200, discard_confirmation_page(
+                describe_session(rec, sid)), extra)
+            return
+
         why = request_teardown(rec["instance"])
         if why is not None:
-            log("could not record a teardown request for %s: %s"
-                % (rec["instance"], why))
+            log("could not record a discard of %s: %s" % (rec["instance"], why))
             respond(wf, 503, page(
                 "This machine could not take that request",
-                "Nothing has been shut down. Try again, and tell whoever runs "
+                "Nothing has been discarded. Try again, and tell whoever runs "
                 "this machine if it keeps happening."), extra)
             return
-        log("a visitor asked to end their own session: slot %s, session %s"
+        log("a visitor discarded their own session: slot %s, session %s"
             % (rec["instance"], sid))
         # 303, not 200: the browser must not repeat the POST if the person
         # reloads the page they land on.
         respond(wf, 303, b"", [("Location", "/sessions/")] + extra)
         return
 
-    rows = []
-    for s in owned:
-        rec = own.lookup(s)
-        if rec is not None:
-            rows.append(describe_session(rec, s))
-    respond(wf, 200, console_page(rows), extra)
+    respond(wf, 200, console_page(rows()), extra)
 
 
 def assert_console_shows_only_your_own(target=None):
@@ -3763,14 +3873,15 @@ def assert_console_shows_only_your_own(target=None):
     target = console_target if target is None else target
     assert target(b"/sessions") == ("list", None), "the console list moved"
     assert target(b"/sessions/") == ("list", None), "the console list moved"
-    assert target(b"/sessions/abc/end") == ("end", "abc"), "the end action moved"
+    assert target(b"/sessions/abc/discard") == ("discard", "abc"), \
+        "the discard action moved"
     # Things that must NOT be read as the console, because each of them would
     # otherwise be routed somewhere that acts.
     for path in (b"/", b"/s/abc/", b"/sessions/abc", b"/sessions/abc/",
-                 b"/sessions/abc/end/more", b"/sessionsabc/end",
-                 b"/sessions//end"):
+                 b"/sessions/abc/discard/more", b"/sessionsabc/discard",
+                 b"/sessions//discard"):
         what, _ = target(path)
-        assert what != "end", "%r was read as an END action" % path
+        assert what != "discard", "%r was read as a DISCARD action" % path
 
 
 # --------------------------------------------------------------------------
