@@ -259,7 +259,15 @@ cmd_serving() {
   # code is appended to the body in a single call and split off afterwards, and
   # -f is dropped because the status is now judged here rather than by curl.
   local out body code
-  out="$(curl -sS --max-time 30 -w '\n%{http_code}' "${auth[@]}" "$@" "${url}" 2>/dev/null)" ||
+  # --max-filesize, because THIS CLIENT DISTRUSTS THE THING IT IS FETCHING. The
+  # whole point of the check is that the server may be serving something other
+  # than what we built; a root process buffering an unbounded body from it into a
+  # shell variable is the checker handing the subject a lever. 4 MiB is far above
+  # any gated index.html and far below anything worth worrying about. Raised in
+  # response to a security review, 2026-09-25 -- nothing was exploited, and the
+  # absence of a bound was simply never considered.
+  out="$(curl -sS --max-time 30 --max-filesize 4194304 \
+              -w '\n%{http_code}' "${auth[@]}" "$@" "${url}" 2>/dev/null)" ||
     out=''
   code="${out##*$'\n'}"
   body="${out%$'\n'*}"
