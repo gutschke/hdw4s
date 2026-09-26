@@ -622,10 +622,14 @@ single hostname for the whole pool and are given a session from it.
     The per-session sizes are ceilings rather than consumption: the same
     desktops used about 21 MB of a 3.5 GB allowance.
 
-    Minting more slots than the machine can serve is supported, and is what
-    `HDW4S_SESSION_MEMORY_MB` exists for: the front door reads the machine's own
-    free memory before it starts a desktop and refuses the arrival if there is
-    not enough, rather than starting one and failing halfway.
+    **The slot count is the only admission control there is.** Nothing asks
+    whether the machine can afford a desktop before starting one, so a pool
+    larger than the machine can serve is a machine that will run out of memory
+    rather than one that turns somebody away. Measured on a 16 GiB container
+    with no swap and a pool of 32: served normally to 18, slower from 19, and at
+    28 the kernel's OOM killer began choosing victims inside desktops, which
+    leaves a unit reporting `active` behind a blank screen. Size the pool for
+    the machine.
 
   * **The credential belongs to the pool, not to a slot.** A reverse proxy
     presents one credential to reach the pool; individual slots have none and
