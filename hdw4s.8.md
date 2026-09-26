@@ -608,6 +608,25 @@ single hostname for the whole pool and are given a session from it.
   * **A slot must not be reached directly.** Not by a reverse proxy, not by
     anything else. The sockets under `/run/hdw4s-proxy/` belong to the pool.
 
+  * **How many slots.** A fresh install mints **one**, which is the number that
+    is safe on a machine the package knows nothing about. The ceiling is **100**,
+    and it is the user-id window rather than a policy: slots take consecutive
+    ids from `HDW4S_EPHEMERAL_UID_BASE` inside 60900-60999, and the minter
+    refuses at boot rather than writing outside it.
+
+    An idle slot costs an entry under `/run` and nothing else. An occupied one
+    costs about **560 MB** -- measured across sixteen concurrent attached
+    desktops on this project's own image, flat from the first to the sixteenth --
+    so the number a machine can *serve* is its free memory divided by that,
+    which is usually far smaller than the number of slots it is safe to *mint*.
+    The per-session sizes are ceilings rather than consumption: the same
+    desktops used about 21 MB of a 3.5 GB allowance.
+
+    Minting more slots than the machine can serve is supported, and is what
+    `HDW4S_SESSION_MEMORY_MB` exists for: the front door reads the machine's own
+    free memory before it starts a desktop and refuses the arrival if there is
+    not enough, rather than starting one and failing halfway.
+
   * **The credential belongs to the pool, not to a slot.** A reverse proxy
     presents one credential to reach the pool; individual slots have none and
     cannot be given one, which is why `auth` refuses for a slot.

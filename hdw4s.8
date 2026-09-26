@@ -319,6 +319,12 @@ The pool is configured as \fBone thing\fR, not slot by slot\. Visitors arrive at
 .IP "\[ci]" 4
 \fBA slot must not be reached directly\.\fR Not by a reverse proxy, not by anything else\. The sockets under \fB/run/hdw4s\-proxy/\fR belong to the pool\.
 .IP "\[ci]" 4
+\fBHow many slots\.\fR A fresh install mints \fBone\fR, which is the number that is safe on a machine the package knows nothing about\. The ceiling is \fB100\fR, and it is the user\-id window rather than a policy: slots take consecutive ids from \fBHDW4S_EPHEMERAL_UID_BASE\fR inside 60900\-60999, and the minter refuses at boot rather than writing outside it\.
+.IP
+An idle slot costs an entry under \fB/run\fR and nothing else\. An occupied one costs about \fB560 MB\fR \-\- measured across sixteen concurrent attached desktops on this project's own image, flat from the first to the sixteenth \-\- so the number a machine can \fIserve\fR is its free memory divided by that, which is usually far smaller than the number of slots it is safe to \fImint\fR\. The per\-session sizes are ceilings rather than consumption: the same desktops used about 21 MB of a 3\.5 GB allowance\.
+.IP
+Minting more slots than the machine can serve is supported, and is what \fBHDW4S_SESSION_MEMORY_MB\fR exists for: the front door reads the machine's own free memory before it starts a desktop and refuses the arrival if there is not enough, rather than starting one and failing halfway\.
+.IP "\[ci]" 4
 \fBThe credential belongs to the pool, not to a slot\.\fR A reverse proxy presents one credential to reach the pool; individual slots have none and cannot be given one, which is why \fBauth\fR refuses for a slot\.
 .IP "" 0
 .SS "The pool's credential"

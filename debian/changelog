@@ -1,3 +1,39 @@
+hdw4s (2.4.0) unstable; urgency=medium
+
+  * Desktops for visitors nobody provisions. A machine can now offer a pool of
+    ephemeral desktops on one hostname: anybody who reaches it is given a clean
+    desktop of their own, and the browser that started it is the only thing that
+    can come back to it. Nothing in such a desktop is kept -- its home and its
+    settings live in memory and are destroyed when it ends -- and it ends by
+    itself once nobody has connected for a while. Named desktops, one per
+    person, are unchanged and can be used on the same machine.
+
+  * A visitor can see the desktops they have, start another, and end one they
+    are finished with, from the same page. It works when the machine is
+    struggling, which is when somebody needs it: it is plain text with nothing
+    to load, and it says how much memory each desktop is using, because the one
+    that is misbehaving is usually the one to end.
+
+  * Every ephemeral desktop gets a background of its own, so two of them side by
+    side are not the same picture. Two desktops that differed only in the
+    address bar were being mixed up.
+
+  * Arriving at a desktop that is already yours no longer costs a click when the
+    desktop was created by that very arrival. A desktop that may already be open
+    somewhere else still asks first, because connecting takes it away from
+    whoever is watching.
+
+  * A machine with no memory left says so, on its own page, instead of starting a
+    desktop it cannot afford. Before this, a full machine handed the visitor an
+    error page from the reverse proxy, or a desktop that never drew anything.
+
+  * A desktop cannot reach another desktop's connection on the same machine.
+
+  * The desktop says it is starting, instead of showing a black screen while it
+    does.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sat, 26 Sep 2026 12:00:00 -0700
+
 hdw4s (2.3.0) unstable; urgency=medium
 
   * Ephemeral sessions survive a reboot: the slot minter is enabled by both
