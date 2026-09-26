@@ -170,6 +170,49 @@ if [ "$1" = 'configure' ]; then
   # running the script directly is the whole fix; it is not the unit, so
   # RefuseManualStop does not apply and no live session is stopped.
   if [ -n "$2" ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    # ENABLE IT HERE TOO, AND THIS IS THE UPGRADE PATH'S OWN DEFECT rather than a
+    # belt on the one debian/rules already fastens.
+    #
+    # dh_installsystemd honours a unit's RECORDED state on upgrade: a unit dpkg
+    # last saw disabled stays disabled, deliberately, so that packaging cannot
+    # overrule an administrator. That is right in general and wrong here, because
+    # the state it is honouring is not an administrator's -- it is OUR OWN, left
+    # behind by a build in which this unit was wrongly in the --no-enable list.
+    # Those machines never get the symlink, from any later version, for ever.
+    #
+    # MEASURED ON A PRODUCTION CONTAINER, 2026-09-26, on a machine upgraded from
+    # such a build: the unit was "disabled", there was no wants symlink, and
+    # "journalctl -b" for it was empty. The first boot after that upgrade came up
+    # with ZERO slot identities but the full set of typed rows and doors bound in
+    # the kernel -- open doors onto accounts that do not exist -- and with the
+    # slice's memory limit at infinity, because this unit is what writes both the
+    # userdb records and the drop-in, and both live in tmpfs.
+    #
+    # THE SHAPE IS WHY IT IS WORTH A LINE HERE: it does not fail at install. The
+    # block below runs the script directly, so the pool works immediately and
+    # keeps working, and the missing symlink is hidden behind that repair until
+    # the machine next reboots -- which may be months, and by then nobody
+    # connects the two. It is the same hiding the comment above this one
+    # describes, one layer further out.
+    #
+    # It announces itself rather than acting silently, because it IS overriding a
+    # local state: an administrator who disabled this on purpose has to be able
+    # to find out that a package turned it back on. "is-enabled" first, so the
+    # message appears only where something was actually wrong. Disabling this
+    # unit is not the supported way to decline the ephemeral pool -- leaving it
+    # off leaves the doors bound and the brake off -- and the supported way is to
+    # configure no slots.
+    if [ "$(systemctl is-enabled hdw4s-ephemeral-slots.service 2>/dev/null)" \
+         = 'disabled' ]; then
+      echo 'hdw4s: re-enabling hdw4s-ephemeral-slots.service, which an older' >&2
+      echo '       version of this package left disabled. Without it a reboot' >&2
+      echo '       brings the machine up with no slot accounts and no memory' >&2
+      echo '       limit on the desktop slice.' >&2
+      systemctl enable hdw4s-ephemeral-slots.service >/dev/null 2>&1 || {
+        echo 'hdw4s: could not enable hdw4s-ephemeral-slots.service. Run' >&2
+        echo '       "systemctl enable hdw4s-ephemeral-slots.service".' >&2
+      }
+    fi
     /usr/lib/hdw4s/hdw4s-ephemeral-slots >/dev/null || {
       echo 'hdw4s: could not refresh the ephemeral slots; existing slots keep' >&2
       echo '       the previous client and may refuse to start. Run' >&2

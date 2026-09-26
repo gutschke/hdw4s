@@ -1,3 +1,16 @@
+hdw4s (2.4.1) unstable; urgency=medium
+
+  * A machine upgraded from an older version could come up, after its next
+    reboot, with no desktop accounts and no memory limit on the desktops --
+    while its doors were open and reporting healthy. The unit that creates
+    both had been left switched off by a package built months earlier, and
+    nothing since could switch it back on. Installing this version does.
+
+    It only ever showed after a reboot, because installing repaired the
+    machine by hand at the same time as leaving the switch off.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sat, 26 Sep 2026 12:40:00 -0700
+
 hdw4s (2.4.0) unstable; urgency=medium
 
   * Desktops for visitors nobody provisions. A machine can now offer a pool of
