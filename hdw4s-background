@@ -198,6 +198,116 @@ def veil(name, freq, seed, octaves, contrast, centre, kind="fractalNoise"):
            centre - contrast / 2.0))
 
 
+def light_sweep(spec, units_w, units_h):
+    """A WHOLE-CANVAS LINEAR GRADIENT, combined five structurally different ways.
+
+    He asked for "a linear gradient across the entire image that combines in
+    different ways with what we are already doing here". It is worth taking as a
+    new ELEMENT rather than a new setting: every layer so far is radial and
+    therefore local, and a linear ramp is the one thing that can say "the light
+    came from that side for a century" -- a document faded more along one edge
+    than the other, which is the metaphor he has been driving at from the start.
+
+    "Combines in different ways" is the part to take literally, so these are
+    five relationships and not five opacities:
+
+      under     the ramp lies between the dye and the weathering, so the
+                weathering sits ON a sheet that was already unevenly lit.
+      over      the ramp lies over everything, like light falling on the
+                finished sheet rather than history recorded in it.
+      multiply  the ramp deepens what is under it instead of covering it --
+                the difference between a shadow and a film of paint.
+      strength  the ramp decides HOW STRONG the weathering is, so one side of
+                the sheet is barely touched and the other is heavily stained.
+                Nothing is painted by the ramp itself.
+      hue       the ramp decides WHICH WAY the colour leans, warm at one edge
+                and cool at the other, at constant lightness. This is the only
+                one that adds colour rather than light, and it is the one I
+                would not have thought to try if the tint/shade split had not
+                already shown that those two jobs need separating.
+
+    THE ANGLE IS THE SLOT'S, not a constant: a ramp that always ran the same way
+    would be the one thing every desktop had in common, which is the opposite of
+    what the whole feature is for."""
+    kind = spec.get("sweep", "none")
+    if kind == "none":
+        return "", "", ""
+
+    # AMPLITUDE IS COMPENSATED PER RELATIONSHIP, and that compensation is itself
+    # a finding. Painted UNDER the weathering, a ramp at the amplitude that
+    # reads plainly on top moves the finished picture by 0.25 parts in 255 --
+    # invisible -- because the region layers are nearly opaque and simply cover
+    # it. So the same number means completely different things at different
+    # depths, and offering all five at one number would have asked him to
+    # compare four visible options against one blank. Each is scaled to land in
+    # the same visible range so that what he is judging is the RELATIONSHIP.
+    boost = {"under": 6.0, "hue": 2.2, "over": 1.0, "screen": 0.7,
+             "multiply": 1.0, "strength": 1.0}.get(kind, 1.0)
+    spec = dict(spec)
+    spec["sweep_a"] = min(0.95, spec["sweep_a"] * boost)
+    x1, y1, x2, y2 = spec["sweep_vec"]
+    a, b = spec["sweep_colours"]
+    defs = (
+        '  <linearGradient id="lg" x1="%.3f" y1="%.3f" x2="%.3f" y2="%.3f">'
+        '<stop offset="0" stop-color="%s" stop-opacity="%.2f"/>'
+        '<stop offset="0.5" stop-color="%s" stop-opacity="%.2f"/>'
+        '<stop offset="1" stop-color="%s" stop-opacity="0"/>'
+        '</linearGradient>\n' % (x1, y1, x2, y2, a, spec["sweep_a"],
+                                 a, spec["sweep_a"] * 0.42, a))
+    rect = (' <rect width="%d" height="%d" fill="url(#lg)"%%s/>\n'
+            % (units_w, units_h))
+
+    if kind == "screen":
+        # Raking light rather than shadow: the ramp LIFTS what is under it.
+        return defs, "", rect % ' style="mix-blend-mode:screen"'
+    if kind == "under":
+        return defs, rect % "", ""
+    if kind == "over":
+        return defs, "", rect % ""
+    if kind == "multiply":
+        return defs, "", rect % ' style="mix-blend-mode:multiply"'
+    if kind == "strength":
+        # A MASK, so the ramp paints nothing at all and only decides how much of
+        # the weathering survives. White is kept, transparent is dropped.
+        defs = (
+            '  <linearGradient id="lgm" x1="%.3f" y1="%.3f" x2="%.3f" y2="%.3f">'
+            '<stop offset="0" stop-color="#ffffff" stop-opacity="1"/>'
+            '<stop offset="1" stop-color="#ffffff" stop-opacity="0.15"/>'
+            '</linearGradient>\n'
+            '  <mask id="lgmask"><rect width="%d" height="%d"'
+            ' fill="url(#lgm)"/></mask>\n'
+            % (x1, y1, x2, y2, units_w, units_h))
+        return defs, "", ""
+    if kind == "hue":
+        # TWO ramps running opposite ways at the SAME lightness, so the sheet
+        # leans warm at one edge and cool at the other without getting lighter
+        # or darker anywhere -- the tint/shade separation applied to a direction
+        # instead of to a patch.
+        defs = (
+            '  <linearGradient id="lgA" x1="%.3f" y1="%.3f" x2="%.3f" y2="%.3f">'
+            '<stop offset="0" stop-color="%s" stop-opacity="%.2f"/>'
+            '<stop offset="0.85" stop-color="%s" stop-opacity="0"/>'
+            '</linearGradient>\n'
+            '  <linearGradient id="lgB" x1="%.3f" y1="%.3f" x2="%.3f" y2="%.3f">'
+            '<stop offset="0" stop-color="%s" stop-opacity="%.2f"/>'
+            '<stop offset="0.85" stop-color="%s" stop-opacity="0"/>'
+            '</linearGradient>\n'
+            % (x1, y1, x2, y2, a, spec["sweep_a"], a,
+               x2, y2, x1, y1, b, spec["sweep_a"], b))
+        two = (' <rect width="%d" height="%d" fill="url(#lgA)"/>\n'
+               ' <rect width="%d" height="%d" fill="url(#lgB)"/>\n'
+               % (units_w, units_h, units_w, units_h))
+        # ABOVE the weathering, not below it. This ramp is about which way the
+        # finished sheet leans, and anything painted below the region layers is
+        # covered by them: measured, a ramp under the weathering moves the final
+        # picture by 0.8 parts in 255 even at six times the amplitude that reads
+        # plainly on top. "Under" is not a quiet version of "over", it is a
+        # relationship that this construction does not have room for, and that
+        # is worth knowing rather than shipping as a near-blank candidate.
+        return defs, "", two
+    return "", "", ""
+
+
 def micro_filter(name, kind, freq, seed, contrast, centre, macro_freq=0.006):
     """THE SURFACE OF THE MATERIAL, built six different ways.
 
@@ -362,12 +472,18 @@ def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
         ' <rect width="%d" height="%d" fill="%s" filter="url(#rg%d)"'
         ' opacity="%.3f"%s/>\n' % (units_w, units_h, c, i, a, style)
         for i, (c, _f, _s, _o, _g, _b, a) in enumerate(spec["regions"]))
+    sdefs, s_under, s_over = light_sweep(spec, units_w, units_h)
+    defs += sdefs
+    if spec.get("sweep") == "strength":
+        # The ramp paints nothing; it decides how much weathering survives.
+        rects = ' <g mask="url(#lgmask)">\n%s </g>\n' % rects
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d"'
         ' viewBox="0 0 %d %d" preserveAspectRatio="none">\n'
         ' <defs>\n%s </defs>\n'
         ' <!-- the dye the whole skin started out -->\n'
         ' <rect width="%d" height="%d" fill="%s"/>\n'
+        '%s'
         ' <!-- centuries of sun, wind and rain, in that order of scale -->\n'
         '%s'
         ' <!-- the unevenness of the material, then its pores -->\n'
@@ -376,7 +492,8 @@ def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
         '%s'
         '</svg>\n'
         % (w, hgt, units_w, units_h, defs, units_w, units_h, spec["base"],
-           rects, units_w, units_h, gc, ga, micro_rect))
+           s_under, rects, units_w, units_h, gc, ga,
+           micro_rect + s_over))
 
 
 def solid(colour=FALLBACK, w=1920, hgt=1080):
@@ -465,7 +582,7 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     tw = dict(fade_scale=1.0, fade_a=1.0, drift=1.0, grain_a=1.0,
               grain_scale=1.0, regions=3, variant="stack",
               micro_a=1.0, tint_contrast=8.0, shade_a=1.0,
-              micro_kind="perlin")
+              micro_kind="weave", sweep="none", sweep_a=0.55)
     tw.update(tweak or {})
 
     t = rung / float(RUNGS)
@@ -602,6 +719,14 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
         "grain": grain,
         "micro": micro,
         "micro_kind": tw["micro_kind"],
+        # THE RAMP. Its direction is the slot's, because a ramp that always ran
+        # the same way would be the one thing every desktop had in common.
+        "sweep": tw["sweep"],
+        "sweep_a": 0.55 * tw["sweep_a"],
+        "sweep_vec": ((seed >> 3) % 2, (seed >> 5) % 2,
+                      1 - (seed >> 3) % 2, 1 - (seed >> 5) % 2),
+        "sweep_colours": (col(min(top, base_L + 11.0), arc(t + 0.20), 0.85),
+                          col(base_L, arc(t - 0.22), 0.85)),
         "variant": tw["variant"],
         # The brightest lightness this field ACTUALLY uses, not the ceiling it
         # was allowed. A guard pointed at the limit rather than at the value can
