@@ -1770,13 +1770,27 @@ echo '== the starting veil keeps every way out it claims to have =='
   # visitor, and the property is one CSS declaration nothing else would notice.
   has 'the shipped veil never swallows the pointer' \
     "$(cat "${d}/out.html")" 'pointer-events:none'
+  # THE OWNER'S REQUEST, 2026-09-26: *"it makes the product feel slow, if it comes up,
+  # stays for 1 or 2 seconds and then disappears ... suppress the interstitial for a
+  # short while."* The number is his decision to change; that there IS a suppression
+  # is the request, and it is one line somebody tidying up would not miss.
+  has 'the shipped veil suppresses the card at first' \
+    "$(cat "${d}/out.html")" 'VEIL_SUPPRESS'
+  # AND THE CLOCK NO LONGER REVEALS. This is the defect being repaired rather than a
+  # new property: with a 90s clock and an 89s healthy start, the old exit tore the card
+  # away one second before the desktop arrived. The sentence it used to log is the
+  # cheapest evidence that the behaviour is gone.
+  hasnt 'the clock no longer reveals a black desktop' \
+    "$(cat "${d}/out.html")" 'revealing anyway'
+  has 'the clock stops the card PROMISING instead' \
+    "$(cat "${d}/out.html")" 'stops promising'
 
   redv() { python3 "$1" "${d}/in.html" "${d}/redout.html" >/dev/null 2>"${d}/rederr"; }
 
   # 1. The cannot-sample exit removed. This is the dangerous one: it looks like dead
   #    code, because on a working build paintedColours() always returns a number.
   rm -f "${d}/redout.html"
-  sed "s|if (n === null) { veilDown('cannot sample the picture; revealing'); return; }|// tidied away|" \
+  sed "s|if (n === null) { stop('cannot sample the picture; revealing'); return; }|// tidied away|" \
     "${ROOT}/hdw4s-gate-index" > "${d}/redv1"
   redv "${d}/redv1" \
     && bad 'a veil that cannot fail open is refused' 'it was accepted' \
@@ -1785,9 +1799,13 @@ echo '== the starting veil keeps every way out it claims to have =='
   hasnt 'a refused veil writes no page' "$(ls "${d}")" 'redout.html'
 
   # 2. The clock removed. A wedged compositor is black for the life of the session, so
-  #    without this the veil never comes down and the defect becomes invisible.
+  #    without this the card goes on saying "it is coming up now" for ever -- which is
+  #    a permanent reassuring message nobody would report. NOTE WHAT CHANGED HERE,
+  #    2026-09-26: the clock used to REVEAL the desktop, and the threshold was 90s
+  #    against a measured healthy cold start of 89.0s on the production box. It now
+  #    changes the card's WORDS instead, which is why the arm's needle moved.
   rm -f "${d}/redout.html"
-  sed 's|if (Date.now() - t0 >= VEIL_DEADLINE) {|if (false) {|' \
+  sed 's|if (!gaveUp && Date.now() - t0 >= patience) {|if (false) {|' \
     "${ROOT}/hdw4s-gate-index" > "${d}/redv2"
   redv "${d}/redv2" \
     && bad 'a veil that waits forever is refused' 'it was accepted' \
@@ -2793,7 +2811,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=429   # update when tests are added; a wrong number is the point
+EXPECTED=432   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

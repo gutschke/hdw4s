@@ -104,6 +104,29 @@ OVERLAY = r"""
    border-radius:12px;box-shadow:0 10px 40px #000a;text-align:center}
  #hdw4s-starting h2{font-size:1.15rem;margin:0 0 .5rem;color:#fff}
  #hdw4s-starting p{margin:.4rem 0;color:#b9b9b9;font-size:14px}
+ /* THE CARD EASES IN AND IS NEVER EASED OUT, and the asymmetry is the design
+    rather than an oversight. The owner: *"psychologically, it'll feel faster if we
+    don't do anything for that short time window and then suddenly materialize the
+    desktop."* So the appearance of the card is softened -- a card that hard-cuts
+    in reads as an error appearing -- and its disappearance is not, because the
+    thing revealed is the desktop and any transition in front of that is time the
+    visitor spends not using it. Hiding is still a plain `hidden`, one frame.
+    IT IS AN ANIMATION AND NOT A TRANSITION, deliberately: a transition needs the
+    element to be laid out at opacity 0 first and then changed, which is a
+    two-frame dance that goes wrong the moment anything reveals in between. This
+    runs once when the class arrives with the unhide, and `hidden` above -- which
+    is `display:none !important` -- ends it mid-flight with no cleanup. */
+ @keyframes hdw4s-fade-in{from{opacity:0}to{opacity:1}}
+ #hdw4s-starting.fade{animation:hdw4s-fade-in 250ms ease-out}
+ @media (prefers-reduced-motion:reduce){#hdw4s-starting.fade{animation:none}}
+ /* The one thing on this veil a pointer may reach. The veil itself is
+    pointer-events:none as a fail-open (see above) and that must not change; this
+    re-enables it for exactly the offered action, so a visitor whose desktop is
+    genuinely not coming has something to press and everything else stays
+    transparent to the pointer. */
+ #hdw4s-starting form{margin:.9rem 0 0;pointer-events:auto}
+ #hdw4s-starting form button{padding:.5rem 1rem;font:inherit;border:0;
+   border-radius:8px;background:#772953;color:#fff;cursor:pointer}
  #hdw4s-gate{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;
    justify-content:center;background:#141414;color:#eee;font:16px/1.55 system-ui,sans-serif}
  #hdw4s-gate .card{max-width:36rem;padding:2rem 2.25rem;background:#242424;
@@ -150,9 +173,10 @@ __MORE__
   <p class="err" id="hdw4s-err"></p>
 </div></div>
 <div id="hdw4s-starting" hidden><div class="card">
-  <h2>Your desktop is starting</h2>
+  <h2 id="hdw4s-starting-title">Your desktop is starting</h2>
   <p id="hdw4s-starting-note">It is coming up now. This usually takes a few
     seconds; on a busy machine it can take a minute.</p>
+__ACT__
 </div></div>
 <div id="hdw4s-share" hidden>
   <div id="hdw4s-panel" hidden></div>
@@ -673,14 +697,98 @@ __MORE__
   // above -- frames arriving proves the transport and never the picture.
   var VEIL_FLOOR = 16;      // distinct colours. A painted desktop measures thousands;
                             // one colour is black. Nothing needs to be close.
-  var VEIL_DEADLINE = 90000;
+  // HOW LONG NOTHING AT ALL HAPPENS, and it is the owner's request in one number:
+  // *"it makes the product feel slow, if it comes up, stays for 1 or 2 seconds and
+  // then disappears ... the solution is to simply suppress the interstitial for a
+  // short while."* Under a second a wait still reads as part of the same click, so
+  // anything resolving inside this window shows no card at all.
+  //
+  // IT SUPPRESSES THE CARD AND NOTHING ELSE. The connection is made and the pixels
+  // are sampled from the first tick as before -- delaying either would make the
+  // wait longer rather than shorter, which is the opposite of the request. The only
+  // thing on this timer is when the card becomes visible.
+  var VEIL_SUPPRESS = 800;
+  // WHEN THE CARD STOPS PROMISING. It does NOT reveal here any more, and that
+  // change is the repair for a defect that shipped this morning: this used to be
+  // 90000, and the measured healthy cold start on the production box is 89.0
+  // seconds against 15.0-15.3 on the development one (private/paint-evidence/).
+  // A ONE-SECOND MARGIN between a healthy start and the fail-open, on the slower of
+  // the two machines -- so a perfectly well session would have had its card torn
+  // away to reveal black one second before the desktop arrived, and 90000 was
+  // chosen when 15s was the only number anybody had.
+  //
+  // THE NUMBER IS NOT THE FIX. A second constant would rot exactly as the first
+  // did, because it describes the machine and is written in the client. Two things
+  // replace it:
+  //
+  //  * the card KEEPS RENDERING and changes what it SAYS, so being wrong about the
+  //    number costs a visitor a sentence rather than a black screen. That decouples
+  //    the threshold from the damage, which is what made 89-against-90 dangerous.
+  //  * the threshold is LEARNED FROM THIS BOX. Every start that paints records how
+  //    long it took, in this origin's own localStorage, and the patience is three
+  //    times the slowest of the recent ones. A browser with no history gets the
+  //    floor. So a box that is genuinely slow teaches the card to wait, rather than
+  //    somebody having to notice and edit a number.
+  //
+  // THE FLOOR IS DERIVED TOO, from the one deadline the server already commits to:
+  // hdw4s-proxy@.service carries TimeoutStartSec=180, so the front door itself
+  // gives up at three minutes and there is nothing for this card to wait for past
+  // that. Matching it is the honest ceiling; anything longer promises on behalf of
+  // a component that has already stopped.
+  var VEIL_PATIENCE_FLOOR = 180000;
+  var PAINTS = 'hdw4s_paint_ms';   // this ORIGIN's, not this session's: the number
+                                   // describes the box, and a key with the session
+                                   // id in it would start empty on every arrival.
   var veilEl = document.getElementById('hdw4s-starting');
   var veilNote = document.getElementById('hdw4s-starting-note');
+  var veilTitle = document.getElementById('hdw4s-starting-title');
+  var veilAct = document.getElementById('hdw4s-starting-act');
   var veilTimer = null;
+  var veilShowTimer = null;
+
+  function recentPaints(){
+    try {
+      var v = JSON.parse(localStorage.getItem(PAINTS) || '[]');
+      return Object.prototype.toString.call(v) === '[object Array]' ? v : [];
+    } catch(e) { return []; }
+  }
+
+  function recordPaint(ms){
+    // BEST EFFORT AND SILENT. A browser with storage blocked, a private window, a
+    // quota that is full -- every one of those must cost nothing, because the only
+    // thing lost is that this box teaches the card more slowly. The floor still
+    // holds in every case.
+    try {
+      var a = recentPaints();
+      a.push(Math.round(ms));
+      while (a.length > 5) a.shift();
+      localStorage.setItem(PAINTS, JSON.stringify(a));
+    } catch(e){}
+  }
+
+  function veilPatience(){
+    var a = recentPaints(), worst = 0;
+    for (var i = 0; i < a.length; i++) {
+      var n = +a[i];
+      // A stored value that is not a sane number is ignored rather than trusted:
+      // this comes out of storage a page in another tab can also write.
+      if (isFinite(n) && n > 0 && n < 3600000 && n > worst) worst = n;
+    }
+    return Math.max(VEIL_PATIENCE_FLOOR, worst * 3);
+  }
 
   function veilDown(note){
+    if (veilShowTimer) { clearTimeout(veilShowTimer); veilShowTimer = null; }
     if (veilTimer) { clearInterval(veilTimer); veilTimer = null; }
-    if (veilEl) veilEl.hidden = true;
+    if (veilEl) {
+      // The class goes with the hide, so a card that is revealed again later
+      // animates again instead of appearing already-finished. `hidden` is
+      // display:none !important, so removing it mid-animation is instant -- which
+      // is the "cancel the fade rather than complete it" case, and it needs no
+      // special handling because there is nothing to wait for.
+      veilEl.classList.remove('fade');
+      veilEl.hidden = true;
+    }
     if (note) { try { console.log('[hdw4s gate] ' + note); } catch(e){} }
   }
 
@@ -725,24 +833,70 @@ __MORE__
 
   function veilUp(){
     if (!veilEl) return;
-    veilEl.hidden = false;
     var t0 = Date.now();
-    if (veilTimer) clearInterval(veilTimer);
-    veilTimer = setInterval(function(){
+    var patience = veilPatience();
+    var gaveUp = false;
+    // THE CARD IS SCHEDULED; THE SAMPLING IS NOT. Everything that could end the
+    // wait starts now, and only the card's appearance is on a timer.
+    if (veilShowTimer) clearTimeout(veilShowTimer);
+    veilShowTimer = setTimeout(function(){
+      veilShowTimer = null;
+      veilEl.classList.add('fade');
+      veilEl.hidden = false;
+    }, VEIL_SUPPRESS);
+
+    // A LATCH, BECAUSE THE FIRST SAMPLE HAPPENS BEFORE THE POLLER EXISTS. Without
+    // it, an immediate paint called veilDown() -- which clears a timer that had not
+    // been created yet -- and the line at the bottom then started a poller for a
+    // card that was already down, leaving a 500 ms interval running for the life of
+    // the page. Read at the bottom rather than inferred from veilTimer.
+    var stopped = false;
+    function stop(note){ stopped = true; veilDown(note); }
+
+    function tick(){
       // (3) above: the question comes BEFORE the reading, never after.
       if (document.visibilityState === 'hidden' || streamPaused()) return;
       var n = paintedColours();
-      if (n === 'waiting') { /* no surface yet: the deadline below still bounds us */ }
-      else if (n === null) { veilDown('cannot sample the picture; revealing'); return; }
-      else if (n >= VEIL_FLOOR) { veilDown('desktop painted (' + n + ' colours)'); return; }
-      if (Date.now() - t0 >= VEIL_DEADLINE) {
-        if (veilNote) veilNote.textContent =
-          'This is taking longer than usual. The desktop may still be coming up, or '
-          + 'it may have failed to draw -- if it stays black, discard it and start '
-          + 'another one.';
-        veilDown('gave up waiting for a painted desktop; revealing anyway');
+      if (n === 'waiting') { /* no surface yet: the patience below still bounds us */ }
+      else if (n === null) { stop('cannot sample the picture; revealing'); return; }
+      else if (n >= VEIL_FLOOR) {
+        // WHAT THIS BOX ACTUALLY COSTS, written down at the one moment anybody
+        // knows it. Recorded only on a real paint: a reveal for any other reason
+        // is not a time-to-paint, and storing one would teach the card a number
+        // about a failure.
+        recordPaint(Date.now() - t0);
+        stop('desktop painted (' + n + ' colours)');
+        return;
       }
-    }, 500);
+      if (!gaveUp && Date.now() - t0 >= patience) {
+        gaveUp = true;
+        // IT STOPS PROMISING; IT DOES NOT STOP RENDERING. Revealing here is what
+        // the 90-second version did, and on the production box that meant tearing
+        // the card away one second before a healthy desktop arrived. The page also
+        // does not get to say the desktop is dead: it cannot know that -- only the
+        // server can, and that verdict is a separate, larger repair. So the words
+        // narrow to what is true, and the offer is the action that works.
+        if (veilTitle) veilTitle.textContent = 'Still waiting for your desktop';
+        if (veilNote) veilNote.textContent =
+          'This is taking longer than usual. It may still be coming up. If you '
+          + 'would rather not wait, you can start another desktop.';
+        if (veilAct) veilAct.hidden = false;
+        // And it is shown NOW rather than at the end of a suppression window that
+        // has long since passed -- the card may still be hidden if the tab was in
+        // the background for the whole wait.
+        if (veilShowTimer) { clearTimeout(veilShowTimer); veilShowTimer = null; }
+        veilEl.classList.add('fade');
+        veilEl.hidden = false;
+        try { console.log('[hdw4s gate] no paint after ' + patience
+                          + 'ms; the card stops promising and offers a new desktop'); } catch(e){}
+      }
+    }
+    if (veilTimer) clearInterval(veilTimer);
+    // SAMPLED ONCE IMMEDIATELY, and that is what makes a reconnect to a desktop
+    // that is ALREADY PAINTED cost no card at all: waiting 500 ms for the first
+    // tick would push the answer past the suppression window for no reason.
+    tick();
+    if (!stopped) veilTimer = setInterval(tick, 500);
   }
 
   function boot(){
@@ -1049,6 +1203,22 @@ if _dir not in ("no", "yes"):
 # link that cannot work is for the link not to exist.
 MORE = ('  <p id="hdw4s-more"><a href="/sessions/">Your desktops</a></p>\n'
         if _dir == "yes" else "")
+# THE OTHER CONDITIONAL OBJECT, and it is conditional for exactly the reason MORE is
+# -- which the guard at the bottom of this file enforces rather than trusts. The
+# starting card, once it stops promising, offers the one action that works: ask for
+# another desktop. That address is hdw4s-demux's; a NAMED desktop's door is
+# systemd-socket-proxyd in front of Selkies and answers 404 to it, so on that build
+# the offer must not exist at all. Not hidden -- absent. A line that is in the
+# document and merely not shown is still in the source, still in the accessibility
+# tree, and one style regression from being pressable.
+#
+# A FORM AND NOT A LINK, which is the rule the session directory already follows: a
+# link is fetched by prefetchers, link previews, crawlers, pinned tabs and session
+# restore, and every one of those would be a desktop nobody asked for.
+ACT = ('  <form id="hdw4s-starting-act" method="post" action="/sessions/new" hidden>\n'
+       '    <button type="submit">Start another desktop</button>\n'
+       '  </form>\n'
+       if _dir == "yes" else "")
 
 # The identity is a hash of THIS generator, which is where the gate's behaviour
 # lives -- not the package version, which does not change when the logic does, and
@@ -1062,6 +1232,7 @@ OVERLAY = OVERLAY.replace("__SRC__", json.dumps(src_attr)) \
      .replace("__GATEID__", json.dumps(_gate_id)) \
      .replace("__CFG__", json.dumps(cfg)) \
      .replace("__MORE__", MORE) \
+     .replace("__ACT__", ACT) \
      .replace("__NAME__", html_escape(os.environ.get("HDW4S_SESSION_NAME", "Desktop")))
 html = html.replace("</body>", OVERLAY + "</body>") if "</body>" in html else html + OVERLAY
 
@@ -1188,10 +1359,27 @@ for _needle, _why in (
         ("=== null", "the veil no longer reveals when it CANNOT SAMPLE the picture. "
                      "A veil that cannot measure must not hold a visitor behind "
                      "itself; 'could not look' is not 'still black'"),
-        ("VEIL_DEADLINE", "the veil no longer gives up on a clock. A wedged "
-                          "compositor is black forever and only a restart recovers "
-                          "it, so a veil that waits for it replaces a visible defect "
-                          "with a permanent reassuring message nobody would report"),
+        # THE NEEDLE CHANGED AND SO DID WHAT IT DEFENDS, 2026-09-26, and the second
+        # half is the part not to lose. This used to look for VEIL_DEADLINE, whose
+        # exit REVEALED the desktop on a clock -- and the clock was 90 seconds
+        # against a measured healthy cold start of 89.0 on the production box, so
+        # the guard was protecting an exit that would have torn the card away one
+        # second before a working desktop arrived. The exit is now a change of
+        # WORDS rather than a reveal, which is what makes the threshold safe to be
+        # wrong about. What still has to exist is that the card STOPS PROMISING on
+        # a clock: a wedged compositor is black forever and only a restart recovers
+        # it, and a card that goes on saying "it is coming up now" for ever is a
+        # permanent reassuring message nobody would report.
+        # AND THE NEEDLE IS THE COMPARISON, NOT THE FUNCTION. The first version of
+        # this looked for "veilPatience", which also appears where the threshold is
+        # merely COMPUTED -- so a red arm that deleted the whole give-up block built
+        # cleanly, and the guard would have reported health for ever. Caught by
+        # running the arm, which is the only reason it is not still wrong. The
+        # comparison is the exit; nothing else in this file mentions it.
+        (">= patience", "the veil no longer gives up on a clock. A wedged "
+                         "compositor is black forever and only a restart recovers "
+                         "it, so a card that keeps promising is a permanent "
+                         "reassuring message nobody would report"),
         ("streamPaused()", "the veil no longer asks whether the stream was stopped on "
                            "purpose before counting. Hiding a tab sends STOP_VIDEO and "
                            "no frames arrive, and reading that quiet as black keeps the "
@@ -1225,15 +1413,26 @@ if _veil.index("visibilityState") > _veil.index("paintedColours()"):
                      "first or the reading is already about a stopped stream -- "
                      "refusing to build")
 
-_offers = "/sessions/" in html
-if _offers != (_dir == "yes"):
-    raise SystemExit(
-        "hdw4s-gate-index: HDW4S_DIRECTORY=%s but the generated page %s to the "
-        "session directory. It is served by hdw4s-demux, the ephemeral "
-        "front door; a named desktop's door is systemd-socket-proxyd in front of "
-        "Selkies, which answers 404 to that path and hands the person a blank page. "
-        "Refusing to build a card that promises a page its own door cannot serve."
-        % (_dir, "carries a link" if _offers else "carries no link"))
+# ASKED OF EACH OBJECT SEPARATELY, and that is not tidiness. This used to be one
+# boolean over the whole page -- '"/sessions/" in html' -- and there was exactly one
+# object that could put that string there. A SECOND one arrived on 2026-09-26 (the
+# starting card's "Start another desktop" form), and with two contributors a single
+# boolean stops being able to notice either of them going missing: deleting the
+# directory link left the form's "/sessions/new" behind and the guard read health.
+# Caught by the red arm in tests.sh that deletes __MORE__, which is the only reason
+# this is not still one boolean. A guard over a DISJUNCTION cannot see one term.
+for _label, _needle in (("link to the session directory", 'href="/sessions/"'),
+                        ("form asking for another desktop",
+                         'action="/sessions/new"')):
+    _offers = _needle in html
+    if _offers != (_dir == "yes"):
+        raise SystemExit(
+            "hdw4s-gate-index: HDW4S_DIRECTORY=%s but the generated page %s %s. "
+            "Those addresses are served by hdw4s-demux, the ephemeral "
+            "front door; a named desktop's door is systemd-socket-proxyd in front of "
+            "Selkies, which answers 404 to them and hands the person a blank page. "
+            "Refusing to build a card that promises a page its own door cannot serve."
+            % (_dir, "carries" if _offers else "carries no", _label))
 
 open(dst, "w", encoding="utf-8").write(html)
 print("hdw4s-gate-index: built %s (deferred %s)" % (dst, src_attr))
