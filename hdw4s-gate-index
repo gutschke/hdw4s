@@ -88,10 +88,16 @@ OVERLAY = r"""
    padding:.45rem .8rem;border-radius:8px;background:#242424e6;color:#ddd;
    font:13px/1.45 system-ui,sans-serif}
  #hdw4s-role b{color:#fff}
+ /* Quiet on purpose. The card has ONE pressable object and this is not it: it is
+    the way out of a card that can otherwise only be answered one way, and it is
+    styled as prose so the trained reflex still lands on the button. */
+ #hdw4s-more{margin:.9rem 0 0;font-size:13px}
+ #hdw4s-more a{color:#b9b9b9}
 </style>
 <div id="hdw4s-gate" hidden><div class="card">
   <h1>__NAME__</h1><div id="hdw4s-body"></div>
   <button id="hdw4s-go">Connect</button>
+  <p id="hdw4s-more"><a href="/sessions/">Your desktops</a></p>
   <p class="err" id="hdw4s-err"></p>
 </div></div>
 <div id="hdw4s-share" hidden>
@@ -182,10 +188,31 @@ OVERLAY = r"""
   // Two states, kept apart on purpose. Cold: this tab has never connected and cannot
   // know what is open elsewhere, so the consequence is conditional. Lost: this tab WAS
   // connected and was disconnected, which is a fact and is stated as one.
+  //
+  // THE CONDITIONAL IS NOT CAUTION, IT IS THE ONLY HONEST FORM, and that is now
+  // measured rather than reasoned. Every signal this product has for "somebody is
+  // connected" was falsified twice in one day: the occupancy probe asked a port an
+  // ephemeral slot never uses and answered zero for every session under every
+  // condition, and a real visitor's session read as having nobody on it for the first
+  // twenty-four minutes of its life while being the freshest session on the box. So
+  // nothing here may assert who else is connected -- not because we are being careful,
+  // but because we would be wrong.
+  //
+  // AND THE ORDER OF THE SENTENCES IS THE REPAIR. This used to open by telling the
+  // reader that connecting "will take it over", which is written for a stranger
+  // arriving at somebody else's desktop. On the commonest path by far it is the same
+  // person's own tab coming back -- returning from a backgrounded tab, or after the
+  // stream dropped -- and that reader was being warned they were about to steal from
+  // themselves. The consequence is still stated in full, because it is real and the
+  // person may indeed have another tab open; it is stated SECOND, after the case that
+  // is usually theirs, and without the vocabulary of theft. Found by opening the
+  // picture rather than by reading a verdict.
   var COLD = '<p>This tab is not connected.</p>'
-    + '<p>If this desktop is open in another tab or on another device, connecting here '
-    + 'will take it over. That tab will stop streaming and keep showing its last '
-    + 'picture until it is closed.</p>';
+    + '<p>Usually that just means it is a new tab, or one that has been sitting idle. '
+    + 'Connecting brings the desktop back here as it was.</p>'
+    + '<p>If you also have this desktop open in another tab or on another device, that '
+    + 'one will stop streaming and keep showing its last picture until you close it. '
+    + 'Nothing in the desktop is lost either way.</p>';
   var LOST = '<p>This tab was disconnected: the desktop was opened somewhere else.</p>'
     + '<p>Nothing has been lost. The desktop is still running, and you can bring it '
     + 'back here.</p>';
@@ -234,9 +261,22 @@ OVERLAY = r"""
   // a different one. Unexplained that is a fault report; stated once in advance it is
   // a rule, and rules are forgivable.
   //
-  // NOTHING HERE TELLS THE PERSON TO CLOSE THE DESKTOP THEMSELVES: measured on this
-  // tree, no visitor-facing control ends a session, so that instruction would be a
-  // documented act that cannot be performed. Signing out can be.
+  // NOTHING HERE TELLS THE PERSON TO CLOSE THE DESKTOP THEMSELVES, and the reason
+  // CHANGED on 2026-09-25 rather than going away. It used to be that no visitor-facing
+  // control ended a session at all, so the instruction would have been a documented
+  // act that cannot be performed. There is one now -- Discard, in the session
+  // directory -- so the reason is no longer "it is impossible": it is that this card
+  // is read by somebody deciding whether to CONNECT, and a destructive verb does not
+  // belong beside that decision. The directory is one quiet link away, under the
+  // button, and that link is where ending one lives.
+  //
+  // THE LINK IS ALSO THE OWNER'S RULING OF 2026-09-25 reaching this card: *"instead
+  // of just offering me to take back the session, this should also be the place where
+  // i can create a brand new one."* It is a LINK and not a second button, because the
+  // card's whole mechanism is that one object looks pressable -- and because the
+  // thing it leads to costs a slot, so it is reached by a page a person reads rather
+  // than by a control beside the one they came to press. The directory's own create
+  // is a POST, so following this link mints nothing.
   var MINT = '<p>This will start a fresh desktop. Nothing from anyone else is in it.</p>'
     + '<p><b>Closing this tab does not end it.</b> It keeps running, still signed in to '
     + 'whatever you sign in to, and you can come back to it in this browser. Sign out of '
@@ -390,16 +430,50 @@ OVERLAY = r"""
   }
   watchStatus();
 
-  // Backstop, for a transport that announces nothing. Two guards, both learned from a
-  // QA run where this fired on a page that was working perfectly:
+  // Backstop, for a transport that announces nothing. THREE guards now, and each one
+  // is a case where "no frames" is CORRECT rather than a disconnection:
   //   - never on a secondary viewer. #shared, #player2-4 and #display2 legitimately
   //     receive no video of their own, so "no frames" is their normal state, and the
   //     backstop was showing them a takeover button they must never see;
   //   - never before the stream has moved at least once, so a slow first frame is not
-  //     read as a disconnection.
+  //     read as a disconnection;
+  //   - NEVER WHILE THE CLIENT HAS ASKED FOR THE STREAM TO STOP. See below.
+  //
+  // THE THIRD GUARD, and the defect it closes, reported by the owner from a live
+  // desktop with his own console log as the evidence: the card appeared ON THE LIVE
+  // PAGE WITH NO RELOAD, and his log reads "Tab hidden: Sent STOP_VIDEO". The frames
+  // stopped because the client stopped them on purpose. The first two guards are
+  // about a viewer that never receives video and about video that has not started
+  // yet; nobody had guarded the state where video has started, is working, and has
+  // been DELIBERATELY PAUSED. That state looks identical to a dead transport from a
+  // frame counter alone, which is why the repair is not a longer timeout: a longer
+  // timeout makes the wrong answer arrive later.
+  //
+  // ASK THE CLIENT, DO NOT TIME IT. The client knows -- it tracks
+  // isVideoPipelineActive and logs "Received VIDEO_STOPPED" -- so there is a signal
+  // to consult. It is read through a whitelist of places it has been seen, and a
+  // FALSE reading is only trusted when it is explicit: if nothing here answers, the
+  // fall-back is document.hidden, which is the CAUSE the client acts on and is
+  // always available. An absent flag must not read as "the pipeline is running",
+  // which is the shape that would put this defect straight back.
+  function streamPaused(){
+    var c = window.selkiesCore || window.selkies || window;
+    if (typeof c.isVideoPipelineActive === 'boolean')
+      return !c.isVideoPipelineActive;
+    if (typeof window.isVideoPipelineActive === 'boolean')
+      return !window.isVideoPipelineActive;
+    return document.hidden;
+  }
+
   var last = -1, still = 0, everMoved = false;
+  // Reset on the way back as well as on the way out. A tab that has just been shown
+  // again has a pipeline that is restarting, so the first tick or two after it
+  // legitimately see no new frames -- and counting those is the same mistake one
+  // step later.
+  document.addEventListener('visibilitychange', function(){ still = 0; last = -1; });
   setInterval(function(){
     if (SECONDARY || !booted || !gate.hidden) { still = 0; return; }
+    if (streamPaused()) { still = 0; last = -1; return; }
     // Cheap, and it is what makes a repeat loss show the card at once rather than
     // ten seconds later: lost() no-ops once the card is up, so this costs one
     // regexp against a short string twice a second.
@@ -773,6 +847,44 @@ if re.search(r"survives? being closed|survive being closed", _card):
     raise SystemExit("hdw4s-gate-index: the fresh-desktop card promises again that "
                      "nothing survives being closed. That was measured false on this "
                      "build and is false in the dangerous direction -- refusing to build")
+
+# THE STALL BACKSTOP MAY NOT COUNT WHILE THE CLIENT HAS STOPPED THE STREAM, and this
+# guard runs on the bytes about to be written for the same reason the one above does.
+#
+# THE DEFECT IT CLOSES, reported by the owner from a live desktop with his own console
+# log as the evidence: the reconnect card appeared ON THE LIVE PAGE WITH NO RELOAD,
+# because hiding the tab made the client send STOP_VIDEO and the backstop read ten
+# seconds of "no frames" as a disconnection. The two guards it already had are about a
+# viewer that never receives video and about video that has not started yet; the state
+# where video is working and has been DELIBERATELY PAUSED had no guard at all.
+#
+# WHY A BUILD REFUSAL RATHER THAN A TEST: this is one line of browser JavaScript whose
+# wrong version produces a page that works perfectly everywhere except in front of a
+# person who looked away. Nothing in the suite runs it, and the workstation half of the
+# tier cannot; the defect took three wrong theories and a sentence from the owner to
+# find, and it would come back as a tidy-up of an odd-looking early return. So the
+# mechanical thing available is to refuse to build a page where the counting line is
+# not preceded by the consultation, where the person who did it is standing.
+#
+# WHAT IT CANNOT SEE: whether streamPaused() answers correctly. It checks that the
+# question is asked, not that the answer is right -- the answer is `unmeasured` and the
+# experiment that settles it is named in private/create-evidence/README.md.
+_tick = re.search(r"setInterval\(function\(\)\{(.*?)\}, 500\);", html, re.S)
+if _tick is None:
+    raise SystemExit("hdw4s-gate-index: the stall backstop's tick could not be found "
+                     "in the page that was about to be written -- refusing to build, "
+                     "because a guard that cannot find its subject passes forever")
+_body = _tick.group(1)
+if "streamPaused()" not in _body:
+    raise SystemExit("hdw4s-gate-index: the stall backstop no longer asks whether the "
+                     "client STOPPED the stream before counting frames. Hiding a tab "
+                     "sends STOP_VIDEO, so without that question ten quiet seconds "
+                     "shows the reconnect card on a page that is working -- measured "
+                     "on a live desktop 2026-09-25 -- refusing to build")
+if _body.index("streamPaused()") > _body.index("still >= 20"):
+    raise SystemExit("hdw4s-gate-index: the stall backstop counts before it asks "
+                     "whether the stream was stopped on purpose. The question has to "
+                     "come first or the count is already wrong -- refusing to build")
 
 open(dst, "w", encoding="utf-8").write(html)
 print("hdw4s-gate-index: built %s (deferred %s)" % (dst, src_attr))
