@@ -53,22 +53,61 @@ import os
 import sys
 import tempfile
 
-# The approved palette: three anchors across band L* 29-45, at three hues from
-# the published Ubuntu brand palette. Hue first, lightness spread across the
-# band -- a fourth anchor is ruled out by a SIGN and not by a threshold (the
-# deuteranopic between/within ratio inverts as the band widens), so widening
-# the band does not buy one back and neither does lowering the bar.
-ANCHORS = ((29.0, 342.2), (37.0, 46.0), (45.0, 330.9))
+# ---------------------------------------------------------------------------
+# THE PALETTE, AND WHY IT IS AN ARC AND NOT A LIST OF ANCHORS.
+#
+# The published Ubuntu brand palette has SEVEN entries and only TWO hue
+# families: Ubuntu orange at h 46, and four aubergines packed between h 331 and
+# h 349 -- eighteen degrees apart, which is nothing -- plus two greys that carry
+# no hue at all. So a design that picks one brand colour per desktop can tell
+# TWO desktops apart, not ten. That is a fact about the brand, not about this
+# code, and it is the reason the previous three-anchor table repeated every
+# third slot with two of its three anchors in the same magenta family: slots 2,
+# 3, 5 and 6 all read as "purple" on a rendered sheet.
+#
+# So hue here is a CONTINUOUS ARC that passes through the brand's own colours
+# rather than a table of them. It runs from violet, through the aubergines and
+# the crimsons, to Ubuntu orange -- every brand hue lies on it, the ends are the
+# two families, and any point between them is a blend of two brand colours
+# rather than an invented one. That is what keeps ten desktops on-brand AND
+# apart.
+ARC_LO, ARC_HI = 322.0, 408.0        # 406 == 46, Ubuntu orange, unwrapped
+RUNGS = 8                            # distinct rungs on the arc
+STRIDE = 3                           # coprime with RUNGS: consecutive slots
+                                     # land three rungs apart, not one
+
+# HOW DARK THE WHOLE FIELD IS, on a ladder of its own. Five steps against eight
+# hue rungs is not an accident: 5 and 8 are coprime, so the pair (hue, weight)
+# does not repeat until the fortieth slot. Keyed on the hue rung alone, slot 9
+# came out as slot 1 in both, and two desktops that differ only in a jitter are
+# two desktops that look the same.
+WEIGHTS = 5
+
+
+def arc(t):
+    """A hue at fractional position t along the brand arc, wrapped to 0-360."""
+    return (ARC_LO + (ARC_HI - ARC_LO) * (t % 1.0)) % 360.0
+
 
 # The band the rendered field must stay inside. The floor is taste -- the owner
 # called the previous band too dark, at 84% black in the terms he used. The
-# ceiling is contrast: white text falls to 7:1, WCAG AAA, at field L* 37.8, and
-# an anchor at the top of this band renders a field reaching L* 33.4.
+# ceiling is contrast: white icon labels sit on this field, so the field must
+# not climb into them.
 BAND_LO, BAND_HI = 29.0, 45.0
 
-# Field strength. Bought from the band rather than from k: band E at k = 1.5
-# beats the old band at k = 2.5 on every axis that matters.
-HUE_SWING, LIGHT_SWING = 10.0 * 1.5, 6.0 * 1.5
+# THE BRIGHTEST THE FIELD IS ALLOWED TO GET, and the one number that faces the
+# only hard constraint here. White desktop icon labels sit on this field; GNOME
+# draws them white and that is not ours to change; white falls to 7:1 -- WCAG
+# AAA -- at L* 37.8. So the top of the field is pinned just under that and the
+# BASE is what moves between slots. Pinning the top rather than the lift is the
+# repair for a version of this that varied the lift and reached L* 49.3, which
+# private/redarm-background-band.py caught by rasterising and measuring.
+TOP_L = 34.5
+
+# The highest lightness any stop colour may be SPECIFIED at, as an input bound.
+# Slack above TOP_L, because compositing can only darken here -- every blob
+# paints over a darker base -- never brighten past its own stop.
+SPEC_CEILING = 38.0
 
 # The colour a failed generation falls back to, and the one the dconf layer
 # names for primary-color. Canonical aubergine from the brand palette.
@@ -107,49 +146,75 @@ def max_chroma(L, h):
     return lo
 
 
-def svg(L, C, h, seed, w=1920, hgt=1080, units_w=480, units_h=270,
-        hue_swing=HUE_SWING, light_swing=LIGHT_SWING):
-    s = seed
-    dL = ((s) % 7) - 3.0
-    dC = ((s >> 3) % 5) - 2.0
-    dh = ((s >> 6) % 13) - 6.0
-    ox = 12 + (s >> 9) % 76
-    oy = 12 + (s >> 15) % 76
-    f_h = 0.0013 + ((s >> 21) % 1000) / 1000 * 0.0016   # hue field, coarser
-    f_l = 0.0020 + ((s >> 11) % 1000) / 1000 * 0.0022   # lightness field, finer
-    sh = s % 65536
-    sl = (s >> 7) % 65536
-    Lb, Cb, hb = L + dL, max(0.0, C + dC), h + dh
-    cool = lch_to_hex(Lb, Cb, hb - hue_swing)
-    warm = lch_to_hex(Lb, Cb, hb + hue_swing)
-    glow = lch_to_hex(Lb + light_swing * 0.9, min(Cb + 5, Cb * 1.4 + 3),
-                      hb + hue_swing * 0.4)
-    lift = lch_to_hex(min(48, Lb + light_swing * 3.2), Cb + 6, hb)
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{hgt}" viewBox="0 0 {units_w} {units_h}" preserveAspectRatio="none">
- <defs>
-  <radialGradient id="r" cx="0.{ox}" cy="0.{oy}" r="0.8">
-   <stop offset="0" stop-color="{glow}" stop-opacity="0.75"/>
-   <stop offset="1" stop-color="{cool}" stop-opacity="0"/></radialGradient>
-  <!-- HUE field: a coarse, heavily blurred turbulence used only as a mask. -->
-  <filter id="fh" x="0" y="0" width="100%" height="100%">
-   <feTurbulence type="fractalNoise" baseFrequency="{f_h:.4f}" numOctaves="3" seed="{sh}" result="t"/>
-   <feGaussianBlur in="t" stdDeviation="7" result="tb"/>
-   <feColorMatrix in="tb" type="matrix"
-     values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.55 0.35 0.10 0 -0.15" result="m"/>
-   <feComposite in="m" in2="SourceGraphic" operator="in"/></filter>
-  <!-- LIGHTNESS field: independently seeded, finer, lighter touch. -->
-  <filter id="fl" x="0" y="0" width="100%" height="100%">
-   <feTurbulence type="fractalNoise" baseFrequency="{f_l:.4f}" numOctaves="3" seed="{sl}" result="t"/>
-   <feGaussianBlur in="t" stdDeviation="5" result="tb"/>
-   <feColorMatrix in="tb" type="matrix"
-     values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.30 0.30 0.12 0 -0.10" result="m"/>
-   <feComposite in="m" in2="SourceGraphic" operator="in"/></filter>
- </defs>
- <rect width="{units_w}" height="{units_h}" fill="{cool}"/>
- <rect width="{units_w}" height="{units_h}" fill="{warm}" filter="url(#fh)"/>
- <rect width="{units_w}" height="{units_h}" fill="url(#r)"/>
- <rect width="{units_w}" height="{units_h}" fill="{lift}" filter="url(#fl)"/>
-</svg>'''
+def blob(i, hex_colour, cx, cy, r, alpha):
+    """One soft disc of colour. A radialGradient whose outer stop is fully
+    transparent, painted over what is already there -- plain source-over alpha,
+    which is the one compositing path every SVG renderer has had since 1.1.
+
+    librsvg 2.58 does in fact render mix-blend-mode and feBlend (measured; see
+    private/measure-svg-features.py), so `screen` was available and was tried.
+    It is not used: on a dark field screen drives the overlaps towards white, so
+    the result drifts off the brand and out of the top of the band. Plain alpha
+    keeps every pixel a mixture of colours we chose."""
+    return (
+        '  <radialGradient id="b%d" cx="%.3f" cy="%.3f" r="%.3f">'
+        '<stop offset="0" stop-color="%s" stop-opacity="%.3f"/>'
+        '<stop offset="0.30" stop-color="%s" stop-opacity="%.3f"/>'
+        '<stop offset="0.60" stop-color="%s" stop-opacity="%.3f"/>'
+        '<stop offset="0.82" stop-color="%s" stop-opacity="%.3f"/>'
+        '<stop offset="1" stop-color="%s" stop-opacity="0"/>'
+        '</radialGradient>\n'
+        % (i, cx, cy, r, hex_colour, alpha, hex_colour, alpha * 0.72,
+           hex_colour, alpha * 0.34, hex_colour, alpha * 0.10, hex_colour))
+
+
+def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
+    """THREE COLOURS IN THREE PLACES, over a base, with a grain on top.
+
+    This is the owner's own suggestion of 2026-09-25 and it is taken, because it
+    solves the harder half of the problem. Hue alone cannot separate ten
+    desktops on this brand -- see the palette note above -- so the blobs give a
+    SECOND, independent channel: WHERE the colour is. Two desktops whose hues
+    are neighbours on the arc still differ in composition, and a viewer who
+    cannot use hue at all still has somewhere to look.
+
+    His other instinct, that librsvg would need the simplest possible
+    construction, turned out not to bind: measured on librsvg 2.58 (the version
+    on the target and on this workstation), everything tried renders, filters
+    and mix-blend-mode included. The construction below is still the plain one,
+    but by choice rather than by necessity.
+
+    THE VIEWBOX IS 480x270 AND THE IMAGE IS NOT. feTurbulence's baseFrequency is
+    per USER UNIT, so the grain's feature size follows the viewBox and not the
+    pixel size. The nominal pixel size is large so the loader rasterises
+    something worth scaling."""
+    defs = "".join(blob(i, c, cx, cy, r, al)
+                   for i, (c, cx, cy, r, al) in enumerate(spec["blobs"]))
+    rects = "".join(
+        ' <rect width="%d" height="%d" fill="url(#b%d)"/>\n'
+        % (units_w, units_h, i) for i in range(len(spec["blobs"])))
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d"'
+        ' viewBox="0 0 %d %d" preserveAspectRatio="none">\n'
+        ' <defs>\n%s'
+        '  <!-- A grain, not a feature. It breaks up the banding a big soft\n'
+        '       gradient shows on an 8-bit framebuffer. It carries no identity:\n'
+        '       take it away and every desktop is still the same colour it was. -->\n'
+        '  <filter id="grain" x="0" y="0" width="100%%" height="100%%">\n'
+        '   <feTurbulence type="fractalNoise" baseFrequency="%.4f"'
+        ' numOctaves="4" seed="%d" result="t"/>\n'
+        '   <feColorMatrix in="t" type="matrix" values="0 0 0 0 0  0 0 0 0 0'
+        '  0 0 0 0 0  0.3 0.3 0.3 0 -0.14" result="m"/>\n'
+        '   <feComposite in="m" in2="SourceGraphic" operator="in"/></filter>\n'
+        ' </defs>\n'
+        ' <rect width="%d" height="%d" fill="%s"/>\n'
+        '%s'
+        ' <rect width="%d" height="%d" fill="#ffffff" filter="url(#grain)"'
+        ' opacity="0.06"/>\n'
+        '</svg>\n'
+        % (w, hgt, units_w, units_h, defs, spec["grain_freq"],
+           spec["grain_seed"], units_w, units_h, spec["base"], rects,
+           units_w, units_h))
 
 
 def solid(colour=FALLBACK, w=1920, hgt=1080):
@@ -163,43 +228,144 @@ def solid(colour=FALLBACK, w=1920, hgt=1080):
 
 
 def slot_number(instance):
-    """The slot's own number, taken from the instance name this process was
-    handed rather than from a count of anything. The prefix is an administrator
-    setting, so it is the TRAILING digits that identify the slot and not a
-    fixed-length prefix."""
+    """The slot's own number, or None when the name carries no number at all.
+
+    NONE IS NOT ZERO, and the difference is the whole of the named-desktop
+    repair. The previous version returned 0 for a name with no digits, which is
+    a real slot number, so every named desktop collapsed onto slot 0's colour
+    and each of them looked like the other. An absent number is a different
+    question from the number nought."""
     digits = ""
     for ch in reversed(instance):
         if not ch.isdigit():
             break
         digits = ch + digits
-    return int(digits) if digits else 0
+    return int(digits) if digits else None
 
 
-def choose(instance, token):
-    """Which anchor, and which field.
+def choose(instance, token, kind=None):
+    """WHAT DIFFERS BETWEEN TWO DESKTOPS, AND WHAT STAYS PUT ACROSS A RESTART.
 
-    THE ANCHOR IS THE SLOT'S, AND THE FIELD IS THE START'S, and the split is
-    deliberate. Two desktops that are up at the same time are in different
-    slots, always, so a slot-derived anchor separates concurrent sessions BY
-    CONSTRUCTION -- no birthday collisions and no randomness to be unlucky
-    with. It does nothing for two successive occupants of one slot, which is
-    why the field is seeded from the incarnation token instead: that value is
-    fresh at every start, so the same slot never renders the same image twice.
+    Two questions, two answers, and the two kinds of session get DIFFERENT
+    answers on purpose:
 
-    WHAT THIS DOES NOT DO, said out loud because the design asks for it and
-    this is less. The design's rejection rule draws an anchor at least d_min
-    from the slot's own PREVIOUS anchor as well as from its siblings', which
-    would make the returning-tab case distinct by construction too. It cannot
-    be done here: the record of what the previous start published is
-    /run/hdw4s-incarnation/<slot>, root-owned 0600, and this runs as the
-    occupant. Doing it properly means publishing the choice from
-    hdw4s-incarnation, which is the design's own answer and a larger change.
-    Measured consequence, from the design: successive occupants of one slot
-    differ by about dE 3 -- around the just-noticeable threshold, not "noticed
-    without looking"."""
-    L, h = ANCHORS[slot_number(instance) % len(ANCHORS)]
-    seed = int.from_bytes(hashlib.sha256(token).digest()[:8], "big")
-    return L, max_chroma(L, h) * 0.9, h, seed
+    * AN EPHEMERAL SLOT lives minutes to days and is handed to a stranger when
+      its last occupant is gone. Its HUE is the slot's own, taken from the
+      instance name, so two slots that are up at the same time are apart BY
+      CONSTRUCTION -- no birthday collisions, no randomness to be unlucky with.
+      Its LAYOUT -- where the three colours sit, how big they are -- comes from
+      the incarnation token, which is fresh at every start. So a slot keeps a
+      recognisable colour while it is running, and the next occupant of that
+      slot does not inherit the last one's picture.
+
+    * A NAMED DESKTOP is one person's, for months. Everything about it is
+      derived from the INSTANCE NAME and nothing from the token, so it looks the
+      same tomorrow as it does today. A background that reshuffled itself at
+      every restart would be worse than none: the whole point is that a person
+      recognises their own desktop, and that only works if it holds still. It
+      also repairs a real defect in the previous table, which keyed on trailing
+      digits and so gave EVERY named desktop the same colour, name-derived
+      hashing having no digits to find.
+
+    The kind is inferred from the name when the caller does not say: a trailing
+    number is a slot, anything else is a person's. The prefix is an
+    administrator setting, so it is the TRAILING digits that identify a slot and
+    never a fixed-length prefix.
+    """
+    n = slot_number(instance)
+    if kind is None:
+        kind = "ephemeral" if n is not None else "named"
+
+    if kind == "ephemeral":
+        rung = (n * STRIDE) % RUNGS
+        weight = n % WEIGHTS
+        layout_seed = int.from_bytes(
+            hashlib.sha256(token).digest()[:8], "big")
+    else:
+        h = hashlib.sha256(instance.encode("utf-8", "replace")).digest()
+        rung = h[0] % RUNGS
+        weight = h[1] % WEIGHTS
+        layout_seed = int.from_bytes(h[2:10], "big")
+
+    return spec_for(rung, weight, layout_seed)
+
+
+# WHERE THE LEAD COLOUR SITS, one archetype per rung. This is the SECOND
+# channel and it is the one that actually does the work at ten slots: the brand
+# offers two hue families and an arc of about ninety degrees between them, so
+# ten slots can be at most nine degrees apart in hue -- not enough on its own.
+# Composition is not so constrained. Two desktops that are up together differ in
+# WHERE their colour is even when their hues are close, and that is a difference
+# a viewer reads instantly and a colour-blind viewer reads too.
+#
+# The archetype is the SLOT'S, so concurrent slots differ by construction. The
+# jitter around it is the START'S, so the next occupant of a slot does not
+# inherit the last one's exact picture.
+ARCHETYPES = (
+    (0.15, 0.20, 0.85, 0.75),   # lead top-left,     mate bottom-right
+    (0.82, 0.18, 0.15, 0.80),   # lead top-right,    mate bottom-left
+    (0.20, 0.82, 0.80, 0.20),   # lead bottom-left,  mate top-right
+    (0.80, 0.80, 0.18, 0.22),   # lead bottom-right, mate top-left
+    (0.50, 0.12, 0.50, 0.95),   # lead top-centre,   mate below
+    (0.08, 0.50, 0.95, 0.50),   # lead left edge,    mate right edge
+    (0.50, 0.88, 0.50, 0.08),   # lead bottom-centre, mate above
+    (0.92, 0.50, 0.10, 0.50),   # lead right edge,   mate left edge
+)
+
+
+def spec_for(rung, weight, seed, top=None):
+    """Turn a rung on the brand arc and a layout seed into a drawable field."""
+    top = TOP_L if top is None else top
+    t = rung / float(RUNGS)
+
+    # THE TWO ENDS OF THE ARC, EVERY TIME. The lead colour walks the arc; its
+    # companion sits half an arc away, so every desktop carries a cool region
+    # and a warm one and the PAIR rotates with the slot. One colour per desktop
+    # is what made the old sheet read as four purples and two rusts.
+    h_lead = arc(t)
+    h_mate = arc(t + 0.5)
+    h_third = arc(t + 0.22)
+
+    # A THIRD CHANNEL, FREE: how dark the whole field is. Alternate rungs sit at
+    # opposite ends of a small range, so neighbouring slots -- which are three
+    # rungs apart and therefore closest in hue -- are furthest apart in weight.
+    base_L = 12.0 + 9.0 * (weight % WEIGHTS) / (WEIGHTS - 1.0)
+    # Every blob's lightness is a fraction of the way from this slot's base up
+    # to the shared ceiling, so a dark slot still has internal contrast and a
+    # light one still cannot break the ceiling.
+    lead_L = base_L + (top - base_L) * 0.82
+    mate_L = base_L + (top - base_L) * 0.62
+    third_L = top
+
+    def col(L, h, frac):
+        # Chroma as a fraction of what the hue can carry at that lightness,
+        # found by bisection rather than tabulated, so that moving a hue cannot
+        # silently move it outside the gamut.
+        return lch_to_hex(L, max_chroma(L, h) * frac, h)
+
+    lx, ly, mx, my = ARCHETYPES[(rung + weight) % len(ARCHETYPES)]
+
+    def jit(shift, amount):
+        """The start's own wobble around the slot's archetype. Small on
+        purpose: big enough that two occupants of one slot are not the same
+        picture, small enough that the slot's composition is still the slot's."""
+        return (((seed >> shift) % 1000) / 1000.0 - 0.5) * 2 * amount
+
+    blobs = [
+        (col(lead_L, h_lead, 0.72), lx + jit(0, 0.10), ly + jit(7, 0.10),
+         0.40 + jit(14, 0.06), 1.00),
+        (col(mate_L, h_mate, 0.62), mx + jit(21, 0.12), my + jit(28, 0.12),
+         0.38 + jit(35, 0.06), 0.88),
+        (col(third_L, h_third, 0.78), 0.5 + jit(42, 0.40), 0.5 + jit(48, 0.40),
+         0.15 + jit(54, 0.04), 0.55),
+    ]
+    return {
+        "base": col(base_L, h_lead, 0.50),
+        "blobs": blobs,
+        "grain_seed": (seed >> 3) % 65536,
+        "grain_freq": 0.010 + ((seed >> 17) % 100) / 100.0 * 0.006,
+        "top_L": third_L,
+    }
 
 
 def write_atomically(path, text):
@@ -243,8 +409,7 @@ def cmd_write(args):
         token = os.urandom(16)
 
     try:
-        L, C, h, seed = choose(args.instance, token)
-        text = svg(L, C, h, seed)
+        text = svg(choose(args.instance, token, args.kind))
     except Exception as e:                        # noqa: BLE001 -- see below
         # Broad on purpose. Every branch of the arithmetic above is reachable
         # only with the constants in this file, so a failure here is a defect
@@ -260,32 +425,50 @@ def cmd_write(args):
 
 
 def cmd_check(args):
-    """THE GUARD, AND WHAT IT IS NOT.
+    """WHAT EACH SLOT IS BUILT FROM -- and what this is not.
 
-    This asserts on the ANCHORS, which is the input, and the design says in so
-    many words that a guard pointed at the input passes while the thing it
-    protects fails: an anchor at L* 16 renders a field whose lightest pixel is
-    L* 21.6. So this is a bound and not a measurement, and it is written here
-    only because it is the half that can run with no rendering library.
+    It prints the colours a slot would use, and it REFUSES if any of them is
+    specified above SPEC_CEILING. That is an assertion about the INPUT, and the
+    design says in so many words that a guard pointed at the input passes while
+    the thing it protects fails: these colours are composited, and what a white
+    icon label actually sits on is the rendered pixel, not the stop colour.
 
-    THE OTHER HALF IS private/redarm-background-band.sh, which rasterises the
-    field through the same loader GNOME uses and measures the pixels. Do not
-    read a green line here as the band having been checked."""
-    anchors = ANCHORS
-    if args.anchors:
-        anchors = tuple(tuple(float(x) for x in a.split(":"))
-                        for a in args.anchors.split(","))
-    bad = [a for a in anchors if not BAND_LO <= a[0] <= BAND_HI]
-    for L, h in anchors:
-        print("anchor L*=%5.1f h=%6.1f C=%5.1f  %s"
-              % (L, h, max_chroma(L, h) * 0.9,
-                 "outside the band" if not BAND_LO <= L <= BAND_HI else "in band"))
+    So this is a bound, never the band having been checked. The pixels are
+    measured by private/redarm-background-band.py, which rasterises through the
+    loader GNOME uses; private/sheet-background.py puts the slots side by side
+    for the only oracle that answers "can you tell these apart", which is a
+    person looking at them.
+
+    --top-lightness exists so that this refusal can be SEEN to happen. A guard that
+    has never refused is not known to refuse.
+    """
+    top = args.top_lightness if args.top_lightness is not None else TOP_L
+    bad = []
+    print("%-6s %-5s %-9s %-9s %-9s %-9s %s"
+          % ("slot", "rung", "base", "lead", "mate", "third", "top L*"))
+    for slot in range(1, args.slots + 1):
+        rung = (slot * STRIDE) % RUNGS
+        spec = spec_for(rung, slot % WEIGHTS, 0x5eed5eed, top=top)
+        top = spec["top_L"]
+        if top > SPEC_CEILING:
+            bad.append(slot)
+        print("%-6d %-5d %-9s %-9s %-9s %-9s %5.1f%s"
+              % (slot, rung, spec["base"], spec["blobs"][0][0],
+                 spec["blobs"][1][0], spec["blobs"][2][0], top,
+                 "  ABOVE THE CEILING" if top > SPEC_CEILING else ""))
+
+    if args.slots > RUNGS:
+        print("\nNote: %d slots over %d rungs. Slot %d repeats slot 1's hue and "
+              "is told apart by where its colours sit and how dark it is. That "
+              "is the brand's limit, not a defect: the published palette has "
+              "two hue families and this arc already spends everything between "
+              "them." % (args.slots, RUNGS, RUNGS + 1))
+
     if bad:
-        print("hdw4s-background: %d anchor(s) outside the approved band L* "
-              "%.1f-%.1f. The band's floor is the owner's judgement that a "
-              "darker field is too black; its ceiling is white icon labels, "
-              "which fall below WCAG AAA above it."
-              % (len(bad), BAND_LO, BAND_HI), file=sys.stderr)
+        print("hdw4s-background: %d slot(s) specify a colour above L* %.1f. "
+              "White desktop icon labels sit on this field and GNOME's choice "
+              "of white is not ours to change, so the ceiling is a real one."
+              % (len(bad), SPEC_CEILING), file=sys.stderr)
         return 1
     return 0
 
@@ -297,13 +480,19 @@ def main(argv):
     w = sub.add_parser("write", help="write one session's background")
     w.add_argument("instance")
     w.add_argument("output")
+    w.add_argument("--kind", choices=("ephemeral", "named"), default=None,
+                   help="which kind of session this is; inferred from whether "
+                        "the instance name ends in a number when not given")
     w.add_argument("--incarnation", default=None,
                    help="the published identity to seed the field from; "
                         "defaults to this slot's own record in the web root")
     w.set_defaults(func=cmd_write)
-    c = sub.add_parser("check", help="are the anchors inside the band?")
-    c.add_argument("--anchors", default=None,
-                   help="L:h[,L:h...] to check instead of the shipped table")
+    c = sub.add_parser("check", help="what colours would each slot get?")
+    c.add_argument("--slots", type=int, default=10,
+                   help="how many slots to walk (default: the production goal)")
+    c.add_argument("--top-lightness", type=float, default=None,
+                   help="override the brightest lightness the field may use, "
+                        "so that this guard can be SEEN to refuse")
     c.set_defaults(func=cmd_check)
     args = p.parse_args(argv)
     return args.func(args)
