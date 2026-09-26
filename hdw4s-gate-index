@@ -650,6 +650,30 @@ OVERLAY = r"""
   // assert that a tab came back through THIS path and not because the card failed to
   // draw, which is the same failure this file has shipped once before.
   window.__hdw4sResume = {loadedHidden: LOADED_HIDDEN, verdict: null};
+
+  // SAY WHAT THIS PAGE DECIDED, IN THE CONSOLE, EVERY TIME.
+  //
+  // The stamp above is readable only while the gate is on screen: boot() hands
+  // the document to the client and the global goes with it. So a person who
+  // resumes has nothing left to inspect, and a resume and a click-through leave
+  // an IDENTICAL trace -- both end in a page load that connects.
+  //
+  // Measured cost of that, 2026-09-25: the owner sent two full console logs of a
+  // hide-and-return, and neither could establish whether he had met the card,
+  // because every line in them came from the streaming client and this file said
+  // nothing at all. A gate that decides silently cannot be debugged by the only
+  // person who can see it decide.
+  //
+  // Deliberately console.log rather than a UI element: it is for whoever is
+  // reading a console at the time, costs a visitor nothing, and says what was
+  // DECIDED rather than what was shown -- which is the distinction a screenshot
+  // cannot make either.
+  var announce = function(what, extra){
+    try {
+      console.log('[hdw4s gate] ' + what,
+                  Object.assign({loadedHidden: LOADED_HIDDEN}, extra || {}));
+    } catch(e){}
+  };
   var knownInc = null;
   try { knownInc = sessionStorage.getItem(INC); } catch(e){}
   if (LOADED_HIDDEN && knownInc) {
@@ -658,6 +682,9 @@ OVERLAY = r"""
         var same = !!served && served === knownInc;
         window.__hdw4sResume.served = !!served;
         window.__hdw4sResume.verdict = same ? 'resumed' : 'refused';
+        announce(same ? 'resumed silently: this tab owns the running desktop'
+                      : 'card shown: the desktop is not the one this tab left',
+                 {served: !!served, knownIncarnation: !!knownInc});
         if (same) return boot();
         return (GATE === 'mint') ? show(MINT, MINT_GO) : show(COLD, COLD_GO);
       });
