@@ -973,6 +973,32 @@ webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${instance}"
 # session sees": the session cannot see the evidence, and a check the occupant
 # could satisfy is not a gate against the occupant. Do not change that "!" to a
 # "+" either; the unit says at length what that cost.
+# CAN THIS UID ACTUALLY OPEN THE INDEX? Asked HERE, and nowhere else can ask it.
+#
+# Selkies decides whether to use a web root with os.path.isdir() and
+# os.path.isfile() -- two stat calls. A directory it cannot traverse fails them
+# and is announced as a refusal, which the unit's "hdw4s-webroot
+# announced-gate" catches. But an index.html that STATS and will not OPEN
+# passes both: the server announces acceptance, and then serves an error for
+# every request while every check in this product reports health. That case was
+# the one thing the HTTP fetch of the front door uniquely caught, and it is not
+# dropped silently just because the fetch is gone.
+#
+# It cannot be asked from the unit's Exec lines, and this is not the same
+# argument as the one above about layer 4. Those lines run as root with "!", and
+# root opens a file the session's uid cannot -- so a root check would report
+# green on exactly the fault. This script is the session: the unit sets User=%i,
+# so the uid here IS the uid that is about to exec the streaming server, derived
+# by construction rather than looked up or assumed.
+#
+# An open, not "[ -r ]": access(2) answers about the permission bits, and the
+# question is whether the read succeeds.
+head -c 1 < "${webroot}/index.html" > /dev/null 2>&1 || {
+  echo "hdw4s: cannot read '${webroot}/index.html' as $(id -un). The streaming" >&2
+  echo '  server tests its web root with stat, so it would ACCEPT this tree and' >&2
+  echo '  then fail every request -- coming up healthy with no gate in it.' >&2
+  exit 1
+}
 stream+=(--web-root="${webroot}")
 "${stream[@]}" \
   --addr="${HDW4S_ADDR}" \
@@ -985,32 +1011,46 @@ stream+=(--web-root="${webroot}")
 children+=($!)
 stream_pid="$!"
 
-# THE THIRD CHECK -- the only one that can see what is actually SERVED -- IS NOT
-# HERE ANY MORE. It is "ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot serving-gate"
-# in the session units, and it moved for a reason that is not tidiness.
+# THE THIRD CHECK IS NOT HERE ANY MORE, and since 2026-09-26 it is not a request
+# either. It is "ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate" in
+# the session units, and both changes were forced rather than chosen.
 #
-# What it does is unchanged: ask the running server for its index and look for
-# the gate in the bytes that come back, because Selkies decides at startup
-# whether to use the configured web root and, if it declines, logs one warning
-# and serves the packaged client -- after which the session comes up, notifies
-# ready, and every health check in this product reports health while the gate is
-# simply absent. Do not narrow it without narrowing the file check above it;
-# withholding the web root without this ships a feature that is GREEN AND ABSENT.
+# WHAT IT DOES NOW: it reads the streaming server's own startup announcement out
+# of this invocation's journal and compares the directory it names against the one
+# this session was given. Selkies decides at startup whether to use the configured
+# web root and, if it declines, logs one warning and serves the packaged client --
+# after which the session comes up, notifies ready, and every health check in this
+# product reports health while the gate is simply absent. Do not narrow it without
+# narrowing the file check above it; withholding the web root without this ships a
+# feature that is GREEN AND ABSENT.
 #
-# Why it cannot run here: this script is the session, the unit sets User=%i, and
-# a desktop is no longer allowed to open a connection to a session port on this
-# machine. That refusal is the fix for one visitor's desktop being able to reach
-# another's, and this check's own request has exactly the shape being refused.
-# The unit runs it as root instead, with "!", which the occupant cannot be.
+# WHAT IT USED TO DO, and why that is gone: it fetched this session's own front
+# door over HTTP and looked for the gate marker in the body. On an instance with
+# basic auth that needs a credential, and in the position it ran from there is
+# none -- in a unit with mount namespacing the first ExecStartPost= gets a
+# namespace without the unit's credential directory. It asked anyway and reported
+# the 401 as though the server were unreachable, which tore a healthy desktop down
+# 55 times in an hour. The owner ruled that reading the server's own decision is
+# fine, to be revisited if it stops being trustworthy.
 #
-# The sixty-second /dev/tcp wait that used to stand here went WITH it, into
-# hdw4s-webroot, and it had to. The first version of this change dropped the
-# wait, on the reasoning that ExecStartPost= runs after the readiness
-# notification below and that notification is sent only once the port is bound.
-# Measured false on the first run: the check fired a second before the streaming
-# server announced its port and took the session down. NotifyAccess=all lets
-# anything in this cgroup send READY=, and something does, so "started" is not
-# the claim it reads as -- do not rebuild an ordering argument on it here.
+# WHY IT STILL CANNOT RUN HERE, and the reason CHANGED with it. It was that a
+# desktop may no longer open a connection to a session port on this machine, and
+# the fetch had exactly the shape the firewall refuses. There is no connection
+# now; what it needs instead is to read the unit's own journal, and this script
+# runs as the occupant, who is in no group that may. Do not move it back.
+#
+# The sixty-second /dev/tcp wait that used to stand here went with it into
+# hdw4s-webroot and became a wait for the announcement, for the same reason and
+# with the same budget: the first version of the move dropped the wait, on the
+# reasoning that ExecStartPost= runs after the readiness notification below and
+# that notification is sent only once the port is bound. Measured false on the
+# first run. NotifyAccess=all lets anything in this cgroup send READY=, and
+# something does, so "started" is not the claim it reads as -- do not rebuild an
+# ordering argument on it here.
+#
+# And what it CANNOT see is asserted above instead, next to the web root: an
+# index.html that stats but will not open for this uid is announced as accepted.
+# The fetch caught that; reading the announcement cannot.
 #
 # Failure is still fatal to the session, and now more simply: a failing
 # ExecStartPost= stops the unit, where this code had to kill the streaming

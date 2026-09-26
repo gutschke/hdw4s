@@ -35,6 +35,34 @@ After=hdw4s-incarnation@%i.service
 # A home directory that arrives over the network has to be there before a
 # desktop tries to read settings out of it.
 
+# IN [Unit] AND NOT [Service], which is where this went first. StartLimitIntervalSec=
+# and StartLimitBurst= are [Unit] directives; systemd parses them nowhere else and a
+# copy in [Service] is a line that looks like a guard and is not one.
+#
+# THE RESTART LOOP HAD NO LATCH, and that is what turned one broken check into an
+# hour of a healthy desktop being torn down 55 times on 2026-09-25. Nothing would
+# ever have stopped it; a person noticed.
+#
+# systemd's start limit is the only thing that latches, and its default window is
+# 10 seconds. This unit takes up to ninety seconds to fail and then waits five, so
+# a failure cycle is about ninety-five seconds and NRestarts went 1, 2, back to 1
+# for ever -- the burst was never reached inside the window, so the window is the
+# bug and not the burst.
+#
+# Twenty minutes holds five of those cycles with room to spare, so a start that
+# cannot succeed gives up after five tries and about eight minutes, and stays
+# failed until somebody clears it.
+#
+# THE COST IS REAL AND IS ACCEPTED: the counter counts every start, including a
+# person's own "systemctl restart", so five restarts inside twenty minutes latch a
+# desktop that is perfectly fine. That is a "systemctl reset-failed" away, it is
+# what the tools in private/ already do before starting a session, and a session
+# start path whose failure has no latch will do the 2026-09-25 thing again for
+# some other reason. Do not widen the window back to something that cannot be
+# reached; if this latches on somebody, shorten the failure, not the guard.
+StartLimitIntervalSec=20min
+StartLimitBurst=5
+
 [Service]
 # There is deliberately no User= here. The instance name is the account name,
 # so "User=%i" would be correct as far as it goes -- but an invalid user name in
@@ -86,7 +114,8 @@ After=hdw4s-incarnation@%i.service
 # NO DAC CAPABILITY HERE, and the reason is worth more than the line.
 #
 # For several hours on 2026-09-25 this granted one (first CAP_DAC_READ_SEARCH,
-# then CAP_DAC_OVERRIDE) to let "ExecStartPost=!... serving-gate" read this
+# then CAP_DAC_OVERRIDE) to let the front-door fetch that stood at this unit's
+# ExecStartPost= until 2026-09-26 -- "hdw4s-webroot serving-gate" -- read this
 # unit's own credential, on a diagnosis that the mode-0000 staging directory
 # could not be traversed by a uid-0 process without it. THAT WAS WRONG, and the
 # comment that stood here asserted the opposite with a "Measured" stamp --
@@ -163,32 +192,58 @@ EnvironmentFile=-/etc/hdw4s/%i.conf
 # answer to a missing web root is one warning and the stock ungated client --
 # healthy in every check this product has, with the gate silently absent.
 ExecStartPre=+/usr/lib/hdw4s/hdw4s-webroot provision %i
+# AND THEN CHECKED, which this unit did not do and the ephemeral one always has.
+#
+# It asserts three things about the tree provision just built: that it carries the
+# gate marker and no auto-loading module, that every asset its index names is
+# present, and that the identity published for THIS start is the one
+# hdw4s-incarnation recorded and is not the previous start's.
+#
+# The comment at the head of this unit says why the third of those matters here
+# and not only in the pool: MEASURED 2026-09-25 on the owner's own named desktop,
+# a hidden tab that comes back meets the reconnect card every time because
+# /hdw4s-incarnation 404s. A named desktop now publishes one -- so it can now be
+# checked, and until this line existed nothing checked it.
+#
+# "!" and NOT "+": "+" drops ProtectHome= while KEEPING BindPaths= and
+# TemporaryFileSystem=, so a drop-in's /home mount lands on the REAL /home. The
+# ExecStartPost below says what that costs. What this needs is root -- the /run
+# record is 0600 root-owned so the occupant cannot forge it -- with the
+# namespace intact, and "!" is exactly that.
+ExecStartPre=!/usr/lib/hdw4s/hdw4s-webroot gate %i
 ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
 ExecStart=/usr/lib/hdw4s/hdw4s-session %i
 
-# What is actually SERVED, asked of the running server rather than of the file we
-# generated. Selkies decides at startup whether to use the configured web root, and
-# if it declines it logs one warning and serves the packaged client -- after which
-# this session comes up, notifies ready, and every health check reports health while
-# the gate is simply absent. Failing here stops the session, which is the point.
+# WHICH WEB ROOT THE STREAMING SERVER ACCEPTED, read from what the server itself
+# announced at startup. It decides at startup whether to use the configured web root,
+# and if it declines it logs one warning and serves the stock ungated client -- after
+# which this session comes up, notifies ready, and every health check reports health
+# while the gate is simply absent. Failing here stops the session, which is the point.
 #
-# "!" and NOT nothing: this runs as root, deliberately. A desktop may no longer open
-# a connection to a session port on this machine -- that is the firewall's
-# sessions_out chain, and it is what stops one visitor's desktop reaching another's
-# -- and this request has exactly the shape being refused. Root is how the session's
-# own check is told apart from its occupant, who cannot become root here. Run it
-# without the "!" and every session on the machine fails to start.
+# THIS WAS AN HTTP FETCH OF THE SESSION'S OWN FRONT DOOR UNTIL 2026-09-26, and every
+# reason the old comment here gave has gone with it. It needed a credential on any
+# instance with basic auth and could not get one in this position -- see the
+# CapabilityBoundingSet= note above, and hdw4s-webroot for the measurement -- which
+# tore a HEALTHY desktop down 55 times in an hour. The owner ruled that reading the
+# server's own decision is fine, to be revisited if it stops being trustworthy.
 #
-# "!" and NOT "+", for the reason the ExecStartPre above sets out at length: "+"
-# keeps BindPaths= and TemporaryFileSystem= while dropping ProtectHome=, which lands
-# this unit's /home/user mount on the real /home.
+# Two things about the new shape are worth keeping straight:
 #
-# It waits for the port itself and does not rely on running after the readiness
-# notification. Measured: with NotifyAccess=all something inside the desktop
-# sends READY= before the streaming server has bound, so this line runs first and
-# a version of it without its own wait killed every session it was meant to
-# verify.
-ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot serving-gate %i
+# "!" and still NOT nothing, but for a DIFFERENT reason than before. The old reason was
+# the firewall's sessions_out chain, which refuses a desktop opening a connection to a
+# session port; there is no connection now. The reason now is that this reads the unit's
+# own journal, and the occupant's uid is in no group that may.
+#
+# "!" and NOT "+", unchanged: "+" keeps BindPaths= and TemporaryFileSystem= while
+# dropping ProtectHome=, which lands this unit's /home/user mount on the real /home --
+# fatal on an NFS home and a silent stray directory on a local one.
+#
+# It does not depend on running in any particular position. It needs no credential, and
+# systemd puts INVOCATION_ID in the environment of every Exec line, so it can name THIS
+# start rather than reading a journal that a restart loop has interleaved. It waits for
+# the announcement and reports the expiry as a failure that says WHICH thing it could not
+# establish -- never as a pass.
+ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate %i
 KillMode=control-group
 LockPersonality=yes
 # Readiness is reported once the stream is accepting connections, so that

@@ -216,17 +216,33 @@ CHAIN
   # whatever uid, and however many sessions exist. Nothing per-session is
   # recorded here, so nothing here can go stale.
   #
-  # WHY uid 0 IS LET THROUGH, and it is not a hole. The session verifies its own
-  # front door at startup -- "is this server really serving the gated client" --
-  # and that request comes from inside the session's own cgroup. It is run as
-  # root by the unit (ExecStartPost=!), which is a privilege the occupant does
-  # not have: an ephemeral slot account is in no sudo-capable group, and on a
-  # named session anyone who can become root can flush this table outright, so
-  # the exception concedes nothing that was being defended. Measured before the
-  # change: with a counting-only copy of this chain loaded, a session start
-  # produced 11 packets from the occupant's uid to its own port and 0 from uid 0
-  # -- which is exactly why moving that check is part of this change and not a
-  # tidy-up. A drop without it stops every session from starting.
+  # WHY uid 0 IS LET THROUGH, and THE CALLER IT WAS ADDED FOR IS GONE. It was
+  # added for one request: the session's startup check of its own front door,
+  # "is this server really serving the gated client", made from inside the
+  # session's own cgroup and run as root by the unit (ExecStartPost=!). Measured
+  # before it was added, with a counting-only copy of this chain loaded, a
+  # session start produced 11 packets from the occupant's uid to its own port and
+  # 0 from uid 0; without the exception every session failed to start.
+  #
+  # ON 2026-09-26 THAT CHECK STOPPED MAKING A REQUEST. It reads the streaming
+  # server's own startup announcement out of the journal instead -- see
+  # "announced-gate" in hdw4s-webroot -- because the fetch needed a credential it
+  # could not get and tore a healthy desktop down 55 times in an hour. So nothing
+  # this package ships now sends anything from uid 0 in hdw4s.slice to a session
+  # port, and this line no longer has a caller.
+  #
+  # IT IS LEFT IN PLACE DELIBERATELY, AND THAT IS NOT THE SAME AS NOBODY NOTICING.
+  # Removing it narrows the chain and is probably right; it is also a firewall
+  # change whose blast radius is every session start on every machine, made in a
+  # round about something else, and a source read says only that no SHIPPED caller
+  # remains -- a drop-in or a site script could have one. So the reason is
+  # recorded here rather than left to read as still-current justification. Whoever
+  # removes it should first watch hdw4s_xreach_refused with the rule gone and a
+  # session starting, on both unit types.
+  #
+  # What it never conceded, and still does not: root is a privilege the occupant
+  # does not have. An ephemeral slot account is in no sudo-capable group, and on a
+  # named desktop anyone who can become root can flush this table outright.
   #
   # BOTH BLOCKS, not just the internal one. The public block is what a named
   # session on the TCP transport listens on, and reaching it over loopback
@@ -288,7 +304,7 @@ COUNTERS
                 tcp dport != ${first}-${internal_last} accept
                 counter name "hdw4s_xreach_seen"
 
-                # The session's own startup checks; see above.
+                # See above: this has no shipped caller since 2026-09-26.
                 meta skuid 0 accept
 
                 meta skuid 0-4294967295 socket cgroupv2 level 1 "hdw4s.slice" \

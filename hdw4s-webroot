@@ -47,8 +47,7 @@ usage: hdw4s-webroot build     [--directory] <instance> <web-root> [<session nam
        hdw4s-webroot provision [--directory] <instance> [<session name>]
        hdw4s-webroot check     <web-root> [<instance>]
        hdw4s-webroot gate      <instance>
-       hdw4s-webroot serving <url> [--auth-stdin] [<curl args>...]
-       hdw4s-webroot serving-gate <instance>
+       hdw4s-webroot announced-gate <instance>
 
   --directory   this instance is reached through a door that ALSO serves
                 /sessions/, the session directory, so the boot card may offer a
@@ -56,11 +55,6 @@ usage: hdw4s-webroot build     [--directory] <instance> <web-root> [<session nam
                 desktop's door is systemd-socket-proxyd in front of Selkies and
                 answers 404 there. Absent means no link, which is the safe way
                 round: a card that stays quiet is never wrong.
-
-  --auth-stdin  read a curl config line ("user = <user>:<password>") from stdin
-                and hand it to curl as its own config. Never pass a credential
-                as an argument: /proc/<pid>/cmdline is readable by every process
-                of this uid, and in an ephemeral session that is the occupant.
 EOF
   exit 2
 }
@@ -240,178 +234,144 @@ be told this is the desktop it was using, which is the bug this file exists to p
   fi
 }
 
-# Layer 2: what is actually SERVED. A correct file is the layer we built; the bytes on
-# the wire are the layer a person gets, and Selkies' fallback is a place where the two
-# can differ -- it declines a web root it does not like and serves the packaged client
-# with one line in a log.
+# Layer 2: WHICH WEB ROOT THE STREAMING SERVER ACTUALLY ACCEPTED, asked of the server's
+# own startup announcement rather than of the file we generated. Selkies decides at
+# startup whether to use the configured web root, and if it declines it logs one warning
+# and serves the packaged client -- after which the session comes up, notifies ready, and
+# every health check in this product reports health while the gate is simply absent.
 #
-# Honest limit: the case usually cited for this -- a web root the session cannot read --
-# is caught by "check" instead, which runs in the same namespace as the server and sees
-# what it sees. No divergence between the file and the served bytes has been reproduced.
-# This is cheap insurance against a silent one, not a check with a catch to its name.
-cmd_serving() {
-  local url="$1"; shift
-  local auth=()
-  # --auth-stdin: this process's stdin is a pipe carrying a curl config line
-  # ("user = <user>:<password>"). It is handed to curl as ITS config, on ITS
-  # stdin, which curl already inherits -- so this script never reads the bytes
-  # and never names them. The alternative interfaces all publish the secret to
-  # every process of this uid, which in an ephemeral session includes the
-  # occupant: "-u" and "-H" put it in /proc/<pid>/cmdline, "--netrc-file" and
-  # "--config <path>" put a readable path there and the secret on a filesystem,
-  # and a here-string would make bash materialise a temp file for it.
-  if [ "${1:-}" = '--auth-stdin' ]; then shift; auth=(--config -); fi
-  # THE STATUS, NOT JUST THE FAILURE. "could not fetch" is true of a refused
-  # connection, a timeout and a 401 alike, and on 2026-09-25 it described a 401
-  # for a day while the cause was looked for in the network. curl's own
-  # "(22) ... error: 401" goes to stderr and into the journal, but the line this
-  # script prints is the one anybody reads first, so it carries the number.
-  #
-  # ONE REQUEST, not two. The obvious shape -- a --write-out call for the code
-  # beside the real one for the body -- is WRONG HERE and was written that way
-  # first: with --auth-stdin the credential arrives on this process's stdin, a
-  # pipe, and the first curl CONSUMES it, so the second would run
-  # unauthenticated and report a 401 caused by the measurement itself. So the
-  # code is appended to the body in a single call and split off afterwards, and
-  # -f is dropped because the status is now judged here rather than by curl.
-  local out body code
-  # --max-filesize, because THIS CLIENT DISTRUSTS THE THING IT IS FETCHING. The
-  # whole point of the check is that the server may be serving something other
-  # than what we built; a root process buffering an unbounded body from it into a
-  # shell variable is the checker handing the subject a lever. 4 MiB is far above
-  # any gated index.html and far below anything worth worrying about. Raised in
-  # response to a security review, 2026-09-25 -- nothing was exploited, and the
-  # absence of a bound was simply never considered.
-  out="$(curl -sS --max-time 30 --max-filesize 4194304 \
-              -w '\n%{http_code}' "${auth[@]}" "$@" "${url}" 2>/dev/null)" ||
-    out=''
-  code="${out##*$'\n'}"
-  body="${out%$'\n'*}"
-  case "${code}" in
-    2??) ;;
-    *) die "could not fetch '${url}' to verify what is served (HTTP ${code:-000}).
-A 401 here means the request carried no usable credential; an empty status means
-nothing answered" ;;
-  esac
-  case "${body}" in
-    *"${MARKER}"*) ;;
-    *) die "'${url}' is serving a client with no ${MARKER} marker: the web root is not in effect" ;;
-  esac
-}
+# THIS USED TO BE AN HTTP FETCH OF THE SESSION'S OWN FRONT DOOR, and the reason it is not
+# any more is not tidiness. That fetch needed a credential on any instance with basic
+# auth, and it CANNOT GET ONE where it runs: measured 2026-09-25, in a unit with mount
+# namespacing the FIRST ExecStartPost= is handed a namespace with the unit's own
+# credential directory not mounted -- [[first-execstartpost-has-no-credentials]], and
+# private/diagnose-401.sh reproduces it in a second. The consequence was an hour of a
+# HEALTHY desktop being torn down in a loop, 55 times, and it would have broken the one
+# real user. It also needed root, and a firewall exemption for root, to make a request
+# the firewall exists to refuse.
+#
+# The owner's ruling, 2026-09-26: "reading selkies directly is fine, we'll revisit if we
+# think we can't trust it." Two premises he asked about, both verified: Selkies runs
+# exactly once per session ("/api/switch" changes streaming mode inside the same process,
+# so the line cannot go stale), and the web root cannot be rewritten from inside a
+# session, because ProtectSystem=strict makes /usr read-only and writing it as the slot
+# user was refused when tried.
+#
+# WHAT THIS LAYER IS HONESTLY WORTH, because a check's limits belong beside it:
+#
+#   * It sees a web root Selkies REFUSED -- absent, present-but-empty,
+#     present-without-index, or a directory the session's own uid cannot traverse. All
+#     four are announced as the warning below; provoke them with
+#     private/redarm-selkies-webroot-fallback.sh.
+#   * It sees a web root Selkies accepted that is NOT THE ONE WE BUILT, because the
+#     announcement carries the path and the path is compared. "It accepted something"
+#     is not the property; a misconfigured instance would pass on the words alone.
+#   * It does NOT see an index.html that stats but will not open for the session's uid.
+#     Selkies' test is os.path.isdir() and os.path.isfile(), which are stat calls, so it
+#     announces acceptance and then serves an error for every request. The HTTP fetch
+#     this replaces did catch that. hdw4s-run-session covers it now, by reading the file
+#     as the uid that is about to exec the server -- which is where the uid is derived
+#     rather than assumed. Do not delete that line thinking this one covers it.
+#   * It is not forgery-proof against the OCCUPANT. Anything in the session's cgroup can
+#     write to the journal under this invocation, so a shell inside the desktop could
+#     print the sentence below. That is not what this guards: an occupant who has a
+#     shell already has the session, and cannot touch the web root. It guards against
+#     Selkies silently declining a web root we thought it had taken.
+#
+# THE INSTRUMENT HAS TO BE SEEN FINDING SOMETHING, and here that is not a manner of
+# speaking. Measured on a development container, systemd 255.4-1ubuntu8.17, by
+# private/measure-invocation-journal.sh: journalctl exits 1 BOTH for "nothing matched"
+# and for "I could not read the journal at all" -- identical status, identical empty
+# output, the difference only on stderr. So an empty result here cannot be read as "the
+# server said nothing". This prints a nonce to its own stderr, which lands in the
+# journal under this same invocation, and asks for it in the SAME query: until the nonce
+# comes back, an empty answer means the query is not known to work and is reported as
+# "could not tell", never as a pass.
+#
+# AND IT IS GROUPED BY INVOCATION. _SYSTEMD_INVOCATION_ID is the discriminator: a unit
+# with Restart= interleaves starts, and an ungrouped read mixes them -- that produced two
+# wrong conclusions on 2026-09-25. systemd puts INVOCATION_ID in the environment of every
+# Exec line, so this needs no lookup, no credential, and no particular position in the
+# Exec sequence. Measured in FIRST ExecStartPost position, which is the one the
+# credential was missing from.
+cmd_announced_gate() {
+  local inst="$1"
+  # DERIVED the same way "gate" and "provision" derive it, and compared exactly. A
+  # constant here would be a wrong answer waiting for a second web root to exist.
+  local expect="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${inst}"
+  local inv="${INVOCATION_ID:-}"
+  [ -n "${inv}" ] ||
+    die "INVOCATION_ID is not set, so this start cannot be told apart from any
+other: run this from the session unit, which is the only caller that can name
+its own invocation. Refusing rather than reading a journal that mixes starts."
+  # Overridable so the suite can exercise this logic, because a check whose logic
+  # no test can reach is a check nobody has seen go red. Same reason
+  # HDW4S_SELKIES_PY and HDW4S_INCARNATION_DIR are overridable.
+  local jctl="${HDW4S_JOURNALCTL:-journalctl}"
+  local budget="${HDW4S_ANNOUNCED_GATE_WAIT:-60}"
 
-# "serving" with the URL and the credential derived, run by the unit as root.
-#
-# IT RUNS AS ROOT ON PURPOSE, and that is the whole reason this subcommand
-# exists rather than the four lines it replaces inside hdw4s-run-session. A
-# desktop may no longer open a connection to a session port on this machine --
-# the firewall's sessions_out chain refuses it, because every other visitor's
-# desktop used to be one unauthenticated request away. The session's own check
-# of its own front door is the one connection of that shape that is legitimate,
-# and the way it is told apart from the occupant's is that it is made by root:
-# the occupant of an ephemeral slot is in no sudo-capable group and cannot
-# become root, and on a named session anyone who can would be able to flush the
-# table anyway.
-#
-# So: do not move this back inside the session, and do not run it without the
-# "!" prefix in the unit. Either one puts it back on the occupant's uid, where
-# the firewall refuses it -- and it fails CLOSED, so the symptom is every
-# session on the machine refusing to start, with this file's message.
-#
-# The port comes from the environment, which systemd fills from
-# /etc/hdw4s/<instance>.conf OUTSIDE the namespace. It cannot be read from that
-# file here: the session unit hides /etc/hdw4s with InaccessiblePaths=, and "!"
-# keeps the mount namespace.
-cmd_serving_gate() {
-  local inst="$1" port="${HDW4S_PORT:-}"
-  [ -n "${port}" ] ||
-    die "HDW4S_PORT is not set: this must be run from the session unit, which
-takes it from /etc/hdw4s/${inst}.conf"
+  # WHY THERE IS A WAIT AT ALL, and why its expiry is a FAILURE. Selkies logs this
+  # decision from initialize_app(), before it binds its port -- so the line comes early,
+  # but not before this runs: measured, the gate is spawned 180-250 ms into a 90-second
+  # start, because NotifyAccess=all lets anything in the desktop's cgroup send READY=
+  # and something does, and the server binds 0.7-1 s later. Sixty seconds is the same
+  # budget the HTTP fetch's /dev/tcp loop had. A loop that gave up and returned success
+  # would be the defect this whole area cost a day to; this one gives up and says which
+  # of two things it could not establish.
+  local nonce="hdw4s-probe-$$-${RANDOM}${RANDOM}"
+  echo "hdw4s-webroot: ${inst}: reading this start's web-root decision from the
+journal of invocation ${inv} (probe ${nonce})" >&2
 
-  # Wait for the server to bind. An earlier version of this did not, on the
-  # reasoning that ExecStartPost= runs after the readiness notification and the
-  # session notifies ready only once the port is bound. MEASURED FALSE on the
-  # first run: the check fired a second BEFORE "Selkies server running on
-  # http://127.0.0.1:<port>" appeared in the journal, failed to connect, and
-  # took the session down with it. The unit sets NotifyAccess=all, so anything
-  # in the desktop's cgroup can send READY= and something evidently does --
-  # which makes "started" a claim about the wrong thing and makes any ordering
-  # argument here worthless. So the wait is explicit and this check depends on
-  # no ordering at all.
-  #
-  # Sixty seconds, the same budget the equivalent loop inside the session had.
-  # A refusal from the firewall arrives instantly and repeatedly, so a guard
-  # that wrongly refuses this costs a minute per session and then says so
-  # loudly, rather than passing quietly.
-  for _ in $(seq 1 60); do
-    (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null && break
-    sleep 1
+  # ONE QUERY FOR BOTH SENTENCES AND THE PROBE, so the three are always read from the
+  # same snapshot, and journalctl does the filtering: only matching lines are ever
+  # buffered here. The checker must not read an unbounded stream from the thing it
+  # distrusts into a shell variable.
+  local pat="${nonce}|Using custom web_root directory: |web_root directory .* not found or missing index"
+  local ticks=$(( budget * 4 )) i hits probe='' accepted refused
+  for (( i = 0; i < ticks; i++ )); do
+    hits="$("${jctl}" "_SYSTEMD_INVOCATION_ID=${inv}" --case-sensitive=yes \
+              --grep="${pat}" --no-pager --output=cat 2>/dev/null || :)"
+    case "${hits}" in *"${nonce}"*) probe='seen' ;; esac
+    refused="$(printf '%s\n' "${hits}" |
+               grep -F 'not found or missing index' | head -n1 || :)"
+    if [ -n "${refused}" ]; then
+      die "the streaming server REFUSED the web root for ${inst} and is serving the
+stock, ungated client. It said: ${refused}
+A session that serves the stock client is taken over by the next arrival without
+being asked, which is the one thing the gate exists to prevent -- so this start
+is stopped rather than allowed up looking healthy. Check that
+'${expect}/index.html' exists and that the session's own uid can traverse to it."
+    fi
+    accepted="$(printf '%s\n' "${hits}" |
+                sed -n 's/.*Using custom web_root directory: //p' | head -n1 || :)"
+    if [ -n "${accepted}" ]; then
+      # THE PATH, NOT JUST THE WORDS. "Using custom web_root directory:" proves it
+      # accepted SOME directory; a misconfigured instance -- one pointed at another
+      # session's tree, say -- would pass a check that only matched the sentence.
+      [ "${accepted}" = "${expect}" ] ||
+        die "the streaming server accepted a DIFFERENT web root for ${inst}: it
+announced '${accepted}' and this session's own tree is '${expect}'. Whatever it is
+serving is not the gated client this start built, so the session is stopped."
+      echo "hdw4s-webroot: ${inst}: the streaming server announced '${expect}' as its web root"
+      return 0
+    fi
+    sleep 0.25
   done
 
-  # No credential configured -- every ephemeral slot, because "hdw4s auth"
-  # refuses one for a slot by design. Ask plainly.
-  # THREE CONDITIONS THAT ARE NOT THE SAME THING, and conflating them cost a
-  # day. "No credential is configured" is a positive, complete statement about
-  # this instance -- every ephemeral slot, because "hdw4s auth" refuses one for
-  # a slot by design -- and it is the other branch, not a fallback. The other
-  # two are FAILURES: under HDW4S_AUTH=basic they mean "a credential is required
-  # and I cannot get it", and answering that by quietly asking anyway verifies a
-  # weaker property and then reports the consequence -- a 401 -- as though the
-  # server were unreachable. That is a check that stopped checking and blamed
-  # the subject. Its sibling in hdw4s-run-session already refuses to start
-  # unauthenticated for exactly these conditions; this diverged from it, and the
-  # divergence is what made the defect invisible.
-  if [ "${HDW4S_AUTH:-none}" != 'basic' ]; then
-    cmd_serving "http://127.0.0.1:${port}/"
-    return
-  fi
-  [ -n "${CREDENTIALS_DIRECTORY:-}" ] ||
-    die "this instance is configured for basic auth but no credential was
-passed to this check, so what is served cannot be verified as the gated client"
-  # ABSENT AND FORBIDDEN ARE DIFFERENT FAILURES AND NEED DIFFERENT REPAIRS, and
-  # "[ -r ]" is one bit for two errnos. Saying the wrong one is not a cosmetic
-  # fault: the first version of this message asserted "this process lacks the
-  # privilege to traverse to it", which sent a day of work down a capability
-  # path -- two capabilities granted, both measured not to help, because the
-  # path was never there to be forbidden. So the two are tested separately and
-  # the message names which one happened.
-  if [ ! -e "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ]; then
-    die "this instance is configured for basic auth, but the credential
-directory is NOT MOUNTED in this context: '${CREDENTIALS_DIRECTORY}' does not
-contain hdw4s-auth. This is not a permission problem and no capability fixes
-it -- in a unit with mount namespacing the FIRST ExecStartPost= is given a
-namespace without the unit's own credential directory, while ExecStartPre= and
-a SECOND ExecStartPost= both have it. Reproduce in one second, with no desktop
-involved: private/diagnose-401.sh <target> <instance> R."
-  fi
-  [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ] ||
-    die "this instance is configured for basic auth and
-'${CREDENTIALS_DIRECTORY}/hdw4s-auth' EXISTS but will not open for this process.
-That is a genuine permission problem, unlike the absent case above -- the
-credential is staged owned by the instance user (0400, in a 0500 directory),
-so a reader that is neither that user nor privileged cannot read it."
-
-  # The same derivation the session itself uses, and it has to stay the same:
-  # an instance is the account name, stripped at the colon for an instance named
-  # "<user>:<session>" by a version that still created them.
-  local user pass
-  user="${inst%%:*}"
-  pass="$(cat "${CREDENTIALS_DIRECTORY}/hdw4s-auth")"
-  # curl's config format reads an unquoted value to end of line, which is right
-  # for what "hdw4s auth" mints -- base64 with "=/+" removed, so [A-Za-z0-9]
-  # only -- and wrong for anything carrying a quote, a backslash or whitespace,
-  # which it would re-interpret. Refuse rather than authenticate with a silently
-  # mangled credential: a 401 from a mangled secret looks identical to an
-  # ungated client and would stop the session for the wrong reason.
-  case "${user}${pass}" in
-    *[!A-Za-z0-9_.-]*)
-      die "the basic-auth credential contains characters this check cannot pass
-to curl without quoting ambiguity, so the served client cannot be verified" ;;
-  esac
-  # Down a pipe, never in argv: /proc/<pid>/cmdline is readable by every process
-  # of this uid. cmd_serving hands its own stdin straight to curl without
-  # reading it, so the bytes live in one pipe and one process.
-  printf 'user = %s:%s\n' "${user}" "${pass}" |
-    cmd_serving "http://127.0.0.1:${port}/" --auth-stdin
+  # THE EXPIRY, AND IT IS TWO DIFFERENT ANSWERS. Neither is "accepted".
+  [ -n "${probe}" ] ||
+    die "could not read this start's own journal: ${budget}s of asking
+journalctl for invocation ${inv} never returned even this check's own probe line
+(${nonce}), which it printed to its own stderr. So an empty answer about the web
+root says nothing about the web root -- the instrument is not known to work here.
+This is reported as a failure because a check that cannot run must not pass."
+  die "the streaming server said nothing about its web root within ${budget}s.
+This check's own probe line came back from the journal of invocation ${inv}, so
+the read works and the sentence genuinely is not there -- which is NOT the same
+as acceptance and is not treated as it. Either the server never reached the point
+where it decides (look for an earlier failure in this start) or its announcement
+has changed wording, in which case this check must be re-derived from
+selkies/stream_server.py rather than relaxed."
 }
 
 [ "$#" -ge 1 ] || usage
@@ -447,7 +407,6 @@ case "$1" in
            cmd_build ${dir_flag} "${1}" \
                      "${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${1}" \
                      "${2:-Desktop}" ;;
-  serving) shift; [ "$#" -ge 1 ] || usage; cmd_serving "$@" ;;
-  serving-gate) shift; [ "$#" -ge 1 ] || usage; cmd_serving_gate "$1" ;;
+  announced-gate) shift; [ "$#" -ge 1 ] || usage; cmd_announced_gate "$1" ;;
   *) usage ;;
 esac

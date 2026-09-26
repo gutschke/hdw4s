@@ -2086,13 +2086,23 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   RUNDIR="${SB}/run"
   HDW4S_INCARNATION_DIR="${SB}/run/hdw4s-incarnation"
   HDW4S_WEBROOT_DIR="${SB}/webroot"
-  mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}/eph0" "${HDW4S_WEBROOT_DIR}/eph1"
-  # A running NAMED desktop in the table throughout, and it is not decoration.
-  # Only hdw4s-ephemeral@.service pulls in the publisher, and only an ephemeral
-  # slot gets a web root to publish into, so a named desktop can never satisfy
-  # this check. Without the restriction the command reported every running
-  # desktop as broken -- measured against a real machine, where it buried the
-  # one slot that was actually wrong among rows that never could be right.
+  mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}/eph0" \
+           "${HDW4S_WEBROOT_DIR}/eph1" "${HDW4S_WEBROOT_DIR}/alice"
+  # A running NAMED desktop in the table throughout, and it IS the census now.
+  #
+  # This group used to assert the opposite: that alice was skipped, because
+  # "only hdw4s-ephemeral@.service pulls in the publisher, and only an ephemeral
+  # slot gets a web root to publish into". Both halves stopped being true --
+  # hdw4s@.service has Wants=/After= the publisher since ea4f6f6 and a web root
+  # since 78e12c6 -- and while they were false and this restriction was still in
+  # place, the check reported green at all six timer ticks through an outage in
+  # which every named desktop with basic auth was failing to start.
+  #
+  # The old comment's warning is kept, because it is still the failure mode to
+  # watch: on a machine whose named desktops predate those commits, every one of
+  # them is reported broken at once, and a check that is always red is read as
+  # noise. The difference is that those rows are now TRUE and a restart repairs
+  # them. The arms below assert both directions on alice for exactly that reason.
   printf '%s\n' '0 eph0 ephemeral' '1 eph1 ephemeral' '2 alice desktop' > "${SLOTS}"
 
   # THE POOL AROUND THE SESSIONS, stood in for so this group can go on being
@@ -2139,16 +2149,32 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   printf '%s\n' 'aaaa' > "${HDW4S_INCARNATION_DIR}/eph0"
   printf '%s\n' 'bbbb' > "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation"
   printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  printf '%s\n' 'cccc' > "${HDW4S_WEBROOT_DIR}/alice/hdw4s-incarnation"
+  printf '%s\n' 'cccc' > "${HDW4S_INCARNATION_DIR}/alice"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
-  is  'a sound pool passes'            "${rc}" '0'
-  # Two, not three: the named desktop beside them is running and is not counted.
-  # The number is the whole control here -- a restriction that skipped everything
-  # would pass this group just as quietly, and would say "0".
-  has 'and says how many it looked at'  "${out}" '2 running'
+  is  'a sound pool and a sound named desktop pass' "${rc}" '0'
+  # THREE, and the number is the whole control here: a census that skipped a
+  # kind of session would pass this group just as quietly, and would say two.
+  # It said two until 2026-09-26, with the named desktop unexamined.
+  has 'and says how many it looked at'  "${out}" '3 running'
   # The door count is the half that was missing: "0 running" used to be printed
-  # by an idle pool AND by a pool that could not start anything.
+  # by an idle pool AND by a pool that could not start anything. It still counts
+  # the POOL only, which is what it says -- alice has no door of this kind.
   has 'and how many doors are listening' "${out}" '2 ephemeral slot(s), 2 with a listening door'
-  hasnt 'the running named desktop is not accused' "${out}" 'alice'
+  hasnt 'a sound named desktop is not accused' "${out}" 'alice is running and publishes'
+
+  # THE RED ARM OF THE WIDENING, and it is the state the outage was in: a named
+  # desktop running with nothing published. It is the row that was invisible.
+  rm -f "${HDW4S_WEBROOT_DIR}/alice/hdw4s-incarnation"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a named desktop publishing nothing FAILS the check' "${rc}" '1'
+  has 'and is named'                                       "${out}" 'alice is running and publishes no incarnation token'
+  # The repair has to name the unit that runs a NAMED desktop. A message naming
+  # the ephemeral unit sends somebody to restart something that does not exist.
+  has 'and names the named unit, not the ephemeral one'    "${out}" 'systemctl restart hdw4s@alice.service'
+  printf '%s\n' 'cccc' > "${HDW4S_WEBROOT_DIR}/alice/hdw4s-incarnation"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'and passes again once it publishes one' "${rc}" '0'
 
   # The defect itself: a live slot publishing nothing.
   rm -f "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation" "${HDW4S_INCARNATION_DIR}/eph1"
@@ -2160,7 +2186,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # Which way it fails is the property. It reports; it does not restart, because
   # a check that repairs what it finds is one nobody reads, and the fact worth
   # having is that a slot ran for two hours without a publisher.
-  has   'it counts the failures against the total' "${out}" '1 of 2 running session(s) failed'
+  has   'it counts the failures against the total' "${out}" '1 of 3 running session(s) failed'
 
   # Pinned independently of the half below it. With the record left in place the
   # served file is the only thing missing, so this cannot be satisfied by the
@@ -2341,6 +2367,212 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   has 'and says there is no pool'            "${out}" 'no ephemeral slots configured'
 )
 
+echo '== the web-root check reads THIS start, and silence is never a pass =='
+# Written from the failure, 2026-09-25: the check that stood here fetched the
+# session's own front door over HTTP, needed a basic-auth credential to do it,
+# and could not get one -- in a unit with mount namespacing the FIRST
+# ExecStartPost= has no credential directory. It asked anyway, got a 401,
+# reported it as "could not fetch", and tore a HEALTHY desktop down 55 times in
+# an hour. Every named desktop with "hdw4s auth" configured was broken on a
+# stock install.
+#
+# It reads the streaming server's own startup announcement now. The failure that
+# matters about THAT shape is the opposite one: a read that finds nothing looks
+# exactly like a server that said nothing, and treating either as acceptance is
+# the defect this whole area cost a day to. Measured on a development container with
+# private/measure-invocation-journal.sh: journalctl exits 1 both when nothing
+# matched and when it could not read the journal at all, so the status cannot
+# tell them apart -- which is why the check prints a probe of its own and
+# requires it back.
+#
+# journalctl is stubbed, so this group tests the DECISION and not systemd. What
+# it cannot test is the position and the namespace; those are measured on a real
+# machine by private/measure-invocation-journal.sh and by a live start.
+#
+# "set +e": every arm here runs a command that is MEANT to fail, and under this
+# file's errexit the first refusal takes the whole run with it -- which showed as
+# a group that stopped after its two green lines, and a suite that reported
+# nothing for everything after it.
+( set +e
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  mkdir -p "${d}/webroot/probe" "${d}/bin"
+  # THE STUB IS A JOURNAL, not a switch: it answers the --grep pattern the check
+  # actually passes, and echoes the probe line back only when PROBE=yes -- which
+  # is how the "I could not read the journal" arm is expressed without needing an
+  # unreadable journal.
+  cat > "${d}/bin/journalctl" <<'STUB'
+#!/bin/bash
+pat=''
+for a in "$@"; do case "${a}" in --grep=*) pat="${a#--grep=}";; esac; done
+# The check builds its pattern as "<nonce>|<sentence>|<sentence>", so the nonce
+# is the first alternative. Taking it from the pattern is what lets the stub
+# play the journal back rather than be told the answer.
+nonce="${pat%%|*}"
+[ "${PROBE:-yes}" = 'yes' ] && echo "hdw4s-webroot: probe ${nonce}"
+[ -z "${SAID:-}" ] || printf '%s\n' "${SAID}"
+exit 0
+STUB
+  chmod +x "${d}/bin/journalctl"
+  gate() {
+    env INVOCATION_ID='abcd1234' \
+        HDW4S_JOURNALCTL="${d}/bin/journalctl" \
+        HDW4S_WEBROOT_DIR="${d}/webroot" \
+        HDW4S_ANNOUNCED_GATE_WAIT='1' \
+        PROBE="${PROBE:-yes}" SAID="${SAID:-}" \
+        "${ROOT}/hdw4s-webroot" announced-gate probe 2>&1
+  }
+
+  # THE POSITIVE CONTROL FIRST. If acceptance does not pass, every refusal below
+  # is a check that is always red and says nothing.
+  SAID="INFO:server:Using custom web_root directory: ${d}/webroot/probe"
+  out="$( ( gate ) 2>&1 )"; rc=$?
+  is  'the announced acceptance of OUR web root passes' "${rc}" '0'
+  has 'and says which directory'                        "${out}" "${d}/webroot/probe"
+
+  # THE PATH, NOT JUST THE WORDS. "Using custom web_root directory:" proves the
+  # server accepted SOME directory; an instance pointed at another session's tree
+  # would pass a check that matched only the sentence.
+  SAID="INFO:server:Using custom web_root directory: ${d}/webroot/somebody-else"
+  out="$( ( gate ) 2>&1 )"; rc=$?
+  is  'acceptance of a DIFFERENT directory fails' "${rc}" '1'
+  has 'and names both paths'                      "${out}" 'somebody-else'
+  has 'and says which one was expected'           "${out}" "${d}/webroot/probe"
+
+  # The refusal. This is the sentence the whole layer exists to catch: the server
+  # declines the web root, logs one warning, and serves the stock ungated client
+  # while every other check on the machine reports health.
+  SAID="WARNING:server:web_root directory ${d}/webroot/probe not found or missing index.html"
+  out="$( ( gate ) 2>&1 )"; rc=$?
+  is  'an announced refusal fails'      "${rc}" '1'
+  has 'and says the client is ungated'  "${out}" 'stock, ungated client'
+  has 'and quotes what the server said' "${out}" 'not found or missing index.html'
+
+  # SILENCE, WITH THE INSTRUMENT PROVEN. The probe comes back, so the read works
+  # and the sentence genuinely is not there -- which is not acceptance.
+  SAID=''
+  out="$( ( gate ) 2>&1 )"; rc=$?
+  is  'a server that said nothing about its web root fails' "${rc}" '1'
+  has 'and says it could not tell, not that it was fine'    "${out}" 'said nothing about its web root'
+
+  # SILENCE, WITH THE INSTRUMENT UNPROVEN, and this is the arm that separates two
+  # things journalctl's exit status cannot. The two messages must differ, because
+  # the repairs differ: one is "look for an earlier failure in this start", the
+  # other is "the reader is broken".
+  PROBE='no' SAID=''
+  out="$( ( PROBE='no' gate ) 2>&1 )"; rc=$?
+  is    'a journal read that cannot even find its own probe fails' "${rc}" '1'
+  has   'and blames the instrument'                                "${out}" 'could not read this start'
+  hasnt 'and does NOT say the server was silent'                   "${out}" 'said nothing about its web root'
+  PROBE='yes'
+
+  # No invocation to read. Without it the query would return whatever the journal
+  # holds for every start the unit has ever had, which is how two wrong
+  # conclusions were reached on 2026-09-25.
+  out="$( ( env INVOCATION_ID='' HDW4S_JOURNALCTL="${d}/bin/journalctl" \
+                HDW4S_WEBROOT_DIR="${d}/webroot" HDW4S_ANNOUNCED_GATE_WAIT='1' \
+                "${ROOT}/hdw4s-webroot" announced-gate probe ) 2>&1 )"; rc=$?
+  is  'a run with no INVOCATION_ID refuses'   "${rc}" '1'
+  has 'and says it will not read mixed starts' "${out}" 'mixes starts'
+)
+
+echo '== both session units check the web root, and neither needs a credential to =='
+# Written from the failure twice over. The named unit never ran
+# "hdw4s-webroot gate" at all, so the layer that asserts this start's published
+# identity -- the one whose absence gives the owner's own desktop a reconnect
+# card on every returning tab -- was running on ephemeral slots only. And the
+# check that DID run there was an HTTP fetch that could not get its credential.
+( set +e
+  for u in hdw4s@.service hdw4s-ephemeral@.service; do
+    f="${ROOT}/${u}"
+    # A harness that greps for something absent from every file proves nothing,
+    # so show the pattern can match before reporting that it does.
+    probe="$(printf 'ExecStartPre=!/usr/lib/hdw4s/hdw4s-webroot gate %%i\n' |
+             grep -c 'hdw4s-webroot gate')"
+    is "the probe can see a gate line (${u})" "${probe}" '1'
+    grep -qE '^ExecStartPre=!/usr/lib/hdw4s/hdw4s-webroot gate %i$' "${f}" \
+      && ok "${u} checks the web root it was given" \
+      || bad "${u} checks the web root it was given" \
+             'no "ExecStartPre=!hdw4s-webroot gate %i" -- nothing asserts this start'"'"'s identity'
+    grep -qE '^ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate %i$' "${f}" \
+      && ok "${u} reads what the server accepted" \
+      || bad "${u} reads what the server accepted" 'no announced-gate line'
+    # THE NAME THAT WAS REMOVED, searched for deliberately. A unit still calling
+    # "serving-gate" would fail at start with "usage:", which is loud -- but a
+    # COMMENT still describing a fetch that no longer happens is silent, and that
+    # is the thing this project keeps paying for.
+    found="$(grep -n 'serving-gate' "${f}" || :)"
+    case "${found}" in
+      ''|*'until 2026-09-26'*) ok "${u} does not cite the removed serving-gate as current" ;;
+      *) bad "${u} does not cite the removed serving-gate as current" "${found}" ;;
+    esac
+  done
+)
+
+echo '== a session start that keeps failing has to stop, and this one could not =='
+# MEASURED 2026-09-25: hdw4s@.service looped 55 times in an hour and would have
+# gone on for ever. Its failure cycle is about ninety-five seconds -- up to
+# TimeoutStartSec= to fail, then RestartSec= before the next try -- against
+# systemd's DEFAULT start-limit window of ten seconds, so the burst was never
+# reached inside the window and NRestarts went 1, 2, back to 1. Nothing would
+# ever have latched it; a person noticed.
+#
+# So the property is not "there is a StartLimit line". It is that the window is
+# long enough to hold a burst of this unit's OWN cycles, derived from the unit's
+# own timeouts rather than compared against a number somebody typed here.
+( set +e
+  f="${ROOT}/hdw4s@.service"
+  # The reason has to still be true, or this test outlives it as a rule nobody
+  # can explain: with Restart=no there is no loop to latch.
+  grep -qE '^Restart=on-failure$' "${f}" \
+    && ok 'the named unit still restarts on failure' \
+    || bad 'the named unit still restarts on failure' \
+           'the reason this test exists has moved; re-derive it before editing'
+
+  # SECTION-AWARE, because that is where this went first: StartLimitIntervalSec=
+  # and StartLimitBurst= are [Unit] directives, and a copy in [Service] is a line
+  # that looks like a guard and is not one. systemd-analyze verify does not say
+  # so, so nothing else here would notice.
+  sect="$(awk -F= '/^\[/ { s=$0; next }
+                   /^StartLimit(IntervalSec|Burst)=/ { print s, $1 }' "${f}" | sort -u)"
+  is 'both start-limit directives are in [Unit]' \
+     "$(printf '%s\n' "${sect}" | grep -cv '^\[Unit\]')" '0'
+
+  secs() {  # a systemd time span, in seconds, for the three spellings used here
+    case "$1" in
+      *min) echo $(( ${1%min} * 60 ));;
+      *h)   echo $(( ${1%h} * 3600 ));;
+      *s)   echo "${1%s}";;
+      *)    echo "$1";;
+    esac
+  }
+  get() { sed -n "s/^$1=//p" "${f}" | tail -n1; }
+  window="$(secs "$(get StartLimitIntervalSec)")"
+  burst="$(get StartLimitBurst)"
+  cycle=$(( $(secs "$(get TimeoutStartSec)") + $(secs "$(get RestartSec)") ))
+  need=$(( burst * cycle ))
+
+  # The harness has to have read real numbers, or every comparison below is
+  # arithmetic on empty strings that happens to come out true.
+  [ "${window}" -gt 0 ] && [ "${burst}" -gt 1 ] && [ "${cycle}" -gt 0 ] \
+    && ok "the unit's own numbers were read (window ${window}s, burst ${burst}, cycle ${cycle}s)" \
+    || bad "the unit's own numbers were read" \
+           "window [${window}] burst [${burst}] cycle [${cycle}]"
+
+  [ "${window}" -ge "${need}" ] \
+    && ok "and the window holds ${burst} of them (${window}s >= ${need}s)" \
+    || bad 'and the window holds a burst of them' \
+           "window ${window}s cannot hold ${burst} cycles of ${cycle}s: this unit
+       would loop for ever, which is what it did on 2026-09-25"
+
+  # THE RED ARM, against systemd's own default, which is the value this unit
+  # carried while it looped. If the arithmetic above cannot fail, it is not a
+  # check -- and a default is exactly the number nobody writes down.
+  window='10'
+  [ "${window}" -ge "${need}" ] \
+    && bad 'CONTROL: the default ten-second window is rejected' 'it passed' \
+    || ok  'CONTROL: the default ten-second window is rejected'
+)
+
 echo '== the tool and the router agree about what a setting means =='
 # HDW4S_IDLE_DAYS was read by both and parsed differently: the tool took "30d"
 # and the router read the same line with int(), swallowed the failure and used
@@ -2414,7 +2646,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=382   # update when tests are added; a wrong number is the point
+EXPECTED=414   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

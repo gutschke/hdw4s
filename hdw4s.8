@@ -1,6 +1,6 @@
 .\" generated with Ronn-NG/v0.9.1
 .\" http://github.com/apjanke/ronn-ng/tree/0.9.1
-.TH "HDW4S" "8" "January 2000" "hdw4s" "hdw4s"
+.TH "HDW4S" "8" "September 2026" "hdw4s" "hdw4s"
 .SH "NAME"
 \fBhdw4s\fR \- headless GNOME desktop streamed to a web browser
 .SH "SYNOPSIS"
@@ -383,7 +383,7 @@ The rules cover the whole port block rather than the ports currently in use\. A 
 .P
 The table also stops one desktop reaching another\. A desktop is meant to be reached through its own front door, which is where authentication happens; before this rule existed, anything running inside one session could open a connection straight to another session's port over loopback, with no credential \-\- past the reverse proxy for a named desktop, and past every boundary there is for an ephemeral one, whose occupant is a stranger running untrusted code\. The rule matches the \fIsender\fR: a connection to a session port is refused when it comes from a process inside \fBhdw4s\.slice\fR, which is every desktop and nothing else\. The relay that serves the sessions runs under \fBsystem\.slice\fR and is unaffected, as is anything an administrator runs\. Nothing per session is recorded, so there is nothing here to go stale when a slot moves\.
 .P
-Two exceptions, both deliberate\. Connections made as \fBroot\fR from inside a session are allowed, because the session's own startup check of what its server is serving is made that way; the occupant of an ephemeral slot is in no sudo\-capable group and cannot become root, and on a named desktop anyone who could would be able to flush the table outright\. And the rule needs a kernel that can match a socket by its cgroup \-\- 6\.11 or newer inside a container\. Where that is not available, \fBhdw4s firewall \-\-apply\fR says so on standard error and \fBhdw4s firewall \-\-check\fR reports \fBcross\-reach NOT CLOSED\fR\. There is no port\-range fallback for this one: the relay talks to the same ports the desktops do, so a rule written by port would either close the product or close nothing\.
+Two exceptions, both deliberate\. Connections made as \fBroot\fR from inside a session are allowed\. This was added for the session's own startup check of what its server was serving, which was made that way; that check now reads the streaming server's own startup announcement out of the journal and opens no connection at all, so the exception has no caller in what this package ships and is kept only because removing a firewall rule deserves its own measurement\. It concedes little either way: the occupant of an ephemeral slot is in no sudo\-capable group and cannot become root, and on a named desktop anyone who could would be able to flush the table outright\. And the rule needs a kernel that can match a socket by its cgroup \-\- 6\.11 or newer inside a container\. Where that is not available, \fBhdw4s firewall \-\-apply\fR says so on standard error and \fBhdw4s firewall \-\-check\fR reports \fBcross\-reach NOT CLOSED\fR\. There is no port\-range fallback for this one: the relay talks to the same ports the desktops do, so a rule written by port would either close the product or close nothing\.
 .P
 A desktop that needs to reach a service elsewhere goes out over the network and authenticates like any other client\.
 .P

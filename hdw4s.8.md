@@ -751,8 +751,12 @@ unaffected, as is anything an administrator runs. Nothing per session is
 recorded, so there is nothing here to go stale when a slot moves.
 
 Two exceptions, both deliberate. Connections made as `root` from inside a
-session are allowed, because the session's own startup check of what its server
-is serving is made that way; the occupant of an ephemeral slot is in no
+session are allowed. This was added for the session's own startup check of what
+its server was serving, which was made that way; that check now reads the
+streaming server's own startup announcement out of the journal and opens no
+connection at all, so the exception has no caller in what this package ships and
+is kept only because removing a firewall rule deserves its own measurement. It
+concedes little either way: the occupant of an ephemeral slot is in no
 sudo-capable group and cannot become root, and on a named desktop anyone who
 could would be able to flush the table outright. And the rule needs a kernel
 that can match a socket by its cgroup -- 6.11 or newer inside a container.

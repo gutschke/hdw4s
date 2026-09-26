@@ -839,23 +839,34 @@ cmd_check() {
     # first cannot be looked up by the readers below and the second has no
     # account to run. This command is about sessions that are running now.
     case "${inst}" in *:*) continue;; esac
-    # Ephemeral slots only, and this is a restriction rather than a shortcut.
-    # Only hdw4s-ephemeral@.service Wants= the publisher, and only an ephemeral
-    # slot is given a web root of its own to publish into -- a named desktop has
-    # neither, so it can never satisfy this check. Run without the restriction
-    # against a real machine it reported every running named desktop as broken,
-    # which is the same as reporting nothing: a check that is always red is read
-    # as noise, and the one row that mattered was in the middle of it.
+    # EVERY SESSION THAT IS RUNNING, named desktops included. This arm was
+    # restricted to the ephemeral pool by "in_ephemeral_pool ... || continue"
+    # until 2026-09-26, and the restriction was justified by a comment whose two
+    # factual halves were BOTH false by then:
     #
-    # The property is an ephemeral-pool property in the first place. A returning
-    # tab has to ask "is this the desktop I had" because a slot is REUSED behind
-    # one well-known hostname; a named desktop is one person's, at their own
-    # name, and is not handed to somebody else when it restarts.
-    # in_ephemeral_pool(), because the comment above says why: the question is
-    # whether a slot is REUSED behind one hostname. The authoring slot is not --
-    # nothing is ever minted onto it -- so it belongs out of this census with
-    # the named desktops, however ephemeral its machinery is.
-    in_ephemeral_pool "$(type_of "${inst}")" || continue
+    #   "only hdw4s-ephemeral@.service Wants= the publisher"  -- hdw4s@.service
+    #   has Wants=/After=hdw4s-incarnation@%i.service since ea4f6f6.
+    #   "only an ephemeral slot is given a web root of its own" -- hdw4s@.service
+    #   has ExecStartPre=+hdw4s-webroot provision %i since 78e12c6.
+    #
+    # It also argued that the PROPERTY is an ephemeral one, because a returning
+    # tab only has to ask "is this the desktop I had" for a slot that is reused
+    # behind one hostname. That was wrong too, and the measurement is in
+    # hdw4s@.service's own header: 2026-09-25, on the owner's named desktop, a
+    # hidden tab that comes back meets the reconnect card EVERY TIME, because the
+    # gate's resume path reads /hdw4s-incarnation and got a 404. A named desktop
+    # needs the token for the same reason and was the one place nothing checked it.
+    #
+    # WHAT THE OLD COMMENT GOT RIGHT, and it is the part to keep: run this
+    # unrestricted against a machine whose named desktops predate those two
+    # commits and it reports every one of them as broken -- and a check that is
+    # always red is read as noise, with the one row that matters lost in the
+    # middle of it. The difference is that those rows are now TRUE: such a
+    # desktop IS broken, and a restart repairs it, which is what each row says to
+    # do. If this ever goes red on a whole machine again, restart the sessions
+    # rather than narrowing this back -- and if a session type is ever added that
+    # genuinely cannot publish a token, exclude THAT TYPE by name here, with the
+    # reason, instead of restoring a restriction whose reason has expired.
     state="$(systemctl show -p ActiveState --value "$(unit_of "${inst}")" \
              2>/dev/null || echo unknown)"
     [ "${state}" = 'active' ] || continue
@@ -932,13 +943,16 @@ cmd_check() {
   # reading of an idle pool and was also the reading of a pool that could not
   # start anything; saying how many doors are listening separates the two in the
   # one line an operator actually reads.
+  # "live" counts every running session, named desktops included, since
+  # 2026-09-26 -- so the sentence may not call them ephemeral. The clause that
+  # did has been dropped rather than reworded; the slot and door counts still
+  # describe the pool alone, which is what they say.
   if [ "${slot_total}" -gt 0 ]; then
     echo "hdw4s: ${slot_total} ephemeral slot(s), ${doors} with a listening door," \
          "${live} running; each running one publishes the identity its own" \
          'start recorded.'
   else
-    echo "hdw4s: no ephemeral slots configured; ${live} running ephemeral" \
-         'session(s).'
+    echo "hdw4s: no ephemeral slots configured; ${live} running session(s)."
   fi
 }
 
