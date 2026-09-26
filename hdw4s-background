@@ -102,7 +102,7 @@ BAND_LO, BAND_HI = 29.0, 45.0
 # BASE is what moves between slots. Pinning the top rather than the lift is the
 # repair for a version of this that varied the lift and reached L* 49.3, which
 # private/redarm-background-band.py caught by rasterising and measuring.
-TOP_L = 34.5
+TOP_L = 37.0
 
 # The highest lightness any stop colour may be SPECIFIED at, as an input bound.
 # Slack above TOP_L, because compositing can only darken here -- every blob
@@ -146,116 +146,126 @@ def max_chroma(L, h):
     return lo
 
 
-def blob(i, hex_colour, cx, cy, r, alpha, falloff=1.0):
-    """One broad wash of colour -- deliberately NOT a spot.
+def veil(name, freq, seed, octaves, contrast, centre, kind="fractalNoise"):
+    """A turbulence field turned into a SOFT ALPHA MASK, so whatever colour is
+    painted through it arrives unevenly across the canvas.
 
-    THE FALL-OFF IS THE WHOLE POINT, and an earlier version got it wrong. Its
-    stops ran 1.00, 0.72, 0.34, 0.10, 0 across the radius, which puts most of
-    the change in the middle third and leaves a legible bright core: the owner
-    could point at where each colour had been placed and count them. A wash has
-    to be flattest where it is strongest. These stops hold near the peak for the
-    first half of the radius and then let go slowly, which is what a stain on
-    parchment does -- it is saturated across its body and vague at its edge.
+    SCALE THE MASK ABOUT ITS CENTRE. This is stated as two numbers because
+    getting it wrong produced both of the looks the owner rejected, in opposite
+    directions, and neither was an amplitude problem.
 
-    librsvg 2.58, the version GNOME 46 rasterises the wallpaper with, renders
-    mix-blend-mode and feBlend as well (measured; private/measure-svg-features.py).
-    Plain source-over alpha is used anyway: on a dark field screen drives the
-    overlaps towards white, off the brand and out of the top of the band."""
-    return (
-        '  <radialGradient id="b%d" cx="%.3f" cy="%.3f" r="%.3f">'
-        '<stop offset="0" stop-color="%s" stop-opacity="%.3f"/>'
-        '<stop offset="0.45" stop-color="%s" stop-opacity="%.3f"/>'
-        '<stop offset="0.72" stop-color="%s" stop-opacity="%.3f"/>'
-        '<stop offset="0.90" stop-color="%s" stop-opacity="%.3f"/>'
-        '<stop offset="1" stop-color="%s" stop-opacity="0"/>'
-        '</radialGradient>\n'
-        % (i, cx, cy, r, hex_colour, alpha,
-           hex_colour, alpha * 0.88 ** falloff,
-           hex_colour, alpha * 0.55 ** falloff,
-           hex_colour, alpha * 0.20 ** falloff, hex_colour))
+    fractalNoise's channels sit around 0.5 with a fairly narrow spread, so the
+    naive matrix -- weights summing to 1, no offset -- yields an alpha of about
+    0.5 everywhere: a FLAT 50% TINT. Several of those stacked just average into
+    one muddy colour, which is what the first attempt at this did. Shifting the
+    offset down instead, as the version before it did (weights 1.7, offset
+    -0.60), puts the alpha near 0.25 with a spread wider than that, so it CLIPS
+    AT ZERO over most of the canvas -- and clipping is what makes a findable
+    edge, because the mask stops being a gradient and becomes a shape.
 
+    So `contrast` multiplies the distance from 0.5 and `centre` says where the
+    result sits: alpha = contrast * (x - 0.5) + centre, which the matrix
+    expresses as weights summing to `contrast` and an offset of
+    `centre - contrast/2`. That gives a wide, smooth swing that spends most of
+    its range in the middle, and it is why the same number can now be asked to
+    produce a whole-canvas lean rather than a scatter of blotches.
 
-def stain(name, freq, seed, octaves, gain, bias, kind="fractalNoise"):
-    """A turbulence field turned into an ALPHA MASK, so that whatever colour is
-    painted through it arrives unevenly -- the mottling.
+    THE OPERANDS OF feComposite ARE NOT INTERCHANGEABLE, and having them the
+    wrong way round is a bug this file shipped. `A in B` keeps A's COLOUR where
+    B is opaque. The colour matrix above zeroes the R, G and B rows -- it builds
+    an alpha channel and nothing else -- so `m in SourceGraphic`, which is what
+    was written, painted BLACK through the rect's shape and threw the rect's
+    fill away entirely. Every layer that was supposed to be a colour was a dark
+    smudge, which is exactly what the owner reported: "large dark stains
+    sprinkled irregularly". The fill colours in this file did nothing at all
+    until this was turned round.
 
-    THE NOISE WAS RENDERING ALL ALONG AND THAT WAS NOT THE QUESTION WORTH
-    ASKING. The owner reported it as "(almost) as if there was no noise", and
-    this project has previously shipped a background whose noise really was
-    dropped, so an absent effect and a too-faint one had to be told apart before
-    anything was tuned: they need opposite repairs. Measured by rendering one
-    generated file twice, once with the noise layer and once with that single
-    element deleted, the old grain's LARGEST difference anywhere on the field
-    was 3 parts in 255. It rendered. Nobody could see it.
-
-    So the numbers below are amplitudes, not a change of technique. `gain` and
-    `bias` are the alpha row of the colour matrix: turbulence channels sit
-    around 0.5, so alpha lands near 0.5 * gain + bias, and a bias that puts that
-    near zero keeps only the upper part of the field -- which is what makes
-    patches rather than an even veil."""
+    OCTAVES ARE THE SPATIAL BAND, and that is the other half. Each octave adds
+    detail at half the previous scale, so a low frequency with three octaves
+    does NOT give you large regions -- it gives you large regions plus
+    fist-sized blotches plus coin-sized ones, and the middle band is precisely
+    what reads as sprinkled-on. One octave for the regional fade; two for the
+    fine grain, where detail is the point."""
     return (
         '  <filter id="%s" x="0" y="0" width="100%%" height="100%%">\n'
-        '   <feTurbulence type="%s" baseFrequency="%.4f" numOctaves="%d"'
+        '   <feTurbulence type="%s" baseFrequency="%.5f" numOctaves="%d"'
         ' seed="%d" result="t"/>\n'
         '   <feColorMatrix in="t" type="matrix" values="0 0 0 0 0  0 0 0 0 0'
         '  0 0 0 0 0  %.3f %.3f %.3f 0 %.3f" result="m"/>\n'
-        '   <feComposite in="m" in2="SourceGraphic" operator="in"/></filter>\n'
+        '   <feComposite in="SourceGraphic" in2="m" operator="in"/></filter>\n'
         % (name, kind, freq, octaves, seed,
-           gain * 0.5, gain * 0.35, gain * 0.15, bias))
+           contrast * 0.5, contrast * 0.35, contrast * 0.15,
+           centre - contrast / 2.0))
 
 
 def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
-    """A FADED PIECE OF STAINED LEATHER PARCHMENT -- the owner's words for the
-    target, and the most useful sentence in the brief.
+    """ONE DYE, WEATHERED UNEVENLY FOR CENTURIES -- the owner's description, and
+    it is a mechanism rather than a mood, which is why it is worth following
+    literally.
 
-    Three broad colour washes over a base, then three turbulence fields: a
-    coarse one that darkens, a coarse one that lightens, and a fine one for the
-    leather's grain. The washes carry the identity -- which desktop this is --
-    and the noise carries the character. Neither may be in your face.
+    A skin is dyed ONE colour. That is the base rect, and its hue is the slot's.
+    Then parts of it are left in the sun, the wind and the rain to different
+    degrees, so different REGIONS drift different distances from that one dye:
+    the exposed parts lose chroma and gain lightness, the sheltered parts stay
+    deeper and cooler. That is what the region layers are -- the same dye at
+    several points along the brand arc, each painted through its own very broad,
+    very soft mask. Not several dyes applied in spots.
 
-    WHY THE COLOUR STILL SEPARATES TWO DESKTOPS once the foci have been told to
-    stop being visible. The identity was never in the spots; it is in the
-    overall cast of the field and in which way the cast leans. Widening the
-    washes moves that cast from a spot you can point at to a bias you read
-    without looking, which is the effect that was wanted in the first place.
+    THREE SPATIAL BANDS, AND THE MIDDLE ONE IS DELIBERATELY EMPTY:
+
+      very large   whole-canvas regions, one octave, no boundary anywhere.
+                   This is the fade, and it was missing entirely.
+      middle       coin-to-fist blotches. NOTHING lives here on purpose. Every
+                   version that put something here read as spots sprinkled over
+                   the background rather than as weathering.
+      very fine    surface grain, a few pixels across, what makes it read as
+                   skin rather than as a gradient.
+
+    HUE VARIES WITHIN ONE IMAGE, which the previous design could not do. It
+    picked one hue per desktop and washed that same hue about, so a background
+    leaned one way as a whole and never had a region leaning another. The
+    separation between two desktops does not suffer from this and probably
+    gains: a desktop is now identified by WHICH regions lean WHICH way, which is
+    a richer signal than a single hue and does not depend on the brand having
+    many hues -- and the brand has two.
 
     THE VIEWBOX IS 480x270 AND THE IMAGE IS NOT. feTurbulence's baseFrequency is
-    per USER UNIT, so a stain's size follows the viewBox and not the pixel size.
-    Change one without the other and the mottling becomes either wallpaper
-    paisley or invisible dust. The nominal pixel size is large so that the
-    loader rasterises something worth scaling."""
-    defs = "".join(blob(i, c, cx, cy, r, al, spec.get("falloff", 1.0))
-                   for i, (c, cx, cy, r, al) in enumerate(spec["blobs"]))
-    defs += stain("stainD", spec["stain_freq"], spec["stain_seed"], 3,
-                  1.7, -0.60, "fractalNoise")
-    defs += stain("stainL", spec["stain_freq"] * 2.1, spec["stain_seed"] ^ 0x3a5f,
-                  3, 1.7, -0.68, "fractalNoise")
-    defs += stain("grain", spec["grain_freq"], spec["grain_seed"], 3,
-                  1.8, -0.72, "turbulence")
+    per USER UNIT, so every scale above follows the viewBox and not the pixel
+    size. Change one without the other and the fade becomes paisley or the grain
+    becomes invisible."""
+    defs = "".join(
+        veil("rg%d" % i, f, s, o, g, b)
+        for i, (_c, f, s, o, g, b, _a) in enumerate(spec["regions"]))
+    gc, gf, gs, go, gg, gb, ga = spec["grain"]
+    defs += veil("grain", gf, gs, go, gg, gb, "fractalNoise")
+    # STACKING versus BLENDING, which is the structural question itself. Plain
+    # source-over is "stacking": each region hides what is under it in
+    # proportion to its alpha. `multiply` is "blending": each region tints what
+    # is under it, which is literally what a dye or a stain does to a material
+    # and is the reason it is worth asking about rather than assuming.
+    # librsvg 2.58 renders mix-blend-mode (measured, private/measure-svg-
+    # features.py), so this is a real choice on the target and not a browser
+    # trick that would vanish on the desktop.
+    mode = {"blend": "multiply", "soft": "overlay"}.get(spec.get("variant"))
+    style = (' style="mix-blend-mode:%s"' % mode) if mode else ""
     rects = "".join(
-        ' <rect width="%d" height="%d" fill="url(#b%d)"/>\n'
-        % (units_w, units_h, i) for i in range(len(spec["blobs"])))
+        ' <rect width="%d" height="%d" fill="%s" filter="url(#rg%d)"'
+        ' opacity="%.3f"%s/>\n' % (units_w, units_h, c, i, a, style)
+        for i, (c, _f, _s, _o, _g, _b, a) in enumerate(spec["regions"]))
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d"'
         ' viewBox="0 0 %d %d" preserveAspectRatio="none">\n'
         ' <defs>\n%s </defs>\n'
+        ' <!-- the dye the whole skin started out -->\n'
         ' <rect width="%d" height="%d" fill="%s"/>\n'
+        ' <!-- centuries of sun, wind and rain, in that order of scale -->\n'
         '%s'
-        ' <!-- The staining. Two coarse fields, one down and one up, at\n'
-        '      different scales and different seeds, so that neither reads as a\n'
-        '      pattern; then a fine field for the grain of the leather. -->\n'
-        ' <rect width="%d" height="%d" fill="%s" filter="url(#stainD)"'
-        ' opacity="%.3f"/>\n'
-        ' <rect width="%d" height="%d" fill="%s" filter="url(#stainL)"'
-        ' opacity="%.3f"/>\n'
+        ' <!-- the grain of the skin itself -->\n'
         ' <rect width="%d" height="%d" fill="%s" filter="url(#grain)"'
         ' opacity="%.3f"/>\n'
         '</svg>\n'
         % (w, hgt, units_w, units_h, defs, units_w, units_h, spec["base"],
-           rects,
-           units_w, units_h, spec["stain_dark"], spec["stain_dark_a"],
-           units_w, units_h, spec["stain_light"], spec["stain_light_a"],
-           units_w, units_h, spec["grain_colour"], spec["grain_a"]))
+           rects, units_w, units_h, gc, ga))
 
 
 def solid(colour=FALLBACK, w=1920, hgt=1080):
@@ -331,107 +341,88 @@ def choose(instance, token, kind=None):
     return spec_for(rung, weight, layout_seed)
 
 
-# WHERE THE LEAD COLOUR SITS, one archetype per rung. This is the SECOND
-# channel and it is the one that actually does the work at ten slots: the brand
-# offers two hue families and an arc of about ninety degrees between them, so
-# ten slots can be at most nine degrees apart in hue -- not enough on its own.
-# Composition is not so constrained. Two desktops that are up together differ in
-# WHERE their colour is even when their hues are close, and that is a difference
-# a viewer reads instantly and a colour-blind viewer reads too.
-#
-# The archetype is the SLOT'S, so concurrent slots differ by construction. The
-# jitter around it is the START'S, so the next occupant of a slot does not
-# inherit the last one's exact picture.
-ARCHETYPES = (
-    (0.15, 0.20, 0.85, 0.75),   # lead top-left,     mate bottom-right
-    (0.82, 0.18, 0.15, 0.80),   # lead top-right,    mate bottom-left
-    (0.20, 0.82, 0.80, 0.20),   # lead bottom-left,  mate top-right
-    (0.80, 0.80, 0.18, 0.22),   # lead bottom-right, mate top-left
-    (0.50, 0.12, 0.50, 0.95),   # lead top-centre,   mate below
-    (0.08, 0.50, 0.95, 0.50),   # lead left edge,    mate right edge
-    (0.50, 0.88, 0.50, 0.08),   # lead bottom-centre, mate above
-    (0.92, 0.50, 0.10, 0.50),   # lead right edge,   mate left edge
-)
-
-
 def spec_for(rung, weight, seed, top=None, tweak=None):
-    """Turn a rung on the brand arc and a layout seed into a drawable field."""
+    """Turn a rung on the brand arc and a layout seed into a weathered skin."""
     top = TOP_L if top is None else top
-    # SWEEP KNOBS, and they exist for one reason: the owner asked to be shown
-    # samples and told which is better, optometrist fashion, rather than be
-    # handed one guess. Every default is 1.0, so the shipped picture is the
-    # picture this file would draw without them.
-    tw = dict(wash_r=1.0, wash_a=1.0, stain_scale=1.0, stain_a=1.0,
-              grain_a=1.0, falloff=1.0)
+    # VARIANTS ARE WHOLE CONSTRUCTIONS, not settings. The owner asked for A/B
+    # questions that compare TECHNIQUES and not only numbers -- "they can also
+    # check if blending is better than stacking" -- and he is right that this is
+    # the better use of his attention: a pair that differs by a number can only
+    # tell us which number, and only if the direction was already right. Last
+    # round was twelve numeric questions inside a space that was itself wrong,
+    # and none of the answers could reach what he wanted.
+    tw = dict(fade_scale=1.0, fade_a=1.0, drift=1.0, grain_a=1.0,
+              grain_scale=1.0, regions=3, variant="stack")
     tw.update(tweak or {})
+
     t = rung / float(RUNGS)
+    h_dye = arc(t)
 
-    # THE TWO ENDS OF THE ARC, EVERY TIME. The lead colour walks the arc; its
-    # companion sits half an arc away, so every desktop carries a cool region
-    # and a warm one and the PAIR rotates with the slot. One colour per desktop
-    # is what made the old sheet read as four purples and two rusts.
-    h_lead = arc(t)
-    h_mate = arc(t + 0.5)
-    h_third = arc(t + 0.22)
-
-    # A THIRD CHANNEL, FREE: how dark the whole field is. Alternate rungs sit at
-    # opposite ends of a small range, so neighbouring slots -- which are three
-    # rungs apart and therefore closest in hue -- are furthest apart in weight.
-    base_L = 11.0 + 12.0 * (weight % WEIGHTS) / (WEIGHTS - 1.0)
-    # Every blob's lightness is a fraction of the way from this slot's base up
-    # to the shared ceiling, so a dark slot still has internal contrast and a
-    # light one still cannot break the ceiling.
-    lead_L = base_L + (top - base_L) * 0.82
-    mate_L = base_L + (top - base_L) * 0.62
-    third_L = top
+    # THE DYE, and everything else is this colour weathered. base_L is the
+    # slot's own weight; the ladder is coprime with the hue rungs so the pair
+    # does not repeat until the fortieth slot.
+    base_L = 23.0 + 7.0 * (weight % WEIGHTS) / (WEIGHTS - 1.0)
 
     def col(L, h, frac):
         # Chroma as a fraction of what the hue can carry at that lightness,
-        # found by bisection rather than tabulated, so that moving a hue cannot
-        # silently move it outside the gamut.
+        # found by bisection, so moving a hue cannot silently leave the gamut.
         return lch_to_hex(L, max_chroma(L, h) * frac, h)
 
-    lx, ly, mx, my = ARCHETYPES[(rung + weight) % len(ARCHETYPES)]
+    def pick(shift, lo, hi):
+        return lo + ((seed >> shift) % 1000) / 1000.0 * (hi - lo)
 
-    def jit(shift, amount):
-        """The start's own wobble around the slot's archetype. Small on
-        purpose: big enough that two occupants of one slot are not the same
-        picture, small enough that the slot's composition is still the slot's."""
-        return (((seed >> shift) % 1000) / 1000.0 - 0.5) * 2 * amount
+    # HOW EACH REGION HAS WEATHERED. Sun bleaches: lighter, and markedly LESS
+    # chroma, because fading is loss of dye and not a change of colour. Rain and
+    # shade keep it deep and push it the other way along the arc. The drifts are
+    # in ARC FRACTIONS, not degrees, so they stay on the brand however the arc
+    # is redrawn.
+    weather = (
+        # (drift along the arc, lightness vs base, chroma fraction, opacity)
+        (-0.10, -0.16, 0.66, 0.55),   # sheltered: deeper, richer, cooler
+        (+0.13, +0.80, 0.30, 0.62),   # sun-bleached: lighter, washed out
+        (+0.30, +0.50, 0.44, 0.50),   # weathered furthest along the arc
+        (-0.04, +1.00, 0.18, 0.38),   # the palest patch, barely any dye left
+    )[:max(2, min(4, int(tw["regions"])))]
 
-    # BROAD. Radii near and beyond the whole canvas, so no wash has an edge
-    # inside the picture and none of them has a core you can point at. An
-    # earlier version used radii of 0.40 and 0.15 and the owner could count the
-    # foci; the identity is meant to be the cast of the field, not three dots.
-    blobs = [
-        (col(lead_L, h_lead, 0.70), lx + jit(0, 0.10), ly + jit(7, 0.10),
-         (1.05 + jit(14, 0.12)) * tw["wash_r"], 0.85 * tw["wash_a"]),
-        (col(mate_L, h_mate, 0.55), mx + jit(21, 0.12), my + jit(28, 0.12),
-         (0.95 + jit(35, 0.12)) * tw["wash_r"], 0.68 * tw["wash_a"]),
-        (col(third_L, h_third, 0.66), 0.5 + jit(42, 0.32), 0.5 + jit(48, 0.32),
-         (0.70 + jit(54, 0.10)) * tw["wash_r"], 0.42 * tw["wash_a"]),
-    ]
+    regions = []
+    hottest = base_L
+    for i, (dr, dL, cf, op) in enumerate(weather):
+        h = arc(t + dr * tw["drift"])
+        L = base_L + (top - base_L) * dL if dL > 0 else base_L * (1.0 + dL)
+        L = max(4.0, min(top, L))
+        hottest = max(hottest, L)
+        # VERY LOW FREQUENCY, ONE OCTAVE. Features larger than the canvas, so
+        # each region is a lean across the whole picture rather than a patch in
+        # it, and nothing lands in the middle band.
+        # TWO TO FOUR REGIONS ACROSS THE CANVAS. Lower than this and the whole
+        # picture sits on one smooth part of the noise, which is a flat tint and
+        # not a fade; higher and the regions shrink towards the middle band that
+        # reads as blotches. The band is set HERE, by frequency, and kept clean
+        # by numOctaves=1 -- a third octave puts coin-sized detail back however
+        # low this number is.
+        freq = (0.0062 + pick(i * 9, -0.0022, 0.0030)) / tw["fade_scale"]
+        regions.append((col(L, h, cf), freq,
+                        (seed >> (i * 7 + 3)) % 65536, 1,
+                        3.2, 0.46, op * tw["fade_a"]))
+
+    # THE GRAIN OF THE SKIN. High frequency: at the 4x between viewBox and
+    # pixels, a baseFrequency near 1 is a feature a few pixels across, which is
+    # grain. The previous 0.04 was a feature ~100px wide -- that is not grain,
+    # that is dust, and it was the one thing he rejected outright in the
+    # questionnaire (he chose NO grain over a lot of it).
+    grain = (col(min(top, base_L + 16.0), h_dye, 0.30),
+             (0.95 + pick(50, -0.25, 0.35)) / tw["grain_scale"],
+             (seed >> 41) % 65536, 2, 1.60, 0.50, 0.16 * tw["grain_a"])
+
     return {
-        "base": col(base_L, h_lead, 0.64),
-        "blobs": blobs,
-        # The staining. Dark is a deep, almost colourless version of the slot's
-        # own hue so a patch reads as age rather than as another colour; light
-        # is warmer, the way a worn spot on leather goes.
-        "stain_dark": lch_to_hex(max(4.0, base_L - 11.0),
-                                 max_chroma(max(4.0, base_L - 11.0), h_mate) * 0.30,
-                                 h_mate),
-        "stain_dark_a": 0.33 * tw["stain_a"],
-        "stain_light": col(min(top, base_L + (top - base_L) * 1.00), h_third, 0.45),
-        "stain_light_a": 0.20 * tw["stain_a"],
-        "grain_colour": lch_to_hex(top, max_chroma(top, h_lead) * 0.18, h_lead),
-        "grain_a": 0.16 * tw["grain_a"],
-        "stain_seed": (seed >> 3) % 65536,
-        "stain_freq": (0.0030 + ((seed >> 17) % 100) / 100.0 * 0.0018)
-                      / tw["stain_scale"],
-        "grain_seed": (seed >> 23) % 65536,
-        "grain_freq": 0.040 + ((seed >> 31) % 100) / 100.0 * 0.025,
-        "top_L": third_L,
-        "falloff": tw["falloff"],
+        "base": col(base_L, h_dye, 0.58),
+        "regions": regions,
+        "grain": grain,
+        "variant": tw["variant"],
+        # The brightest lightness this field ACTUALLY uses, not the ceiling it
+        # was allowed. A guard pointed at the limit rather than at the value can
+        # never refuse anything.
+        "top_L": max(hottest, min(top, base_L + 16.0)),
     }
 
 
@@ -512,7 +503,7 @@ def cmd_check(args):
     top = args.top_lightness if args.top_lightness is not None else TOP_L
     bad = []
     print("%-6s %-5s %-9s %-9s %-9s %-9s %s"
-          % ("slot", "rung", "base", "lead", "mate", "third", "top L*"))
+          % ("slot", "rung", "dye", "sheltered", "bleached", "weathered", "top L*"))
     for slot in range(1, args.slots + 1):
         rung = (slot * STRIDE) % RUNGS
         spec = spec_for(rung, slot % WEIGHTS, 0x5eed5eed, top=top)
@@ -520,8 +511,8 @@ def cmd_check(args):
         if top > SPEC_CEILING:
             bad.append(slot)
         print("%-6d %-5d %-9s %-9s %-9s %-9s %5.1f%s"
-              % (slot, rung, spec["base"], spec["blobs"][0][0],
-                 spec["blobs"][1][0], spec["blobs"][2][0], top,
+              % (slot, rung, spec["base"], spec["regions"][0][0],
+                 spec["regions"][1][0], spec["regions"][2][0], top,
                  "  ABOVE THE CEILING" if top > SPEC_CEILING else ""))
 
     if args.slots > RUNGS:
