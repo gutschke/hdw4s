@@ -198,6 +198,101 @@ def veil(name, freq, seed, octaves, contrast, centre, kind="fractalNoise"):
            centre - contrast / 2.0))
 
 
+def micro_filter(name, kind, freq, seed, contrast, centre, macro_freq=0.006):
+    """THE SURFACE OF THE MATERIAL, built six different ways.
+
+    WHY THE TECHNIQUE AND NOT THE SETTING. The owner: "the microstructure is
+    still a bit on the splotchy side. maybe raw perlin isn't quite right? i am
+    not sure." Looking at the field at TRUE pixel size rather than on a contact
+    sheet settles what he is seeing: isotropic Perlin has exactly two looks and
+    neither is leather. Run it fine and it is sensor grain -- an even speckle
+    with no structure at all. Run it coarse and it is blobs. There is no setting
+    in between that becomes fibre, because fibre is DIRECTIONAL and the field is
+    not. That is a property of the construction, so no sweep reaches it.
+
+    (One hypothesis worth recording as FALSIFIED rather than quietly dropped: it
+    was suggested that the splotch came from type="turbulence", which takes the
+    absolute value of each octave and folds the field into cells. That would
+    indeed look splotchy -- but this generator already used type="fractalNoise"
+    everywhere, so it cannot be the cause. Checked before changing anything.)
+
+    So the kinds below differ in KIND. The cheap and most promising one is
+    `fibre`: feTurbulence's baseFrequency accepts TWO numbers, x and y, and an
+    x-frequency far lower than the y-frequency stretches every feature into a
+    thread. One attribute, and the field stops being isotropic."""
+    if kind == "perlin":
+        # The control: what he has been looking at.
+        body = ('   <feTurbulence type="fractalNoise" baseFrequency="%.4f"'
+                ' numOctaves="2" seed="%d" result="n"/>\n' % (freq, seed))
+    elif kind == "fibre":
+        # Stretched on one axis: threads running across the hide.
+        body = ('   <feTurbulence type="fractalNoise" baseFrequency="%.4f %.4f"'
+                ' numOctaves="2" seed="%d" result="n"/>\n'
+                % (freq * 0.035, freq * 1.6, seed))
+    elif kind == "weave":
+        # Two fibre fields at right angles, multiplied together: a hide has
+        # structure in both directions and neither dominates.
+        body = ('   <feTurbulence type="fractalNoise" baseFrequency="%.4f %.4f"'
+                ' numOctaves="2" seed="%d" result="a"/>\n'
+                '   <feTurbulence type="fractalNoise" baseFrequency="%.4f %.4f"'
+                ' numOctaves="2" seed="%d" result="b"/>\n'
+                '   <feBlend in="a" in2="b" mode="multiply" result="n"/>\n'
+                % (freq * 0.035, freq * 1.6, seed,
+                   freq * 1.6, freq * 0.035, seed ^ 0x2b7f))
+    elif kind == "displaced":
+        # The grain FOLLOWS the weathering instead of sitting on top of it
+        # independently: a fine field pushed around by the same large-scale
+        # field that decides where the sheet is faded. On a real hide the
+        # surface and the staining are not independent, and every version so far
+        # has drawn them as though they were.
+        body = ('   <feTurbulence type="fractalNoise" baseFrequency="%.4f"'
+                ' numOctaves="1" seed="%d" result="big"/>\n'
+                '   <feTurbulence type="fractalNoise" baseFrequency="%.4f %.4f"'
+                ' numOctaves="2" seed="%d" result="fine"/>\n'
+                '   <feDisplacementMap in="fine" in2="big" scale="26"'
+                ' xChannelSelector="R" yChannelSelector="G" result="n"/>\n'
+                % (macro_freq, seed ^ 0x51a3, freq * 0.05, freq * 1.4, seed))
+    elif kind == "pores":
+        # Not threads but pits: a fine field driven hard and then eroded, so
+        # what survives is a scatter of small dark points rather than a veil.
+        body = ('   <feTurbulence type="fractalNoise" baseFrequency="%.4f"'
+                ' numOctaves="1" seed="%d" result="t"/>\n'
+                '   <feMorphology in="t" operator="erode" radius="0.35"'
+                ' result="n"/>\n' % (freq * 1.1, seed))
+    elif kind == "hatch":
+        # NOT NOISE AT ALL. A ruled pattern, faded in and out by a slow field,
+        # so it reads as the tooth of the material rather than as randomness.
+        # Included because "is it noise at all?" is the question he asked, and a
+        # candidate that answers it has to not be noise.
+        return (
+            '  <pattern id="%s-p" width="3" height="3"'
+            ' patternUnits="userSpaceOnUse" patternTransform="rotate(24)">\n'
+            '   <rect width="3" height="3" fill="#000" fill-opacity="0"/>\n'
+            '   <rect width="3" height="0.6" fill="#fff" fill-opacity="0.5"/>\n'
+            '  </pattern>\n'
+            '  <filter id="%s" x="0" y="0" width="100%%" height="100%%">\n'
+            '   <feTurbulence type="fractalNoise" baseFrequency="%.4f"'
+            ' numOctaves="1" seed="%d" result="n"/>\n'
+            '   <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0'
+            '  0 0 0 0 0  %.3f %.3f %.3f 0 %.3f" result="m"/>\n'
+            '   <feComposite in="SourceGraphic" in2="m" operator="in"/>'
+            '</filter>\n'
+            % (name, name, macro_freq * 2.2, seed,
+               contrast * 0.5, contrast * 0.35, contrast * 0.15,
+               centre - contrast / 2.0))
+    else:                                     # "none" -- the control
+        return ""
+
+    return (
+        '  <filter id="%s" x="0" y="0" width="100%%" height="100%%">\n'
+        '%s'
+        '   <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0'
+        '  0 0 0 0 0  %.3f %.3f %.3f 0 %.3f" result="m"/>\n'
+        '   <feComposite in="SourceGraphic" in2="m" operator="in"/></filter>\n'
+        % (name, body, contrast * 0.5, contrast * 0.35, contrast * 0.15,
+           centre - contrast / 2.0))
+
+
 def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
     """ONE DYE, WEATHERED UNEVENLY FOR CENTURIES -- the owner's description, and
     it is a mechanism rather than a mood, which is why it is worth following
@@ -239,7 +334,20 @@ def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
     gc, gf, gs, go, gg, gb, ga = spec["grain"]
     defs += veil("grain", gf, gs, go, gg, gb, "fractalNoise")
     mc, mf, ms, mo, mg, mb, ma = spec["micro"]
-    defs += veil("micro", mf, ms, mo, mg, mb, "fractalNoise")
+    mk = spec.get("micro_kind", "perlin")
+    defs += micro_filter("micro", mk, mf, ms, mg, mb,
+                         macro_freq=spec["regions"][0][1])
+    if mk == "hatch":
+        mc = "url(#micro-p)"
+    # A rect whose filter does not exist is NOT skipped -- it is drawn
+    # UNFILTERED, which here means a flat wash of the grain colour over the
+    # whole picture. Measured: the "no micro texture" control came out 11.9
+    # parts in 255 away from the textured version, in the wrong direction,
+    # because the control was painting a solid sheet. A control that is louder
+    # than the thing it controls for is worse than no control.
+    micro_rect = ("" if mk == "none" else
+                  ' <rect width="%d" height="%d" fill="%s" filter="url(#micro)"'
+                  ' opacity="%.3f"/>\n' % (units_w, units_h, mc, ma))
     # STACKING versus BLENDING, which is the structural question itself. Plain
     # source-over is "stacking": each region hides what is under it in
     # proportion to its alpha. `multiply` is "blending": each region tints what
@@ -265,11 +373,10 @@ def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
         ' <!-- the unevenness of the material, then its pores -->\n'
         ' <rect width="%d" height="%d" fill="%s" filter="url(#grain)"'
         ' opacity="%.3f"/>\n'
-        ' <rect width="%d" height="%d" fill="%s" filter="url(#micro)"'
-        ' opacity="%.3f"/>\n'
+        '%s'
         '</svg>\n'
         % (w, hgt, units_w, units_h, defs, units_w, units_h, spec["base"],
-           rects, units_w, units_h, gc, ga, units_w, units_h, mc, ma))
+           rects, units_w, units_h, gc, ga, micro_rect))
 
 
 def solid(colour=FALLBACK, w=1920, hgt=1080):
@@ -357,7 +464,8 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     # and none of the answers could reach what he wanted.
     tw = dict(fade_scale=1.0, fade_a=1.0, drift=1.0, grain_a=1.0,
               grain_scale=1.0, regions=3, variant="stack",
-              micro_a=1.0, tint_contrast=8.0, shade_a=1.0)
+              micro_a=1.0, tint_contrast=8.0, shade_a=1.0,
+              micro_kind="perlin")
     tw.update(tweak or {})
 
     t = rung / float(RUNGS)
@@ -493,6 +601,7 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
         "regions": regions,
         "grain": grain,
         "micro": micro,
+        "micro_kind": tw["micro_kind"],
         "variant": tw["variant"],
         # The brightest lightness this field ACTUALLY uses, not the ceiling it
         # was allowed. A guard pointed at the limit rather than at the value can
