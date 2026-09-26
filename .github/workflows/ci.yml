@@ -26,7 +26,14 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # fetch-depth: 0, because checks.sh reads COMMIT MESSAGES as well as files
+      # -- a push publishes history, and the containment rule was enforced on
+      # files and unenforced on messages until 2.4.0. The default shallow clone
+      # has no master to compare against, so the check would SKIP here forever,
+      # which is the loudest possible version of the failure it exists for.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Install build and check dependencies
         run: |
@@ -56,7 +63,10 @@ jobs:
       contents: write
 
     steps:
+      # Full history here too, for the same reason as the build job above.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Install build dependencies
         run: |

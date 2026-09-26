@@ -264,6 +264,26 @@ scan_ok() {
 # longer than a single argv entry is allowed to be on a big tree.
 scan_grep() { xargs -0 -r grep -Il "$@" < <(printf '%s\0' "${SCAN_FILES[@]}") || true; }
 
+# THE LOCAL-DETAIL PATTERN, IN ONE PLACE. It was written out twice -- once for
+# the file scan and once for the index -- and the two had already drifted: the
+# index copy was widened after a committed .pyc carried a home directory into
+# public history, and the file copy was not, so the narrower one had been
+# reporting clean about a class it does not look for. A third copy was about to
+# be added for commit messages, which is what made the drift worth fixing rather
+# than working around.
+#
+# Every alternative is written with a bracketed character so this file does not
+# match its own source -- the same trap as a process search containing its own
+# pattern -- which is why the scans below can include this file rather than
+# having to exclude it.
+#
+# The maintainer's own name is deliberately absent: it belongs in debian/control
+# and in the licence, and banning it would make every scan here cry wolf until
+# somebody turned them off.
+LOCAL_DETAIL_RE='ariadn[e]|atticu[s]|ct1[0-9][0-9]|10\.10\.[0-9]|172\.24\.[0-9]'
+LOCAL_DETAIL_RE="${LOCAL_DETAIL_RE}"'|/home/(markus|root)/|gutschke\.com'
+LOCAL_DETAIL_RE="${LOCAL_DETAIL_RE}"'|schlag[e]|van-aake[n]|proxmo[x]'
+
 # The browser-mode word for a private window must not appear in anything that
 # ships. It names privacy from other people using the same machine, which is not
 # what this session type offers -- it keeps one session's state out of the next
@@ -410,8 +430,7 @@ okif 'user-facing text says "pool", not the component name'
 # turned it off.
 begin
 if scan_ok 'local detail'; then
-  local_detail="$(scan_grep -E \
-      'ariadn[e]|atticu[s]|ct1[0-9][0-9]|10\.10\.[0-9]|172\.24\.[0-9]' 2>/dev/null)"
+  local_detail="$(scan_grep -E "${LOCAL_DETAIL_RE}" 2>/dev/null)"
   # This file names the estate in the comments explaining why it must not be
   # named, so it is exempted from its own scan. The path has NO leading "./"
   # any more: the list comes from git and from a walk that strips it, where it
@@ -467,13 +486,81 @@ else
   # time and no text review can see. A guard whose list omits the class of thing
   # that motivated it is decoration. Username-bearing paths, the estate's own
   # domain and its machine names are in scope too.
-  tracked_leak="$(git grep --cached -lE 'ariadn[e]|atticu[s]|ct1[0-9][0-9]|10\.10\.[0-9]|172\.24\.[0-9]|/home/(markus|root)/|gutschke\.com|schlag[e]|van-aake[n]|proxmo[x]' \
+  tracked_leak="$(git grep --cached -lE "${LOCAL_DETAIL_RE}" \
       -- ':(exclude).github/checks.sh' 2>/dev/null || true)"
   if [ -n "${tracked_leak}" ]; then
     printf '%s\n' "${tracked_leak}"
     bad 'containment' 'estate detail appears in the STAGED content of the files above'
   fi
   okif 'no privileged file, and no estate detail, in the index'
+fi
+
+# ESTATE DETAIL IN A COMMIT MESSAGE, which nothing here has ever looked at.
+#
+# THE GAP, and it is as old as this file: every scan above reads the INDEX or the
+# working tree. A push publishes HISTORY as well, and a commit message is in
+# neither of those places, so the containment rule has been enforced on files and
+# unenforced on messages from the beginning. A check that does not exist and a
+# check that has never rejected anything read identically from here.
+#
+# FOUND BY AUDITING A TREE FOR A PUBLIC RELEASE and not by anything automatic:
+# three messages on the release branch named a development container. The owner's
+# ruling on those three is worth recording because it is the reason this check
+# exists in the shape it does -- *"isn't a problem from a security point of view,
+# but it will trip future scripts that scan for leaks"*. So this is a check about
+# keeping later tooling honest, and the repair for a hit is cheap: substitute the
+# name and move on.
+#
+# THE SAME PATTERN AS THE FILE SCANS, read from LOCAL_DETAIL_RE rather than
+# written out again. A fourth copy of the list is how the first two came to
+# disagree with each other.
+#
+# WHAT IT COVERS: commits that are NOT yet on the published branch, because those
+# are the ones a push would add and the only ones anybody can still change. It is
+# deliberately not the whole history: a hit in something already published cannot
+# be repaired by failing this build, and a check that is red on every run for
+# something nobody can fix is one somebody turns off.
+#
+# IT SKIPS RATHER THAN PASSES when it cannot resolve the published branch -- a
+# shallow clone has no history to compare against, and reporting ok there would
+# be the loudest possible version of the failure this check exists for.
+begin
+if ! same_repo; then
+  skip 'commit messages' 'this tree is not a git repository of its own (a build copy) -- no history to read'
+else
+  msg_base=''
+  for ref in origin/master master; do
+    if git rev-parse --verify --quiet "${ref}" >/dev/null 2>&1; then
+      msg_base="${ref}"; break
+    fi
+  done
+  if [ -z "${msg_base}" ]; then
+    skip 'commit messages' 'neither origin/master nor master is present (a shallow clone?) -- history was NOT read'
+  else
+    # THE CONTROL, and it is not decoration. An empty range, an unreadable log
+    # and a pattern that matches nothing all produce the same silence, and two of
+    # those three are broken instruments. So the range is counted first and the
+    # count is reported, which is also what tells a reader whether the silence
+    # below is about anything at all.
+    msg_n="$(git rev-list --count "${msg_base}..HEAD" 2>/dev/null || echo 0)"
+    msg_hits=''
+    while read -r c; do
+      [ -n "${c}" ] || continue
+      hit="$(git log -1 --format='%s%n%b' "${c}" |
+             grep -niE "${LOCAL_DETAIL_RE}" || true)"
+      [ -z "${hit}" ] || msg_hits="${msg_hits}$(git log -1 --format='%h %s' "${c}")
+$(printf '%s\n' "${hit}" | sed 's/^/      /')
+"
+    done < <(git rev-list "${msg_base}..HEAD" 2>/dev/null)
+    if [ -n "${msg_hits}" ]; then
+      printf '%s' "${msg_hits}"
+      bad 'commit messages' \
+          "estate detail is in the message(s) above, and a push publishes them"
+    else
+      note 'commit messages' \
+        "no estate detail in ${msg_n} commit(s) not yet on ${msg_base}"
+    fi
+  fi
 fi
 
 # THE TOOLS THAT HELPED ARE NOT NAMED IN ANYTHING PUBLISHED -- not in code, not
