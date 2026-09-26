@@ -83,35 +83,33 @@ After=hdw4s-incarnation@%i.service
 # it. The rest of the bounding set still does real work: CAP_SYS_ADMIN,
 # CAP_SYS_MODULE, CAP_NET_ADMIN and everything else remain out, so mounting,
 # module loading and network reconfiguration stay impossible for uid 0 here.
-# CAP_DAC_READ_SEARCH is here for the ROOT Exec lines, not for the desktop.
-# systemd stages a unit's credentials under /run/credentials/<unit>, and the
-# path every credential traverses is mode 0000 root:root BY DESIGN -- systemd
-# relies on DAC-bypass rather than on permissions to keep it private. A uid-0
-# process whose bounding set lacks a DAC capability is judged by DAC like
-# anybody else and CANNOT traverse it. Measured on 2026-09-25: with the set
-# below lacking this, "ExecStartPost=!... serving-gate" found
-# $CREDENTIALS_DIRECTORY set and the directory unreachable, fell through to an
-# unauthenticated request, and Selkies answered 401 -- which failed the unit and
-# tore down a desktop that had started correctly. It is not a race: watched for
-# sixty seconds across thirty samples, the mode never changed.
+# NO DAC CAPABILITY HERE, and the reason is worth more than the line.
 #
-# CAP_DAC_OVERRIDE, and NOT the narrower CAP_DAC_READ_SEARCH, which is what
-# this line said first. Read-and-traverse bypass is what the access looks like
-# on paper -- a mode-0000 directory and a 0400 file, both only read -- and the
-# narrower word was chosen on that reasoning, against a diagnosis that had
-# measured only the wider one. IT DOES NOT WORK: with READ_SEARCH the
-# credential stayed unreachable and the check refused exactly as it did with no
-# capability at all. Measured here 2026-09-25. The reason is not established, so
-# this comment does not invent one; what is established is which word works.
-# Do not narrow it again without measuring, and if you do measure it, say so
-# here -- the appeal of the narrower spelling is obvious and will recur.
+# For several hours on 2026-09-25 this granted one (first CAP_DAC_READ_SEARCH,
+# then CAP_DAC_OVERRIDE) to let "ExecStartPost=!... serving-gate" read this
+# unit's own credential, on a diagnosis that the mode-0000 staging directory
+# could not be traversed by a uid-0 process without it. THAT WAS WRONG, and the
+# comment that stood here asserted the opposite with a "Measured" stamp --
+# which is the more dangerous artefact of the two, because the next reader
+# believes a comment.
 #
-# The blast radius is worth stating plainly rather than implying it
-# is nil -- capabilities bind only uid-0 processes here, the desktop itself runs
-# as the instance user and never holds them, and the set already grants
-# CAP_SETUID/CAP_SETGID, so a root Exec line in this unit could already become
-# any user. This adds nothing that set did not already imply.
-CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
+# What was actually measured, in production shape (nothing ahead of the gate,
+# Restart=no, three starts): it fails 3/3 WITH the capability, and succeeds 3/3
+# with a bare "ExecStartPost=!/bin/true" placed AHEAD of the gate. The deciding
+# fact is the gate's POSITION -- each Exec line is built with its own mount
+# namespace and the FIRST ExecStartPost does not have this unit's credential
+# directory mounted in it at all. The capability only turned EACCES into ENOENT:
+# it opened the placeholder and found an empty directory.
+#
+# So a capability bought nothing and granted real privilege for it. The earlier
+# reading that seemed to confirm it came from a diagnostic whose own probe sat in
+# first position and thereby pushed the gate to second, where it passes -- the
+# instrument changed the answer.
+#
+# The remaining fault is an ORDERING/OWNERSHIP one and is not repaired here; see
+# private/SESSION-STATE.md. Do not re-add a DAC capability to make this pass:
+# it has been tried twice and measured failing both times.
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
 DevicePolicy=closed
 # The GPU, where the machine has one. Both lines are inert on a machine without
 # one -- the "-" makes the bind optional, and a device rule for a class of nodes
