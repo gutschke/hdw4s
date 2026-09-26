@@ -3527,6 +3527,19 @@ def console_target(path):
     # a reflex trained somewhere else lands on the irreversible half.
     if len(parts) == 4 and parts[1] == b"sessions" and parts[2] and parts[3] == b"discard":
         return "discard", parts[2].decode("ascii", "replace")
+    # /sessions/new -- ASK FOR ANOTHER ONE.
+    #
+    # It is claimed HERE, and that is the whole of what stops it minting by
+    # accident. Everything this dispatch does not claim falls through to
+    # arrival(), which mints -- so before this line existed a GET of this
+    # address handed the visitor a desktop nobody had pressed for. Seen red:
+    # private/create-evidence/control-RED-before-create.txt.
+    #
+    # NEW, not "create" or "mint", because it is the word a person would type
+    # and it is not a verb: a verb in a URL reads as something the address
+    # itself does, and this address does nothing until a POST arrives.
+    if path in (b"/sessions/new", b"/sessions/new/"):
+        return "create", None
     return None, None
 
 
@@ -3651,6 +3664,95 @@ def describe_session(rec, sid, now=None):
     }
 
 
+def create_form(disabled=False):
+    """THE ONE PRESSABLE OBJECT, and it is a FORM rather than a link.
+
+    THE RULING THIS EXISTS FOR, 2026-09-25: *"instead of just offering me to
+    take back the session, this should also be the place where i can create a
+    brand new one."* Before this, a visitor who already had a desktop had no
+    way to ask for a second: the front door resumes the one they have, which is
+    the arrival rule working correctly and is also the thing that blocked him
+    from exercising most of the product.
+
+    IT IS NOT A CONTRADICTION OF THE ARRIVAL RULE and must not be read as a
+    softening of it. "Minting is a damage" is about minting WITHOUT BEING
+    ASKED -- a restored tab costing a visitor a desktop and the pool a slot.
+    A button somebody presses is active intent, which is the distinction the
+    gate exists to draw in the first place. The two rules meet in the METHOD,
+    which is why this is a form and not an <a href>: a link is fetched by
+    prefetchers, link previews, crawlers, pinned tabs and session restore, and
+    every one of those would be a mint nobody asked for. Asserted in
+    test_asking_for_a_second_desktop_takes_a_GESTURE, which was watched minting
+    on a GET before this address was claimed.
+
+    The mock's rule, kept: one object on this page looks pressable. The rows
+    are quiet, discard is an underlined word at the far end of a row, and this
+    is the only filled, bordered thing on the screen. That is the whole
+    mechanism for leading the habitual click somewhere safe.
+    """
+    if disabled:
+        # Rendered as PLAIN TEXT rather than a disabled control. A disabled
+        # button invites the reflex and then swallows it, and a person on an
+        # unwell machine reads that as the page being broken. Saying the
+        # machine has no room is a fact about the machine; a greyed-out button
+        # is a fact about the page.
+        return ("<p style=\"margin-top:2rem;color:#8a8a8a\">"
+                "There is no room for another desktop right now.</p>")
+    return ("<form method=\"post\" action=\"/sessions/new\" "
+            "style=\"margin-top:2rem\">"
+            "<button type=\"submit\" style=\"font:inherit;font-size:1.15rem;"
+            "font-weight:600;background:#772953;color:#fff;border:0;"
+            "border-radius:.35rem;padding:.85rem 1.4rem;cursor:pointer\">"
+            "New desktop</button>"
+            "<span style=\"display:block;margin-top:.5rem;color:#8a8a8a\">"
+            "A clean desktop. Nothing from any of the others.</span>"
+            "</form>")
+
+
+def create_refused_page(rows, pool):
+    """A NO, ON THE SURFACE THE PERSON PRESSED, with their own desktops kept.
+
+    TWO HALVES OF ONE PAGE, and that is the reason this is not a separate
+    screen: the place a visitor asks for another desktop is the place the
+    answer has to appear, and this surface is also the rescue console. A
+    refusal rendered anywhere else is a dead end, and the one action that would
+    make the refusal stop being true -- ending a desktop they are finished
+    with -- is on this page and nowhere else. So the list stays.
+
+    ITS AUDIENCE IS THE ADMINISTRATOR, WITH THE VISITOR AS MESSENGER. It names
+    what ran out and how much of it there was, because that is what saves an
+    operator a tracing session when somebody forwards them this screen. It
+    names no unit, no path, no process and no address: a stranger is reading
+    it. And it does not suggest the reader did anything wrong or can fix the
+    machine -- the only thing offered is authority over their own desktops,
+    which they already had.
+
+    WHAT IT DELIBERATELY DOES NOT SAY: which of these desktops is idle, or
+    which one to end. Every signal that would answer that was falsified on
+    2026-09-25 -- a probe that could not observe a connection at all, a census
+    that read the freshest session on the box as idle, and an emptiness check
+    that authorised destroying a visitor's desktops. A page that admits what it
+    cannot know beats one that confidently mislabels a person's own desktop
+    back to them.
+    """
+    note = ("This machine has no room for another desktop. All %d of its "
+            "desktop slots are in use." % pool) if pool else \
+           ("This machine has no room for another desktop, and could not "
+            "read how many slots it has.")
+    body = "<p>%s</p>" % note
+    if rows:
+        body += ("<p>Nothing you have has changed. These are still yours, and "
+                 "discarding one you are finished with frees a slot.</p>")
+        for r in rows:
+            body += row_html(r)
+    body += create_form(disabled=True)
+    body += ("<p style=\"margin-top:1.5rem;color:#8a8a8a\">If this keeps "
+             "happening, tell whoever runs this machine: its pool of "
+             "ephemeral desktops is full, and the refusal is recorded in its "
+             "log with the time and the size of the pool.</p>")
+    return page("No desktop could be started", body)
+
+
 def console_page(rows, note=None):
     """The visitor's own desktops. A REFINEMENT of the session-directory mock.
 
@@ -3694,14 +3796,12 @@ def console_page(rows, note=None):
     """
     if not rows:
         body = ("<p>You have no desktops on this machine right now.</p>"
-                "<p><a href=\"/\">Open a desktop</a></p>")
+                + create_form())
     else:
         body = "<p>These are yours. Nobody else can see them.</p>"
         for r in rows:
             body += row_html(r)
-        # WHERE CREATE LANDS, and where a refusal will render in its place.
-        body += ("<p style=\"margin-top:2rem\">"
-                 "<a href=\"/\">Open another desktop</a></p>")
+        body += create_form()
         if any(r["memory_mb"] is not None for r in rows) and len(rows) > 1:
             body += ("<p style=\"color:#8a8a8a\">If one of these is using far "
                      "more memory than the others, that is the one "
@@ -3803,11 +3903,21 @@ def discard_confirmation_page(r):
 
 
 def console(own, wf, identity, new_identity, what, sid, method):
-    """Serve the directory. NEVER mints, whatever it is asked.
+    """Serve the directory. Mints on a POST to one address, and NOWHERE ELSE.
 
-    The one thing this whole surface must not do is start a desktop: it is what
-    somebody reaches when the machine is already in trouble, and the front door
-    one path away mints on sight.
+    THE DOCSTRING THIS REPLACES SAID "NEVER MINTS", and it was true when it was
+    written. It stopped being true on 2026-09-25, when the owner ruled that
+    this surface is also where a person asks for another desktop. Left as it
+    was it would have been a comment citing a shape that is gone -- the class
+    of defect that passes every test, because what it describes is simply not
+    there to contradict it.
+
+    What the rule became, rather than what it was: NOTHING THIS SURFACE SERVES
+    ON A GET MAY START A DESKTOP. That keeps the property the original was
+    protecting -- somebody reaches this page when the machine is already in
+    trouble, and the front door one path away mints on sight -- while allowing
+    the one act the owner asked for. The method is the whole boundary, and it
+    is asserted rather than described: test_asking_for_a_second_desktop_takes_a_GESTURE.
     """
     extra = refresh_headers(own, identity, new_identity)
 
@@ -3818,6 +3928,54 @@ def console(own, wf, identity, new_identity, what, sid, method):
             if rec is not None:
                 out.append(describe_session(rec, s))
         return out
+
+    if what == "create":
+        if method != b"POST":
+            # A GET ASKS, and here asking is simply the directory again: the
+            # button is on it. Rendering the list rather than a 405 means a
+            # bookmarked or shared /sessions/new is a screen somebody can use
+            # instead of an error -- and it is still not a mint, which is the
+            # property that matters and the one the test watches.
+            respond(wf, 200, console_page(rows()), extra)
+            return
+
+        instance = pick_slot(own)
+        if instance is None:
+            # THE REFUSAL RENDERS WHERE CREATE LIVES. Logged first and with the
+            # cookie still attached, for the same reason the front door's
+            # refusal is: refusing somebody a NEW desktop is not a reason to
+            # let their identity lapse, and doing that would lock them out of
+            # the ones they already have -- on the very page whose job is to
+            # let them end one.
+            log_refusal("no free slot for a requested new session")
+            respond(wf, 503, create_refused_page(rows(), len(ephemeral_slots())),
+                    extra)
+            return
+
+        # THE SECOND MINTING SITE, and it is deliberate rather than a leak of
+        # the one in arrival(). They are not the same event: arrival() mints
+        # for somebody who has nothing, on a GET, because asking for the front
+        # door IS asking for a desktop. This mints for somebody who already has
+        # one and pressed a button saying so. Keeping them apart is what lets
+        # the arrival rule stay exactly as it was -- nothing about a returning
+        # tab, a stale id or a restored window reaches this line, because
+        # nothing but a POST does.
+        #
+        # THE ORDER IS THE ONE arrival() ARGUES FOR and is copied on purpose:
+        # the reservation is on disk BEFORE the redirect, because the redirect
+        # is what starts the desktop and a reservation written after it would
+        # leave the slot unheld across exactly the window in which this process
+        # can die and forget the slot was let.
+        new_sid = own.mint_session(identity, instance)
+        reserve_slot(instance)
+        log_arrival("minted a session on request", identity, instance, new_sid,
+                    "asked for from the directory, %d slot(s) now let"
+                    % len(own.instances_in_use()))
+        # 303 rather than 302, for the reason the discard uses one: the browser
+        # must not repeat the POST if the person reloads where they land, and
+        # repeating THIS one costs a slot.
+        respond(wf, 303, b"", [("Location", "/s/%s/" % new_sid)] + extra)
+        return
 
     if what == "discard":
         rec = own.lookup(sid)
@@ -3875,6 +4033,11 @@ def assert_console_shows_only_your_own(target=None):
     assert target(b"/sessions/") == ("list", None), "the console list moved"
     assert target(b"/sessions/abc/discard") == ("discard", "abc"), \
         "the discard action moved"
+    # AND THE CREATE ADDRESS, for a sharper version of the same reason: if this
+    # one stops being claimed, the fall-through does not merely mint -- it
+    # mints on a GET, which is the one thing the whole surface may not do.
+    assert target(b"/sessions/new") == ("create", None), \
+        "the create address moved"
     # Things that must NOT be read as the console, because each of them would
     # otherwise be routed somewhere that acts.
     for path in (b"/", b"/s/abc/", b"/sessions/abc", b"/sessions/abc/",
@@ -3882,6 +4045,12 @@ def assert_console_shows_only_your_own(target=None):
                  b"/sessions//discard"):
         what, _ = target(path)
         assert what != "discard", "%r was read as a DISCARD action" % path
+    # A SESSION WHOSE ID IS THE WORD "new" MUST NOT BE THE CREATE ADDRESS, and
+    # it cannot be, because ids are 32 hex characters -- but the collision is
+    # written down here rather than assumed, since the day somebody makes ids
+    # human-readable this is where it bites.
+    assert target(b"/sessions/new/discard") == ("discard", "new"), \
+        "the create address swallowed a discard"
 
 
 # --------------------------------------------------------------------------

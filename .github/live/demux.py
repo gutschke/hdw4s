@@ -1167,6 +1167,126 @@ def test_the_console_never_mints(rig):
     assert os.listdir(rig.teardowndir) == [], "listing sessions recorded a teardown"
 
 
+def test_asking_for_a_second_desktop_takes_a_GESTURE(rig):
+    """THE POSITIVE CONTROL FOR THIS ROUND, and it is written to go red.
+
+    The owner's arrival rule of 2026-09-22 says minting is a DAMAGE: a browser
+    restoring twenty tabs must not cost a visitor twenty desktops. His ruling of
+    2026-09-25 adds a third answer to the gate -- "this should also be the place
+    where i can create a brand new one" -- and the two are not in tension,
+    because the first is about minting WITHOUT BEING ASKED and the second is a
+    button somebody presses. The whole of that distinction is carried by the
+    METHOD, so this is where it is asserted.
+
+    A GET of the create address is every way a URL gets fetched without a
+    person deciding anything: a prefetch, a link preview, a crawler, a pinned
+    tab, a session restore, a back button. Each of those must leave the pool
+    exactly as it found it.
+
+    SEEN RED BEFORE IT WAS SEEN GREEN, against the tree with no create address
+    at all: /sessions/new fell through console_target() to arrival(), which
+    minted a desktop for a visitor who had pressed nothing. That is the same
+    fall-through red_a_console_address_that_stops_being_claimed_mints exists
+    for, one address wider.
+    """
+    c = rig.client()
+    # A visitor with NO session, which is the case that would hide this: with
+    # one already owned, the shipped arm resumes and the mint never happens.
+    st, h, _ = c.get("/sessions/new")
+    c.learn_cookie(h)
+    assert "location" not in h, \
+        "A GET OF THE CREATE ADDRESS MINTED A DESKTOP (302 to %r). Nobody " \
+        "pressed anything." % h.get("location")
+    assert st in (200, 405), \
+        "a GET of the create address answered %d, which is neither an offer " \
+        "nor a refusal" % st
+
+    # And it is still true for somebody who already has one, which is the
+    # person this round is actually for.
+    d = rig.client()
+    sid, _ = arrive(rig, d)
+    st, h, _ = d.get("/sessions/new")
+    assert "location" not in h or h["location"][0] == "/s/%s/" % sid, \
+        "a GET of the create address moved a returning visitor somewhere new"
+
+    # THE OTHER HALF, and without it this test is satisfied by a router that
+    # can never create anything at all -- which is the shape that passes every
+    # rule and is then deleted. A POST is a gesture, and a gesture works.
+    st, h, _ = d.post("/sessions/new")
+    assert st == 303, "a deliberate POST did not create: %d" % st
+    got = h["location"][0]
+    assert got.startswith("/s/"), "create sent the visitor to %r" % got
+    assert got != "/s/%s/" % sid, \
+        "create RESUMED the session this visitor already had instead of " \
+        "making a second one -- which is the whole complaint"
+
+
+def test_a_second_desktop_is_a_second_desktop(rig):
+    """Two sessions, both this visitor's, both listed, and the first survives.
+
+    The failure this rules out is a "create" that is really a takeover: the
+    pool loses no slot, the visitor sees one row, and the desktop they had is
+    gone. Measured against the ownership table and against the page the visitor
+    receives, because the table agreeing with itself is not the product.
+    """
+    c = rig.client()
+    sid1, _ = arrive(rig, c)
+    st, h, _ = c.post("/sessions/new")
+    assert st == 303, "create refused on a box with free slots: %d" % st
+    sid2 = h["location"][0].split("/")[2]
+    assert sid2 != sid1, "create returned the session the visitor already had"
+
+    st, _, body = c.get("/sessions/")
+    text = body.decode()
+    assert sid1 in text and sid2 in text, \
+        "the directory did not list both of this visitor's desktops"
+    # Both still route: a create that quietly recycled the first slot would
+    # pass every assertion above.
+    for sid in (sid1, sid2):
+        st, _, _ = c.get("/s/%s/" % sid)
+        assert st == 200, "session %s stopped routing after a create" % sid
+
+
+def test_create_refuses_where_it_lives(rig):
+    """The refusal renders ON THE CREATE SURFACE, not somewhere else.
+
+    Two halves of one page, ruled 2026-09-25: the place a visitor presses for
+    another desktop is the place a "no" has to appear, because a refusal shown
+    anywhere else is a dead end and this surface is the rescue console. So the
+    refusal KEEPS THE LIST -- the visitor can still see and discard what they
+    have, which is the one action that would make the refusal stop being true.
+
+    ITS AUDIENCE IS THE ADMIN, with the visitor as messenger: enough for an
+    operator to skip the tracing, nothing about machine internals, and no
+    suggestion that the person reading it did anything wrong or can fix it.
+
+    ONE VISITOR TAKES THE WHOLE POOL HERE, deliberately. A pool filled by other
+    visitors would test the same refusal against an EMPTY list, and the half
+    that matters -- that being told no still leaves you your own desktops and
+    the way to end one -- would not be exercised at all.
+    """
+    c = rig.client()
+    sid1, _ = arrive(rig, c)
+    mine = [sid1]
+    while len(mine) < len(rig.slots):
+        st, h, _ = c.post("/sessions/new")
+        assert st == 303, "create refused while a slot was free: %d" % st
+        mine.append(h["location"][0].split("/")[2])
+
+    st, _, body = c.post("/sessions/new")
+    assert st == 503, "a full pool did not refuse a create: %d" % st
+    text = body.decode()
+    for sid in mine:
+        assert sid in text, \
+            "THE REFUSAL DROPPED THE LIST. A visitor told no, and shown no way " \
+            "to free the thing that would make the answer change, is a dead end."
+    assert "Discard" in text, \
+        "the refusal offered no way to make the answer change"
+    # The words an operator needs, and none the visitor could act on.
+    assert "slot" in text.lower(), \
+        "the refusal did not name what ran out, so an admin must go and trace it"
+
+
 def test_exhaustion(rig):
     """More arrivals than slots must refuse, not overwrite somebody."""
     seen = []
@@ -2487,6 +2607,22 @@ def test_the_row_says_when_the_desktop_goes_by_itself(rig=None):
         rig.stop()
 
 
+CREATE_IS_A_LINK = """
+
+# Appended by the red arm: create as an <a href> rather than a form -- which is
+# what "just make the button a link, it is simpler" looks like in a diff, and
+# it is a one-word change that nothing else in this suite notices. Every way a
+# URL is fetched without a person deciding anything then mints: a prefetch, a
+# link preview, a crawler, a pinned tab, a session restore, a back button.
+_shipped_console = console
+
+
+def console(own, wf, identity, new_identity, what, sid, method):
+    return _shipped_console(own, wf, identity, new_identity, what, sid,
+                            b"POST" if what == "create" else method)
+"""
+
+
 def red_a_console_address_that_stops_being_claimed_mints():
     """The silent one: a parser that quietly stops matching hands out desktops.
 
@@ -2502,6 +2638,29 @@ def red_a_console_address_that_stops_being_claimed_mints():
     rig = Rig(demux=path)
     try:
         test_the_console_never_mints(rig)
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
+def red_create_on_a_GET():
+    """THE GUARANTEE THAT MUST NOT REGRESS, broken on purpose.
+
+    The whole distinction between "a visitor asked for another desktop" and
+    "minting is a damage" is carried by ONE REQUEST METHOD. Nothing else in the
+    product marks it, nothing else would fail if it went, and the change that
+    removes it is the plausible-looking simplification of turning a form into a
+    link. So the control is pointed at a router where exactly that has
+    happened, and watched refusing it.
+
+    Its oracle is the REDIRECT, not the status code: a router that answered 200
+    and minted anyway would satisfy any assertion about "did it serve", and the
+    desktop would still be gone from the pool.
+    """
+    path = scratch_demux("-create", CREATE_IS_A_LINK)
+    rig = Rig(gate=None, demux=path)
+    try:
+        test_asking_for_a_second_desktop_takes_a_GESTURE(rig)
     finally:
         rig.stop()
         os.unlink(path)
@@ -3001,6 +3160,17 @@ def main():
         # nothing -- it was written that way first and was green.
         (test_a_reaped_visitor_is_not_handed_back_the_same_dead_address,
          dict(gate=None)),
+        # CREATE, and all three on the UNPINNED arm because the question is
+        # what the SHIPPED product does. Under the pinned mint arm every
+        # arrival mints anyway, so "a second desktop appeared" would say
+        # nothing about whether a gesture was what produced it -- the test
+        # would be green against a router that mints on sight, which is the
+        # exact defect the arrival rule exists to prevent.
+        (test_asking_for_a_second_desktop_takes_a_GESTURE, dict(gate=None)),
+        (test_a_second_desktop_is_a_second_desktop, dict(gate=None)),
+        # Two slots, not three, so the pool can be filled by ONE visitor
+        # without the run taking three creates to get there.
+        (test_create_refuses_where_it_lives, dict(nslots=2, gate=None)),
         # ONE pool slot and one stray, so the second arrival has nowhere legal
         # to go. See the test's own docstring for why a spare slot would make
         # this green against the defect.
@@ -3075,6 +3245,7 @@ def main():
                red_reclaim_on_mismatch_alone,
                red_scope_checked_by_the_page,
                red_a_console_address_that_stops_being_claimed_mints,
+               red_create_on_a_GET,
                red_startup_guard_notices_a_console_address_that_moved):
         expect_red(fn.__name__, fn)
 
