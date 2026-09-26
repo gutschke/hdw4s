@@ -43,12 +43,19 @@ die() { echo "hdw4s-webroot: $*" >&2; exit 1; }
 
 usage() {
   cat >&2 <<EOF
-usage: hdw4s-webroot build     <instance> <web-root> [<session name>]
-       hdw4s-webroot provision <instance> [<session name>]
+usage: hdw4s-webroot build     [--directory] <instance> <web-root> [<session name>]
+       hdw4s-webroot provision [--directory] <instance> [<session name>]
        hdw4s-webroot check     <web-root> [<instance>]
        hdw4s-webroot gate      <instance>
        hdw4s-webroot serving <url> [--auth-stdin] [<curl args>...]
        hdw4s-webroot serving-gate <instance>
+
+  --directory   this instance is reached through a door that ALSO serves
+                /sessions/, the session directory, so the boot card may offer a
+                link to it. Only the ephemeral pool's door does; a named
+                desktop's door is systemd-socket-proxyd in front of Selkies and
+                answers 404 there. Absent means no link, which is the safe way
+                round: a card that stays quiet is never wrong.
 
   --auth-stdin  read a curl config line ("user = <user>:<password>") from stdin
                 and hand it to curl as its own config. Never pass a credential
@@ -69,6 +76,15 @@ PY
 }
 
 cmd_build() {
+  # PASSED BY THE CALLER, NOT LOOKED UP HERE, and that is deliberate. The slot
+  # table already has three parsers that agree by coincidence, and a fourth one
+  # in this script would be a fourth chance to disagree about what a row means.
+  # It does not need one: there are exactly two callers that build a web root
+  # and each of them knows by construction which kind it is building --
+  # hdw4s@.service provisions one named desktop, hdw4s-ephemeral-slots builds
+  # the pool. So the fact travels from the only places that already hold it.
+  local directory='no'
+  if [ "${1:-}" = '--directory' ]; then directory='yes'; shift; fi
   local inst="$1" root="$2" name="${3:-Desktop}" src
   src="$(packaged_web)" || die 'could not locate the packaged web client'
   [ -d "${src}" ] || die "packaged web client not found at '${src}'"
@@ -135,7 +151,7 @@ cmd_build() {
       die 'could not carry the published identity across the rebuild'
   fi
 
-  HDW4S_SESSION_NAME="${name}" \
+  HDW4S_SESSION_NAME="${name}" HDW4S_DIRECTORY="${directory}" \
     "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-gate-index" \
       "${src}/index.html" "${stage}/index.html" || die 'could not build the gated index'
 
@@ -400,7 +416,14 @@ to curl without quoting ambiguity, so the served client cannot be verified" ;;
 
 [ "$#" -ge 1 ] || usage
 case "$1" in
-  build)   shift; [ "$#" -ge 2 ] || usage; cmd_build "$@" ;;
+  # The flag is counted out of the argument check as well as passed through:
+  # "build --directory x y" has three arguments and two of them are the pair
+  # this command needs, so a count that ignored the flag would accept
+  # "build --directory x" and then build a web root at the empty path.
+  build)   shift
+           case "${1:-}" in --directory) [ "$#" -ge 3 ] || usage ;;
+                            *) [ "$#" -ge 2 ] || usage ;; esac
+           cmd_build "$@" ;;
   check)   shift; [ "$#" -ge 1 ] || usage; cmd_check "$@" ;;
   # "gate" is "check" with the web root derived rather than passed, and it exists
   # because the only caller that CAN run it is a systemd ExecStartPre= line, which
@@ -417,8 +440,12 @@ case "$1" in
   # upgrade would leave a named session serving last release's bytes, gated but
   # stale, with nothing saying so. A build costs a fifth of a second, which is
   # cheaper than the class of bug that staleness creates.
-  provision) shift; [ "$#" -ge 1 ] || usage
-           cmd_build "${1}" "${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${1}" \
+  provision) shift
+           dir_flag=''
+           if [ "${1:-}" = '--directory' ]; then dir_flag='--directory'; shift; fi
+           [ "$#" -ge 1 ] || usage
+           cmd_build ${dir_flag} "${1}" \
+                     "${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${1}" \
                      "${2:-Desktop}" ;;
   serving) shift; [ "$#" -ge 1 ] || usage; cmd_serving "$@" ;;
   serving-gate) shift; [ "$#" -ge 1 ] || usage; cmd_serving_gate "$1" ;;

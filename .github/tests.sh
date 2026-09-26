@@ -1681,6 +1681,84 @@ echo '== the stall backstop does not read a deliberately stopped stream as a los
        'could not be found'
 )
 
+echo '== the boot card offers the session directory only where a door serves one =='
+# THE DEFECT, reported by the owner 2026-09-25: "named sessions now have a link to where
+# the user can see all their sessions ... and that link doesn't work."
+#
+# It did not work and it could not have. /sessions/ is a route of hdw4s-demux, the
+# EPHEMERAL front door. A named desktop is reached reverse proxy ->
+# hdw4s-proxy@<inst>.socket -> systemd-socket-proxyd -> Selkies' own aiohttp server, and
+# nothing of ours is anywhere in that path. Measured through a named session's own front door: GET / -> 200 with the gate marker and the words "Your
+# desktops" (the positive control, so the empty answer below is about the path and not
+# about a rig that could not reach the box), GET /sessions/ -> 404, zero-length body,
+# "Server: Python/3.12 aiohttp/3.14.3". A blank page.
+#
+# WHAT THIS TESTS: that the link is absent by default, present when the builder says the
+# door serves one, and that the generator REFUSES a page whose offer and whose flag
+# disagree. What it cannot test is whether the flag is TRUE of the real door -- that
+# claim lives with the two callers and is checked by eye, once, in each.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+
+  # DEFAULT FIRST, because the default is the safety property: a caller that says
+  # nothing must get no link. This is the named desktop's case, and it is the one that
+  # shipped broken.
+  "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/plain.html" >/dev/null 2>"${d}/err" \
+    || bad 'a card with no directory builds' "the generator refused: $(cat "${d}/err")"
+  hasnt 'a door with no session directory offers no link to one' \
+    "$(cat "${d}/plain.html")" '/sessions/'
+  hasnt 'and the words are not in the document either, hidden or otherwise' \
+    "$(cat "${d}/plain.html")" 'Your desktops'
+  # The positive control for the two assertions above: the same search, on a page that
+  # DOES carry the link, must find it. Without this, a typo in the needle would report
+  # a clean pass on every page forever.
+  HDW4S_DIRECTORY=yes "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/dir.html" \
+    >/dev/null 2>"${d}/err2" \
+    || bad 'a card with a directory builds' "the generator refused: $(cat "${d}/err2")"
+  has 'a door that serves the directory does offer the link' \
+    "$(cat "${d}/dir.html")" 'href="/sessions/"'
+  has 'and it is the quiet prose line, not a second button' \
+    "$(cat "${d}/dir.html")" 'id="hdw4s-more"'
+
+  # A value that is neither arm is REFUSED, not clamped. "no" is the safe branch, so a
+  # typo quietly taking it would hide a caller that meant to say yes and did not --
+  # the page would be right by accident on the pool and nobody would know the flag had
+  # stopped being read.
+  HDW4S_DIRECTORY=true "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/bad.html" \
+    >/dev/null 2>"${d}/err3" \
+    && bad 'a misspelled HDW4S_DIRECTORY is refused' 'it was accepted' \
+    || has 'a misspelled HDW4S_DIRECTORY is refused' "$(cat "${d}/err3")" \
+       'is not one of no/yes'
+  hasnt 'a refused value writes no page' "$(ls "${d}")" 'bad.html'
+
+  # THE ARM THAT MATTERS: the link put back into the static markup by hand. That is not
+  # a hypothetical edit -- it is what "tidying away" a placeholder and an empty string
+  # looks like to somebody who does not know why the condition is there, and it puts
+  # the 404 back on every named desktop while changing nothing any other test reads.
+  rm -f "${d}/redout.html"
+  sed 's|^__MORE__$|  <p id="hdw4s-more"><a href="/sessions/">Your desktops</a></p>|' \
+    "${ROOT}/hdw4s-gate-index" > "${d}/red"
+  python3 "${d}/red" "${d}/in.html" "${d}/redout.html" >/dev/null 2>"${d}/rederr" \
+    && bad 'a card that offers a directory its door lacks is refused' 'it was accepted' \
+    || has 'a card that offers a directory its door lacks is refused' \
+       "$(cat "${d}/rederr")" 'cannot serve'
+  hasnt 'and no page is written' "$(ls "${d}")" 'redout.html'
+
+  # The other direction, which is the one a guard usually cannot do: told the door
+  # serves a directory, and emitting no link. A caller whose flag stopped being read
+  # would look exactly like this, and a page that silently drops the way out of the
+  # card is a rescue path quietly removed.
+  rm -f "${d}/redout2.html"
+  sed 's|^__MORE__$||' "${ROOT}/hdw4s-gate-index" > "${d}/red2"
+  HDW4S_DIRECTORY=yes python3 "${d}/red2" "${d}/in.html" "${d}/redout2.html" \
+    >/dev/null 2>"${d}/rederr2" \
+    && bad 'a card that drops a directory its door serves is refused' 'it was accepted' \
+    || has 'a card that drops a directory its door serves is refused' \
+       "$(cat "${d}/rederr2")" 'carries no link'
+)
+
 echo '== BOTH session kinds publish an identity, or the gate refuses forever =='
 # THE ARM THAT WAS MISSING, AND WHY IT WAS MISSING. The gate's resume path
 # compares the identity a tab connected to against the one published in the web
@@ -2336,7 +2414,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=373   # update when tests are added; a wrong number is the point
+EXPECTED=382   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

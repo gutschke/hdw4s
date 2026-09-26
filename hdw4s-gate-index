@@ -5,8 +5,10 @@
     HDW4S_SESSION_NAME names the session on the card and in the tab.
     HDW4S_GATE_MODE   takeover (default) | mint | off -- what arrival does.
     HDW4S_SHARE_MODE  off (default) | view | control  -- what sharing offers.
+    HDW4S_DIRECTORY   no (default) | yes -- does the door this page is served
+                      through ALSO serve /sessions/, the session directory?
 
-Those two are DEFAULTS, not settings. Each is also readable from the query string
+The gate and share modes are DEFAULTS, not settings. Each is also readable from the query string
 ("?gate=off", "?share=view"), and the query string wins. That is deliberate and it is
 the cheaper carrier of the two: changing a baked default means re-running
 "hdw4s-webroot build", which copies a fresh tree from the packaged client and therefore
@@ -37,6 +39,37 @@ re-entry the card uses, window.selkiesCoreInitialize(), is its documented entry 
 
 Every behaviour here was put in by a test that caught it missing; the comments say which,
 because each one looks like an unnecessary special case until it is not.
+
+HDW4S_DIRECTORY IS NOT A KNOB, AND UNLIKE THE TWO ABOVE IT IS NOT READABLE FROM THE
+QUERY STRING. It is not a choice about what to offer; it is a fact about the deployment
+that the builder knows and the page cannot discover, so there is no second arm to put
+side by side and nothing to settle by use. A "?directory=yes" would simply let anyone
+put the defect below back on any page.
+
+THE DEFECT, measured 2026-09-26 on a development box through a named session's own
+front door: the card's "Your desktops" line was in this overlay unconditionally, so
+it shipped on
+NAMED desktops too -- and /sessions/ is a route of hdw4s-demux, which is the EPHEMERAL
+front door. A named desktop is reached reverse proxy -> hdw4s-proxy@<inst>.socket ->
+systemd-socket-proxyd -> Selkies' own aiohttp server, and NOTHING OF OURS IS IN THAT
+PATH. So the link was not pointing at the wrong place; there is no component on that
+origin that could answer it at all, and no spelling of the href would have been better.
+GET /sessions/ returned "404 Not Found", zero-length body, "Server: Python/3.12
+aiohttp/3.14.3" -- the owner pressed a line on our card and was handed a blank page.
+The positive control in the same run: GET / on the same door returned 200, 43706 bytes,
+carrying the gate marker and the words "Your desktops", so the empty answer was about
+that path and not about a rig that could not reach the box.
+
+It therefore defaults to NO, and the default is the whole safety property: a card that
+stays quiet is never wrong, and a card that offers a page its own door cannot serve is
+wrong in the expensive direction -- the one line on the card that is not the button is
+the line a person reaches for when the desktop in front of them has stopped working.
+
+WHAT IS NOT HERE, so that the next reader does not conclude it was overlooked: a named
+desktop still has no way for its occupant to end or restart it from the browser. That
+is the thing the owner actually asked for, it cannot be served from this page for the
+reason above, and the options are written down in
+private/NAMED-SESSION-CONTROL-BRIEF.md rather than chosen here.
 """
 import json, os, re, sys
 from html import escape as html_escape
@@ -90,14 +123,16 @@ OVERLAY = r"""
  #hdw4s-role b{color:#fff}
  /* Quiet on purpose. The card has ONE pressable object and this is not it: it is
     the way out of a card that can otherwise only be answered one way, and it is
-    styled as prose so the trained reflex still lands on the button. */
+    styled as prose so the trained reflex still lands on the button.
+    It is also CONDITIONAL: the paragraph below is emitted only for a door that
+    really serves the page it points at, so on most pages nothing matches this. */
  #hdw4s-more{margin:.9rem 0 0;font-size:13px}
  #hdw4s-more a{color:#b9b9b9}
 </style>
 <div id="hdw4s-gate" hidden><div class="card">
   <h1>__NAME__</h1><div id="hdw4s-body"></div>
   <button id="hdw4s-go">Connect</button>
-  <p id="hdw4s-more"><a href="/sessions/">Your desktops</a></p>
+__MORE__
   <p class="err" id="hdw4s-err"></p>
 </div></div>
 <div id="hdw4s-share" hidden>
@@ -794,6 +829,20 @@ for knob, allowed in ARMS.items():
     if cfg[knob] not in allowed:
         raise SystemExit("%s=%r is not one of %s" % (env, cfg[knob], "/".join(allowed)))
 
+# Refused at generation for the same reason the two above are, and NOT clamped to the
+# default: "no" is the safe value, so a typo silently taking the safe branch is exactly
+# the failure that hides a caller which meant to say "yes" and did not.
+_dir = os.environ.get("HDW4S_DIRECTORY") or "no"
+if _dir not in ("no", "yes"):
+    raise SystemExit("HDW4S_DIRECTORY=%r is not one of no/yes" % _dir)
+# The whole of the conditional card. Built here rather than hidden in CSS or by script,
+# because a line that is in the document and merely not shown is still in the document:
+# it is in the page source, in the accessibility tree for anything that ignores the
+# style, and one "display" regression away from being visible again. The repair for a
+# link that cannot work is for the link not to exist.
+MORE = ('  <p id="hdw4s-more"><a href="/sessions/">Your desktops</a></p>\n'
+        if _dir == "yes" else "")
+
 # The identity is a hash of THIS generator, which is where the gate's behaviour
 # lives -- not the package version, which does not change when the logic does, and
 # not a timestamp, which changes when nothing does. Two pages agree if and only if
@@ -805,6 +854,7 @@ _gate_id = hashlib.sha256(
 OVERLAY = OVERLAY.replace("__SRC__", json.dumps(src_attr)) \
      .replace("__GATEID__", json.dumps(_gate_id)) \
      .replace("__CFG__", json.dumps(cfg)) \
+     .replace("__MORE__", MORE) \
      .replace("__NAME__", html_escape(os.environ.get("HDW4S_SESSION_NAME", "Desktop")))
 html = html.replace("</body>", OVERLAY + "</body>") if "</body>" in html else html + OVERLAY
 
@@ -885,6 +935,33 @@ if _body.index("streamPaused()") > _body.index("still >= 20"):
     raise SystemExit("hdw4s-gate-index: the stall backstop counts before it asks "
                      "whether the stream was stopped on purpose. The question has to "
                      "come first or the count is already wrong -- refusing to build")
+
+# THE CARD MAY NOT POINT AT A DOOR THAT DOES NOT SERVE THE PAGE, checked on the bytes
+# about to be written rather than on the template, for the same reason the two guards
+# above are: a pass at the layer we authored says nothing about what the browser gets.
+#
+# It fires in BOTH directions on purpose. A guard that can only catch one is how this
+# project has already landed a defect: the interesting failure here is not the link
+# coming back by hand -- it is __MORE__ being "tidied" back into the static markup by
+# somebody who sees a placeholder and an empty string and concludes the condition was
+# scaffolding. That edit puts the 404 back on every named desktop and changes nothing
+# a test looks at, because a link is not exercised by anything that does not click it.
+#
+# WHAT IT CANNOT SEE, and this is the honest limit: it checks that the page offers the
+# directory exactly when the BUILDER SAID the door serves one. It has no way to reach
+# the door and ask. If a caller passes HDW4S_DIRECTORY=yes for a door with no session
+# directory behind it, this passes and the page is wrong again -- so the claim lives
+# with the two callers, which are hdw4s@.service (named: silent) and
+# hdw4s-ephemeral-slots (pool: --directory), and nowhere else.
+_offers = "/sessions/" in html
+if _offers != (_dir == "yes"):
+    raise SystemExit(
+        "hdw4s-gate-index: HDW4S_DIRECTORY=%s but the generated page %s to the "
+        "session directory. It is served by hdw4s-demux, the ephemeral "
+        "front door; a named desktop's door is systemd-socket-proxyd in front of "
+        "Selkies, which answers 404 to that path and hands the person a blank page. "
+        "Refusing to build a card that promises a page its own door cannot serve."
+        % (_dir, "carries a link" if _offers else "carries no link"))
 
 open(dst, "w", encoding="utf-8").write(html)
 print("hdw4s-gate-index: built %s (deferred %s)" % (dst, src_attr))
