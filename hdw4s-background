@@ -54,29 +54,146 @@ import sys
 import tempfile
 
 # ---------------------------------------------------------------------------
+# THE BRAND PALETTE, AS PUBLISHED, AND THIS IS THE ONLY COPY THAT SHOULD EXIST.
+#
+# Source: https://design.ubuntu.com/brand/colour-palette, read 2026-09-25.
+# Hex is what the brand publishes; every L*, C and hue below is DERIVED from the
+# hex by hex_to_lch() at import, never typed in. A hand-copied colour table is a
+# second source of truth that drifts silently, and this project already had
+# three of them -- a constant in five shipped files, a table in a private tool,
+# and the arc in this one -- with no way to tell which was right.
+#
+# THE ROLES ARE THE BRAND'S OWN WORDS and two of them decide things here:
+#   * Warm Grey is the ONLY entry the brand names for "backgrounds, graphics,
+#     dot patterns, charts and diagrams". It is the palette's own sanction for
+#     exactly the aged-parchment reading this file is chasing.
+#   * The three aubergines are labelled by AUDIENCE -- consumer, balance,
+#     enterprise -- and not by shade, which is the brand treating LIGHTNESS as a
+#     meaningful axis rather than a fallback. The weight ladder in this file is
+#     therefore in-brand, not a concession.
+#
+# HOW STRICTLY IT BINDS, in the owner's words: "this is the official list, but
+# as long as we stick with what physiologically feels related, we don't have to
+# literally stick to just those named colors." So interpolations between these
+# points, and modest extensions beyond them, are sanctioned. The arc below is
+# built on that permission and says where it uses it.
+PALETTE = (
+    ("Ubuntu Orange",       "#e95420", "core"),
+    ("White",               "#ffffff", "core"),
+    ("Black",               "#000000", "core"),
+    ("Light aubergine",     "#77216f", "consumer"),
+    ("Mid aubergine",       "#5e2750", "balance"),
+    ("Dark aubergine",      "#2c001e", "enterprise"),
+    ("Canonical Aubergine", "#772953", "canonical"),
+    ("Warm Grey",           "#aea79f", "backgrounds"),
+    ("Cool Grey",           "#333333", "neutral"),
+    ("Text Grey",           "#111111", "typography only"),
+)
+
+# A STATED BRAND RULE: "Never use a tint less than 10%." Recorded here because
+# it is the one rule on that page this design could plausibly breach, and the
+# conclusion is not obvious. Read as it is written -- a TINT is a brand colour
+# mixed with white, and the rule keeps a swatch from fading into an
+# indeterminate near-white -- nothing here is a tint at all: every colour is a
+# full-strength LCh value composited at partial alpha, not a colour diluted with
+# white. Read at its loosest, as "no applied colour may contribute less than a
+# tenth", the two TEXTURE layers do breach it: measured by deleting each layer
+# and re-rendering, the macro grain peaks at 13 parts in 255 and the micro at 20
+# -- 5% and 8%. The washes, shades and ramp are all well above.
+#
+# So: not a violation under the natural reading, a breach under the strictest
+# one, and it costs one number to fix if the owner wants it fixed. Said out loud
+# rather than resolved unilaterally, because it is his brand and not mine.
+TINT_FLOOR = 0.10
+
+
+def hex_to_lch(hx):
+    """sRGB hex to CIE L*C*h. The inverse of lch_to_hex, and the reason the
+    palette above can be stored as the brand publishes it."""
+    r, g, b = (int(hx[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    f = lambda c: ((c + 0.055) / 1.055) ** 2.4 if c > 0.04045 else c / 12.92
+    r, g, b = f(r), f(g), f(b)
+    X = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047
+    Y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    Z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+    k = lambda t: t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116
+    fx, fy, fz = k(X), k(Y), k(Z)
+    L, a, bb = 116 * fy - 16, 500 * (k(X) - fy), 200 * (fy - fz)
+    return L, math.hypot(a, bb), math.degrees(math.atan2(bb, a)) % 360.0
+
+
+def swatch(name):
+    """One published colour, as (L*, C, hue). Derived, never transcribed."""
+    for n, hx, _role in PALETTE:
+        if n.lower().startswith(name.lower()):
+            return hex_to_lch(hx)
+    raise KeyError(name)
+
+
+# A swatch whose chroma is this low has no meaningful hue -- White, Black and
+# the greys all report one, and it is an artefact of the conversion rather than
+# a colour. Anything below this is excluded from hue reasoning.
+ACHROMATIC = 8.0
+
+
+# ---------------------------------------------------------------------------
 # THE PALETTE, AND WHY IT IS AN ARC AND NOT A LIST OF ANCHORS.
 #
-# The published Ubuntu brand palette has SEVEN entries and only TWO hue
-# families: Ubuntu orange at h 46, and four aubergines packed between h 331 and
-# h 349 -- eighteen degrees apart, which is nothing -- plus two greys that carry
-# no hue at all. So a design that picks one brand colour per desktop can tell
-# TWO desktops apart, not ten. That is a fact about the brand, not about this
-# code, and it is the reason the previous three-anchor table repeated every
-# third slot with two of its three anchors in the same magenta family: slots 2,
-# 3, 5 and 6 all read as "purple" on a rendered sheet.
+# The seven PUBLISHED swatches have only two hue families: Ubuntu orange at
+# h 46, and four aubergines packed between h 331 and h 349, plus two greys that
+# carry no hue at all. A design that picks one published swatch per desktop can
+# tell TWO desktops apart, not ten. So hue here is a CONTINUOUS ARC through the
+# brand rather than a table of it: every published colour lies on the arc, the
+# ends are the two families, and any point between is a blend of two brand
+# colours rather than an invented one.
 #
-# So hue here is a CONTINUOUS ARC that passes through the brand's own colours
-# rather than a table of them. It runs from violet, through the aubergines and
-# the crimsons, to Ubuntu orange -- every brand hue lies on it, the ends are the
-# two families, and any point between them is a blend of two brand colours
-# rather than an invented one. That is what keeps ten desktops on-brand AND
-# apart.
-ARC_LO, ARC_HI = 322.0, 408.0        # 406 == 46, Ubuntu orange, unwrapped
+# HOW WIDE THE ARC MAY BE IS THE OWNER'S CALL AND HE HAS WIDENED IT. "the brand
+# family has aubergine, orange, white/black, and variations of aubergine that
+# feel more bluish or more orangey. within these constraints, we can also
+# broaden the hue variance intentionally and it should still feel ubuntu like."
+#
+# So the ninety degrees this file was built around was a fact about SEVEN
+# SWATCHES and never a fact about what reads as Ubuntu. Worth saying plainly,
+# because a constraint inherited from a measurement of the wrong population is
+# indistinguishable from a constraint imposed by the brand, and this one shaped
+# the entire design: it is why composition and weight had to carry the
+# separation that hue could not.
+#
+# AND WIDENING IT IS NOT A TRADE. private/measure-background-arc.py reports both
+# halves at once -- how far hue travels WITHIN one sheet, and how far apart the
+# DESKTOPS sit -- because spreading the tints buys the first by spending the
+# second. Measured at drift 1.0:
+#
+#     arc span      within one image      between four desktops
+#     86 deg  (now)   21 deg                47 deg
+#     102 deg         25 deg                73 deg
+#     118 deg         33 deg                82 deg
+#     136 deg         51 deg               101 deg
+#
+# The wider arc is better on BOTH columns at once, which a trade cannot be. The
+# narrow arc was not balancing anything; it was simply costing separation.
+# 118 degrees is the recommendation -- 136 reaches far enough down to risk a
+# true blue, which is not an aubergine leaning bluish -- and it is left unapplied
+# here only because he is mid-round on something else and a silent change of
+# colour would make his answers unreadable.
+# DERIVED FROM THE PALETTE ABOVE, not typed. The warm end IS Ubuntu Orange. The
+# cool end is the bluest published aubergine, extended a little further into the
+# blue on the owner's explicit permission to "broaden the hue variance
+# intentionally" -- so the extension is a named quantity with a reason, and
+# changing the brand's hex would move the arc with it.
+COOL_EXTENSION = 9.0                 # degrees past the bluest published aubergine
+ARC_LO = swatch("Light aubergine")[2] - COOL_EXTENSION      # ~321.9
+ARC_HI = swatch("Ubuntu Orange")[2] + 360.0                 # ~406.0
 RUNGS = 8                            # distinct rungs on the arc
 STRIDE = 3                           # coprime with RUNGS: consecutive slots
                                      # land three rungs apart, not one
 
-# HOW DARK THE WHOLE FIELD IS, on a ladder of its own. Five steps against eight
+# HOW DARK THE WHOLE FIELD IS, on a ladder of its own. WHITE AND BLACK ARE IN
+# THE BRAND FAMILY -- the owner says so -- which makes this ladder in-brand
+# rather than a concession, and it may be the load-bearing channel rather than a
+# supplement: lightness is the one axis a colour-vision deficiency does not take
+# away. Do not narrow it for aesthetic reasons without saying so out loud. It is
+# bounded upward only, by the white-icon-label ceiling. Five steps against eight
 # hue rungs is not an accident: 5 and 8 are coprime, so the pair (hue, weight)
 # does not repeat until the fortieth slot. Keyed on the hue rung alone, slot 9
 # came out as slot 1 in both, and two desktops that differ only in a jitter are
@@ -675,7 +792,7 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
         # and genuinely ABSENT elsewhere. With five gentle layers every one of
         # them covered the whole canvas at roughly half strength and they
         # averaged into one mixed hue everywhere -- measured, the hue varied by
-        # 30 degrees across an image whose inputs spanned ninety. A region has
+        # 30 degrees across an image whose inputs spanned the whole arc. A region has
         # to win somewhere to be a region.
         #
         # This is safe here and was NOT safe before, and the difference is
@@ -826,10 +943,12 @@ def cmd_check(args):
 
     if args.slots > RUNGS:
         print("\nNote: %d slots over %d rungs. Slot %d repeats slot 1's hue and "
-              "is told apart by where its colours sit and how dark it is. That "
-              "is the brand's limit, not a defect: the published palette has "
-              "two hue families and this arc already spends everything between "
-              "them." % (args.slots, RUNGS, RUNGS + 1))
+              "is told apart by where its colours sit and how dark it is. "
+              "That is this ARC's limit and no longer the brand's: the owner "
+              "widened the family on 2026-09-25 to include aubergines leaning "
+              "bluish, and a wider arc measures better on both separation "
+              "axes at once. See private/measure-background-arc.py."
+              % (args.slots, RUNGS, RUNGS + 1))
 
     if bad:
         print("hdw4s-background: %d slot(s) specify a colour above L* %.1f. "
