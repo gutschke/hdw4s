@@ -476,6 +476,97 @@ else
   okif 'no privileged file, and no estate detail, in the index'
 fi
 
+# THE TOOLS THAT HELPED ARE NOT NAMED IN ANYTHING PUBLISHED -- not in code, not
+# in comments, not in the manual, not in the changelog. The rule was written down
+# and nothing checked it, which was found while auditing a tree for a public
+# release: the tree was clean, so there was nothing to notice and no way to learn
+# that the rule was resting on somebody remembering it. A check that does not
+# exist and a check that has never rejected anything read identically from here.
+#
+# Bracketed characters throughout, so this file does not match itself and can
+# therefore be scanned rather than excluded -- the same trap as a process search
+# containing its own pattern.
+#
+# Whole words, so that ordinary English and ordinary names survive: a check that
+# cries wolf is turned off within a week. The trailer form is included because it
+# is what a tool adds by itself, which is the way this leaks without anybody
+# typing it.
+#
+# THE INDEX, not the working tree, for the reason the containment check above
+# gives: the staged content is what a push publishes, and a leak whose working
+# copy has been cleaned is exactly the case that matters.
+#
+# WHAT THIS CANNOT SEE, and it is the larger half: a commit MESSAGE. A push
+# publishes history, and history is not in the index. That needs a hook on the
+# machine where commits are made; it is not pretended to here.
+begin
+if ! same_repo; then
+  skip 'tool attribution' 'this tree is not a git repository of its own (a build copy) -- the index was NOT checked'
+else
+  # THE CONTROL COMES FIRST. This search is expected to find nothing, and a bad
+  # pattern, a bad pathspec and a grep that cannot read the index all look
+  # exactly like that. So the same command shape is pointed at a word that must
+  # be in the index before its silence is believed.
+  if [ -z "$(git grep --cached -licE 'ephemera[l]' -- hdw4s.conf 2>/dev/null)" ]; then
+    bad 'tool attribution' \
+        'the control failed: this search cannot find a word that IS in hdw4s.conf, so its empty result means nothing'
+  else
+    # THE THREE NAMES THAT ARE ALLOWED, removed before the search rather than by
+    # exempting the files that hold them, and this is the whole difference
+    # between a check that stays on and one somebody turns off.
+    #
+    # They are PATHS OF THE PRIVILEGED INSTRUCTION FILE AND ITS DIRECTORY, and
+    # they are load-bearing in two places: .gitignore is what keeps that file
+    # out, and the containment check above has to name the file it refuses to
+    # let be tracked. A rule cannot be enforced without naming its subject, so
+    # banning the name would mean deleting the mechanism -- which is a strictly
+    # worse outcome than the name being visible.
+    #
+    # Exempting the two FILES instead would exempt every future line in them,
+    # including a real attribution added to a comment. Exempting the STRINGS
+    # leaves every other use of the vendor's name, anywhere in the tree,
+    # including in those same two files, still caught. The pool-vocabulary
+    # check above uses the same shape for the same reason.
+    #
+    # ⚠ THEY ARE ALREADY PUBLISHED and have been for as long as the containment
+    # mechanism has existed. This is therefore a decision about what goes in
+    # from now on, not a retraction; removing them would not unpublish them.
+    # The directory is stripped WITH OR WITHOUT its trailing slash: two of the
+    # three real occurrences are prose about the directory rather than a path
+    # ("... is ignored via .git/info/exclude"), and a pattern that required the
+    # slash left them in. Found by running this, not by reading it.
+    strip_allowed_tool_paths() {
+      sed -e 's|\.[c]laude|.<harness>|g' \
+          -e 's|[C]LAUDE\.local\.md|<privileged>|g' \
+          -e 's|[C]LAUDE\.md|<privileged>|g'
+    }
+    # Two passes, because the shape of the answer differs: which FILES, so the
+    # message can name them, and then the surviving LINES, so a file whose only
+    # hits were allowed names does not get blamed.
+    attribution=''
+    for f in $(git grep --cached -linE \
+        '\b([c]laude|[a]nthropic|[c]hatgpt|[o]penai|[c]opilot|[c]o-authored-by)\b' \
+        2>/dev/null || true); do
+      # Each surviving line carries its own file name. Without the sed the name
+      # printed once and the rest of a multi-line hit read as belonging to the
+      # file above it -- a list that looks complete is harder to doubt.
+      hit="$(git show ":${f}" 2>/dev/null | strip_allowed_tool_paths |
+             grep -nEi '\b([c]laude|[a]nthropic|[c]hatgpt|[o]penai|[c]opilot|[c]o-authored-by)\b' |
+             sed "s|^|  ${f}:|" || true)"
+      [ -z "${hit}" ] || attribution="${attribution}${hit}
+"
+    done
+    if [ -n "${attribution}" ]; then
+      printf '%s' "${attribution}"
+      bad 'tool attribution' \
+          'the files above name an assistant, its vendor, or carry a tool trailer'
+    else
+      note 'tool attribution' \
+        'none in the index (control: the same search finds a known word in it)'
+    fi
+  fi
+fi
+
 # Whether the tree this run describes is the tree that is in git.
 #
 # Nothing asserted this before. It matters most during mutation testing, the
