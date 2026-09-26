@@ -686,6 +686,13 @@ cmd_list() {
 # is told which slot and why.
 cmd_check() {
   local idx inst state served recorded live=0 bad=0 pool_bad=0 failed=''
+  # A THIRD COUNTER, and not one of the two above, because the summary has to
+  # name the object the finding is about. The brake arm below first borrowed the
+  # per-session counter, and the summary then read "1 of 1 running session(s)
+  # failed this check" for a fault in a SLICE -- observed on a box on 2026-09-26,
+  # while the arm itself was working perfectly. A reader chasing that sentence
+  # looks at the session and finds nothing wrong with it.
+  local slice_bad=0
   local incarn="${HDW4S_INCARNATION_DIR:-${RUNDIR}/hdw4s-incarnation}"
   local webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}"
   local readable='yes'
@@ -785,7 +792,7 @@ cmd_check() {
           '  which leaves a unit reporting active behind a blank desktop.' \
           '  The usual cause is a PERCENTAGE: systemd resolves one against the' \
           "  hypervisor's memory, not this container's. Use an absolute count." >&2
-        bad=$(( bad + 1 ))
+        slice_bad=$(( slice_bad + 1 ))
       fi
       ;;
   esac
@@ -999,11 +1006,15 @@ cmd_check() {
     fi
   done < <(sort -n "${SLOTS}")
 
-  if [ "${bad}" -gt 0 ] || [ "${pool_bad}" -gt 0 ]; then
+  if [ "${bad}" -gt 0 ] || [ "${pool_bad}" -gt 0 ] || [ "${slice_bad}" -gt 0 ]; then
     [ "${bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${bad} of ${live} running session(s) failed this check." >&2
     [ "${pool_bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${pool_bad} thing(s) stop this machine handing out a desktop." >&2
+    # Its own sentence, naming the slice. It is not a session and it is not the
+    # pool; a machine with no pool at all still has this slice.
+    [ "${slice_bad}" -eq 0 ] || printf '%s\n' '' \
+      "hdw4s: the memory limit on hdw4s.slice cannot apply on this machine." >&2
     trap '' INT TERM QUIT HUP EXIT ERR
     exit 1
   fi
