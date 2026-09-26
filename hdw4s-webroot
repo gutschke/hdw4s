@@ -343,13 +343,28 @@ takes it from /etc/hdw4s/${inst}.conf"
   [ -n "${CREDENTIALS_DIRECTORY:-}" ] ||
     die "this instance is configured for basic auth but no credential was
 passed to this check, so what is served cannot be verified as the gated client"
+  # ABSENT AND FORBIDDEN ARE DIFFERENT FAILURES AND NEED DIFFERENT REPAIRS, and
+  # "[ -r ]" is one bit for two errnos. Saying the wrong one is not a cosmetic
+  # fault: the first version of this message asserted "this process lacks the
+  # privilege to traverse to it", which sent a day of work down a capability
+  # path -- two capabilities granted, both measured not to help, because the
+  # path was never there to be forbidden. So the two are tested separately and
+  # the message names which one happened.
+  if [ ! -e "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ]; then
+    die "this instance is configured for basic auth, but the credential
+directory is NOT MOUNTED in this context: '${CREDENTIALS_DIRECTORY}' does not
+contain hdw4s-auth. This is not a permission problem and no capability fixes
+it -- in a unit with mount namespacing the FIRST ExecStartPost= is given a
+namespace without the unit's own credential directory, while ExecStartPre= and
+a SECOND ExecStartPost= both have it. Reproduce in one second, with no desktop
+involved: private/diagnose-401.sh <target> <instance> R."
+  fi
   [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ] ||
-    die "this instance is configured for basic auth but
-'${CREDENTIALS_DIRECTORY}/hdw4s-auth' cannot be read from here. If it exists,
-this process lacks the privilege to traverse to it. NOTE: the credential is staged owned by the INSTANCE USER (mode 0400,
-0500 on its directory), not by root -- measured 2026-09-25, correcting a comment
-in this tree that said mode 0000 root:root. And a DAC capability has been tried
-twice and measured NOT to fix this; see hdw4s@.service."
+    die "this instance is configured for basic auth and
+'${CREDENTIALS_DIRECTORY}/hdw4s-auth' EXISTS but will not open for this process.
+That is a genuine permission problem, unlike the absent case above -- the
+credential is staged owned by the instance user (0400, in a 0500 directory),
+so a reader that is neither that user nor privileged cannot read it."
 
   # The same derivation the session itself uses, and it has to stay the same:
   # an instance is the account name, stripped at the colon for an instance named
