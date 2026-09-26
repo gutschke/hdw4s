@@ -195,7 +195,7 @@ ACHROMATIC = 8.0
 # metric would have said so. 102 degrees is the widest that still looks like the
 # brand to me; the owner is the judge of "physiologically feels related", so the
 # span is offered to him rather than settled here.
-COOL_EXTENSION = 26.9                # degrees past the bluest published aubergine
+COOL_EXTENSION = 12.9                # degrees past the bluest published aubergine
 ARC_LO = swatch("Light aubergine")[2] - COOL_EXTENSION      # ~321.9
 ARC_HI = swatch("Ubuntu Orange")[2] + 360.0                 # ~406.0
 RUNGS = 8                            # distinct rungs on the arc
@@ -216,8 +216,26 @@ WEIGHTS = 5
 
 
 def arc(t):
-    """A hue at fractional position t along the brand arc, wrapped to 0-360."""
-    return (ARC_LO + (ARC_HI - ARC_LO) * (t % 1.0)) % 360.0
+    """A hue at fractional position t along the brand arc.
+
+    t IS CLAMPED, NOT WRAPPED, and that single word was a serious bug. The arc
+    is an OPEN interval from the bluest aubergine to Ubuntu orange, not a circle
+    -- the whole point is that hues outside it are off-brand. Wrapping t sent a
+    position just past one end to the FAR end, so a tint drifting 15 degrees
+    cooler than the coolest desktop came out ORANGE.
+
+    Measured before the repair, at the 102 degree arc: seven of the eight rungs
+    wrapped. Rung 0, the violet-most desktop, carried tints at 30.5 and 40.3 --
+    Ubuntu orange -- and rung 6 carried one at 305.5, violet. The rendered mean
+    hue spanned about 47 degrees of an 84 degree nominal arc and was NOT
+    MONOTONIC in rung: rung 6 rendered cooler than rung 5. So the one thing this
+    design exists to provide, a recognisable per-desktop hue, was scrambled at
+    both ends.
+
+    The guard that would have caught it is cheap and is now in cmd_check:
+    rendered mean hue must be MONOTONIC in rung. It fires the moment drift
+    crosses an end, which is exactly when the wrap bites."""
+    return (ARC_LO + (ARC_HI - ARC_LO) * min(1.0, max(0.0, t))) % 360.0
 
 
 # The band the rendered field must stay inside. The floor is taste -- the owner
@@ -721,8 +739,9 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     lo = ARC_LO if tw["arc_lo"] is None else tw["arc_lo"]
 
     def arc_(u):
-        """This candidate's arc, so the SPAN can be compared side by side."""
-        return (lo + (ARC_HI - lo) * (u % 1.0)) % 360.0
+        """This candidate's arc, so the SPAN can be compared side by side.
+        CLAMPED, never wrapped -- see arc() for what wrapping did."""
+        return (lo + (ARC_HI - lo) * min(1.0, max(0.0, u))) % 360.0
 
     h_dye = arc_(t)
 
@@ -993,6 +1012,47 @@ def cmd_check(args):
               "bluish, and a wider arc measures better on both separation "
               "axes at once. See private/measure-background-arc.py."
               % (args.slots, RUNGS, RUNGS + 1))
+
+    # THE MONOTONICITY GUARD. Every tint of every rung must lie between the
+    # arc's ends, and the rungs must walk the arc IN ORDER. Both fire the moment
+    # a drift crosses an end, which is precisely when arc() used to wrap a hue
+    # round to the far side and hand the violet-most desktop an orange tint --
+    # seven rungs of eight were affected and nothing noticed for six rounds.
+    #
+    # It asserts on the SPEC and not on the pixels, so it runs with no rendering
+    # library, which is why the package can carry it. The rendered version lives
+    # in private/redarm-background-band.py.
+    lo_h, hi_h = ARC_LO % 360.0, ARC_HI % 360.0
+    span = ARC_HI - ARC_LO
+
+    def along(h):
+        """How far along the arc a hue sits, unwrapped, in degrees."""
+        return (h - lo_h) % 360.0
+
+    # THE TEST IS THE SPREAD WITHIN A RUNG, and an earlier version of this guard
+    # got it wrong in a way worth recording. It asserted that no tint lay off
+    # the end of the arc, and took the minimum per rung to check the ordering.
+    # That caught the wrap at a 102 degree arc and then SILENTLY STOPPED
+    # CATCHING IT at 88 degrees -- because this arc crosses 360, a hue that
+    # wraps to the far end still lands numerically inside the range, and taking
+    # the minimum hid it completely. A guard that stops refusing when a constant
+    # moves is worse than no guard, and the only reason this was noticed is that
+    # the red arm was re-run AFTER the narrowing rather than before it.
+    #
+    # The spread cannot be fooled that way: the tints of one rung are drawn from
+    # a drift window of about four tenths of the arc, so a rung whose hues span
+    # much more than that has had one of them thrown to the other end.
+    widest = (0.264 + 0.152) * span * 1.35 + 4.0
+    for rung in range(RUNGS):
+        sp2 = spec_for(rung, 0, 0x5eed5eed, top=top)
+        hs = [along(hex_to_lch(c)[2]) for c, *_ in sp2["regions"]]
+        if max(hs) - min(hs) > widest:
+            bad.append("rung %d's tints span %.0f degrees, more than the %.0f "
+                       "its drift window allows -- a hue has wrapped to the far "
+                       "end of the arc" % (rung, max(hs) - min(hs), widest))
+    for b in bad:
+        if isinstance(b, str):
+            print("hdw4s-background: %s" % b, file=sys.stderr)
 
     if bad:
         print("hdw4s-background: %d slot(s) specify a colour above L* %.1f. "
