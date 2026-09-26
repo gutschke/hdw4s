@@ -356,8 +356,8 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     # round was twelve numeric questions inside a space that was itself wrong,
     # and none of the answers could reach what he wanted.
     tw = dict(fade_scale=1.0, fade_a=1.0, drift=1.0, grain_a=1.0,
-              grain_scale=1.0, regions=4, variant="stack",
-              micro_a=1.0)
+              grain_scale=1.0, regions=3, variant="stack",
+              micro_a=1.0, tint_contrast=8.0, shade_a=1.0)
     tw.update(tweak or {})
 
     t = rung / float(RUNGS)
@@ -376,51 +376,101 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     def pick(shift, lo, hi):
         return lo + ((seed >> shift) % 1000) / 1000.0 * (hi - lo)
 
-    # HOW EACH REGION HAS WEATHERED. Sun bleaches: lighter, and markedly LESS
-    # chroma, because fading is loss of dye and not a change of colour. Rain and
-    # shade keep it deep and push it the other way along the arc. The drifts are
-    # in ARC FRACTIONS, not degrees, so they stay on the brand however the arc
-    # is redrawn.
-    weather = (
-        # (drift along the arc, lightness vs base, chroma fraction, opacity)
-        # He liked the regions with pronounced dark and light and said they
-        # wanted more COLOUR variation with it -- "not too subtle, but not like
-        # the aftermath of a paintball battle". So the lightness spread is wide
-        # and the hue drifts are wide, while the chroma stays moderate: strong
-        # structure, natural colour.
-        (-0.16, -0.34, 0.70, 0.70),   # sheltered: much deeper, richer, cooler
-        (+0.22, +0.86, 0.34, 0.68),   # sun-bleached: lighter, washed out
-        (+0.44, +0.46, 0.52, 0.58),   # weathered furthest along the arc
-        (-0.28, +0.16, 0.62, 0.46),   # a different dye-fastness, the other way
-        (+0.08, +1.00, 0.20, 0.40),   # the palest patch, barely any dye left
+    # TWO JOBS, TWO KINDS OF LAYER, AND CONFLATING THEM WAS THE DEFECT.
+    #
+    # The owner read a candidate and said: "the first example of perlin noise
+    # affecting color didn't seem to render as such. the noise affected how much
+    # black (V) was mixed into the color if we used an HSV color space." He was
+    # right, and it is measurable: across that field the HSV value varied by
+    # 12.5% while the hue varied by 25 degrees, and value is what the eye
+    # reported. The cause is structural rather than a matter of degree. A layer
+    # painted through an alpha mask over a DARKER base is, at low alpha, simply
+    # the base -- so varying alpha varies how dark the pixel is. That is mixing
+    # in black, exactly as he described, whatever hue the layer nominally holds.
+    #
+    # So a layer can carry hue or it can carry shade, and it cannot carry both:
+    #
+    #   TINTS sit at the SAME LIGHTNESS as the dye and differ from it in hue and
+    #   chroma only. Varying their alpha therefore cannot change how dark a
+    #   pixel is -- there is nowhere for the value to go -- and moves the hue
+    #   instead. This is the layer that makes the noise decide COLOUR.
+    #
+    #   SHADES sit at the dye's OWN hue and differ only in lightness. They carry
+    #   the pronounced light and dark he asked for, without dragging the colour
+    #   towards the base every time they are strong.
+    #
+    # And the hues are further apart and the chroma higher than before, because
+    # he said so: "you are starting out with colors from the ubuntu brand
+    # palette that are too close together. make an effort to pick higher
+    # contrast input colors. everything feels a little too muted."
+    # HOW FAR THE TINTS DRIFT IS A TRADE, AND IT IS MEASURED RATHER THAN
+    # CHOSEN. Wide drift gives one sheet lots of colour; it also destroys the
+    # difference between DESKTOPS, because if every desktop contains most of the
+    # arc they all average to the same thing. He asked for both -- "one desktop
+    # looks more aubergine, one looks more orange" AND "2-5 gradients ... and
+    # fade between those" -- so the number is the balance point:
+    #
+    #   drift   hue spread WITHIN an image   hue range BETWEEN four desktops
+    #   x1.00   the whole wheel (paintball)  27 deg
+    #   x0.55   27 deg                       33 deg
+    #   x0.40   21 deg                       48 deg     <- here
+    #   x0.30   16 deg                       54 deg
+    #
+    # Measured by rendering four slots and taking the chroma-weighted circular
+    # mean hue of each, which is the only way to see both halves of the trade at
+    # once; optimising either alone walks straight past it.
+    tints = (
+        # (drift along the arc, chroma fraction, opacity)
+        (-0.152, 0.98, 0.85),
+        (+0.104, 0.98, 0.85),
+        (+0.264, 0.92, 0.81),
+        (-0.056, 0.90, 0.44),
+        (+0.184, 0.95, 0.42),
     )[:max(2, min(5, int(tw["regions"])))]
+    shades = (
+        # (lightness as a fraction toward the ceiling, or negative toward black)
+        (-0.42, 0.62),
+        (+0.92, 0.58),
+    )
 
     regions = []
     hottest = base_L
-    for i, (dr, dL, cf, op) in enumerate(weather):
+    n = 0
+
+    def add(colour, L, opacity, contrast=None, centre=0.40):
+        contrast = tw["tint_contrast"] if contrast is None else contrast
+        nonlocal n, hottest
+        hottest = max(hottest, L)
+        # VERY LOW FREQUENCY, ONE OCTAVE. Two to four features across the
+        # canvas, so each layer is a lean across the whole picture rather than a
+        # patch in it. One octave keeps the middle band -- the coin-to-fist
+        # blotches that read as sprinkled-on -- empty.
+        freq = (0.0062 + pick(n * 9, -0.0022, 0.0030)) / tw["fade_scale"]
+        # CONTRAST HIGH, so each layer is genuinely PRESENT in its own region
+        # and genuinely ABSENT elsewhere. With five gentle layers every one of
+        # them covered the whole canvas at roughly half strength and they
+        # averaged into one mixed hue everywhere -- measured, the hue varied by
+        # 30 degrees across an image whose inputs spanned ninety. A region has
+        # to win somewhere to be a region.
+        #
+        # This is safe here and was NOT safe before, and the difference is
+        # numOctaves alone. At one octave a mask reaching either rail is a soft
+        # lean over a third of the picture; at three octaves the same rails
+        # produced coin-sized blotches with traceable outlines. That was the
+        # leopard, and it is why the octave count is not a knob.
+        regions.append((colour, freq, (seed >> (n * 7 + 3)) % 65536, 1,
+                        contrast, centre, opacity * tw["fade_a"]))
+        n += 1
+
+    for dr, cf, op in tints:
         h = arc(t + dr * tw["drift"])
+        add(col(base_L, h, cf), base_L, op)          # ISO-LIGHTNESS, by design
+    for dL, op in shades:
         L = base_L + (top - base_L) * dL if dL > 0 else base_L * (1.0 + dL)
         L = max(4.0, min(top, L))
-        hottest = max(hottest, L)
-        # VERY LOW FREQUENCY, ONE OCTAVE. Features larger than the canvas, so
-        # each region is a lean across the whole picture rather than a patch in
-        # it, and nothing lands in the middle band.
-        # TWO TO FOUR REGIONS ACROSS THE CANVAS. Lower than this and the whole
-        # picture sits on one smooth part of the noise, which is a flat tint and
-        # not a fade; higher and the regions shrink towards the middle band that
-        # reads as blotches. The band is set HERE, by frequency, and kept clean
-        # by numOctaves=1 -- a third octave puts coin-sized detail back however
-        # low this number is.
-        freq = (0.0062 + pick(i * 9, -0.0022, 0.0030)) / tw["fade_scale"]
-        regions.append((col(L, h, cf), freq,
-                        (seed >> (i * 7 + 3)) % 65536, 1,
-                        3.2, 0.46, op * tw["fade_a"]))
+        add(col(L, h_dye, 0.38), L, op * tw["shade_a"],
+            contrast=3.0, centre=0.46)                  # ISO-HUE
 
-    # THE GRAIN OF THE SKIN. High frequency: at the 4x between viewBox and
-    # pixels, a baseFrequency near 1 is a feature a few pixels across, which is
-    # grain. The previous 0.04 was a feature ~100px wide -- that is not grain,
-    # that is dust, and it was the one thing he rejected outright in the
-    # questionnaire (he chose NO grain over a lot of it).
     # TWO TEXTURES, NOT ONE, and he named the distinction himself: "we might
     # want both a macro and a micro structure... i think i saw a version that
     # had a much much smaller perlin pattern. it looked like the fine structures
@@ -439,7 +489,7 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
              (seed >> 47) % 65536, 2, 2.30, 0.50, 0.22 * tw["micro_a"])
 
     return {
-        "base": col(base_L, h_dye, 0.58),
+        "base": col(base_L, h_dye, 0.82),
         "regions": regions,
         "grain": grain,
         "micro": micro,
