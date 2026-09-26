@@ -1,3 +1,22 @@
+hdw4s (2.4.2) unstable; urgency=medium
+
+  * Closing a tab and asking for a new desktop no longer costs you the old
+    slot for a week. A browser that still had the discarded session open would
+    retry, reach that slot's door, and start a whole new desktop that nobody
+    was looking at -- which then sat in the pool until the idle window expired,
+    seven days by default. The router now remembers that it ended a letting and
+    refuses to hand the slot back, and a teardown says so for as long as it is
+    running rather than for the seventy milliseconds it used to.
+
+  * The "your desktop is starting" card no longer appears for waits that are
+    about to end, and no longer gives up on one that is merely slow. It stays
+    out of the way for the first moment, fades in only if the desktop really is
+    taking a while, and vanishes the instant the picture arrives. If a desktop
+    takes much longer than this machine usually does, it now says so and offers
+    you another one instead of showing you a black screen.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sat, 26 Sep 2026 16:03:39 -0700
+
 hdw4s (2.4.1) unstable; urgency=medium
 
   * A machine upgraded from an older version could come up, after its next
