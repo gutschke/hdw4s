@@ -95,14 +95,23 @@ After=hdw4s-incarnation@%i.service
 # tore down a desktop that had started correctly. It is not a race: watched for
 # sixty seconds across thirty samples, the mode never changed.
 #
-# READ/SEARCH rather than CAP_DAC_OVERRIDE, which was the wider spelling that
-# first proved the diagnosis: this bypasses read and traverse only, never write
-# permission. The blast radius is worth stating plainly rather than implying it
+# CAP_DAC_OVERRIDE, and NOT the narrower CAP_DAC_READ_SEARCH, which is what
+# this line said first. Read-and-traverse bypass is what the access looks like
+# on paper -- a mode-0000 directory and a 0400 file, both only read -- and the
+# narrower word was chosen on that reasoning, against a diagnosis that had
+# measured only the wider one. IT DOES NOT WORK: with READ_SEARCH the
+# credential stayed unreachable and the check refused exactly as it did with no
+# capability at all. Measured here 2026-09-25. The reason is not established, so
+# this comment does not invent one; what is established is which word works.
+# Do not narrow it again without measuring, and if you do measure it, say so
+# here -- the appeal of the narrower spelling is obvious and will recur.
+#
+# The blast radius is worth stating plainly rather than implying it
 # is nil -- capabilities bind only uid-0 processes here, the desktop itself runs
 # as the instance user and never holds them, and the set already grants
 # CAP_SETUID/CAP_SETGID, so a root Exec line in this unit could already become
 # any user. This adds nothing that set did not already imply.
-CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID CAP_DAC_OVERRIDE
 DevicePolicy=closed
 # The GPU, where the machine has one. Both lines are inert on a machine without
 # one -- the "-" makes the bind optional, and a device rule for a class of nodes
