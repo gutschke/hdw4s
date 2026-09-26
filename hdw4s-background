@@ -238,6 +238,8 @@ def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
         for i, (_c, f, s, o, g, b, _a) in enumerate(spec["regions"]))
     gc, gf, gs, go, gg, gb, ga = spec["grain"]
     defs += veil("grain", gf, gs, go, gg, gb, "fractalNoise")
+    mc, mf, ms, mo, mg, mb, ma = spec["micro"]
+    defs += veil("micro", mf, ms, mo, mg, mb, "fractalNoise")
     # STACKING versus BLENDING, which is the structural question itself. Plain
     # source-over is "stacking": each region hides what is under it in
     # proportion to its alpha. `multiply` is "blending": each region tints what
@@ -260,12 +262,14 @@ def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
         ' <rect width="%d" height="%d" fill="%s"/>\n'
         ' <!-- centuries of sun, wind and rain, in that order of scale -->\n'
         '%s'
-        ' <!-- the grain of the skin itself -->\n'
+        ' <!-- the unevenness of the material, then its pores -->\n'
         ' <rect width="%d" height="%d" fill="%s" filter="url(#grain)"'
+        ' opacity="%.3f"/>\n'
+        ' <rect width="%d" height="%d" fill="%s" filter="url(#micro)"'
         ' opacity="%.3f"/>\n'
         '</svg>\n'
         % (w, hgt, units_w, units_h, defs, units_w, units_h, spec["base"],
-           rects, units_w, units_h, gc, ga))
+           rects, units_w, units_h, gc, ga, units_w, units_h, mc, ma))
 
 
 def solid(colour=FALLBACK, w=1920, hgt=1080):
@@ -352,7 +356,8 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     # round was twelve numeric questions inside a space that was itself wrong,
     # and none of the answers could reach what he wanted.
     tw = dict(fade_scale=1.0, fade_a=1.0, drift=1.0, grain_a=1.0,
-              grain_scale=1.0, regions=3, variant="stack")
+              grain_scale=1.0, regions=4, variant="stack",
+              micro_a=1.0)
     tw.update(tweak or {})
 
     t = rung / float(RUNGS)
@@ -378,11 +383,17 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     # is redrawn.
     weather = (
         # (drift along the arc, lightness vs base, chroma fraction, opacity)
-        (-0.10, -0.16, 0.66, 0.55),   # sheltered: deeper, richer, cooler
-        (+0.13, +0.80, 0.30, 0.62),   # sun-bleached: lighter, washed out
-        (+0.30, +0.50, 0.44, 0.50),   # weathered furthest along the arc
-        (-0.04, +1.00, 0.18, 0.38),   # the palest patch, barely any dye left
-    )[:max(2, min(4, int(tw["regions"])))]
+        # He liked the regions with pronounced dark and light and said they
+        # wanted more COLOUR variation with it -- "not too subtle, but not like
+        # the aftermath of a paintball battle". So the lightness spread is wide
+        # and the hue drifts are wide, while the chroma stays moderate: strong
+        # structure, natural colour.
+        (-0.16, -0.34, 0.70, 0.70),   # sheltered: much deeper, richer, cooler
+        (+0.22, +0.86, 0.34, 0.68),   # sun-bleached: lighter, washed out
+        (+0.44, +0.46, 0.52, 0.58),   # weathered furthest along the arc
+        (-0.28, +0.16, 0.62, 0.46),   # a different dye-fastness, the other way
+        (+0.08, +1.00, 0.20, 0.40),   # the palest patch, barely any dye left
+    )[:max(2, min(5, int(tw["regions"])))]
 
     regions = []
     hottest = base_L
@@ -410,14 +421,28 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     # grain. The previous 0.04 was a feature ~100px wide -- that is not grain,
     # that is dust, and it was the one thing he rejected outright in the
     # questionnaire (he chose NO grain over a lot of it).
-    grain = (col(min(top, base_L + 16.0), h_dye, 0.30),
-             (0.95 + pick(50, -0.25, 0.35)) / tw["grain_scale"],
-             (seed >> 41) % 65536, 2, 1.60, 0.50, 0.16 * tw["grain_a"])
+    # TWO TEXTURES, NOT ONE, and he named the distinction himself: "we might
+    # want both a macro and a micro structure... i think i saw a version that
+    # had a much much smaller perlin pattern. it looked like the fine structures
+    # that a closeup look of a sheet of leather would show".
+    #
+    # MACRO grain sits just under the regions: a few units across, which at the
+    # 4x between viewBox and pixels is tens of pixels -- the unevenness of the
+    # material. MICRO is around one unit, so a few pixels: the pores. They are
+    # separate layers because one number cannot be both, and every previous
+    # version had only one and had to choose.
+    grain = (col(min(top, base_L + 14.0), h_dye, 0.34),
+             (0.16 + pick(50, -0.05, 0.07)) / tw["grain_scale"],
+             (seed >> 41) % 65536, 3, 1.75, 0.50, 0.17 * tw["grain_a"])
+    micro = (col(min(top, base_L + 18.0), h_dye, 0.22),
+             (1.45 + pick(56, -0.30, 0.45)) / tw["grain_scale"],
+             (seed >> 47) % 65536, 2, 2.30, 0.50, 0.22 * tw["micro_a"])
 
     return {
         "base": col(base_L, h_dye, 0.58),
         "regions": regions,
         "grain": grain,
+        "micro": micro,
         "variant": tw["variant"],
         # The brightest lightness this field ACTUALLY uses, not the ceiling it
         # was allowed. A guard pointed at the limit rather than at the value can
