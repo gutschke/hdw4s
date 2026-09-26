@@ -214,10 +214,6 @@ ARC_LO = swatch("Light aubergine")[2] - COOL_EXTENSION      # ~321.9
 ARC_HI = swatch("Ubuntu Orange")[2] + 360.0 + WARM_EXTENSION   # ~432
 RUNGS = 8                            # distinct rungs on the arc
 
-# How many rungs apart two LIVE sessions must be. Two is a third of the arc
-# at eight rungs, which is comfortably above the step the measurement says is
-# detectable; one would be within noise.
-MIN_SEPARATION = 2
 STRIDE = 3                           # coprime with RUNGS: consecutive slots
                                      # land three rungs apart, not one
 
@@ -690,7 +686,7 @@ def slot_number(instance):
     return int(digits) if digits else None
 
 
-def choose(instance, token, kind=None, avoid=()):
+def choose(instance, token, kind=None):
     """WHAT DIFFERS BETWEEN TWO DESKTOPS, AND WHAT STAYS PUT ACROSS A RESTART.
 
     Two questions, two answers, and the two kinds of session get DIFFERENT
@@ -723,56 +719,42 @@ def choose(instance, token, kind=None, avoid=()):
     if kind is None:
         kind = "ephemeral" if n is not None else "named"
 
-    if kind == "ephemeral":
-        # RANDOM, THEN REJECTED IF IT LANDS TOO NEAR A LIVE ONE.
+    if kind != "ephemeral":
+        # A NAMED DESKTOP'S BACKGROUND IS NOT OURS TO SET. The owner, 2026-09-26:
+        # "named desktops never have their background messed with. that's
+        # entirely up to the user".
         #
-        # The owner asked for randomisation as an EXPERIENCE: "we'll do our best
-        # by randomizing parameters each time, which also makes it engaging, as
-        # the users can try to guess if they get their favorite colors twice in
-        # a row or instead strongly different ones."
-        #
-        # But variety over TIME and separation at one MOMENT are different
-        # properties, and keying to the slot only ever gave the second. A plain
-        # random draw gives the first and makes the second probabilistic -- from
-        # a range this small, two live desktops will sometimes land together,
-        # and the whole feature is about the moment two are up at once.
-        #
-        # So: draw from the token, then reject a draw that sits within
-        # MIN_SEPARATION rungs of any session that is currently live, and draw
-        # again. The pool knows which slots are up, so the rejection costs a list
-        # on the command line and nothing else. Variety across visits AND
-        # separation right now, which keying to the slot could not give and
-        # plain randomness cannot either.
-        #
-        # With no --avoid list this falls back to the slot's own rung, so the
-        # behaviour without a caller that knows the pool is the old guaranteed
-        # separation rather than a silent downgrade to chance.
-        seed64 = int.from_bytes(hashlib.sha256(token).digest()[:8], "big")
-        if avoid:
-            taken = set(int(a) % RUNGS for a in avoid)
-            free = [r for r in range(RUNGS)
-                    if all(min((r - t) % RUNGS, (t - r) % RUNGS)
-                           >= MIN_SEPARATION for t in taken)]
-            if not free:                       # pool fuller than the arc allows
-                free = [r for r in range(RUNGS) if r not in taken] or \
-                       list(range(RUNGS))
-            rung = free[seed64 % len(free)]
-        else:
-            rung = (n * STRIDE) % RUNGS
-        weight = (seed64 >> 17) % WEIGHTS if avoid else n % WEIGHTS
-        layout_seed = seed64
-    else:
-        # NAMED DESKTOPS ARE NOT RANDOMISED, and this is deliberate rather than
-        # an oversight. A named desktop is one person's for months; the point is
-        # that they recognise it. Randomising it would change their desktop at
-        # every restart, which is the opposite of recognisable. The owner's
-        # "randomizing each time" was said about the pooled sessions, where a
-        # fresh look each visit IS the point -- but he did not separate the two
-        # cases, so this is the conservative reading and he has been asked.
-        h = hashlib.sha256(instance.encode("utf-8", "replace")).digest()
-        rung = h[0] % RUNGS
-        weight = h[1] % WEIGHTS
-        layout_seed = int.from_bytes(h[2:10], "big")
+        # This refuses rather than returning a field, and it refuses HERE rather
+        # than relying on the caller to not ask. hdw4s-run-session only invokes
+        # this for the ephemeral type, so the named path was already unreachable
+        # -- but a dead path that works is an invitation, and the next reader
+        # fixes it. It is a ruling, not an oversight, and this is where that is
+        # written down.
+        raise ValueError(
+            "refusing to generate a background for the named desktop '%s'. A "
+            "named desktop's background belongs to the person using it "
+            "(owner's ruling, 2026-09-26); only pooled ephemeral sessions get "
+            "one from us." % instance)
+
+    # PLAIN RANDOM, AND THE REJECTION IDEA WAS DECLINED FOR A BETTER REASON THAN
+    # I HAD. It was proposed that a draw landing too near a live session should
+    # be rejected and redrawn, to keep two concurrent desktops apart. The owner:
+    # "we don't even know which slots a particular user gets, as multiple users
+    # draw from the same pool. by chance, things will often work. if it doesn't
+    # the user can re-create the session, live with it, or manually set their
+    # own background. perfect is the enemy of good."
+    #
+    # That is the answer to a question the proposal got wrong: rejecting against
+    # "every live session" rejects against the WRONG SET, because the pool is
+    # shared and most live sessions belong to strangers. It would have spent
+    # real complexity making strangers' desktops differ -- which nobody needed
+    # -- while still guaranteeing nothing for one person holding two. The
+    # mitigation that does work is the wider, brand-adjacent hue range, which
+    # makes an unlucky draw rarer at no cost in machinery.
+    seed64 = int.from_bytes(hashlib.sha256(token).digest()[:8], "big")
+    rung = seed64 % RUNGS
+    weight = (seed64 >> 17) % WEIGHTS
+    layout_seed = seed64
 
     return spec_for(rung, weight, layout_seed)
 
@@ -1036,8 +1018,19 @@ def cmd_write(args):
         token = os.urandom(16)
 
     try:
-        text = svg(choose(args.instance, token, args.kind,
-                          avoid=args.avoid.split(",") if args.avoid else ()))
+        spec = choose(args.instance, token, args.kind)
+    except ValueError as e:
+        # A REFUSAL IS NOT A FAILURE AND MUST NOT FALL BACK TO WRITING. The
+        # broad handler below ships the flat colour when generation breaks,
+        # which is right for a defect and exactly wrong here: writing anything
+        # for a named desktop is the thing we were told not to do, and a flat
+        # aubergine is still a background we chose. Nothing is written and the
+        # exit status is clean, because refusing is the correct outcome.
+        print("hdw4s-background: %s" % e, file=sys.stderr)
+        return 0
+
+    try:
+        text = svg(spec)
     except Exception as e:                        # noqa: BLE001 -- see below
         # Broad on purpose. Every branch of the arithmetic above is reachable
         # only with the constants in this file, so a failure here is a defect
@@ -1107,8 +1100,15 @@ def cmd_check(args):
     span = ARC_HI - ARC_LO
 
     def along(h):
-        """How far along the arc a hue sits, unwrapped, in degrees."""
-        return (h - lo_h) % 360.0
+        """How far along the arc a hue sits, SIGNED, in degrees.
+
+        Centred on the arc rather than taken modulo 360, and that distinction is
+        the same bug this guard exists to catch, committed inside the guard
+        itself. With a plain modulo, a hue six degrees BELOW the arc's start
+        comes out as 354 -- so gamut clipping at the cool end made every rung
+        look as though it spanned the whole wheel, and the guard reported a wrap
+        that was not there. A measure that wraps cannot detect wrapping."""
+        return ((h - lo_h + 180.0) % 360.0) - 180.0
 
     # THE TEST IS THE SPREAD WITHIN A RUNG, and an earlier version of this guard
     # got it wrong in a way worth recording. It asserted that no tint lay off
@@ -1123,25 +1123,29 @@ def cmd_check(args):
     # The spread cannot be fooled that way: the tints of one rung are drawn from
     # a drift window of about four tenths of the arc, so a rung whose hues span
     # much more than that has had one of them thrown to the other end.
+    # KEPT SEPARATE FROM THE LIGHTNESS LIST. They were one list, so the
+    # lightness message counted these strings and announced "2 slot(s) specify a
+    # colour above L* 38" when no slot did. A guard reporting a failure that is
+    # really its own bookkeeping is worse than one that stays quiet.
+    wrapped = []
     widest = (0.264 + 0.152) * span * 1.35 + 4.0
     for rung in range(RUNGS):
         sp2 = spec_for(rung, 0, 0x5eed5eed, top=top)
         hs = [along(hex_to_lch(c)[2]) for c, *_ in sp2["regions"]]
         if max(hs) - min(hs) > widest:
-            bad.append("rung %d's tints span %.0f degrees, more than the %.0f "
-                       "its drift window allows -- a hue has wrapped to the far "
-                       "end of the arc" % (rung, max(hs) - min(hs), widest))
-    for b in bad:
-        if isinstance(b, str):
-            print("hdw4s-background: %s" % b, file=sys.stderr)
-
+            wrapped.append("rung %d's tints span %.0f degrees, more than the "
+                           "%.0f its drift window allows -- a hue has wrapped "
+                           "to the far end of the arc"
+                           % (rung, max(hs) - min(hs), widest))
+    for w in wrapped:
+        print("hdw4s-background: %s" % w, file=sys.stderr)
     if bad:
         print("hdw4s-background: %d slot(s) specify a colour above L* %.1f. "
               "White desktop icon labels sit on this field and GNOME's choice "
               "of white is not ours to change, so the ceiling is a real one."
               % (len(bad), SPEC_CEILING), file=sys.stderr)
         return 1
-    return 0
+    return 1 if wrapped else 0
 
 
 def main(argv):
@@ -1151,12 +1155,6 @@ def main(argv):
     w = sub.add_parser("write", help="write one session's background")
     w.add_argument("instance")
     w.add_argument("output")
-    w.add_argument("--avoid", default="",
-                   help="comma-separated rungs already taken by LIVE sessions; "
-                        "the draw is random but will not land within "
-                        "MIN_SEPARATION of any of them. Without this the rung "
-                        "is the slot's own, which is guaranteed separation "
-                        "rather than a silent downgrade to chance.")
     w.add_argument("--kind", choices=("ephemeral", "named"), default=None,
                    help="which kind of session this is; inferred from whether "
                         "the instance name ends in a number when not given")
