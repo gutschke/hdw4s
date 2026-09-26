@@ -1063,6 +1063,17 @@ class Ownership:
                 # Filled in by attach() once a desktop has actually answered.
                 "live": False,
                 "incarnation": None,
+                # WHY A SESSION ENDED, SET BY US, AND WHY IT IS NOT DERIVED.
+                # Every other signal that a letting is over is read from the
+                # world -- a runtime directory, a listening port, a published
+                # token -- and every one of them goes on saying "healthy" for
+                # seconds after a teardown has been asked for. Measured on
+                # production 2026-09-26: a discard at 14:33:45, the session
+                # gone at 14:33:48, and in between the visitor's own tab
+                # retried, was proxied, and SOCKET-ACTIVATED A FRESH DESKTOP in
+                # the slot it had just released. This field is the one fact no
+                # instrument can be late about, because it is the act itself.
+                "ended": None,
             }
             self._by_identity.setdefault(identity, []).append(sid)
         return sid
@@ -1088,6 +1099,32 @@ class Ownership:
                 return
             rec["live"] = True
             rec["incarnation"] = incarnation
+
+    def end_session(self, sid, why):
+        """Record that this letting is OVER, from here on, whatever the box says.
+
+        THE ORDERING DEFECT THIS EXISTS FOR, and it is why the record is marked
+        rather than dropped. A visitor who discards their desktop has a tab
+        still open on it, and that tab retries about every five seconds by
+        design. The teardown is asynchronous -- the router may not perform it,
+        see request_teardown() -- so for a second or three the slot's runtime
+        directory is still there, its port is still listening and its published
+        token still matches. Every guard in session_replaced() therefore reads
+        HEALTHY, the request is proxied, and the proxy's connect() is an
+        INSTRUCTION to systemd rather than a question: BindsTo= starts a whole
+        new GNOME session for nobody. On production, where nothing sets
+        HDW4S_IDLE_DAYS and the shipped default is seven days, that desktop
+        then holds a slot for a week with the reaper correctly saying nothing.
+
+        MARKED, NOT FORGOTTEN, so the visitor's own session directory can still
+        say "discarding" about it. The record is dropped at the gate, on the
+        first request that presents it, exactly as a reaped one is.
+        """
+        with self._lock:
+            rec = self._by_sid.get(sid)
+            if rec is not None and not rec["ended"]:
+                rec["ended"] = why
+            return rec is not None
 
     def pending_mints(self, since):
         """[(instance, minted)] for slots handed out whose desktop has not
@@ -1123,8 +1160,19 @@ class Ownership:
             return list(self._by_identity.get(identity, ()))
 
     def instances_in_use(self):
+        """The slots this router has a LIVE letting for. Never the ones it had.
+
+        ENDED LETTINGS ARE NOT LETTINGS, and leaving them in was visible in
+        production: the line "3 slot(s) now let" counted a slot whose desktop
+        had been discarded seconds earlier and was already stopping. Nothing
+        admits a visitor on this number -- slots_in_use() does that, from the
+        authority -- but an operator reads it, and a count that only ever goes
+        up is the monotonic defect this table has had once already, wearing a
+        log line instead of a 503.
+        """
         with self._lock:
-            return {r["instance"] for r in self._by_sid.values()}
+            return {r["instance"] for r in self._by_sid.values()
+                    if not r.get("ended")}
 
     def holders_of(self, instance, besides=None):
         """Every sid whose letting names INSTANCE, other than BESIDES.
@@ -1142,7 +1190,17 @@ class Ownership:
         """
         with self._lock:
             return [s for s, r in self._by_sid.items()
-                    if r["instance"] == instance and s != besides]
+                    if r["instance"] == instance and s != besides
+                    # AN ENDED LETTING DOES NOT HOLD A SLOT, and counting one
+                    # disarmed the reclaim completely. Measured on production
+                    # 2026-09-26: "did not reclaim a slot: ephemeral0 has been
+                    # let to somebody else since", about a slot let twice to the
+                    # SAME visitor, where the somebody else was their own
+                    # discarded session still sitting in this table. Nothing
+                    # ever removed it, so every slot that had been let twice was
+                    # permanently unreclaimable -- the leak's second half, and
+                    # it hid behind a refusal that reads like the guard working.
+                    and not r.get("ended")]
 
     def forget(self, sid):
         """Drop a sid whose session is gone. Its slot is NOT reassigned here."""
@@ -2536,6 +2594,17 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
     not be proved against anything but the machine it was already running on,
     and proving it by mutating those globals is a red arm that edits the checker.
     """
+    # WHAT WE DID OURSELVES, ASKED FIRST, AND BEFORE ANY INSTRUMENT. Everything
+    # below reads the world, and the world is LATE: for seconds after a teardown
+    # has been asked for, the runtime directory is still there, the port is still
+    # listening and the published token still matches. A request landing in that
+    # interval is proxied, and proxying is what resurrects the slot -- see
+    # Ownership.end_session(). This needs no instrument, so it cannot be gated on
+    # one being readable, which is why it is above the early return rather than
+    # beside the other reasons.
+    ended = rec.get("ended")
+    if ended:
+        return ended
     if not occupancy_readable(rundir):
         # The instrument is missing. It may not answer, in either direction --
         # "I could not look" must not be spent as either a permit or a refusal.
@@ -2653,6 +2722,18 @@ def slots_in_use(own, slots=None):
     # the filesystem half is empty because nothing could be written, the
     # in-memory half still holds every mint this process made.
     taken |= reserved_slots(now)
+    # AND A SLOT THAT IS BEING TORN DOWN, which none of the three sources above
+    # can see. A teardown is asynchronous and takes seconds; part way through it
+    # the runtime directory is gone -- so the authority says FREE -- while the
+    # session's processes are still being killed and its socket unit is still
+    # listening. Minting onto that hands a visitor a slot whose desktop is about
+    # to be shot, and it is also what made the gate above unsafe: if the slot can
+    # be re-let mid-teardown then a fresh letting could be gated by the marker
+    # that belongs to the previous one. The two halves are a matched pair and
+    # neither is sound alone.
+    for name in (slots or ()):
+        if teardown_requested(name):
+            taken.add(name)
     return taken
 
 
@@ -2824,13 +2905,53 @@ def assert_occupancy_is_read_not_created(occupied=slot_occupied,
 TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", "/run/hdw4s-teardown")
 
 
-def teardown_requested(instance, root=None):
-    """True when somebody has already asked for this slot to be torn down."""
+# HOW LONG A TEARDOWN IN PROGRESS MAY HOLD A SLOT OUT OF THE POOL. Bounded
+# because the marker is removed by another process: hdw4s-teardown clears it from
+# a trap on exit, so it survives only a SIGKILL -- and an unbounded marker after
+# one of those would take a slot out of the pool until the next reboot, which is
+# a capacity leak of exactly the kind this file was changed to stop. The bound is
+# read from the marker's own mtime, the way a reservation is.
+#
+# THE NUMBER IS NOT FREE-CHOSEN: hdw4s-teardown@.service carries
+# TimeoutStartSec=120, so systemd itself gives up at two minutes and nothing can
+# still legitimately be tearing down after that. Doubling it leaves room for a
+# box so loaded that systemd's own clock is the least of its problems, and the
+# failure mode of being too generous is one slot, briefly.
+TEARDOWN_MARKER_MAX = 240.0
+
+
+def teardown_requested(instance, root=None, now=None):
+    """True when this slot is being ended -- asked for, or part way through.
+
+    TWO FILES, AND THE SECOND ONE IS THE REPAIR. The request file is removed by
+    hdw4s-teardown BEFORE it does any work, and it has to be: the path unit fires
+    on the file existing, so a teardown that left it in place would be started
+    again forever. The consequence was that this function answered yes for a few
+    milliseconds and no for the several SECONDS in which the desktop was actually
+    dying -- the whole interval anybody needed it for. A guard that is true only
+    outside the window it guards is not a guard.
+
+    So hdw4s-teardown leaves a marker in "ending/<slot>" instead and clears it
+    from a trap when it is done. A SUBDIRECTORY rather than a suffix on the same
+    name: instance names may legally contain a dot -- hdw4s's own validator
+    permits "A-Za-z0-9._-" -- so "<slot>.ending" is a name a slot could in
+    principle have, and a marker that can be spelled as a request is a marker
+    that can trigger the path unit. The one name this shape collides with is a
+    slot called "ending", and hdw4s-teardown refuses that name outright rather
+    than the comment asking anybody to avoid it.
+    """
     base = TEARDOWN_DIR if root is None else root
     try:
-        return os.path.exists(os.path.join(base, instance))
+        if os.path.exists(os.path.join(base, instance)):
+            return True
     except OSError:
         return False
+    try:
+        st = os.stat(os.path.join(base, "ending", instance))
+    except OSError:
+        return False
+    here = time.time() if now is None else now
+    return (here - st.st_mtime) < TEARDOWN_MARKER_MAX
 
 
 def request_teardown(instance, root=None):
@@ -3680,43 +3801,13 @@ def slot_pids(instance, root=None):
         return None
 
 
-def teardown_requested(instance, root=None):
-    """True when somebody has already asked for this slot to be torn down."""
-    base = TEARDOWN_DIR if root is None else root
-    try:
-        return os.path.exists(os.path.join(base, instance))
-    except OSError:
-        return False
-
-
-def request_teardown(instance, root=None):
-    """Ask for this slot to be torn down. Returns None, or why it could not.
-
-    THE ROUTER CANNOT DO THIS ITSELF AND MUST NOT BE ABLE TO. It runs as a
-    DynamicUser with an empty CapabilityBoundingSet; stopping a unit or writing
-    to a cgroup needs privilege this component deliberately does not have, and
-    giving it any would put the box's teardown behind an HTTP surface that
-    strangers reach. So the router's whole part is to write a file whose NAME is
-    the slot, into a directory it can reach because of the same group membership
-    that lets it reach the slot sockets -- the access story this component
-    already has, rather than a second one.
-    """
-    base = TEARDOWN_DIR if root is None else root
-    try:
-        os.makedirs(base, exist_ok=True)
-    except OSError:
-        pass
-    try:
-        # O_EXCL so a second click is not a second request. An existing file is
-        # success from the visitor's point of view: what they asked for is
-        # already happening.
-        os.close(os.open(os.path.join(base, instance),
-                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o660))
-        return None
-    except FileExistsError:
-        return None
-    except OSError as e:
-        return e.strerror or str(e)
+# NOTE: teardown_requested() and request_teardown() used to be defined a SECOND
+# time here, identically, three hundred lines below the copies beside
+# reclaim_slot(). Python kept the later pair and the earlier one was dead, so an
+# edit to the documented copy would have changed nothing -- the shape this
+# project calls a stale citation, except that here both copies were live-looking.
+# Removed rather than kept in step: two copies of a rule are two rules the
+# moment one is edited.
 
 
 def describe_session(rec, sid, now=None):
@@ -3760,7 +3851,14 @@ def describe_session(rec, sid, now=None):
         "memory_mb": None if kb is None else kb // 1024,
         "pids": slot_pids(inst),
         "started": bool(rec.get("live")) or slot_occupied(inst),
-        "discarding": teardown_requested(inst),
+        # ASKED OF OUR OWN RECORD FIRST, because the FILE is not the state.
+        # hdw4s-teardown removes the request before it does any work -- it must,
+        # or the path unit refires forever -- so a column that only read the
+        # directory was false for all but the first few milliseconds of a
+        # teardown, and a visitor who had just pressed Discard was shown a row
+        # claiming nothing was happening. The marker the teardown itself keeps
+        # for the duration is the second source; either one means discarding.
+        "discarding": bool(rec.get("ended")) or teardown_requested(inst),
         "idle_window": window,
     }
 
@@ -4133,6 +4231,14 @@ def console(own, wf, identity, new_identity, what, sid, method):
                 "Nothing has been discarded. Try again, and tell whoever runs "
                 "this machine if it keeps happening."), extra)
             return
+        # BEFORE THE RESPONSE, AND THE ORDER IS THE WHOLE REPAIR. The 303 below
+        # is what sends this browser somewhere else, and its OTHER tab on the
+        # discarded desktop retries on its own clock -- so from the moment that
+        # response leaves, a request for this letting may arrive at any time. If
+        # it arrives before this line has run it is proxied into a slot that is
+        # still dying and starts a fresh desktop there for nobody.
+        own.end_session(sid, "the desktop behind %s was discarded by the "
+                             "visitor who held it" % rec["instance"])
         log("a visitor discarded their own session: slot %s, session %s"
             % (rec["instance"], sid))
         # 303, not 200: the browser must not repeat the POST if the person
@@ -4544,6 +4650,106 @@ def serve(sock, own, expected_b64):
             pass
 
 
+def assert_an_ended_letting_is_never_proxied(factory=Ownership,
+                                            replaced=session_replaced,
+                                            in_use=slots_in_use,
+                                            asked=teardown_requested):
+    """Prove a discarded letting cannot be proxied, and that a live one still can.
+
+    Runs at every start beside the others. WHAT IT CATCHES IS INVISIBLE FROM THE
+    OUTPUT, which is why it is here and not only in a test file: a request
+    proxied into a slot whose desktop is stopping starts a FRESH desktop in that
+    slot, and the visitor sees a perfectly ordinary screen while a production
+    slot is consumed for the length of the idle window -- seven days on the
+    shipped default. Nothing fails, nothing logs, and the reaper is right to say
+    nothing.
+
+    THE PERMIT ARM IS NOT DECORATION. A version of this gate that refused
+    everything would stop the leak and also gate every living visitor, which is
+    the more expensive defect of the two: [[restarting-sessions-is-usually-safe]]
+    and the 503-vs-gate history both say a refusal that should have been a resume
+    costs more than a leak. So the same record, with the same healthy world
+    around it, must be permitted while it has not ended.
+
+    AND THE WORLD IS BUILT TO LIE, on purpose. Every instrument the gate would
+    otherwise consult is given the HEALTHY answer: the runtime directory exists,
+    the token matches, and the door is stubbed open. That is the production
+    state at the moment of the defect -- the teardown has been asked for and
+    nothing in the world has caught up. A fixture where the directory was already
+    gone would pass against the old code too, which is the arm this project has
+    got wrong before.
+    """
+    import shutil
+    import tempfile
+
+    d = tempfile.mkdtemp(prefix="hdw4s-demux-ended-")
+    try:
+        rundir = os.path.join(d, "run", "hdw4s")
+        web = os.path.join(d, "web")
+        os.makedirs(os.path.join(rundir, "ephemeral0"))
+        os.makedirs(os.path.join(web, "ephemeral0"))
+        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+            f.write("same-token")
+        open_door = lambda inst: True
+
+        def rec(ended=None):
+            return {"live": True, "incarnation": "same-token", "minted": 0.0,
+                    "instance": "ephemeral0", "ended": ended}
+
+        # PERMIT ARM, first, so a gate that refuses everything cannot satisfy
+        # this function by passing the arm below.
+        why = replaced(rec(), "ephemeral0", rundir=rundir, webroot=web,
+                       door=open_door)
+        assert why is None, \
+            "a live letting was gated although nothing about it had ended: %r" % why
+
+        # REFUSE ARM. The same record, the same healthy world, and the one thing
+        # that differs is the act we performed ourselves.
+        why = replaced(rec("the visitor discarded it"), "ephemeral0",
+                       rundir=rundir, webroot=web, door=open_door)
+        assert why is not None, \
+            "a DISCARDED letting was permitted to proxy. The next request for" \
+            " it socket-activates a fresh desktop in that slot, for nobody, for" \
+            " the length of the idle window"
+
+        # AND IT MUST NOT NEED AN INSTRUMENT TO SAY SO. The whole point is that
+        # this answer precedes the world: with the occupancy authority absent --
+        # where every other reason withholds itself, correctly -- the act must
+        # still speak.
+        why = replaced(rec("the visitor discarded it"), "ephemeral0",
+                       rundir=os.path.join(d, "no-such-rundir"), webroot=web,
+                       door=open_door)
+        assert why is not None, \
+            "the discard was answered only when the occupancy authority could" \
+            " be read, so the gate is behind an instrument rather than in front" \
+            " of one"
+
+        # THE OTHER HALF OF THE PAIR: a slot mid-teardown must not be re-let.
+        # Without this, the gate above could fire on a FRESH letting that had been
+        # minted onto the slot while the previous one was still being torn down.
+        tdir = os.path.join(d, "teardown")
+        os.makedirs(os.path.join(tdir, "ending"))
+        pool = ["ephemeral0", "ephemeral1"]
+        seen = asked("ephemeral1", root=tdir)
+        assert seen is False, \
+            "a slot with no teardown marker was reported as being torn down"
+        open(os.path.join(tdir, "ending", "ephemeral1"), "w").close()
+        assert asked("ephemeral1", root=tdir) is True, \
+            "the in-progress marker hdw4s-teardown leaves for the WHOLE of a" \
+            " teardown was not seen; the only thing this router could see was" \
+            " the request file, which the teardown clears before it does any work"
+        # AND IT EXPIRES, because the marker is cleared by another process and a
+        # marker that outlived a SIGKILL would take the slot out of the pool
+        # until the next reboot.
+        assert asked("ephemeral1", root=tdir,
+                     now=time.time() + TEARDOWN_MARKER_MAX + 1) is False, \
+            "the in-progress marker never expires, so one killed teardown" \
+            " retires a slot permanently"
+        _ = pool
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def listening_socket():
     """systemd's fd if we were socket-activated, otherwise our own bind."""
     if os.environ.get("LISTEN_FDS") and os.environ.get("LISTEN_PID") == str(os.getpid()):
@@ -4596,6 +4802,12 @@ def main():
     # being fixed, because the function's name promised the pool while its body
     # returned filenames.
     assert_pool_is_typed(slot_table, ephemeral_slots)
+    # And the newest one, which is the ORDER rather than a condition: what this
+    # router DID must be asked before anything it can observe, because everything
+    # it can observe is late by seconds and a request landing in those seconds is
+    # proxied into a dying slot and starts a desktop there.
+    assert_an_ended_letting_is_never_proxied(Ownership, session_replaced,
+                                            slots_in_use, teardown_requested)
     # And the fifth: the only fact this process holds whose LOSS can permit
     # something, and therefore the only one written to disk. That it holds,
     # that it expires, and that it has no way to say yes to anybody.

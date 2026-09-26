@@ -93,14 +93,48 @@ UNIT="hdw4s-ephemeral@${SLOT}.service"
 # nothing and the failure it prevents is unrecoverable.
 case "${SLOT}" in
   *[!a-zA-Z0-9_-]*|'') echo "hdw4s-teardown: refusing the slot name ${SLOT}" >&2; exit 2;;
+  # "ending" IS THE ONE RESERVED NAME, and it is refused here rather than left to
+  # a comment asking people not to use it. The in-progress marker below lives in
+  # "${REQDIR}/ending/<slot>", so a slot with that name would have its request
+  # file and the marker directory competing for one path -- and the router reads
+  # both. Mechanical, because a naming convention nobody can check is not one.
+  ending) echo "hdw4s-teardown: 'ending' is reserved; ${REQDIR}/ending holds the in-progress markers" >&2; exit 2;;
 esac
 
 say() { echo "hdw4s-teardown: $*"; }
 
-# THE REQUEST IS CLEARED FIRST, and it is deliberate rather than tidy: the path
-# unit fires on the file EXISTING, so a run that failed with the file still
+# THE MARKER IS PLACED BEFORE THE REQUEST IS CLEARED, and that order is the
+# whole point of it: between the two there must be no instant in which nothing
+# says this slot is being ended.
+#
+# WHY A SECOND FILE AT ALL. The request is cleared first, and it has to be -- the
+# path unit fires on the file EXISTING, so a run that failed with the file still
 # there would be started again immediately, for ever, and the loop would be
-# hardest to break on exactly the unwell machine this exists for.
+# hardest to break on exactly the unwell machine this exists for. But clearing it
+# first also meant that hdw4s-demux's teardown_requested() was true for a few
+# milliseconds and false for the several SECONDS during which this script is
+# actually stopping the desktop. MEASURED ON PRODUCTION, 2026-09-26: a discard at
+# 14:33:45, "ended" at 14:33:48, and in that gap the visitor's own stale tab was
+# proxied into the slot and SOCKET-ACTIVATED A NEW GNOME SESSION in it -- which
+# then held a production slot under a seven-day idle window with nobody attached.
+# The router had every guard it needed and every one of them was reading a world
+# that had not caught up yet.
+#
+# So this marker is what is true for the whole of the teardown, and it is removed
+# from a trap rather than at the end of the happy path: a marker left behind takes
+# a slot out of the pool, so the failure mode of forgetting to clear it is the
+# very leak this exists to stop. The router bounds it by mtime as a backstop for
+# the one case a trap cannot cover, a SIGKILL.
+# THE MODE IS STATED, NOT INHERITED. This runs as root from a service, so the
+# directory would come out 0755 under systemd's default UMask -- which is a
+# default, not a decision, and the router only needs to READ this directory. A
+# mode that stopped it reading would make teardown_requested() answer "nothing is
+# being torn down" for ever, silently, which is the shape of guard this whole
+# change exists to remove. Nothing but this script writes here, so the group does
+# not need the write bit the parent gives www-data.
+mkdir -m 0755 -p "${REQDIR}/ending"
+: > "${REQDIR}/ending/${SLOT}"
+trap 'rm -f "${REQDIR}/ending/${SLOT}"' EXIT
 rm -f "${REQDIR}/${SLOT}"
 
 state="$(systemctl show -p ActiveState --value "${UNIT}" 2>/dev/null || echo unknown)"
