@@ -1287,6 +1287,48 @@ def test_create_refuses_where_it_lives(rig):
         "the refusal did not name what ran out, so an admin must go and trace it"
 
 
+def test_each_row_names_its_own_desktop(rig):
+    """Two rows a person can tell apart, and the name comes from the DESKTOP.
+
+    With one desktop there was nothing to choose between and the row said only
+    "Resume". Create makes choosing the point of the page, and the first
+    photograph of two rows showed them identical apart from a few megabytes.
+
+    THE ORACLE IS AGREEMENT, not presence: the row must say what the slot's own
+    page says, because the plausible implementation -- a number derived from
+    the instance name -- is off by one against it (slots count from zero, the
+    card is written i+1) and would put two different numbers for one desktop on
+    the screen where somebody decides which to destroy. So the fixture writes a
+    name into the slot's page and the test asserts the row carries THAT.
+    """
+    c = rig.client()
+    sid1, body1 = arrive(rig, c)
+    st, h, _ = c.post("/sessions/new")
+    assert st == 303, "create refused on a box with free slots: %d" % st
+    sid2 = h["location"][0].split("/")[2]
+    _, _, body2 = c.get("/s/%s/" % sid2)
+
+    names = {}
+    # The slot each session is on, taken from what the SLOT says about itself
+    # rather than from the router's table: the question is whether the row and
+    # the desktop agree, so the desktop's own account is the right end to start.
+    for sid, body in ((sid1, body1), (sid2, body2.decode())):
+        inst = body.split("SLOT=")[1].split()[0]
+        names[sid] = "Codename %s" % inst
+        d = os.path.join(rig.webroot, inst)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "index.html"), "w") as f:
+            f.write("<html><h1>%s</h1></html>" % names[sid])
+
+    st, _, body = c.get("/sessions/")
+    text = body.decode()
+    for sid, name in names.items():
+        assert name in text, \
+            "the row for %s did not carry the name its own page publishes (%r)" \
+            % (sid, name)
+    assert names[sid1] != names[sid2], "the fixture gave both rows one name"
+
+
 def test_exhaustion(rig):
     """More arrivals than slots must refuse, not overwrite somebody."""
     seen = []
@@ -3168,6 +3210,7 @@ def main():
         # exact defect the arrival rule exists to prevent.
         (test_asking_for_a_second_desktop_takes_a_GESTURE, dict(gate=None)),
         (test_a_second_desktop_is_a_second_desktop, dict(gate=None)),
+        (test_each_row_names_its_own_desktop, dict(gate=None)),
         # Two slots, not three, so the pool can be filled by ONE visitor
         # without the run taking three creates to get there.
         (test_create_refuses_where_it_lives, dict(nslots=2, gate=None)),

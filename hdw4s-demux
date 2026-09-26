@@ -79,6 +79,7 @@ made itself true. os.path.isdir, and nothing else, for that reason and no other.
 
 import base64
 import errno
+import re
 import hmac
 import http.cookies
 import os
@@ -3550,6 +3551,38 @@ SESSION_CGROUP_ROOT = os.environ.get("HDW4S_SESSION_CGROUP_ROOT",
                                      "/sys/fs/cgroup/hdw4s.slice")
 
 
+def slot_name(instance, root=None):
+    """What this desktop calls ITSELF, read from the page it serves, or None.
+
+    THE SAME OBJECT UNDER ONE NAME. The visible name is baked into the slot's
+    gated index.html by hdw4s-webroot at provisioning time, and it is what the
+    person sees on the card when they open the desktop. Reading it back is how
+    the directory and the desktop cannot disagree -- any other source here would
+    be a second copy of a rule that lives somewhere else, and the failure mode
+    is not a crash, it is two numbers for one desktop on the screen where
+    somebody decides which one to destroy.
+
+    Cheap enough for a page that must work on a sick machine: one bounded read
+    of a file the kernel has in cache, and every failure answers None.
+    """
+    base = WEBROOT_DIR if root is None else root
+    try:
+        with open(os.path.join(base, instance, "index.html"), "r",
+                  encoding="utf-8", errors="replace") as f:
+            head = f.read(200000)
+    except OSError:
+        return None
+    m = re.search(r"<h1>([^<]{1,60})</h1>", head)
+    if m is None:
+        return None
+    # RETURNED AS THE PAGE HOLDS IT, still HTML-escaped, and it is written into
+    # this page without a second pass. hdw4s-gate-index escaped it once for
+    # exactly this purpose, so escaping again would show a person "1 &amp;
+    # Desktop" and unescaping would undo the one thing protecting a name an
+    # administrator chose. One escape, at the point it was applied.
+    return m.group(1).strip() or None
+
+
 def slot_memory_kb(instance, root=None):
     """What this slot's session is ALREADY charged, in kB, or None.
 
@@ -3655,6 +3688,7 @@ def describe_session(rec, sid, now=None):
     return {
         "sid": sid,
         "instance": inst,
+        "name": slot_name(inst),
         "age": max(0.0, now - rec.get("minted", now)),
         "memory_mb": None if kb is None else kb // 1024,
         "pids": slot_pids(inst),
@@ -3837,7 +3871,28 @@ def describe_span(seconds):
 
 
 def row_html(r):
-    """One row. Quiet, and with exactly one pressable thing in it."""
+    """One row. Quiet, and with exactly one pressable thing in it.
+
+    THE ROW NAMES ITS DESKTOP, and it did not until a visitor could have two.
+    With one row there was nothing to tell apart and "Resume" was enough; the
+    first photograph of two rows, taken the day create landed, showed two rows
+    reading identically apart from seven megabytes. A person cannot choose
+    between those, and choosing is now the whole point of the page.
+
+    THE NAME IS READ FROM THE DESKTOP'S OWN PAGE, not computed here, and that is
+    the part worth defending. The obvious version derives a number from the
+    instance name -- ephemeral1 is "desktop 1" -- and it is WRONG: the slots are
+    named from zero and the card the session puts on itself is written
+    "$(( i + 1 )) - Desktop", so the row would have called ephemeral1 "1" while
+    the desktop it opens says "2". Two numbers for one thing, disagreeing, on
+    the screen where somebody chooses which desktop to end. Computing i+1 here
+    instead would agree today and would be a second copy of a rule that lives in
+    hdw4s-ephemeral-slots, kept in step by nobody.
+
+    So it is read from the page the slot actually serves. Absent or unreadable
+    answers None and the row falls back to the bare verb, because a name is a
+    convenience and this page has to render on a machine that is unwell.
+    """
     if r["discarding"]:
         right = "<span style=\"color:#8a8a8a\">discarding</span>"
     else:
@@ -3851,16 +3906,17 @@ def row_html(r):
         facts.append("%d processes" % r["pids"])
     if not r["started"]:
         facts.append("still starting")
+    label = "Resume %s" % r["name"] if r["name"] else "Resume"
     when = ("" if r["idle_window"] is None else
             "<div style=\"color:#8a8a8a;font-size:0.9em\">"
             "Goes by itself once nobody has connected for %s.</div>"
             % describe_span(r["idle_window"]))
     return ("<div style=\"display:flex;justify-content:space-between;"
             "align-items:baseline;padding:0.75rem 0\">"
-            "<div><a href=\"/s/%s/\">Resume</a>"
+            "<div><a href=\"/s/%s/\">%s</a>"
             "<div style=\"color:#b9b9b9;font-size:0.9em\">%s</div>%s</div>"
             "<div>%s</div></div>"
-            % (r["sid"], ", ".join(facts), when, right))
+            % (r["sid"], label, ", ".join(facts), when, right))
 
 
 def discard_confirmation_page(r):
