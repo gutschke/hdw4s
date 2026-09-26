@@ -90,6 +90,20 @@ OVERLAY = r"""
     probe, and leaves the card on the screen forever. A 20-case matrix passed against
     that, because every assertion asked the DOM instead of the picture. */
  #hdw4s-gate[hidden]{display:none !important}
+ /* THE STARTING VEIL, and it is under the same cascade rule for the same reason. */
+ #hdw4s-starting[hidden]{display:none !important}
+ #hdw4s-starting{position:fixed;inset:0;z-index:2147483645;display:flex;
+   align-items:center;justify-content:center;background:#141414;color:#eee;
+   font:16px/1.55 system-ui,sans-serif;
+   /* POINTER-EVENTS NONE IS A FAIL-OPEN, NOT A STYLE. If this veil ever stays up
+      when it should not, a person can still use the desktop underneath it; a veil
+      that both covers the screen AND swallows the pointer would turn a cosmetic
+      defect into a locked-out visitor. */
+   pointer-events:none}
+ #hdw4s-starting .card{max-width:32rem;padding:1.6rem 2rem;background:#242424;
+   border-radius:12px;box-shadow:0 10px 40px #000a;text-align:center}
+ #hdw4s-starting h2{font-size:1.15rem;margin:0 0 .5rem;color:#fff}
+ #hdw4s-starting p{margin:.4rem 0;color:#b9b9b9;font-size:14px}
  #hdw4s-gate{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;
    justify-content:center;background:#141414;color:#eee;font:16px/1.55 system-ui,sans-serif}
  #hdw4s-gate .card{max-width:36rem;padding:2rem 2.25rem;background:#242424;
@@ -134,6 +148,11 @@ OVERLAY = r"""
   <button id="hdw4s-go">Connect</button>
 __MORE__
   <p class="err" id="hdw4s-err"></p>
+</div></div>
+<div id="hdw4s-starting" hidden><div class="card">
+  <h2>Your desktop is starting</h2>
+  <p id="hdw4s-starting-note">It is coming up now. This usually takes a few
+    seconds; on a busy machine it can take a minute.</p>
 </div></div>
 <div id="hdw4s-share" hidden>
   <div id="hdw4s-panel" hidden></div>
@@ -350,6 +369,11 @@ __MORE__
     if (BADKNOB.length)
       document.getElementById('hdw4s-err').textContent = 'ignored: ' + BADKNOB.join('; ');
     gate.hidden = false;
+    // Whenever the card is on the screen the starting veil is not the thing to be
+    // showing, and its poller has nothing left to wait for. The card draws above it
+    // anyway, so this is about not leaving a timer running behind a state it does not
+    // belong to -- which is how the stall backstop came to count a paused stream.
+    veilDown();
   }
 
   // Second monitors and shared viewers are NEVER offered a takeover. They are not the
@@ -599,6 +623,128 @@ __MORE__
     wrap.hidden = false;
   }
 
+  // ------------------------------------------------------------------------------
+  // WHAT THE VISITOR IS LOOKING AT WHILE THE DESKTOP COMES UP
+  //
+  // THE DEFECT, and it is the owner's report: "frequently, i just get a black
+  // streaming desktop. if i discard and retry, it eventually works. meanwhile, other
+  // sessions continue working fine. so, this is only a problem at startup".
+  //
+  // MEASURED 2026-09-26 on a development box, through the real proxy hostname in a real browser
+  // (private/measure-time-to-paint.py, four runs including three concurrent mints):
+  // EVERY run showed the streamed picture at ONE distinct colour at the moment of
+  // hand-over, and every one climbed to 2114-3161 colours nine to eleven seconds
+  // later WITH NOTHING DISCARDED OR RESTARTED. Server-side, the same thing from the
+  // other end: a slot whose X root read one colour was painted twenty minutes later
+  // having never been touched, and on the black ones gnome-shell's own stage window
+  // was absent from the root's child list while both painted controls had it
+  // (private/measure-root-colours.sh).
+  //
+  // SO THE STREAM IS NOT BROKEN AND THE SLOT IS NOT POISONED: the desktop genuinely
+  // has nothing on it yet. The session unit reports READY as soon as the streaming
+  // server binds its port -- about a second into a start whose desktop takes another
+  // nine, or on a loaded box a great deal longer -- and hdw4s-wait asks the same
+  // question. Both are honest about what they check and neither is a claim that
+  // anything has been painted. A LABEL IS NOT EVIDENCE, and the word doing the work
+  // in "ready" was never "painted".
+  //
+  // WHAT THIS DOES AND, JUST AS IMPORTANTLY, DOES NOT DO. It does not delay the
+  // connection: connecting early is what makes the stream exist at all, and holding
+  // it back would make the wait longer rather than shorter. It delays only the
+  // REVEAL, and it says what is happening while it does. Black with no explanation
+  // reads as a fault; a sentence reads as a wait.
+  //
+  // IT FAILS OPEN, THREE WAYS, and that is the part not to simplify away:
+  //
+  //  1. IF IT CANNOT SAMPLE, IT COMES DOWN AT ONCE. No element to read, a context
+  //     that will not give up pixels, an exception of any kind -- the veil goes. A
+  //     veil that cannot measure must never hold a visitor behind itself, and every
+  //     path out of here that is not "painted" is still a path out.
+  //  2. IT GIVES UP ON A CLOCK. [[black-screen-diagnosis]] records a wedged
+  //     compositor that ONLY A RESTART RECOVERS. That desktop is black forever, and
+  //     a veil that waited for it would replace a visible defect with a permanent
+  //     reassuring message -- strictly worse, because nobody would report it.
+  //  3. IT DOES NOT COUNT WHILE THE STREAM IS STOPPED. Hiding the tab sends
+  //     STOP_VIDEO and no frames arrive; counting that quiet as "still black" is the
+  //     same mistake the stall backstop below already had to be repaired for.
+  //
+  // THE ORACLE IS THE PIXELS THE VISITOR IS BEING SENT, not the client's account of
+  // itself. Frame counters were climbing throughout the black period in every run
+  // above -- frames arriving proves the transport and never the picture.
+  var VEIL_FLOOR = 16;      // distinct colours. A painted desktop measures thousands;
+                            // one colour is black. Nothing needs to be close.
+  var VEIL_DEADLINE = 90000;
+  var veilEl = document.getElementById('hdw4s-starting');
+  var veilNote = document.getElementById('hdw4s-starting-note');
+  var veilTimer = null;
+
+  function veilDown(note){
+    if (veilTimer) { clearInterval(veilTimer); veilTimer = null; }
+    if (veilEl) veilEl.hidden = true;
+    if (note) { try { console.log('[hdw4s gate] ' + note); } catch(e){} }
+  }
+
+  // Count distinct colours in what the client has drawn. THREE outcomes, and keeping
+  // them apart is the whole correctness of this thing:
+  //
+  //   a number   what is on the screen
+  //   'waiting'  the client has not created its surface yet -- NOT a failure, and the
+  //              caller must keep waiting. This case is why the function does not just
+  //              return null: the first version collapsed "no canvas yet" and "cannot
+  //              read this canvas" into one null, and since the client makes its canvas
+  //              a moment AFTER the module loads, the fail-open fired on the very first
+  //              tick of every single start. Measured: the veil flashed for under a
+  //              second and the visitor got the black screen anyway, in five runs out
+  //              of five, while every assertion about it passed. That is
+  //              [[a-label-is-not-evidence]]'s one-bit-for-two-errnos, met again in
+  //              our own repair for it.
+  //   null       a surface exists and will not give up its pixels. THAT is the
+  //              cannot-look case, and the caller reveals on it.
+  //
+  // Sampled through our own small canvas so a WebGL or bitmap-renderer client, whose
+  // own context refuses getImageData, is still readable.
+  function paintedColours(){
+    try {
+      var src = document.querySelector('canvas#videoCanvas, canvas, video');
+      if (!src) return 'waiting';
+      var w = src.videoWidth || src.width, h = src.videoHeight || src.height;
+      if (!w || !h) return 'waiting';
+      var c = document.createElement('canvas');
+      c.width = 24; c.height = 24;
+      var g = c.getContext('2d', {willReadFrequently: true});
+      if (!g) return null;
+      g.drawImage(src, 0, 0, 24, 24);
+      var d = g.getImageData(0, 0, 24, 24).data, seen = {}, n = 0;
+      for (var i = 0; i < d.length; i += 4) {
+        var k = d[i] + ',' + d[i+1] + ',' + d[i+2];
+        if (!seen[k]) { seen[k] = 1; n++; }
+      }
+      return n;
+    } catch(e) { return null; }
+  }
+
+  function veilUp(){
+    if (!veilEl) return;
+    veilEl.hidden = false;
+    var t0 = Date.now();
+    if (veilTimer) clearInterval(veilTimer);
+    veilTimer = setInterval(function(){
+      // (3) above: the question comes BEFORE the reading, never after.
+      if (document.visibilityState === 'hidden' || streamPaused()) return;
+      var n = paintedColours();
+      if (n === 'waiting') { /* no surface yet: the deadline below still bounds us */ }
+      else if (n === null) { veilDown('cannot sample the picture; revealing'); return; }
+      else if (n >= VEIL_FLOOR) { veilDown('desktop painted (' + n + ' colours)'); return; }
+      if (Date.now() - t0 >= VEIL_DEADLINE) {
+        if (veilNote) veilNote.textContent =
+          'This is taking longer than usual. The desktop may still be coming up, or '
+          + 'it may have failed to draw -- if it stays black, discard it and start '
+          + 'another one.';
+        veilDown('gave up waiting for a painted desktop; revealing anyway');
+      }
+    }, 500);
+  }
+
   function boot(){
     try { sessionStorage.setItem(KEY,'1'); } catch(e){}
     // Which desktop this tab is connecting to, remembered so that a later
@@ -612,6 +758,10 @@ __MORE__
     // text there is a window the 500 ms poller can land in.
     clearStaleStatus();
     gate.hidden = true;
+    // Straight after the card comes down and before the client is loaded, because
+    // the gap this covers begins the instant the card goes. On a desktop that is
+    // already painted the veil is gone within one tick and nobody sees it.
+    veilUp();
     if (!booted) {
       booted = true;
       // The client picks its transport from window.__SELKIES_STREAMING_MODE__, then
@@ -953,6 +1103,71 @@ if _body.index("streamPaused()") > _body.index("still >= 20"):
 # directory behind it, this passes and the page is wrong again -- so the claim lives
 # with the two callers, which are hdw4s@.service (named: silent) and
 # hdw4s-ephemeral-slots (pool: --directory), and nowhere else.
+# THE STARTING VEIL MUST HAVE EVERY WAY OUT IT CLAIMS TO HAVE, checked on the bytes
+# about to be written for the same reason the guards above are.
+#
+# WHY A BUILD REFUSAL RATHER THAN A TEST. This veil covers the whole screen. Its
+# failure mode is not a wrong pixel: it is a visitor sitting behind a reassuring
+# sentence with a working desktop underneath, or worse, behind it forever on a session
+# whose compositor really is wedged -- the one case where black is the truth and the
+# only recovery is to start another desktop. Every one of the three exits is a line
+# that looks like defensive clutter to a reader tidying up, and nothing in the suite
+# runs a browser against a half-painted desktop, so a test would not notice their
+# removal. What is available mechanically is to refuse to build a page that has lost
+# one, at the moment somebody removes it.
+#
+# WHAT IT CANNOT SEE: whether paintedColours() reads the element the client actually
+# draws into on this build of Selkies. It checks that the three exits are present, not
+# that the measurement is right -- and if the measurement is wrong, exit 1 is what
+# carries it, which is why "returns null" is checked rather than assumed.
+_veil = re.search(r"function veilUp\(\)\{(.*?)\n  \}", html, re.S)
+if _veil is None:
+    raise SystemExit("hdw4s-gate-index: the starting veil's poller could not be found "
+                     "in the page about to be written -- refusing to build, because a "
+                     "full-screen overlay whose exits nothing has read is a visitor "
+                     "locked behind a sentence")
+_veil = _veil.group(1)
+for _needle, _why in (
+        ("=== null", "the veil no longer reveals when it CANNOT SAMPLE the picture. "
+                     "A veil that cannot measure must not hold a visitor behind "
+                     "itself; 'could not look' is not 'still black'"),
+        ("VEIL_DEADLINE", "the veil no longer gives up on a clock. A wedged "
+                          "compositor is black forever and only a restart recovers "
+                          "it, so a veil that waits for it replaces a visible defect "
+                          "with a permanent reassuring message nobody would report"),
+        ("streamPaused()", "the veil no longer asks whether the stream was stopped on "
+                           "purpose before counting. Hiding a tab sends STOP_VIDEO and "
+                           "no frames arrive, and reading that quiet as black keeps the "
+                           "veil up on a desktop that is working")):
+    if _needle not in _veil:
+        raise SystemExit("hdw4s-gate-index: %s -- refusing to build" % _why)
+# AND THE THIRD OUTCOME MUST STILL EXIST WHERE IT IS PRODUCED. Checked against
+# paintedColours() itself rather than against the poller, because the first version of
+# this guard looked for the word in the POLLER -- where it also appears -- and passed
+# against a red arm that had removed it from the function that produces it. A guard
+# pointed at the wrong subject reports health forever; it was caught only because the
+# red arm was run.
+_pc = re.search(r"function paintedColours\(\)\{(.*?)\n  \}", html, re.S)
+if _pc is None:
+    raise SystemExit("hdw4s-gate-index: paintedColours() could not be found in the page "
+                     "about to be written -- refusing to build, because the guard below "
+                     "would otherwise pass by not looking")
+if "'waiting'" not in _pc.group(1):
+    raise SystemExit(
+        "hdw4s-gate-index: paintedColours() no longer separates 'the client has not "
+        "made its surface yet' from 'a surface exists and cannot be read'. Collapsing "
+        "those into one null makes the veil's fail-open fire on the FIRST tick of every "
+        "start, because the client creates its canvas a moment after the module loads. "
+        "Measured: the veil flashed for under a second and the visitor got the black "
+        "screen anyway, five runs out of five, while every assertion passed -- refusing "
+        "to build")
+
+if _veil.index("visibilityState") > _veil.index("paintedColours()"):
+    raise SystemExit("hdw4s-gate-index: the starting veil samples the picture before "
+                     "asking whether anyone is looking at it. The question has to come "
+                     "first or the reading is already about a stopped stream -- "
+                     "refusing to build")
+
 _offers = "/sessions/" in html
 if _offers != (_dir == "yes"):
     raise SystemExit(

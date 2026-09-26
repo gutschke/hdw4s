@@ -1681,6 +1681,100 @@ echo '== the stall backstop does not read a deliberately stopped stream as a los
        'could not be found'
 )
 
+echo '== the starting veil keeps every way out it claims to have =='
+# THE DEFECT, reported by the owner 2026-09-26: "frequently, i just get a black
+# streaming desktop. if i discard and retry, it eventually works. meanwhile, other
+# sessions continue working fine. so, this is only a problem at startup".
+#
+# MEASURED the same day on a development box, through the real proxy hostname in a real browser
+# across four runs including three concurrent mints: the streamed picture was at ONE
+# distinct colour at the moment of hand-over EVERY time, and climbed to 2114-3161
+# colours nine to eleven seconds later with nothing discarded or restarted. From the
+# other end, a slot whose X root read one colour was painted twenty minutes later
+# having never been touched. The session reports READY when the streaming server binds
+# its port, about a second into a start whose desktop needs another nine -- or far
+# longer on a loaded box. Nothing was broken; the visitor was handed the desktop before
+# it existed to look at.
+#
+# The veil that now covers that gap is a FULL-SCREEN overlay, so what these arms are
+# about is its three ways out. Each is a line that reads as defensive clutter, none is
+# exercised by any browser test here, and losing one puts a visitor behind a reassuring
+# sentence with either a working desktop or a permanently black one underneath.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s\n' '<html><body><script type="module" src="/x.js"></script></body></html>' \
+    > "${d}/in.html"
+
+  # THE POSITIVE CONTROL FIRST, so the four refusals below are known to refuse the
+  # thing under test rather than the input.
+  "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/out.html" >/dev/null 2>"${d}/err" \
+    && has 'the shipped veil is built' "$(cat "${d}/out.html")" 'hdw4s-starting' \
+    || bad 'the shipped veil is built' \
+       "the generator refused a good page: $(cat "${d}/err")"
+  has 'the shipped veil reveals when it cannot sample' \
+    "$(cat "${d}/out.html")" 'cannot sample the picture'
+  # A veil that swallowed the pointer would turn a cosmetic failure into a locked-out
+  # visitor, and the property is one CSS declaration nothing else would notice.
+  has 'the shipped veil never swallows the pointer' \
+    "$(cat "${d}/out.html")" 'pointer-events:none'
+
+  redv() { python3 "$1" "${d}/in.html" "${d}/redout.html" >/dev/null 2>"${d}/rederr"; }
+
+  # 1. The cannot-sample exit removed. This is the dangerous one: it looks like dead
+  #    code, because on a working build paintedColours() always returns a number.
+  rm -f "${d}/redout.html"
+  sed "s|if (n === null) { veilDown('cannot sample the picture; revealing'); return; }|// tidied away|" \
+    "${ROOT}/hdw4s-gate-index" > "${d}/redv1"
+  redv "${d}/redv1" \
+    && bad 'a veil that cannot fail open is refused' 'it was accepted' \
+    || has 'a veil that cannot fail open is refused' "$(cat "${d}/rederr")" \
+       'CANNOT SAMPLE'
+  hasnt 'a refused veil writes no page' "$(ls "${d}")" 'redout.html'
+
+  # 2. The clock removed. A wedged compositor is black for the life of the session, so
+  #    without this the veil never comes down and the defect becomes invisible.
+  rm -f "${d}/redout.html"
+  sed 's|if (Date.now() - t0 >= VEIL_DEADLINE) {|if (false) {|' \
+    "${ROOT}/hdw4s-gate-index" > "${d}/redv2"
+  redv "${d}/redv2" \
+    && bad 'a veil that waits forever is refused' 'it was accepted' \
+    || has 'a veil that waits forever is refused' "$(cat "${d}/rederr")" \
+       'gives up on a clock'
+
+  # 3. The paused-stream question removed -- the same repair the stall backstop above
+  #    already needed, and the same way of losing it.
+  rm -f "${d}/redout.html"
+  sed "s|      if (document.visibilityState === 'hidden' \|\| streamPaused()) return;|      if (false) return;|" \
+    "${ROOT}/hdw4s-gate-index" > "${d}/redv3"
+  redv "${d}/redv3" \
+    && bad 'a veil that counts a stopped stream is refused' 'it was accepted' \
+    || has 'a veil that counts a stopped stream is refused' "$(cat "${d}/rederr")" \
+       'stopped on purpose'
+
+  # 4. The two not-a-number cases collapsed back into one. This is the defect the
+  #    repair itself shipped with and it was invisible to every assertion: the veil
+  #    flashed under a second and the visitor got the black screen anyway.
+  rm -f "${d}/redout.html"
+  # BOTH occurrences, because removing one leaves the distinction intact and the guard
+  # is right to accept that. The defect is collapsing the third outcome away entirely.
+  sed "s|return 'waiting';|return null;|g" \
+    "${ROOT}/hdw4s-gate-index" > "${d}/redv5"
+  redv "${d}/redv5" \
+    && bad 'a veil that cannot wait for the canvas is refused' 'it was accepted' \
+    || has 'a veil that cannot wait for the canvas is refused' "$(cat "${d}/rederr")" \
+       'has not made its surface yet'
+
+  # 5. THE ARM THAT MATTERS MOST: the guard must not pass by failing to find its
+  #    subject. A search that silently stops matching reports health forever.
+  rm -f "${d}/redout.html"
+  sed 's|function veilUp()|function veilRaise()|' \
+    "${ROOT}/hdw4s-gate-index" > "${d}/redv4"
+  redv "${d}/redv4" \
+    && bad "a veil the guard cannot find is refused" 'it was accepted' \
+    || has "a veil the guard cannot find is refused" "$(cat "${d}/rederr")" \
+       'could not be found'
+)
+
 echo '== the boot card offers the session directory only where a door serves one =='
 # THE DEFECT, reported by the owner 2026-09-25: "named sessions now have a link to where
 # the user can see all their sessions ... and that link doesn't work."
@@ -2646,7 +2740,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=414   # update when tests are added; a wrong number is the point
+EXPECTED=423   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
