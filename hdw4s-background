@@ -195,10 +195,29 @@ ACHROMATIC = 8.0
 # metric would have said so. 102 degrees is the widest that still looks like the
 # brand to me; the owner is the judge of "physiologically feels related", so the
 # span is offered to him rather than settled here.
-COOL_EXTENSION = 12.9                # degrees past the bluest published aubergine
+# HOW FAR PAST THE PUBLISHED SWATCHES WE GO, AND THE OWNER SET THIS, NOT THE
+# BRAND: "we're not ubuntu. we just want to look compatible with ubuntu. that
+# means, if we slightly break their rules, nobody is going to breath down our
+# necks and users won't complain as long as everything 'looks nice'." And a
+# datum with it -- earlier, less careful builds that "veered more into the blue
+# or sometimes into the yellow (instead of orange)... worked and felt natural".
+#
+# So blue at one end and yellow at the other are LIKED, not leaks to be clamped
+# away, and three rounds of me tightening this (118 -> 102 -> 88) were caution
+# overshooting. The gamut limit is still real and physical -- a dark saturated
+# violet is not in sRGB and comes back blue -- but "the realised hue left the
+# arc" is only a defect if the arc is a hard boundary, and he has said it is
+# not. It is a guide now.
+COOL_EXTENSION = 34.9                # degrees past the bluest aubergine: BLUE
+WARM_EXTENSION = 26.0                # degrees past Ubuntu orange: toward YELLOW
 ARC_LO = swatch("Light aubergine")[2] - COOL_EXTENSION      # ~321.9
-ARC_HI = swatch("Ubuntu Orange")[2] + 360.0                 # ~406.0
+ARC_HI = swatch("Ubuntu Orange")[2] + 360.0 + WARM_EXTENSION   # ~432
 RUNGS = 8                            # distinct rungs on the arc
+
+# How many rungs apart two LIVE sessions must be. Two is a third of the arc
+# at eight rungs, which is comfortably above the step the measurement says is
+# detectable; one would be within noise.
+MIN_SEPARATION = 2
 STRIDE = 3                           # coprime with RUNGS: consecutive slots
                                      # land three rungs apart, not one
 
@@ -671,7 +690,7 @@ def slot_number(instance):
     return int(digits) if digits else None
 
 
-def choose(instance, token, kind=None):
+def choose(instance, token, kind=None, avoid=()):
     """WHAT DIFFERS BETWEEN TWO DESKTOPS, AND WHAT STAYS PUT ACROSS A RESTART.
 
     Two questions, two answers, and the two kinds of session get DIFFERENT
@@ -705,11 +724,51 @@ def choose(instance, token, kind=None):
         kind = "ephemeral" if n is not None else "named"
 
     if kind == "ephemeral":
-        rung = (n * STRIDE) % RUNGS
-        weight = n % WEIGHTS
-        layout_seed = int.from_bytes(
-            hashlib.sha256(token).digest()[:8], "big")
+        # RANDOM, THEN REJECTED IF IT LANDS TOO NEAR A LIVE ONE.
+        #
+        # The owner asked for randomisation as an EXPERIENCE: "we'll do our best
+        # by randomizing parameters each time, which also makes it engaging, as
+        # the users can try to guess if they get their favorite colors twice in
+        # a row or instead strongly different ones."
+        #
+        # But variety over TIME and separation at one MOMENT are different
+        # properties, and keying to the slot only ever gave the second. A plain
+        # random draw gives the first and makes the second probabilistic -- from
+        # a range this small, two live desktops will sometimes land together,
+        # and the whole feature is about the moment two are up at once.
+        #
+        # So: draw from the token, then reject a draw that sits within
+        # MIN_SEPARATION rungs of any session that is currently live, and draw
+        # again. The pool knows which slots are up, so the rejection costs a list
+        # on the command line and nothing else. Variety across visits AND
+        # separation right now, which keying to the slot could not give and
+        # plain randomness cannot either.
+        #
+        # With no --avoid list this falls back to the slot's own rung, so the
+        # behaviour without a caller that knows the pool is the old guaranteed
+        # separation rather than a silent downgrade to chance.
+        seed64 = int.from_bytes(hashlib.sha256(token).digest()[:8], "big")
+        if avoid:
+            taken = set(int(a) % RUNGS for a in avoid)
+            free = [r for r in range(RUNGS)
+                    if all(min((r - t) % RUNGS, (t - r) % RUNGS)
+                           >= MIN_SEPARATION for t in taken)]
+            if not free:                       # pool fuller than the arc allows
+                free = [r for r in range(RUNGS) if r not in taken] or \
+                       list(range(RUNGS))
+            rung = free[seed64 % len(free)]
+        else:
+            rung = (n * STRIDE) % RUNGS
+        weight = (seed64 >> 17) % WEIGHTS if avoid else n % WEIGHTS
+        layout_seed = seed64
     else:
+        # NAMED DESKTOPS ARE NOT RANDOMISED, and this is deliberate rather than
+        # an oversight. A named desktop is one person's for months; the point is
+        # that they recognise it. Randomising it would change their desktop at
+        # every restart, which is the opposite of recognisable. The owner's
+        # "randomizing each time" was said about the pooled sessions, where a
+        # fresh look each visit IS the point -- but he did not separate the two
+        # cases, so this is the conservative reading and he has been asked.
         h = hashlib.sha256(instance.encode("utf-8", "replace")).digest()
         rung = h[0] % RUNGS
         weight = h[1] % WEIGHTS
@@ -732,16 +791,18 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
               grain_scale=1.0, regions=3, variant="stack",
               micro_a=1.0, tint_contrast=8.0, shade_a=1.0,
               micro_kind="weave", sweep="hue", sweep_a=0.55,
-              arc_lo=None, faded_anchor="dye", ladder="smooth")
+              arc_lo=None, faded_anchor="dye", ladder="smooth",
+              arc_hi=None)
     tw.update(tweak or {})
 
     t = rung / float(RUNGS)
     lo = ARC_LO if tw["arc_lo"] is None else tw["arc_lo"]
+    hi = ARC_HI if tw["arc_hi"] is None else tw["arc_hi"]
 
     def arc_(u):
         """This candidate's arc, so the SPAN can be compared side by side.
         CLAMPED, never wrapped -- see arc() for what wrapping did."""
-        return (lo + (ARC_HI - lo) * min(1.0, max(0.0, u))) % 360.0
+        return (lo + (hi - lo) * min(1.0, max(0.0, u))) % 360.0
 
     h_dye = arc_(t)
 
@@ -860,6 +921,25 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     for dL, op in shades:
         L = base_L + (top - base_L) * dL if dL > 0 else base_L * (1.0 + dL)
         L = max(4.0, min(top, L))
+        if tw["faded_anchor"] == "grey" and dL > 0:
+            # A REAL GREY AREA, which the previous "warm grey" option never
+            # produced. He said so: "a few times you mentioned that we are going
+            # towards grey, and honestly, there was no visible grey area."
+            # Measured, he is right -- the minimum saturation anywhere in that
+            # candidate was 63%, and a region reads as grey below about 15-20%.
+            # A thin veil of a pale colour over a field that is 70% saturated
+            # CANNOT desaturate it; it only shifts the hue a little. The label
+            # described something the construction could not do.
+            #
+            # To get grey the layer has to be nearly opaque where it lands, so
+            # the dye is genuinely replaced rather than tinted. Whether that is
+            # wanted is his call -- he notes grey "is obviously not as excited
+            # as a punchy saturated color" -- but it is now a real option
+            # instead of a word.
+            wg = swatch("Warm Grey")
+            add(lch_to_hex(L, min(4.0, max_chroma(L, wg[2])), wg[2]), L,
+                min(0.95, op * tw["shade_a"] * 1.7), contrast=2.2, centre=0.30)
+            continue
         if tw["faded_anchor"] == "warmgrey" and dL > 0:
             # WARM GREY IS THE ONLY PALETTE ENTRY THE BRAND NAMES FOR
             # BACKGROUNDS -- "backgrounds, graphics, dot patterns, charts and
@@ -956,7 +1036,8 @@ def cmd_write(args):
         token = os.urandom(16)
 
     try:
-        text = svg(choose(args.instance, token, args.kind))
+        text = svg(choose(args.instance, token, args.kind,
+                          avoid=args.avoid.split(",") if args.avoid else ()))
     except Exception as e:                        # noqa: BLE001 -- see below
         # Broad on purpose. Every branch of the arithmetic above is reachable
         # only with the constants in this file, so a failure here is a defect
@@ -1070,6 +1151,12 @@ def main(argv):
     w = sub.add_parser("write", help="write one session's background")
     w.add_argument("instance")
     w.add_argument("output")
+    w.add_argument("--avoid", default="",
+                   help="comma-separated rungs already taken by LIVE sessions; "
+                        "the draw is random but will not land within "
+                        "MIN_SEPARATION of any of them. Without this the rung "
+                        "is the slot's own, which is guaranteed separation "
+                        "rather than a silent downgrade to chance.")
     w.add_argument("--kind", choices=("ephemeral", "named"), default=None,
                    help="which kind of session this is; inferred from whether "
                         "the instance name ends in a number when not given")
