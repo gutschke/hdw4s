@@ -209,7 +209,31 @@ ACHROMATIC = 8.0
 # arc" is only a defect if the arc is a hard boundary, and he has said it is
 # not. It is a guide now.
 COOL_EXTENSION = 34.9                # degrees past the bluest aubergine: BLUE
-WARM_EXTENSION = 26.0                # degrees past Ubuntu orange: toward YELLOW
+# THE WARM END STOPS AT UBUNTU ORANGE, AND THE REASON IS A CONSTRAINT WE CANNOT
+# LIFT. The owner: "you mentioned a few times you pushed into yellow, but
+# honestly the background was just purples and blues." He is right and I was
+# wrong to say otherwise -- it is the fourth time on this feature that a label
+# claimed more than the construction could deliver.
+#
+# YELLOW ONLY READS AS YELLOW WHEN IT IS LIGHT. Measured: hue 72 at L* 70 is
+# #ed9918, gold. The same hue at the lightnesses the white-icon-label ceiling
+# forces -- 23 to 37 -- is #4f3004 and #7b4d07, which are dark brown and olive.
+# Gold needs about L* 70 and the ceiling is 37.8, so the warm end of this arc
+# CANNOT BE WARM while that ceiling holds. The two constraints are in direct
+# conflict and the ceiling wins, because white icon labels are GNOME's and not
+# ours to change.
+#
+# The asymmetry is the whole story: a dark blue is still blue, a dark yellow is
+# brown. So the cool extension works and the warm one never could.
+#
+# Lightening only the warm rungs was tried and does nothing -- the rendered hue
+# moved from 16.0 to 16.2 -- because the mixture, not the base lightness, pins
+# it. And the extension was actively COSTING a rung: with it, rungs 6 and 7 both
+# rendered at about 16 degrees, so two of eight desktops were the same colour.
+# Removing it gives eight distinct rungs. A constant that describes something
+# unreachable is worse than no constant, because everything downstream reasons
+# from it.
+WARM_EXTENSION = 0.0                 # Ubuntu orange is as warm as the ceiling allows
 ARC_LO = swatch("Light aubergine")[2] - COOL_EXTENSION      # ~321.9
 ARC_HI = swatch("Ubuntu Orange")[2] + 360.0 + WARM_EXTENSION   # ~432
 RUNGS = 8                            # distinct rungs on the arc
@@ -903,25 +927,17 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     for dL, op in shades:
         L = base_L + (top - base_L) * dL if dL > 0 else base_L * (1.0 + dL)
         L = max(4.0, min(top, L))
-        if tw["faded_anchor"] == "grey" and dL > 0:
-            # A REAL GREY AREA, which the previous "warm grey" option never
-            # produced. He said so: "a few times you mentioned that we are going
-            # towards grey, and honestly, there was no visible grey area."
-            # Measured, he is right -- the minimum saturation anywhere in that
-            # candidate was 63%, and a region reads as grey below about 15-20%.
-            # A thin veil of a pale colour over a field that is 70% saturated
-            # CANNOT desaturate it; it only shifts the hue a little. The label
-            # described something the construction could not do.
-            #
-            # To get grey the layer has to be nearly opaque where it lands, so
-            # the dye is genuinely replaced rather than tinted. Whether that is
-            # wanted is his call -- he notes grey "is obviously not as excited
-            # as a punchy saturated color" -- but it is now a real option
-            # instead of a word.
-            wg = swatch("Warm Grey")
-            add(lch_to_hex(L, min(4.0, max_chroma(L, wg[2])), wg[2]), L,
-                min(0.95, op * tw["shade_a"] * 1.7), contrast=2.2, centre=0.30)
-            continue
+        # GREY IS GONE, ON HIS WORD, AND IS NOT BEHIND A KNOB. "the grey never
+        # really worked too well. it didn't really render as grey, but more as
+        # lots of superimposed mottled structure or none. as such, that's
+        # probably not usable."
+        #
+        # It could not have worked and that was measurable before he said it:
+        # nothing in the field ever fell below LCh chroma 37 where grey begins
+        # around 10, because the hue ramp re-saturates the whole sheet. Grey and
+        # the ramp cannot coexist, and by choosing against grey he has chosen
+        # the ramp. Removed rather than left as an option, so that nobody
+        # re-adds it and measures it again.
         if tw["faded_anchor"] == "warmgrey" and dL > 0:
             # WARM GREY IS THE ONLY PALETTE ENTRY THE BRAND NAMES FOR
             # BACKGROUNDS -- "backgrounds, graphics, dot patterns, charts and
