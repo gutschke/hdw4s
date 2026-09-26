@@ -215,6 +215,61 @@ BROWSER_COOKIE_CAP_SECONDS = BROWSER_COOKIE_CAP_DAYS * 86400
 # exercise the guards without a network -- never depends on main() having run.
 COOKIE_LIFETIME = COOKIE_FLOOR_SECONDS
 
+# THE ONE-SHOT THAT SAYS "THIS ARRIVAL IS THE ONE WE JUST CAUSED".
+#
+# THE RULING, 2026-09-26: *"let's drop the two-click flow confirmation and see
+# what happens."* The two clicks were "New desktop" and then, on the desktop the
+# router had just minted, "Connect".
+#
+# WHAT THE SECOND CLICK WAS FOR, because this must not be read as softening it.
+# The arrival gate exists because a page arriving at a session address cannot
+# tell whether somebody else is watching that desktop right now -- measured, and
+# said on the card itself -- so connecting may evict them. A browser restoring
+# twenty tabs presents twenty session addresses and must ask about every one.
+# That reasoning is untouched here, and so is the rule that a GET must never
+# mint: this marker is written by the mint, never read as permission to perform
+# one. See test_asking_for_a_second_desktop_takes_a_GESTURE and its red arm.
+#
+# WHY IT DOES NOT REACH A DESKTOP THIS ROUTER JUST MINTED. A session minted in
+# this request has never been served to anybody: there is no viewer to evict, so
+# the card is asking a question whose only honest answer is yes. The owner's own
+# words for it: *"the button that shouldn't even appear if everything worked
+# correctly."*
+#
+# WHY A COOKIE AND NOT A URL. "?gate=off" on the redirect would work today and
+# reopen exactly the hole the ruling of 2026-09-22 closed: a query string goes
+# into history, so the restored tab that ruling is about would come back
+# carrying its own permission to connect silently, months later, possibly on top
+# of a viewer. This marker is consumed by the first page that reads it and
+# expires in two minutes, so no restored tab, bookmark, shared link or back
+# button can carry it.
+#
+# WHY IT NAMES THE SID. Derived from the session being minted rather than a bare
+# flag: a flag would authorise an arrival at ANY session address the browser
+# happened to open next, including one somebody else is watching. The page
+# checks the name against the address it is serving and ignores anything else.
+#
+# NOT HttpOnly, and it is the only cookie here that is not: its reader is the
+# page-side gate in hdw4s-gate-index, which is script. It carries a session id
+# the browser is being redirected to in the same response and nothing else.
+FRESH_COOKIE = "hdw4s_fresh"
+# Long enough to survive a redirect and a page load on an unwell box, short
+# enough that it is gone before anybody could restore a tab. The page deletes it
+# on read; this is the backstop for the arrival that never happens.
+FRESH_COOKIE_SECONDS = 120
+
+
+def fresh_mint_header(sid):
+    """The marker for a session THIS request minted, for the redirect to carry.
+
+    A function rather than a line at each site, because the two minting sites
+    must not drift into two spellings -- and the page-side reader is in a third
+    file, which is why the name is asserted across all three by tests.sh.
+    """
+    return ("Set-Cookie",
+            "%s=%s; Path=/; SameSite=Lax; Secure; Max-Age=%d"
+            % (FRESH_COOKIE, sid, FRESH_COOKIE_SECONDS))
+
 # Where the periodic sweep records the last time anything was connected to a
 # slot. Same environment variable the CLI reads, deliberately: two spellings of
 # one path is two paths as soon as either is edited.
@@ -3221,6 +3276,7 @@ def header_value(headers, name):
 def respond(wf, status, body=b"", extra=()):
     reason = {
         200: "OK", 302: "Found", 400: "Bad Request", 401: "Unauthorized",
+        303: "See Other",
         403: "Forbidden", 404: "Not Found", 410: "Gone",
         502: "Bad Gateway", 503: "Service Unavailable",
     }.get(status, "Error")
@@ -3395,6 +3451,12 @@ def arrival(own, wf, identity, query, new_identity):
     owned = own.owned_by(identity)
 
     sid = None
+    # Whether the session this arrival lands on was created by THIS request.
+    # Kept as its own fact rather than inferred from "owned was empty": the
+    # resume loop below can drop every candidate it finds and fall through to
+    # the mint, and an inference would then be wrong in the one direction that
+    # matters -- skipping the gate on a desktop somebody may be watching.
+    minted_here = False
     if owned and arm in ("takeover", "off"):
         # Resume the most recent session this identity owns -- IF IT IS STILL
         # THERE. Not a slot lookup: the sid is what is resumed, so a reaped
@@ -3464,11 +3526,16 @@ def arrival(own, wf, identity, query, new_identity):
         log_arrival("minted a session", identity, instance, sid,
                     "arm %s, %d slot(s) now let" % (arm,
                                                     len(own.instances_in_use())))
+        minted_here = True
 
     location = "/s/%s/" % sid
     if query:
         location += "?" + query.decode("latin-1")
     extra.append(("Location", location))
+    # ONLY WHERE THIS REQUEST MINTED. A RESUMED session -- which may well have a
+    # viewer on it -- is redirected exactly as it always was and meets the card.
+    if minted_here:
+        extra.append(fresh_mint_header(sid))
     respond(wf, 302, b"", extra)
 
 
@@ -4030,7 +4097,9 @@ def console(own, wf, identity, new_identity, what, sid, method):
         # 303 rather than 302, for the reason the discard uses one: the browser
         # must not repeat the POST if the person reloads where they land, and
         # repeating THIS one costs a slot.
-        respond(wf, 303, b"", [("Location", "/s/%s/" % new_sid)] + extra)
+        respond(wf, 303, b"",
+                [("Location", "/s/%s/" % new_sid),
+                 fresh_mint_header(new_sid)] + extra)
         return
 
     if what == "discard":

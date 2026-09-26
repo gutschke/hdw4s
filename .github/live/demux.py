@@ -1221,6 +1221,86 @@ def test_asking_for_a_second_desktop_takes_a_GESTURE(rig):
         "making a second one -- which is the whole complaint"
 
 
+def fresh_markers(headers):
+    """Every hdw4s_fresh value in a response, as a list.
+
+    Read from the bytes the browser receives rather than from a call inside the
+    router, for the reason every other assertion on this page is: what the page
+    gate will act on is the header, and a component is not evidence about its
+    own behaviour.
+    """
+    out = []
+    for sc in headers.get("set-cookie", []):
+        if sc.startswith("hdw4s_fresh="):
+            out.append(sc.split("=", 1)[1].split(";")[0])
+    return out
+
+
+def test_a_desktop_just_MINTED_is_marked_and_a_resumed_one_is_not(rig):
+    """THE PAIR THAT CARRIES THE 2026-09-26 RULING, and it is a pair on purpose.
+
+    Dropping the arrival card on a desktop the router has just minted rests
+    entirely on the marker appearing at a MINT and nowhere else. A router that
+    marked every redirect would satisfy any assertion about "the mint was
+    marked" -- and would hand a silent connect to a returning tab arriving at a
+    desktop somebody else is watching, which is the damage the gate exists for
+    and is strictly worse than the click it replaces.
+
+    So the refusal is the second half of every arm here, in the same rig, at the
+    same reading.
+
+    THE ORACLE IS THE SID IN THE MARKER, not merely its presence: a marker that
+    named a different desktop would authorise an arrival at that one instead,
+    and "a cookie was set" cannot tell the two apart.
+    """
+    # 1. THE FRONT DOOR, for a browser that has nothing. This is a mint.
+    c = rig.client()
+    st, h, _ = c.get("/")
+    assert st == 302, "arrival did not redirect: %d" % st
+    c.learn_cookie(h)
+    sid = h["location"][0].split("/")[2]
+    assert fresh_markers(h) == [sid], (
+        "a freshly minted desktop was not marked as one (markers %r, session "
+        "%r), so the visitor meets the card on a desktop nobody has ever seen"
+        % (fresh_markers(h), sid))
+
+    # 2. THE CONTROL, and without it nothing above is evidence: the SAME
+    # browser arriving again is RESUMED, not minted, and a resume may well be
+    # taking the desktop back from another tab. It must not be marked.
+    st, h, _ = c.get("/")
+    assert st == 302, "a returning visitor did not redirect: %d" % st
+    assert h["location"][0] == "/s/%s/" % sid, \
+        "the rig resumed a different session, so this is not the control it " \
+        "claims to be: %r" % h["location"][0]
+    assert fresh_markers(h) == [], (
+        "A RESUMED DESKTOP WAS MARKED AS FRESHLY MINTED (%r). Any tab arriving "
+        "at this address now connects without asking, including one that is "
+        "taking the desktop from whoever is watching it."
+        % fresh_markers(h))
+
+    # 3. THE DIRECTORY'S CREATE, which is the path the owner's report is about,
+    # and it is a SECOND minting site rather than the one above.
+    st, h, _ = c.post("/sessions/new")
+    assert st == 303, "create refused on a box with free slots: %d" % st
+    new_sid = h["location"][0].split("/")[2]
+    assert new_sid != sid, "create resumed instead of minting"
+    assert fresh_markers(h) == [new_sid], (
+        "the desktop created from the directory was not marked (markers %r, "
+        "session %r) -- which is the two-click flow the owner asked us to drop"
+        % (fresh_markers(h), new_sid))
+
+    # 4. The marker must be READABLE BY SCRIPT, because its only reader is the
+    # page-side gate. HttpOnly here would be a marker nothing can consume, and
+    # the symptom is the card coming back with every check still green.
+    raw = [sc for sc in h.get("set-cookie", []) if sc.startswith("hdw4s_fresh=")]
+    assert "httponly" not in raw[0].lower(), \
+        "the marker is HttpOnly, so the page gate cannot read it: %r" % raw[0]
+    # And it must expire on its own, so an arrival that never happens cannot
+    # leave a standing permission behind.
+    assert "max-age=" in raw[0].lower(), \
+        "the marker has no expiry: %r" % raw[0]
+
+
 def test_a_second_desktop_is_a_second_desktop(rig):
     """Two sessions, both this visitor's, both listed, and the first survives.
 
@@ -2665,6 +2745,61 @@ def console(own, wf, identity, new_identity, what, sid, method):
 """
 
 
+MARK_EVERY_REDIRECT = """
+
+# Appended by the red arm: mark EVERY redirect to a session address as a fresh
+# mint, which is what "why is this conditional, just set it beside the Location"
+# looks like in a diff. The mint keeps working, the owner's two clicks stay gone,
+# and the arrival gate is silently off for every returning tab -- including one
+# arriving at a desktop somebody else is watching. Nothing else in this suite
+# notices, which is why the green test above carries its control.
+_shipped_respond = respond
+
+
+def respond(wf, status, body=b"", extra=()):
+    extra = list(extra)
+    if status == 302 and not any(
+            k == "Set-Cookie" and v.startswith("hdw4s_fresh=")
+            for k, v in extra):
+        for k, v in list(extra):
+            if k == "Location" and v.startswith("/s/"):
+                extra.append(fresh_mint_header(v.split("/")[2]))
+                break
+    return _shipped_respond(wf, status, body, extra)
+"""
+
+
+def red_every_redirect_marked_as_a_fresh_mint():
+    """THE GUARANTEE THE 2026-09-26 RULING RESTS ON, broken on purpose.
+
+    Skipping the card is safe for exactly one reason: the desktop was minted in
+    the request that redirected here, so nobody can be watching it. The whole of
+    that reason is carried by ONE CONDITIONAL, and the change that removes it is
+    the plausible tidy-up -- a marker set once beside the redirect instead of
+    twice inside branches.
+
+    Its oracle is the CONTROL arm of the green test, not the mint arm: a router
+    that marks everything mints perfectly well.
+    """
+    path = scratch_demux("-fresh", MARK_EVERY_REDIRECT)
+    rig = Rig(gate=None, demux=path)
+    try:
+        test_a_desktop_just_MINTED_is_marked_and_a_resumed_one_is_not(rig)
+    except AssertionError as e:
+        # NAMED, not merely "it failed". The first version of this arm was red
+        # for the wrong reason -- the patch added a SECOND marker beside the
+        # shipped one, so the MINT arm failed on a duplicate and the control
+        # never ran. A red arm that trips the wrong assertion reports that the
+        # guard works while the property it is about is untested.
+        if "RESUMED DESKTOP WAS MARKED" not in str(e):
+            raise RuntimeError(
+                "the red arm failed, but not on the control: %s" % e)
+        raise
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
 def red_a_console_address_that_stops_being_claimed_mints():
     """The silent one: a parser that quietly stops matching hands out desktops.
 
@@ -3209,6 +3344,13 @@ def main():
         # would be green against a router that mints on sight, which is the
         # exact defect the arrival rule exists to prevent.
         (test_asking_for_a_second_desktop_takes_a_GESTURE, dict(gate=None)),
+        # UNPINNED for the same reason, and it needs one more thing: the
+        # shipped arm is what RESUMES, and the control half of this test is the
+        # resume. Under the pinned mint arm every arrival mints, so there is no
+        # resume to check the marker's absence on and the test would be green
+        # against a router that marked everything.
+        (test_a_desktop_just_MINTED_is_marked_and_a_resumed_one_is_not,
+         dict(gate=None)),
         (test_a_second_desktop_is_a_second_desktop, dict(gate=None)),
         (test_each_row_names_its_own_desktop, dict(gate=None)),
         # Two slots, not three, so the pool can be filled by ONE visitor
@@ -3289,6 +3431,7 @@ def main():
                red_scope_checked_by_the_page,
                red_a_console_address_that_stops_being_claimed_mints,
                red_create_on_a_GET,
+               red_every_redirect_marked_as_a_fresh_mint,
                red_startup_guard_notices_a_console_address_that_moved):
         expect_red(fn.__name__, fn)
 

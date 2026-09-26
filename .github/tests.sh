@@ -1557,6 +1557,59 @@ echo '== the arrival and sharing arms are chosen at generation, and a bad one is
     '<script type="module" src='
 )
 
+echo '== the fresh-mint marker is spelled the same in the router and the page =='
+# THE ONE RULE WITH TWO HOMES IN THIS TREE, and it is here because it has to be.
+# Dropping the owner's second click works by hdw4s-demux writing a cookie beside the
+# redirect and hdw4s-gate-index reading it on the page that lands. Neither file can
+# import the other -- one is python run as a service, the other generates a document --
+# so the name is written twice, and two spellings of one name is two names the moment
+# either is edited.
+#
+# The failure it catches is SILENT IN THE SAFE-LOOKING DIRECTION: a renamed cookie means
+# the page never finds a marker, so the card comes back and every check in this tier
+# stays green. The owner would simply be clicking twice again, which is exactly the
+# report that started this.
+#
+# WHAT THIS CANNOT SEE, said plainly: whether the page does the right thing with the
+# marker it finds. That is asserted against a running router in .github/live/demux.py
+# (test_a_desktop_just_MINTED_is_marked_and_a_resumed_one_is_not, with its red arm).
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+  "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/out.html" >/dev/null 2>&1
+
+  # DERIVED FROM THE ROUTER, never typed here: a literal in this file would be a third
+  # home for the name and would agree with neither when somebody renames it.
+  name="$(sed -n 's/^FRESH_COOKIE = "\(.*\)"$/\1/p' "${ROOT}/hdw4s-demux")"
+  # The positive control for the derivation itself. An empty name makes every "has"
+  # below match anything, so a broken sed would report the two files agreeing.
+  case "${name}" in
+    '') bad 'the router names the marker' 'FRESH_COOKIE was not found in hdw4s-demux' ;;
+    *)  ok  'the router names the marker' ;;
+  esac
+
+  # BOTH MINTING SITES, counted rather than eyeballed. There are exactly two --
+  # the front door and the directory's create -- and a marker attached at only
+  # one of them brings the second click back on whichever path was missed, with
+  # nothing going red.
+  sites="$(grep -c 'fresh_mint_header(' "${ROOT}/hdw4s-demux")"
+  is 'the router attaches it at both minting sites (and defines it once)' \
+    "${sites}" '3'
+  has 'the page reads the same name' "$(cat "${d}/out.html")" "'${name}'"
+  # And it is read from the address the page is serving rather than taken on trust, so
+  # it cannot authorise an arrival at a desktop somebody else may be watching.
+  has 'the page checks the marker against its own address' \
+    "$(cat "${d}/out.html")" 'location.pathname'
+  # And consumed. Without this the one-shot is a standing permission.
+  has 'the page deletes the marker before connecting' \
+    "$(cat "${d}/out.html")" 'Max-Age=0'
+  # NOT HttpOnly, because its only reader is script. Asserted on the router, where the
+  # header is composed: a marker the page cannot read brings the card back silently.
+  hasnt 'the marker is not hidden from the page' \
+    "$(sed -n '/^def fresh_mint_header/,/^$/p' "${ROOT}/hdw4s-demux")" 'HttpOnly'
+)
+
 echo '== the fresh-desktop card tells the truth about how long the desktop lasts =='
 # Written from the failure: the card said "nothing in it survives being closed" and that
 # was false for as long as it shipped. Closing a tab does not stop a session -- it is
@@ -2740,7 +2793,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=423   # update when tests are added; a wrong number is the point
+EXPECTED=429   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

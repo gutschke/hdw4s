@@ -860,12 +860,69 @@ __MORE__
   //
   // So there is a second marked arrival below, and it is marked by facts about THIS
   // TAB rather than by a moment in time: see AN UNWATCHED LOAD IS NOT AN ARRIVAL.
+  // SAY SO IN THE CONSOLE, for the same reason every other verdict on this page
+  // is announced: a silent skip and a card the person clicked through leave an
+  // identical trace, and the only person who can watch this decide is reading a
+  // console at the time. Declared here rather than reusing announce() below,
+  // which is defined after the branch that needs this one.
+  var announceFresh = function(){
+    try {
+      console.log('[hdw4s gate] connected without asking: this desktop was ' +
+                  'minted for this browser in the request that sent us here',
+                  {loadedHidden: LOADED_HIDDEN});
+    } catch(e){}
+  };
   var expected=false;
   try {
     expected = sessionStorage.getItem(EXPECT)==='1';
     sessionStorage.removeItem(EXPECT);
   } catch(e){}
   if (expected) return boot();
+
+  // AND NEITHER IS A DESKTOP THE ROUTER MINTED IN THE REQUEST THAT SENT US HERE.
+  //
+  // THE RULING, 2026-09-26: *"let's drop the two-click flow confirmation and see
+  // what happens."* Arriving used to cost a click even on a desktop that had just
+  // been created for this browser -- "new desktop" and then "connect" -- which the
+  // owner called *"the button that shouldn't even appear if everything worked
+  // correctly"*, and he is right about this case: the card's whole subject is a
+  // viewer this page cannot see, and a session nobody has ever been served cannot
+  // have one.
+  //
+  // The marker is written by hdw4s-demux beside the redirect and NOWHERE ELSE, so
+  // it exists only where a mint just happened. Three things make it unable to
+  // become a standing permission to connect:
+  //
+  //   1. IT NAMES THE DESKTOP. Compared against the address this page is being
+  //      served at, so it cannot authorise an arrival at a DIFFERENT session --
+  //      which is the one somebody else might be watching.
+  //   2. IT IS CONSUMED HERE. Deleted before boot(), so a reload, a back button
+  //      or a second tab on the same address meets the card as before.
+  //   3. IT EXPIRES IN TWO MINUTES. The restored-tab case the 2026-09-22 ruling
+  //      is about cannot carry it, which is exactly why this is a cookie and not
+  //      a "?gate=off" on the redirect: a query string lives in history.
+  //
+  // FAILS CLOSED. Anything that is not an exact match -- no cookie, a different
+  // sid, an address that is not a session address, a thrown read -- falls through
+  // to the ordinary decision below.
+  var FRESH = 'hdw4s_fresh';
+  try {
+    var here = /^\/s\/([^/]+)\//.exec(location.pathname);
+    if (here) {
+      var want = FRESH + '=' + here[1];
+      var got = document.cookie.split(';').some(function(c){
+        return c.trim() === want;
+      });
+      if (got) {
+        // Deleted on the same Path it was written on; a mismatched Path leaves
+        // the original in place and turns a one-shot into a standing permission.
+        document.cookie = FRESH + '=; Path=/; Max-Age=0; SameSite=Lax; Secure';
+        announceFresh();
+        return boot();
+      }
+    }
+  } catch(e){}
+
   // Second monitors and shared viewers must never be shown a takeover button.
   if (/^#(shared|player[2-4]|display2)/.test(location.hash)) return boot();
   // gate=off is about ARRIVAL and nothing else. lost() still shows its card: a tab
