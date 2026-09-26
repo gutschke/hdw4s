@@ -23,9 +23,10 @@ hdw4s (2.4.0) unstable; urgency=medium
     somewhere else still asks first, because connecting takes it away from
     whoever is watching.
 
-  * A machine with no memory left says so, on its own page, instead of starting a
-    desktop it cannot afford. Before this, a full machine handed the visitor an
-    error page from the reverse proxy, or a desktop that never drew anything.
+  * A machine with no memory left says so, on its own page, rather than
+    starting a desktop it cannot afford. Before this, a full machine handed
+    the visitor an error page from the reverse proxy, or a desktop that never
+    drew anything at all.
 
   * A desktop cannot reach another desktop's connection on the same machine.
 
