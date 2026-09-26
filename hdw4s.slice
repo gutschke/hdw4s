@@ -10,7 +10,42 @@ MemoryAccounting=yes
 # A soft limit reclaims and throttles rather than killing, which is what you
 # want for a desktop: one session that overreaches slows down instead of
 # vanishing, and it stops doing so to everyone else on the machine.
-MemoryHigh=75%
+#
+# THE VALUE IS NOT HERE, AND IT USED TO BE "75%". systemd expands a percentage
+# in a memory limit through sysconf(_SC_PHYS_PAGES) -- the sysinfo() syscall --
+# and a container runtime cannot virtualise a syscall. It CAN virtualise
+# /proc/meminfo, and does. So the two disagree, in exactly one direction:
+#
+#   measured inside a 16 GiB container, 2026-09-26
+#     /proc/meminfo MemTotal            16.00 GiB   (an lxcfs fuse mount)
+#     sysconf(_SC_PHYS_PAGES)           62.11 GiB   (the host)
+#     MemoryHigh=75% resolved to        46.58 GiB   = 75% of the host's figure
+#
+# The limit was therefore three times the container's entire memory and could
+# not apply at any load; the cgroup's memory.events said "high 0" for as long as
+# it shipped. The same directive on a 32 GiB container of this estate resolved to
+# 377.6 GiB. This is NOT an unavoidable fact about containers: the accurate
+# number is sitting in /proc/meminfo, and the percentage is simply expanded
+# through the one door that does not tell the truth.
+#
+# So the number is computed from MemTotal -- read on the machine the sessions
+# actually run on -- and written as an absolute byte count into a drop-in at
+# boot by hdw4s-ephemeral-slots, which is the one thing ordered early enough
+# that nothing can start before it. The fraction is still 75%; only the way it
+# is expanded has moved. It is NOT left here as well: two homes for one number
+# is two numbers as soon as either is edited, and the one here is the one that
+# cannot be right.
+#
+# "hdw4s check" reads the RESOLVED value back and complains when it is at or
+# above what the machine has. That half is not redundant: a live container
+# resize, an administrator's own drop-in, or a future edit here can all put a
+# percentage back, and nothing else on the machine would show it.
+#
+# ManagedOOMMemoryPressureLimit BELOW IS NOT THE SAME DEFECT, and it was checked
+# rather than assumed -- two percentages in one unit with only one measured is
+# an invitation. 60% resolved to 2576980377, which is 0.6 x 2^32: it is a
+# fraction of a pressure stall figure and never a quantity of memory, so there
+# is nothing for it to resolve against wrongly.
 # Let systemd-oomd pick the worst-behaved session under pressure, rather than
 # leaving it to the kernel, which is as likely to choose sshd.
 ManagedOOMMemoryPressure=kill

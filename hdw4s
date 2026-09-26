@@ -718,6 +718,78 @@ cmd_check() {
     return 0
   fi
 
+  # ---- is the session slice's memory brake a number this machine can reach? --
+  #
+  # THE DEFECT THIS EXISTS FOR, and the reason nobody caught it for months is the
+  # whole justification for the check. The slice carried "MemoryHigh=75%".
+  # systemd expands a percentage in a memory limit through
+  # sysconf(_SC_PHYS_PAGES) -- the sysinfo() syscall -- which a container runtime
+  # cannot virtualise, while /proc/meminfo, which it can and does, stays correct.
+  # Measured inside a 16 GiB container on 2026-09-26: the file said 16.00 GiB,
+  # sysconf said 62.11 GiB, and the directive resolved to 46.58 GiB. The brake
+  # was three times the container's memory and memory.events said "high 0".
+  #
+  # EVERY HUMAN-FACING TOOL ON THAT MACHINE REPORTS THE RIGHT NUMBER. free, top,
+  # /proc/meminfo, the monitoring: all of them say 16 GiB, correctly. The only
+  # place the disagreement is visible is in what systemd resolved the percentage
+  # TO, and nobody reads that. That is why the repair alone is not enough: an
+  # administrator's own drop-in, a live container resize, or a future edit of
+  # ours can put a percentage back, and the machine would look exactly as it does
+  # now -- no log line, no refusal, no symptom, until the kernel's OOM killer
+  # picks a desktop and leaves a unit reporting active behind a blank screen.
+  #
+  # SO IT ASKS BOTH SIDES, and the asymmetry is the point: systemd is the only
+  # thing that knows what the directive resolved to, and /proc/meminfo is the
+  # only thing that knows what this machine has. Asking either one for both is
+  # how the defect survived.
+  #
+  # ONE DIRECTION ONLY, deliberately. A limit BELOW what the machine has is
+  # either correct or merely conservative -- which is also what a stale value
+  # looks like after a container is grown, and ours is computed at boot -- and
+  # throttling sooner than necessary harms nobody. A limit at or above what the
+  # machine has can never be reached by anything, so it is not a brake at all.
+  local memhigh memtotal_kb memtotal
+  memhigh="$(systemctl show -p MemoryHigh --value hdw4s.slice 2>/dev/null || :)"
+  memtotal_kb="$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || :)"
+  case "${memhigh}:${memtotal_kb}" in
+    # Nothing to say. An unloaded slice on a machine that has never started a
+    # session is not a fault, and a machine whose own MemTotal is unreadable is
+    # not one to make claims about -- both answer "cannot tell", which is not
+    # the same answer as "fine" and is therefore silent rather than green.
+    :*|*:) ;;
+    infinity:*)
+      # NOT a failure. A soft brake is a good thing to have and its absence is
+      # the state every release before this one shipped, so reddening here would
+      # fail on machines that are merely not yet configured -- and a check that
+      # is red on a working machine is one somebody turns off. Said, and not
+      # counted.
+      printf '%s\n' \
+        'hdw4s: the desktop slice has no memory brake.' \
+        '  One session that overreaches can make every other session on this' \
+        '  machine slow, and nothing will throttle it first.' >&2
+      ;;
+    *[!0-9]*:*|*:*[!0-9]*) ;;
+    *)
+      memtotal=$(( memtotal_kb * 1024 ))
+      if [ "${memhigh}" -ge "${memtotal}" ]; then
+        # THE OBJECT THIS IS ABOUT IS NAMED, both numbers, in the units they were
+        # read in -- because the first report of this defect said "the brake is
+        # broken" and the next reader could not tell whether that was about a
+        # container, a host, a slice or a session.
+        printf '%s\n' \
+          "hdw4s: the desktop slice's memory brake cannot ever apply." \
+          "  MemoryHigh on hdw4s.slice resolves to ${memhigh} bytes, and this" \
+          "  machine has ${memtotal} bytes of memory in total. A limit at or" \
+          '  above what the machine has is never reached, so nothing throttles a' \
+          '  session that overreaches and the kernel OOM killer acts instead --' \
+          '  which leaves a unit reporting active behind a blank desktop.' \
+          '  The usual cause is a PERCENTAGE: systemd resolves one against the' \
+          "  hypervisor's memory, not this container's. Use an absolute count." >&2
+        bad=$(( bad + 1 ))
+      fi
+      ;;
+  esac
+
   # ---- can this machine hand anybody a desktop? -----------------------------
   #
   # WHY THIS ARM EXISTS AT ALL, and it is not the arm below it. The incarnation

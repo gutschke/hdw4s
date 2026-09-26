@@ -47,7 +47,9 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
   * `check`:
     Report any running session that is not publishing the identity a returning
-    browser tab compares itself against, and exit non-zero if there is one.
+    browser tab compares itself against, whether the machine can hand anybody a
+    desktop at all, and whether the memory limit on the desktop slice is a number
+    this machine can actually reach. Exit non-zero if any of those is wrong.
     Nothing is restarted: the point is that somebody is told which session and
     why. See DIAGNOSTICS.
 
@@ -870,8 +872,26 @@ working in, at an hour chosen by a timer, is an updater that gets switched off.
     systemctl status hdw4s@<i>       includes the display and port when running
     journalctl -xeu hdw4s@<i>        session output, including the X server
 
-`hdw4s check` asks two questions, and the first one is about the machine rather
-than about any session: can it hand anybody a desktop? On a box with ephemeral
+`hdw4s check` asks three questions, and the first two are about the machine
+rather than about any session.
+
+The first is whether the memory limit on the desktop slice is a number this
+machine can reach. A soft limit on `hdw4s.slice` is what makes one session that
+overreaches go slow instead of making every other session go slow, and a limit
+set at or above the machine's own total memory is never reached by anything -- so
+it is not a limit, and nothing on the machine shows that. The usual cause is a
+percentage: **systemd expands a percentage in a memory limit through
+`sysconf(_SC_PHYS_PAGES)`, which a container cannot virtualise, while
+`/proc/meminfo`, which it can, stays correct.** Inside a 16 GiB container that
+made `MemoryHigh=75%` mean 46.58 GiB -- three times the container's memory, never
+applied once. `free`, `top` and `/proc/meminfo` all reported 16 GiB, correctly,
+throughout; the only place the disagreement was visible was in what systemd had
+resolved the directive to. This product therefore computes the value from
+`/proc/meminfo` and writes it as an absolute byte count at boot, and this check is
+what notices if anything puts a percentage back. A limit *below* what the machine
+has is not reported: it is either right or merely conservative.
+
+The second is whether the machine can hand anybody a desktop. On a box with ephemeral
 slots configured it reports a slot table that exists and cannot be read, slot
 identities that were never minted, a front door with nothing bound to its port,
 a slot whose socket has no listener, and any unit of the pool's that has latched
@@ -888,7 +908,7 @@ slot the router has already let to a visitor who never arrived is listening,
 unfailed and unserviceable. Whether a slot is let is the router's own record,
 not systemd's, so the answer has to come from the router.
 
-The second question is asked of every session that is running now: is it
+The third question is asked of every session that is running now: is it
 serving the incarnation token its own start published? A returning browser tab
 compares its saved token against the served one to decide whether it is looking
 at the desktop it had. A session serving nothing makes that comparison empty on
