@@ -1620,6 +1620,67 @@ echo '== the fresh-desktop card tells the truth about how long the desktop lasts
        'could not be found'
 )
 
+echo '== the stall backstop does not read a deliberately stopped stream as a loss =='
+# THE DEFECT, from the owner on a live desktop with his own console log as the
+# evidence: the reconnect card appeared ON THE LIVE PAGE WITH NO RELOAD, and the log
+# read "Tab hidden: Sent STOP_VIDEO". Hiding a tab makes the client stop the stream, and
+# the backstop read ten quiet seconds as a disconnection. Its two existing guards are
+# about a viewer that never receives video and about video that has not started; the
+# state where video is working and was PAUSED ON PURPOSE had no guard.
+#
+# WHAT THIS TESTS AND WHAT IT DOES NOT. It tests that the page refuses to be built when
+# the question stops being asked, or is asked too late, or cannot be found. It does NOT
+# test that streamPaused() answers correctly -- that needs a browser, a hidden tab and
+# more than ten seconds, and it is recorded as unmeasured with its experiment named in
+# private/create-evidence/README.md rather than asserted here.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+
+  # The positive control FIRST, so the three refusals below are known to refuse the
+  # thing under test rather than the input.
+  "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/out.html" >/dev/null 2>"${d}/err" \
+    && has 'the shipped backstop asks before it counts' "$(cat "${d}/out.html")" \
+       'streamPaused()' \
+    || bad 'the shipped backstop asks before it counts' \
+       "the generator refused a good page: $(cat "${d}/err")"
+
+  redb() { python3 "$1" "${d}/in.html" "${d}/redout.html" >/dev/null 2>"${d}/rederr"; }
+
+  # 1. The question deleted -- which is what a tidy-up of an odd-looking early return
+  #    looks like in a diff, and it is the exact shape that shipped the defect.
+  rm -f "${d}/redout.html"
+  sed 's|if (streamPaused()) { still = 0; last = -1; return; }|// tidied away|' \
+    "${ROOT}/hdw4s-gate-index" > "${d}/red1"
+  redb "${d}/red1" \
+    && bad 'a backstop that stopped asking is refused' 'it was accepted' \
+    || has 'a backstop that stopped asking is refused' "$(cat "${d}/rederr")" \
+       'STOPPED the stream before counting'
+  hasnt 'a refused backstop writes no page' "$(ls "${d}")" 'redout.html'
+
+  # 2. The question asked AFTER the count, which reads as a fix and is not one: the
+  #    card is already up by the time the counter is reset.
+  rm -f "${d}/redout.html"
+  sed -e 's|    if (streamPaused()) { still = 0; last = -1; return; }||' \
+      -e "s|    if (everMoved \&\& still >= 20) lost('stalled');.*|    if (everMoved \&\& still >= 20) lost('stalled');\n    if (streamPaused()) { still = 0; }|" \
+    "${ROOT}/hdw4s-gate-index" > "${d}/red2"
+  redb "${d}/red2" \
+    && bad 'a backstop that asks too late is refused' 'it was accepted' \
+    || has 'a backstop that asks too late is refused' "$(cat "${d}/rederr")" \
+       'counts before it asks'
+
+  # 3. THE ARM THAT MATTERS MOST: the guard cannot pass by failing to find its subject.
+  #    A guard whose search silently stops matching reports a clean bill of health
+  #    forever, which is this project's commonest defect rather than a hypothetical.
+  rm -f "${d}/redout.html"
+  sed 's|}, 500);|}, 501);|' "${ROOT}/hdw4s-gate-index" > "${d}/red3"
+  redb "${d}/red3" \
+    && bad 'a backstop the guard cannot find is refused' 'it was accepted' \
+    || has 'a backstop the guard cannot find is refused' "$(cat "${d}/rederr")" \
+       'could not be found'
+)
+
 echo '== BOTH session kinds publish an identity, or the gate refuses forever =='
 # THE ARM THAT WAS MISSING, AND WHY IT WAS MISSING. The gate's resume path
 # compares the identity a tab connected to against the one published in the web
@@ -2275,7 +2336,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=368   # update when tests are added; a wrong number is the point
+EXPECTED=373   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
