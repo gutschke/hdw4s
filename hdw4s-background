@@ -181,7 +181,21 @@ ACHROMATIC = 8.0
 # blue on the owner's explicit permission to "broaden the hue variance
 # intentionally" -- so the extension is a named quantity with a reason, and
 # changing the brand's hex would move the arc with it.
-COOL_EXTENSION = 9.0                 # degrees past the bluest published aubergine
+# HOW FAR PAST THE BLUEST PUBLISHED AUBERGINE IS SAFE, AND THE NUMBER CAME FROM
+# LOOKING, NOT FROM THE SWEEP. private/measure-background-arc.py says a wider
+# arc is better on BOTH separation axes at once -- 118 degrees beats 86 on
+# within-image spread AND on between-desktop distance -- and on that basis 118
+# was recommended. Rendering it and looking refuted that: at 306 degrees and
+# below the colours come out #311ac6 and #223d8a, which are blue and navy, not
+# "variations of aubergine that feel more bluish". Several desktops at 118 have
+# frankly blue regions.
+#
+# So the sweep was optimising hue separation while the thing hue separation
+# stands for -- still reading as Ubuntu -- got worse, and no amount of the
+# metric would have said so. 102 degrees is the widest that still looks like the
+# brand to me; the owner is the judge of "physiologically feels related", so the
+# span is offered to him rather than settled here.
+COOL_EXTENSION = 26.9                # degrees past the bluest published aubergine
 ARC_LO = swatch("Light aubergine")[2] - COOL_EXTENSION      # ~321.9
 ARC_HI = swatch("Ubuntu Orange")[2] + 360.0                 # ~406.0
 RUNGS = 8                            # distinct rungs on the arc
@@ -699,16 +713,33 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     tw = dict(fade_scale=1.0, fade_a=1.0, drift=1.0, grain_a=1.0,
               grain_scale=1.0, regions=3, variant="stack",
               micro_a=1.0, tint_contrast=8.0, shade_a=1.0,
-              micro_kind="weave", sweep="none", sweep_a=0.55)
+              micro_kind="weave", sweep="hue", sweep_a=0.55,
+              arc_lo=None, faded_anchor="dye", ladder="smooth")
     tw.update(tweak or {})
 
     t = rung / float(RUNGS)
-    h_dye = arc(t)
+    lo = ARC_LO if tw["arc_lo"] is None else tw["arc_lo"]
+
+    def arc_(u):
+        """This candidate's arc, so the SPAN can be compared side by side."""
+        return (lo + (ARC_HI - lo) * (u % 1.0)) % 360.0
+
+    h_dye = arc_(t)
 
     # THE DYE, and everything else is this colour weathered. base_L is the
     # slot's own weight; the ladder is coprime with the hue rungs so the pair
     # does not repeat until the fortieth slot.
-    base_L = 23.0 + 7.0 * (weight % WEIGHTS) / (WEIGHTS - 1.0)
+    if tw["ladder"] == "aubergines":
+        # THE BRAND'S OWN LIGHTNESS LADDER. The three aubergines are labelled by
+        # AUDIENCE -- consumer, balance, enterprise -- rather than by shade,
+        # which is the brand treating lightness as the meaningful axis. Using
+        # their actual L* values rather than a smooth ramp is the most
+        # defensible weight ladder available, and it is coarser on purpose.
+        rungsL = sorted(swatch(n)[0] for n in
+                        ("Dark aubergine", "Mid aubergine", "Light aubergine"))
+        base_L = rungsL[(weight % WEIGHTS) % len(rungsL)] + 8.0
+    else:
+        base_L = 23.0 + 7.0 * (weight % WEIGHTS) / (WEIGHTS - 1.0)
 
     def col(L, h, frac):
         # Chroma as a fraction of what the hue can carry at that lightness,
@@ -805,11 +836,24 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
         n += 1
 
     for dr, cf, op in tints:
-        h = arc(t + dr * tw["drift"])
+        h = arc_(t + dr * tw["drift"])
         add(col(base_L, h, cf), base_L, op)          # ISO-LIGHTNESS, by design
     for dL, op in shades:
         L = base_L + (top - base_L) * dL if dL > 0 else base_L * (1.0 + dL)
         L = max(4.0, min(top, L))
+        if tw["faded_anchor"] == "warmgrey" and dL > 0:
+            # WARM GREY IS THE ONLY PALETTE ENTRY THE BRAND NAMES FOR
+            # BACKGROUNDS -- "backgrounds, graphics, dot patterns, charts and
+            # diagrams" -- which makes it in-brand BY NAME for exactly the aged
+            # parchment this is chasing, rather than in-brand by my argument.
+            # Its own L* 68.9 is far above the icon-label ceiling, so what is
+            # borrowed is its HUE and its near-absence of chroma, not its
+            # lightness: a faded patch that has lost its dye rather than a
+            # lighter patch of the same dye.
+            wg = swatch("Warm Grey")
+            add(lch_to_hex(L, min(6.0, max_chroma(L, wg[2])), wg[2]), L,
+                op * tw["shade_a"], contrast=3.0, centre=0.46)
+            continue
         add(col(L, h_dye, 0.38), L, op * tw["shade_a"],
             contrast=3.0, centre=0.46)                  # ISO-HUE
 
@@ -842,8 +886,8 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
         "sweep_a": 0.55 * tw["sweep_a"],
         "sweep_vec": ((seed >> 3) % 2, (seed >> 5) % 2,
                       1 - (seed >> 3) % 2, 1 - (seed >> 5) % 2),
-        "sweep_colours": (col(min(top, base_L + 11.0), arc(t + 0.20), 0.85),
-                          col(base_L, arc(t - 0.22), 0.85)),
+        "sweep_colours": (col(min(top, base_L + 11.0), arc_(t + 0.20), 0.85),
+                          col(base_L, arc_(t - 0.22), 0.85)),
         "variant": tw["variant"],
         # The brightest lightness this field ACTUALLY uses, not the ceiling it
         # was allowed. A guard pointed at the limit rather than at the value can
