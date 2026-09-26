@@ -247,11 +247,6 @@ cmd_serving() {
   if [ "${1:-}" = '--auth-stdin' ]; then shift; auth=(--config -); fi
   # THE STATUS, NOT JUST THE FAILURE. "could not fetch" is true of a refused
   # connection, a timeout and a 401 alike, and on 2026-09-25 it described a 401
-  # for a day while three people looked for a network problem. curl's own
-  # "(22) ... error: 401" goes to stderr and into the journal, but the line this
-  # script prints is the one anybody reads first, so it carries the number.
-  # THE STATUS, NOT JUST THE FAILURE. "could not fetch" is true of a refused
-  # connection, a timeout and a 401 alike, and on 2026-09-25 it described a 401
   # for a day while the cause was looked for in the network. curl's own
   # "(22) ... error: 401" goes to stderr and into the journal, but the line this
   # script prints is the one anybody reads first, so it carries the number.
@@ -351,9 +346,10 @@ passed to this check, so what is served cannot be verified as the gated client"
   [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ] ||
     die "this instance is configured for basic auth but
 '${CREDENTIALS_DIRECTORY}/hdw4s-auth' cannot be read from here. If it exists,
-this process lacks the privilege to traverse to it -- see CapabilityBoundingSet=
-in the unit, which must grant a DAC capability to reach /run/credentials"
-
+this process lacks the privilege to traverse to it. NOTE: the credential is staged owned by the INSTANCE USER (mode 0400,
+0500 on its directory), not by root -- measured 2026-09-25, correcting a comment
+in this tree that said mode 0000 root:root. And a DAC capability has been tried
+twice and measured NOT to fix this; see hdw4s@.service."
 
   # The same derivation the session itself uses, and it has to stay the same:
   # an instance is the account name, stripped at the colon for an instance named
