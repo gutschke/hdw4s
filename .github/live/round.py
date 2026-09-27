@@ -56,6 +56,7 @@ changing either.
 """
 
 import argparse
+import html.parser
 import json
 import os
 import re
@@ -403,6 +404,36 @@ def contradicts(facts):
                 and shown(facts))
 
 
+class _Shape(html.parser.HTMLParser):
+    """The ELEMENTS of a page: ids, card divs, form actions, link targets.
+
+    Parsed rather than searched, because a substring cannot tell markup from
+    prose. The ended page inlines a script whose comment names
+    hdw4s-gate-index, and a search for "hdw4s-gate" read that comment as the
+    gated client. The parser keeps <script> and <style> bodies as text and
+    drops comments, so only an element that is actually there counts.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.ids, self.actions, self.hrefs = set(), set(), set()
+        self.card = False
+
+    def handle_starttag(self, tag, attrs):
+        a = dict((k, v or "") for k, v in attrs)
+        if a.get("id"):
+            self.ids.add(a["id"])
+        if tag == "div" and ("card" in a.get("class", "").split()
+                             or "max-width:32rem" in a.get("style", "")):
+            self.card = True
+        if tag == "form":
+            self.actions.add(a.get("action", ""))
+        if tag == "a":
+            self.hrefs.add(a.get("href", ""))
+
+    handle_startendtag = handle_starttag
+
+
 def classify(title, body_html):
     """Which of the three pages is this? -- and this is a PROXY, not a reading.
 
@@ -429,15 +460,17 @@ def classify(title, body_html):
     """
     if body_html is None:
         return "unreachable"
-    if "hdw4s-gate" in body_html or "hdw4s-go" in body_html:
+    shape = _Shape()
+    shape.feed(body_html)
+    shape.close()
+    # The gated client's own elements, by id: the gate card and its button.
+    if "hdw4s-gate" in shape.ids or "hdw4s-go" in shape.ids:
         return "desktop"
     # The card was an inline max-width:32rem; it is now class="card" on the
     # shared page stylesheet. Both are read, so an older build classifies too.
-    card = ("max-width:32rem" in body_html
-            or '<div class="card">' in body_html)
-    if not card:
+    if not shape.card:
         return "unknown"
-    if 'action="/sessions/new"' in body_html or 'href="/"' in body_html:
+    if "/sessions/new" in shape.actions or "/" in shape.hrefs:
         return "gate"
     # A LINKLESS CARD IS NOT ONE THING, and this cost the exhaustion arm its
     # meaning before it ever ran. page() builds BOTH the 503 "every desktop is
@@ -1975,6 +2008,15 @@ def selftest():
     # And the constant that separates them must still be the product's wording.
     expect("the product still says %r" % CAPACITY_TITLE,
            CAPACITY_TITLE in REFUSED_HTML, True)
+    # The round-b red, pinned: prose that NAMES the gate -- in an inlined
+    # script's comment, in an HTML comment -- is not the gate's element.
+    expect("classify: a card whose script comment names hdw4s-gate-index",
+           classify("", GATE_HTML.replace(
+               "</body>", "<script>/* see hdw4s-gate-index; #hdw4s-go */</script></body>")
+               if "</body>" in GATE_HTML else GATE_HTML +
+               "<script>/* see hdw4s-gate-index; #hdw4s-go */</script>"), "gate")
+    expect("classify: an HTML comment quoting the gate's markup",
+           classify("", GATE_HTML + '<!-- <div id="hdw4s-gate"> -->'), "gate")
     expect("classify: something else entirely",
            classify("", "<html><body>hello"), "unknown")
     expect("classify: nothing came back", classify("", None), "unreachable")
