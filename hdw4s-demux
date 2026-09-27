@@ -1074,6 +1074,7 @@ class Ownership:
                 # the slot it had just released. This field is the one fact no
                 # instrument can be late about, because it is the act itself.
                 "ended": None,
+            "ended_at": None,
             }
             self._by_identity.setdefault(identity, []).append(sid)
         return sid
@@ -1124,6 +1125,16 @@ class Ownership:
             rec = self._by_sid.get(sid)
             if rec is not None and not rec["ended"]:
                 rec["ended"] = why
+                # WHEN it ended, because the two readers of this flag need
+                # different lifetimes and sharing one was a defect. The
+                # resurrection guard must never forget -- a stale tab may return
+                # at any time, and forgetting is what let it mint. The visitor's
+                # directory must forget, because a row that says "discarding"
+                # for ever is a row about work that finished in seconds.
+                # Measured on production 2026-09-26: a slot discarded at 19:51
+                # was still listed as discarding twenty-one minutes later, with
+                # its teardown long complete and the marker directory empty.
+                rec["ended_at"] = time.time()
             return rec is not None
 
     def pending_mints(self, since):
@@ -4144,10 +4155,30 @@ def console(own, wf, identity, new_identity, what, sid, method):
 
     def rows():
         out = []
+        now = time.time()
         for s in own.owned_by(identity):
             rec = own.lookup(s)
-            if rec is not None:
-                out.append(describe_session(rec, s))
+            if rec is None:
+                continue
+            # A DISCARD THAT IS OVER IS NOT A DESKTOP THE VISITOR HAS. The
+            # record survives -- end_session() explains why, and the
+            # resurrection guard depends on it -- but it stops being listed once
+            # the teardown has had its whole window. Without this the row sat
+            # there saying "discarding" indefinitely, because the record is
+            # dropped only by a request that PRESENTS that session id, and a
+            # visitor who discards from this page has no tab left to present it.
+            #
+            # BOUNDED IN TIME rather than by asking whether a teardown is
+            # running. Reading the marker alone was the obvious repair and is
+            # wrong: the request file is removed before the work starts, so the
+            # row would blink out and back at the moment the person is watching
+            # it -- which is the very flicker describe_session() was written to
+            # stop. Same bound as the marker, for one reason rather than two.
+            if rec.get("ended"):
+                ended_at = rec.get("ended_at")
+                if ended_at is None or (now - ended_at) > TEARDOWN_MARKER_MAX:
+                    continue
+            out.append(describe_session(rec, s))
         return out
 
     if what == "create":
