@@ -876,7 +876,11 @@ echo '== a slot records what kind of session it is =='
     # whether two variables agree rather than whether the refusal is useful.
     has 'and the refusal says it cannot READ the file' "${out}" 'cannot be read'
     has 'and it names the table rather than the slot' "${out}" 'instances'
-    hasnt 'and no command got far enough to build a unit name' "${out}" '.d'
+    # '/.d', not '.d': the refusal quotes the sandbox path, which mktemp names
+    # /tmp/tmp.XXXXXXXXXX, so a bare '.d' failed a correct refusal whenever the
+    # random suffix began with a d -- about one run in sixty. The defect it
+    # guards produced "${DROPIN}/.d", which always has the slash.
+    hasnt 'and no command got far enough to build a unit name' "${out}" '/.d'
   fi
   chmod 644 "${SLOTS}"
 
