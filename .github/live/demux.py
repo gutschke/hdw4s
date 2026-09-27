@@ -889,7 +889,7 @@ def test_dead_sid_gates_and_does_not_mint(rig):
         assert st == 410, "a dead address did not gate: %d" % st
         assert "location" not in h, \
             "a dead address REDIRECTED, which is an action, not a question"
-        assert b"href=\"/\"" in body, "the gate offers no way forward"
+        assert pressables(body), "the gate offers no way forward"
     after = slots_in_use(rig)
     assert after == before, \
         ("five returning tabs started %d desktop(s) nobody asked for"
@@ -1219,6 +1219,191 @@ def test_asking_for_a_second_desktop_takes_a_GESTURE(rig):
     assert got != "/s/%s/" % sid, \
         "create RESUMED the session this visitor already had instead of " \
         "making a second one -- which is the whole complaint"
+
+
+def pressables(body):
+    """Every object on a page a person can press, as (method, target, label).
+
+    READ FROM THE BYTES THE BROWSER GETS, and read as a browser reads them: an
+    <a href> is a GET of its target, a form's submit button is the form's
+    method at the form's action, and a button outside any form does nothing
+    the router can see (it is listed as JS so that it cannot be missed).
+    A substring check for one href cannot tell a page with the right button
+    from a page with the right button AND a wrong one beside it.
+    """
+    import html.parser
+
+    class P(html.parser.HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.out, self.form, self.open, self.text = [], None, None, []
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag == "form":
+                self.form = ((a.get("method") or "get").upper(),
+                             a.get("action") or "(same URL)")
+            elif tag == "a" and "href" in a:
+                self.open, self.text = ("GET", a["href"]), []
+            elif tag == "button" and (a.get("type") or "submit") == "submit":
+                self.open, self.text = (self.form or ("JS", None)), []
+
+        def handle_endtag(self, tag):
+            if tag in ("a", "button") and self.open is not None:
+                self.out.append(self.open + ("".join(self.text).strip(),))
+                self.open = None
+            elif tag == "form":
+                self.form = None
+
+        def handle_data(self, data):
+            if self.open is not None:
+                self.text.append(data)
+
+    p = P()
+    p.feed(body.decode() if isinstance(body, bytes) else body)
+    return p.out
+
+
+def mint_lines(rig):
+    """How many desktops the router says it has minted, from its own log.
+
+    Both minting sites log through log_arrival(), as "minted a session" (the
+    front door) and "minted a session on request" (a POST). The count is only
+    quoted beside slots_in_use(), which reads the stand-in backends rather than
+    the router's account of itself."""
+    return sum(1 for line in rig.stderr_text().splitlines()
+               if "minted a session" in line)
+
+
+def test_the_ended_pages_button_starts_a_NEW_desktop(rig):
+    """BUG 1, as the owner met it: log out of one of two desktops, press
+    "Start a new desktop", and be handed the OTHER one.
+
+    The ended page's button was a link to "/", and "/" is the front door, which
+    RESUMES the newest desktop this browser owns. With nothing else owned that
+    looked like a mint; with a second desktop open in another tab it took that
+    one over. The label promises a new desktop, so the button must ask for one:
+    POST /sessions/new, the directory's own create.
+
+    PRESSED, not inspected first. The button is pressed as a browser would
+    press whatever is on the page, and the assertion is about where that lands:
+    a session this browser did not already own, on a slot it was not already
+    in. The shape of the button is asserted afterwards, so the red on the
+    unrepaired router names the damage (a resume) rather than the markup.
+
+    On the UNPINNED arm, because the shipped arm is the one that resumes.
+    """
+    a = rig.client()
+    x, slot_x = arrive_on_slot(rig, a)
+    # A second desktop, the way the owner had one: asked for.
+    st, h, _ = a.post("/sessions/new")
+    assert st == 303, "could not set up a second desktop: %d" % st
+    y = h["location"][0].split("/")[2]
+    st, _, body = a.get("/s/%s/" % y)
+    assert st == 200, "the second desktop did not serve: %d" % st
+    slot_y = body.decode().split("SLOT=")[1].split()[0]
+    assert slot_y != slot_x, "the rig put both desktops on one slot"
+
+    # The first one ends (a GNOME logout, as far as the router can tell), and
+    # its tab is reloaded onto the ended page.
+    slot_named(rig, slot_x).reap()
+    st, h, body = a.get("/s/%s/" % x)
+    assert st == 410, "the ended desktop's tab was not gated: %d" % st
+    a.learn_cookie(h)
+    buttons = pressables(body)
+    assert buttons, "the ended page offers nothing to press"
+
+    minted_before = mint_lines(rig)
+    resumed_before = rig.stderr_text().count("resumed a session")
+    method, target, label = buttons[0]
+    if method == "POST":
+        st, h, _ = a.post(target)
+    else:
+        st, h, _ = a.get(target)
+    assert st in (302, 303), \
+        "pressing %r (%s %s) went nowhere: %d" % (label, method, target, st)
+    got = h["location"][0].split("/")[2]
+    assert got != y, (
+        "PRESSING %r (%s %s) RESUMED THE OTHER DESKTOP THIS BROWSER OWNS "
+        "(session %s) instead of starting a new one -- bug 1: the tab takes "
+        "over the desktop open in the other tab" % (label, method, target, y))
+    assert got != x, "pressing %r sent the tab back to the ended desktop" % label
+    assert mint_lines(rig) == minted_before + 1, \
+        "pressing %r did not mint exactly one desktop" % label
+    assert rig.stderr_text().count("resumed a session") == resumed_before, \
+        "pressing %r logged a resume" % label
+    # WHICH SLOT, from the router's mint line and not from the backend. The
+    # router may, correctly, re-let the ended desktop's slot, and this rig's
+    # reaped slot REFUSES a connection where the field's starts a fresh desktop
+    # (Slot.reap() says which, and why). So the new desktop is not asked to
+    # serve here; seeing it paint is the real-browser run's job.
+    line = [l for l in rig.stderr_text().splitlines()
+            if "minted a session" in l and got in l]
+    assert len(line) == 1, "no mint line names session %s" % got
+    slot_new = line[0].split("slot ")[1].split(",")[0]
+    assert slot_new != slot_y, \
+        "the new desktop is on the slot of the one in the other tab"
+
+    # And the page offers exactly that, and nothing else a person could press.
+    assert [(m, t) for m, t, _ in buttons] == [("POST", "/sessions/new")], \
+        "the ended page's pressables are %r, not one POST /sessions/new" \
+        % (buttons,)
+
+
+def test_the_ended_page_and_restored_tabs_mint_NOTHING(rig):
+    """THE OTHER HALF, and without it the test above is satisfied by a page
+    that mints on sight.
+
+    Opening the ended page, reloading it, and a browser restoring six tabs whose
+    desktops are gone (two that this browser owned and that have ended, four it
+    never had) must start NOTHING. Minting is a damage: this is the rebooted
+    laptop the arrival rule was written for.
+
+    THE COUNTER IS SEEN COUNTING before its zero is believed: the one press at
+    the end must move it by exactly one. A count that cannot move reads zero
+    for a router that mints on every GET too.
+    """
+    a = rig.client()
+    x, slot_x = arrive_on_slot(rig, a)
+    st, h, _ = a.post("/sessions/new")
+    assert st == 303, "could not set up a second desktop: %d" % st
+    z = h["location"][0].split("/")[2]
+    st, _, body = a.get("/s/%s/" % z)
+    assert st == 200
+    slot_z = body.decode().split("SLOT=")[1].split()[0]
+    slot_named(rig, slot_x).reap()
+    slot_named(rig, slot_z).reap()
+
+    minted_before, seen_before = mint_lines(rig), slots_in_use(rig)
+    tabs = [x, x] + [z, x] + [secrets_hex() for _ in range(4)]
+    for n, sid in enumerate(tabs):
+        st, h, body = a.get("/s/%s/" % sid)
+        a.learn_cookie(h)
+        assert st == 410, "request %d (%s) was not gated: %d" % (n, sid, st)
+        assert "location" not in h, \
+            "request %d REDIRECTED, which is an action, not a question" % n
+    minted_after, seen_after = mint_lines(rig), slots_in_use(rig)
+    print("       zero-mint negative: 'minted a session' lines %d -> %d, "
+          "backends handed out %d -> %d, over %d requests "
+          "(ended page, reload, six restored tabs)"
+          % (minted_before, minted_after, seen_before, seen_after, len(tabs)))
+    assert minted_after == minted_before, (
+        "the ended page, a reload and six restored tabs MINTED %d desktop(s) "
+        "nobody asked for" % (minted_after - minted_before))
+    assert seen_after == seen_before, \
+        "a backend was handed out without a mint line: %d -> %d" \
+        % (seen_before, seen_after)
+
+    # The counter, seen moving: one press of the ended page's button.
+    method, target, _ = pressables(body)[0]
+    if method == "POST":
+        a.post(target)
+    else:
+        a.get(target)
+    assert mint_lines(rig) == minted_after + 1, (
+        "the press did not register as one mint (%d -> %d): this counter "
+        "cannot see a mint, so its zero above means nothing"
+        % (minted_after, mint_lines(rig)))
 
 
 def fresh_markers(headers):
@@ -2843,6 +3028,39 @@ def red_create_on_a_GET():
         os.unlink(path)
 
 
+ENDED_PAGE_LINKS_TO_THE_FRONT_DOOR = """
+
+# Appended by the red arm: the ended page's button as it was until bug 1 --
+# a link to "/", which is what "a link is simpler than a form" looks like in a
+# diff. "/" resumes the newest desktop this browser owns, so with a second
+# desktop open the button takes that one over.
+def gate_page(title, detail, action):
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>"
+            "<body><div style=\\"max-width:32rem;padding:2rem\\">"
+            "<h1>%s</h1><p>%s</p><p><a href=\\"/\\">%s</a></p></div>"
+            % (title, title, detail, action)).encode()
+"""
+
+
+def red_the_ended_pages_button_resumes():
+    """BUG 1, put back on purpose. Its oracle is the RESUME, not the markup:
+    the green test presses the button before it looks at its shape, so this
+    must fail on landing at the other desktop, and is refused as a red arm if
+    it fails anywhere else."""
+    path = scratch_demux("-ended", ENDED_PAGE_LINKS_TO_THE_FRONT_DOOR)
+    rig = Rig(gate=None, demux=path)
+    try:
+        test_the_ended_pages_button_starts_a_NEW_desktop(rig)
+    except AssertionError as e:
+        if "RESUMED THE OTHER DESKTOP" not in str(e):
+            raise RuntimeError(
+                "the red arm failed, but not on the resume: %s" % e)
+        raise
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
 def red_startup_guard_notices_a_console_address_that_moved():
     """And the start-up guard alone must refuse that router.
 
@@ -3344,6 +3562,10 @@ def main():
         # would be green against a router that mints on sight, which is the
         # exact defect the arrival rule exists to prevent.
         (test_asking_for_a_second_desktop_takes_a_GESTURE, dict(gate=None)),
+        # UNPINNED, because the shipped arm is what resumes, and resuming is
+        # what the ended page's button did to the other desktop (bug 1).
+        (test_the_ended_pages_button_starts_a_NEW_desktop, dict(gate=None)),
+        (test_the_ended_page_and_restored_tabs_mint_NOTHING, dict(gate=None)),
         # UNPINNED for the same reason, and it needs one more thing: the
         # shipped arm is what RESUMES, and the control half of this test is the
         # resume. Under the pinned mint arm every arrival mints, so there is no
@@ -3431,6 +3653,7 @@ def main():
                red_scope_checked_by_the_page,
                red_a_console_address_that_stops_being_claimed_mints,
                red_create_on_a_GET,
+               red_the_ended_pages_button_resumes,
                red_every_redirect_marked_as_a_fresh_mint,
                red_startup_guard_notices_a_console_address_that_moved):
         expect_red(fn.__name__, fn)

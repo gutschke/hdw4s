@@ -3425,18 +3425,30 @@ def respond(wf, status, body=b"", extra=()):
 
 
 def gate_page(title, detail, action):
-    """A page that ASKS. The link is the whole mechanism: minting happens only
-    because a person clicked, so a browser restoring twenty tabs produces twenty
-    questions and zero desktops rather than twenty desktops nobody asked for."""
+    """A page that ASKS. The button is the whole mechanism: minting happens only
+    because a person pressed it, so a browser restoring twenty tabs produces
+    twenty questions and zero desktops rather than twenty desktops nobody asked
+    for.
+
+    THE BUTTON IS THE DIRECTORY'S OWN CREATE, POST /sessions/new, and not a
+    link to the front door. It was a link to "/", and "/" RESUMES the newest
+    desktop this browser owns: with a second desktop open in another tab,
+    "Start a new desktop" took that one over (bug 1, met by the owner after a
+    GNOME logout). The label promises a new desktop, so the button asks for
+    exactly that, through the one mint site that already exists for a press.
+    Being a POST also keeps a prefetch or a restored tab from pressing it.
+    Asserted by test_the_ended_pages_button_starts_a_NEW_desktop."""
     return ("<!doctype html><meta charset=utf-8><title>%s</title>"
             "<body style=\"font:16px/1.5 system-ui;background:#242424;color:#ddd;"
             "display:flex;align-items:center;justify-content:center;height:100vh\">"
             "<div style=\"max-width:32rem;padding:2rem\">"
             "<h1 style=\"font-size:1.3rem\">%s</h1>"
             "<p style=\"color:#b9b9b9\">%s</p>"
-            "<p><a href=\"/\" style=\"display:inline-block;margin-top:1rem;"
+            "<form method=\"post\" action=\"/sessions/new\" style=\"margin:1em 0\">"
+            "<button type=\"submit\" style=\"display:inline-block;margin-top:1rem;"
             "padding:.65rem 1.15rem;background:#772953;color:#fff;"
-            "text-decoration:none;border-radius:.35rem\">%s</a></p></div>"
+            "font:inherit;border:0;cursor:pointer;"
+            "text-decoration:none;border-radius:.35rem\">%s</button></form></div>"
             % (title, title, detail, action)).encode()
 
 

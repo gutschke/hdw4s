@@ -410,13 +410,16 @@ def classify(title, body_html):
     distinguishable only by accident:
 
       desktop  the gated client, which carries #hdw4s-gate / #hdw4s-go
-      gate     demux gate_page(): a card WITH an action link back to /
+      gate     demux gate_page(): a card WITH a button (POST /sessions/new)
       refused  demux page(): the same card WITHOUT the link (the 503)
 
-    gate_page() and page() differ by one <a href="/"> and nothing else. Neither
-    carries an id, a class or a data- attribute saying which it is, so this
-    function is reading a styling decision and calling it a protocol. It is
-    good enough to run the round and it is not good enough to keep: the repair
+    gate_page() and page() differ by one <form action="/sessions/new"> and
+    nothing else (it was an <a href="/"> until the ended page's button stopped
+    resuming another desktop; both are still read, so an older build classifies
+    too). Neither carries an id, a class or a data- attribute saying which it
+    is, so this function is reading a styling decision and calling it a
+    protocol. It is good enough to run the round and it is not good enough to
+    keep: the repair
     is one attribute on <body> in hdw4s-demux (see the report accompanying this
     file), after which this function reads that attribute and the structural
     guess below becomes the fallback rather than the oracle.
@@ -432,7 +435,7 @@ def classify(title, body_html):
     card = 'style="max-width:32rem' in body_html or "max-width:32rem" in body_html
     if not card:
         return "unknown"
-    if 'href="/"' in body_html:
+    if 'action="/sessions/new"' in body_html or 'href="/"' in body_html:
         return "gate"
     # A LINKLESS CARD IS NOT ONE THING, and this cost the exhaustion arm its
     # meaning before it ever ran. page() builds BOTH the 503 "every desktop is
