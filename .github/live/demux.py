@@ -1032,12 +1032,20 @@ def test_shipped_default_resumes_a_returning_browser():
     Measured as a release blocker before this existed: three requests from one
     cookie jar returned three different sessions, and the front door then refused
     everyone with three desktops running and nobody connected to any of them.
+
+    The BARE address now shows such a browser its desktops rather than resuming
+    one (test_the_bare_address_shows_your_desktops); neither is a mint, and an
+    arrival carrying a query still resumes, which is the half checked here.
     """
     rig = Rig(gate=None)          # no HDW4S_GATE_MODE -- the shipped default
     try:
         a = rig.client()
         sid1, _ = arrive(rig, a)
         st, h, _ = a.get("/")
+        assert h["location"][0] == "/sessions/", (
+            "the shipped default sent a browser that already had a desktop to "
+            "%r, not to its desktops" % h["location"][0])
+        st, h, _ = a.get("/?socket_worker=false")
         got = h["location"][0].split("/")[2]
         assert got == sid1, (
             "the shipped default minted a SECOND session for a browser that "
@@ -1331,7 +1339,13 @@ def test_the_ended_pages_button_starts_a_NEW_desktop(rig):
 
     minted_before = mint_lines(rig)
     resumed_before = rig.stderr_text().count("resumed a session")
-    method, target, label = buttons[0]
+    # BY ITS LABEL, because the page now lists the other desktop above it, and
+    # its Resume is supposed to resume. The button under test is the one that
+    # promises a new desktop.
+    new = [b for b in buttons if b[2] == "New desktop"]
+    assert len(new) == 1, "the ended page has %d New desktop buttons: %r" \
+        % (len(new), buttons)
+    method, target, label = new[0]
     if method == "POST":
         st, h, _ = a.post(target)
     else:
@@ -1360,10 +1374,13 @@ def test_the_ended_pages_button_starts_a_NEW_desktop(rig):
     assert slot_new != slot_y, \
         "the new desktop is on the slot of the one in the other tab"
 
-    # And the page offers exactly that, and nothing else a person could press.
-    assert [(m, t) for m, t, _ in buttons] == [("POST", "/sessions/new")], \
-        "the ended page's pressables are %r, not one POST /sessions/new" \
-        % (buttons,)
+    # And the page offers exactly that, beside the other desktop's own row --
+    # its Resume and its Discard, at the addresses the directory uses -- and
+    # nothing else a person could press. No new target, no new mint site.
+    assert [(m, t) for m, t, _ in buttons] == [
+        ("GET", "/s/%s/" % y), ("GET", "/sessions/%s/discard" % y),
+        ("POST", "/sessions/new")], \
+        "the ended page's pressables are %r" % (buttons,)
 
 
 def test_the_ended_page_and_restored_tabs_mint_NOTHING(rig):
@@ -1411,7 +1428,7 @@ def test_the_ended_page_and_restored_tabs_mint_NOTHING(rig):
         % (seen_before, seen_after)
 
     # The counter, seen moving: one press of the ended page's button.
-    method, target, _ = pressables(body)[0]
+    method, target, _ = [b for b in pressables(body) if b[2] == "New desktop"][0]
     if method == "POST":
         a.post(target)
     else:
@@ -1420,6 +1437,151 @@ def test_the_ended_page_and_restored_tabs_mint_NOTHING(rig):
         "the press did not register as one mint (%d -> %d): this counter "
         "cannot see a mint, so its zero above means nothing"
         % (minted_after, mint_lines(rig)))
+
+
+def test_the_bare_address_shows_your_desktops(rig):
+    """A browser that already has a live desktop, opening the bare address
+    again, is sent to ITS DESKTOPS -- not resumed onto the newest one.
+
+    Opening the address again is how a person asks for a second desktop: two
+    novice walks did exactly that, independently, and were handed a card for
+    the desktop they already had, whose only button takes it from the other
+    tab. The owner's rule for a returning browser says the same thing: one
+    that owns sessions gets the session manager.
+
+    WHAT MUST NOT MOVE, each checked in the same rig: the redirect is not a
+    mint and carries no fresh-mint marker; ?gate= still resumes (the rigs rely
+    on it) and gate=mint still mints; a restored tab at /s/<sid>/ is served as
+    before, and one at a dead id still gates; and a browser whose desktops are
+    ALL gone still gets a new one from the bare address.
+    """
+    c = rig.client()
+    st, h, _ = c.get("/")
+    assert st == 302, "a first arrival did not redirect: %d" % st
+    c.learn_cookie(h)
+    sid = h["location"][0].split("/")[2]
+    assert h["location"][0].startswith("/s/%s/" % sid) and \
+        fresh_markers(h) == [sid], \
+        "a first arrival was not a marked mint: %r" % (h,)
+    st, _, body = c.get("/s/%s/" % sid)
+    assert st == 200, "the new desktop did not serve: %d" % st
+    slot = body.decode().split("SLOT=")[1].split()[0]
+
+    minted, seen = mint_lines(rig), slots_in_use(rig)
+    st, h, _ = c.get("/")
+    assert st == 302, "the bare address did not redirect: %d" % st
+    assert h["location"][0] == "/sessions/", (
+        "THE BARE ADDRESS RESUMED %r for a browser that has a desktop, instead "
+        "of showing it its desktops" % h["location"][0])
+    assert fresh_markers(h) == [], \
+        "the redirect to the directory carried a fresh-mint marker"
+    assert (mint_lines(rig), slots_in_use(rig)) == (minted, seen), \
+        "the bare address minted"
+    st, _, body = c.get("/sessions/")
+    assert st == 200, "the directory did not serve: %d" % st
+    targets = [(m, t) for m, t, _ in pressables(body)]
+    assert ("GET", "/s/%s/" % sid) in targets and \
+        ("POST", "/sessions/new") in targets, \
+        "the directory does not offer this desktop and a new one: %r" % targets
+
+    # ?gate= keeps today's behaviour, both arms that resume, and the mint arm.
+    for arm in ("takeover", "off"):
+        st, h, _ = c.get("/?gate=%s" % arm)
+        assert h["location"][0] == "/s/%s/?gate=%s" % (sid, arm), \
+            "?gate=%s no longer resumes: %r" % (arm, h["location"][0])
+    assert mint_lines(rig) == minted, "a ?gate= resume minted"
+    st, h, _ = c.get("/?gate=mint")
+    assert h["location"][0].split("/")[2] != sid and \
+        mint_lines(rig) == minted + 1, "?gate=mint no longer mints"
+
+    # Restored tabs present /s/<sid>/, never /, so they are untouched.
+    st, _, _ = c.get("/s/%s/" % sid)
+    assert st == 200, "a restored tab on a live desktop was not served: %d" % st
+    st, h, _ = c.get("/s/%s/" % secrets_hex())
+    assert st == 410 and "location" not in h, \
+        "a restored tab on a dead id did not gate: %d" % st
+
+    # A browser whose only desktop has ended: the bare address mints (R1).
+    d = rig.client()
+    old, old_slot = arrive_on_slot(rig, d)
+    slot_named(rig, old_slot).reap()
+    st, h, _ = d.get("/")
+    loc = h["location"][0]
+    assert loc.startswith("/s/") and loc.split("/")[2] != old, (
+        "a browser whose desktops are all gone was sent to %r instead of a new "
+        "desktop" % loc)
+    assert fresh_markers(h) == [loc.split("/")[2]], \
+        "the new desktop for a browser with nothing left was not marked"
+
+
+def test_the_ended_page_lists_what_is_still_running(rig):
+    """The ended page is the directory, headed with the one fact the visitor
+    came for.
+
+    Where the router SAW the desktop stop, it says everything in it is gone --
+    true for an ephemeral desktop, whose home dies with its unit. Where the id
+    is merely unknown it does not say that, because a restarted router forgets
+    lettings whose desktops are still running. Either way it lists this
+    browser's other desktops, at the directory's own addresses, and only this
+    browser's: a stranger presenting the same dead id sees their own list.
+    """
+    a, b = rig.client(), rig.client()
+    x, slot_x = arrive_on_slot(rig, a)
+    st, h, _ = a.post("/sessions/new")
+    assert st == 303, "could not set up a second desktop: %d" % st
+    y = h["location"][0].split("/")[2]
+    assert a.get("/s/%s/" % y)[0] == 200
+    w, _ = arrive_on_slot(rig, b)
+    slot_named(rig, slot_x).reap()
+
+    minted = mint_lines(rig)
+    st, h, body = a.get("/s/%s/" % x)
+    assert st == 410, "the ended desktop's tab was not gated: %d" % st
+    text = body.decode()
+    assert "Everything that was in it is gone." in text, \
+        "a desktop the router saw stop is not said to be gone"
+    assert "Still running in this browser" in text, \
+        "the ended page does not list what is still running"
+    assert [(m, t) for m, t, _ in pressables(body)] == [
+        ("GET", "/s/%s/" % y), ("GET", "/sessions/%s/discard" % y),
+        ("POST", "/sessions/new")], \
+        "the ended page's pressables are %r" % (pressables(body),)
+    assert "Nothing has been started for you" not in text
+
+    # Unknown to this router (x was forgotten on the way in above): no claim.
+    st, _, body = a.get("/s/%s/" % x)
+    text = body.decode()
+    assert st == 410 and "is gone" not in text, \
+        "an id this router merely does not know was said to be gone"
+    assert "no longer running" in text and "/s/%s/" % y in text
+
+    # A stranger presenting a dead id sees THEIR list, never a's.
+    st, _, body = b.get("/s/%s/" % x)
+    text = body.decode()
+    assert st == 410 and y not in text and "/s/%s/" % w in text, \
+        "the ended page listed somebody else's desktop, or not the viewer's own"
+    assert mint_lines(rig) == minted, "the ended page minted"
+
+
+def test_every_pressable_keeps_its_target(rig):
+    """The rows and the confirmation were redrawn; what they DO must not move.
+    Read as a browser reads the page: every <a> is a GET of its href and every
+    submit button is its form's method at its action."""
+    c = rig.client()
+    x, _ = arrive(rig, c)
+    st, h, _ = c.post("/sessions/new")
+    y = h["location"][0].split("/")[2]
+    c.get("/s/%s/" % y)
+    st, _, body = c.get("/sessions/")
+    assert [(m, t) for m, t, _ in pressables(body)] == [
+        ("GET", "/s/%s/" % x), ("GET", "/sessions/%s/discard" % x),
+        ("GET", "/s/%s/" % y), ("GET", "/sessions/%s/discard" % y),
+        ("POST", "/sessions/new")], \
+        "the directory's pressables are %r" % (pressables(body),)
+    st, _, body = c.get("/sessions/%s/discard" % x)
+    assert [(m, t) for m, t, _ in pressables(body)] == [
+        ("GET", "/sessions/"), ("POST", "/sessions/%s/discard" % x)], \
+        "the confirmation's pressables are %r" % (pressables(body),)
 
 
 # A browser's top-level navigation, as it reaches the router. Accept is what
@@ -1610,10 +1772,12 @@ def test_a_desktop_just_MINTED_is_marked_and_a_resumed_one_is_not(rig):
 
     # 2. THE CONTROL, and without it nothing above is evidence: the SAME
     # browser arriving again is RESUMED, not minted, and a resume may well be
-    # taking the desktop back from another tab. It must not be marked.
-    st, h, _ = c.get("/")
+    # taking the desktop back from another tab. It must not be marked. (With a
+    # query: the bare address shows the directory instead, which is not a
+    # redirect to a session at all.)
+    st, h, _ = c.get("/?socket_worker=false")
     assert st == 302, "a returning visitor did not redirect: %d" % st
-    assert h["location"][0] == "/s/%s/" % sid, \
+    assert h["location"][0].startswith("/s/%s/" % sid), \
         "the rig resumed a different session, so this is not the control it " \
         "claims to be: %r" % h["location"][0]
     assert fresh_markers(h) == [], (
@@ -3252,14 +3416,15 @@ def red_our_page_waits_for_itself():
 ENDED_PAGE_LINKS_TO_THE_FRONT_DOOR = """
 
 # Appended by the red arm: the ended page's button as it was until bug 1 --
-# a link to "/", which is what "a link is simpler than a form" looks like in a
-# diff. "/" resumes the newest desktop this browser owns, so with a second
-# desktop open the button takes that one over.
-def gate_page(title, detail, action):
-    return ("<!doctype html><meta charset=utf-8><title>%s</title>"
-            "<body><div style=\\"max-width:32rem;padding:2rem\\">"
-            "<h1>%s</h1><p>%s</p><p><a href=\\"/\\">%s</a></p></div>"
-            % (title, title, detail, action)).encode()
+# a link to the front door, which is what "a link is simpler than a form"
+# looks like in a diff. The front door resumes the newest desktop this browser
+# owns (the bare address now shows the directory, so the link carries a query,
+# as a link that kept the arm would), and with a second desktop open the
+# button takes that one over.
+def ended_page(rows, gone):
+    return card("This desktop has ended",
+                rows_html(rows) + "<p><a href=\\"/?gate=takeover\\">"
+                "New desktop</a></p>")
 """
 
 
@@ -3274,6 +3439,36 @@ def red_the_ended_pages_button_resumes():
         test_the_ended_pages_button_starts_a_NEW_desktop(rig)
     except AssertionError as e:
         if "RESUMED THE OTHER DESKTOP" not in str(e):
+            raise RuntimeError(
+                "the red arm failed, but not on the resume: %s" % e)
+        raise
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
+BARE_ADDRESS_RESUMES = """
+
+# Appended by the red arm: the front door as it was, resuming the newest
+# desktop on a bare arrival -- what treating "no query" like any other query
+# looks like in a diff.
+_shipped_arrival = arrival
+
+
+def arrival(own, wf, identity, query, new_identity):
+    return _shipped_arrival(own, wf, identity, query or b"gate=" +
+                            GATE_DEFAULT.encode(), new_identity)
+"""
+
+
+def red_the_bare_address_resumes():
+    """Change 1 undone on purpose; must fail on the resume and nowhere else."""
+    path = scratch_demux("-bare", BARE_ADDRESS_RESUMES)
+    rig = Rig(gate=None, demux=path)
+    try:
+        test_the_bare_address_shows_your_desktops(rig)
+    except AssertionError as e:
+        if "THE BARE ADDRESS RESUMED" not in str(e):
             raise RuntimeError(
                 "the red arm failed, but not on the resume: %s" % e)
         raise
@@ -3787,6 +3982,10 @@ def main():
         # what the ended page's button did to the other desktop (bug 1).
         (test_the_ended_pages_button_starts_a_NEW_desktop, dict(gate=None)),
         (test_the_ended_page_and_restored_tabs_mint_NOTHING, dict(gate=None)),
+        # UNPINNED: the shipped arm is the one whose bare arrival changed.
+        (test_the_bare_address_shows_your_desktops, dict(gate=None)),
+        (test_the_ended_page_lists_what_is_still_running, dict(gate=None)),
+        (test_every_pressable_keeps_its_target, dict(gate=None)),
         # UNPINNED for the same reason, and it needs one more thing: the
         # shipped arm is what RESUMES, and the control half of this test is the
         # resume. Under the pinned mint arm every arrival mints, so there is no
@@ -3880,6 +4079,7 @@ def main():
                red_a_console_address_that_stops_being_claimed_mints,
                red_create_on_a_GET,
                red_the_ended_pages_button_resumes,
+               red_the_bare_address_resumes,
                red_a_slow_start_is_the_loading_tab_again,
                red_our_page_in_front_of_a_fast_desktop,
                red_our_page_waits_for_itself,

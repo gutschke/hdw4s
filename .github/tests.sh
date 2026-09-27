@@ -1896,7 +1896,7 @@ echo '== the boot card offers the session directory only where a door serves one
     || bad 'a card with a directory builds' "the generator refused: $(cat "${d}/err2")"
   has 'a door that serves the directory does offer the link' \
     "$(cat "${d}/dir.html")" 'href="/sessions/"'
-  has 'and it is the quiet prose line, not a second button' \
+  has 'and it is the outlined button on Connect'"'"'s row' \
     "$(cat "${d}/dir.html")" 'id="hdw4s-more"'
 
   # A value that is neither arm is REFUSED, not clamped. "no" is the safe branch, so a

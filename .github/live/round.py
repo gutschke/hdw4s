@@ -410,13 +410,12 @@ def classify(title, body_html):
     distinguishable only by accident:
 
       desktop  the gated client, which carries #hdw4s-gate / #hdw4s-go
-      gate     demux gate_page(): a card WITH a button (POST /sessions/new)
+      gate     demux ended_page(): a card WITH a button (POST /sessions/new)
       refused  demux page(): the same card WITHOUT the link (the 503)
 
-    gate_page() and page() differ by one <form action="/sessions/new"> and
-    nothing else (it was an <a href="/"> until the ended page's button stopped
-    resuming another desktop; both are still read, so an older build classifies
-    too). Neither carries an id, a class or a data- attribute saying which it
+    ended_page() and page() differ by a <form action="/sessions/new"> (it was
+    an <a href="/"> until the ended page's button stopped resuming another
+    desktop; both are still read, so an older build classifies too). Neither carries an id, a class or a data- attribute saying which it
     is, so this function is reading a styling decision and calling it a
     protocol. It is good enough to run the round and it is not good enough to
     keep: the repair
@@ -432,7 +431,10 @@ def classify(title, body_html):
         return "unreachable"
     if "hdw4s-gate" in body_html or "hdw4s-go" in body_html:
         return "desktop"
-    card = 'style="max-width:32rem' in body_html or "max-width:32rem" in body_html
+    # The card was an inline max-width:32rem; it is now class="card" on the
+    # shared page stylesheet. Both are read, so an older build classifies too.
+    card = ("max-width:32rem" in body_html
+            or '<div class="card">' in body_html)
     if not card:
         return "unknown"
     if 'action="/sessions/new"' in body_html or 'href="/"' in body_html:
@@ -1614,7 +1616,7 @@ def product_pages():
     that somebody transcribed is a detector checked against the transcription:
     it stays green forever while the real page drifts away from it, which is
     the whole failure this file's classify() is exposed to. So the self-test
-    calls hdw4s-demux's own gate_page() and page(), and if it cannot reach
+    calls hdw4s-demux's own ended_page() and page(), and if it cannot reach
     them it says so rather than quietly falling back to a guess.
 
     Returns (gate_html, refused_html) or raises.
@@ -1628,7 +1630,7 @@ def product_pages():
                                                             os.path.normpath(path)))
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    return (m.gate_page("Start a desktop", "detail", "Start").decode(),
+    return (m.ended_page([], True).decode(),
             m.page(CAPACITY_TITLE, "detail").decode(),
             m.page("That desktop closed the connection", "detail").decode())
 

@@ -133,8 +133,9 @@ OVERLAY = r"""
    border-radius:12px;box-shadow:0 10px 40px #000a}
  #hdw4s-gate h1{font-size:1.3rem;margin:0 0 .6rem}
  #hdw4s-gate p{margin:.45rem 0;color:#b9b9b9}
- #hdw4s-gate button{margin-top:1.3rem;padding:.65rem 1.15rem;font:inherit;border:0;
+ #hdw4s-gate button{padding:.65rem 1.15rem;font:inherit;border:0;
    border-radius:8px;background:#772953;color:#fff;cursor:pointer}
+ #hdw4s-actions{display:flex;gap:.75rem;align-items:center;margin-top:1.3rem}
  #hdw4s-gate .err{color:#ff8a80;white-space:pre-wrap}
  /* Same cascade trap as the gate above, and for the same reason: every one of these
     is toggled with .hidden and every one of them sets its own display. Without the
@@ -158,18 +159,24 @@ OVERLAY = r"""
    padding:.45rem .8rem;border-radius:8px;background:#242424e6;color:#ddd;
    font:13px/1.45 system-ui,sans-serif}
  #hdw4s-role b{color:#fff}
- /* Quiet on purpose. The card has ONE pressable object and this is not it: it is
-    the way out of a card that can otherwise only be answered one way, and it is
-    styled as prose so the trained reflex still lands on the button.
-    It is also CONDITIONAL: the paragraph below is emitted only for a door that
-    really serves the page it points at, so on most pages nothing matches this. */
- #hdw4s-more{margin:.9rem 0 0;font-size:13px}
- #hdw4s-more a{color:#b9b9b9}
+ /* THE WAY OUT OF THE CARD, drawn as a button on Connect's row. Connect stays the
+    one FILLED button; this is outlined, so it is plainly second -- but it is plainly
+    a button. It was 13px grey prose under Connect, to keep the trained reflex on
+    Connect, and a visitor read it as a caption and nearly missed it: when the
+    person did not come for THIS desktop, the reflex on Connect is the bad outcome,
+    and the list is what they needed.
+    It is also CONDITIONAL: the paragraph below is emitted only for a door that really
+    serves the page it points at, so on most pages nothing matches this. */
+ #hdw4s-gate #hdw4s-more{margin:0}
+ #hdw4s-more a{display:inline-block;padding:.65rem 1.15rem;border-radius:8px;
+   border:1px solid #6e6e6e;color:#eee;text-decoration:none;line-height:1.3}
 </style>
 <div id="hdw4s-gate" hidden><div class="card">
   <h1>__NAME__</h1><div id="hdw4s-body"></div>
+  <div id="hdw4s-actions">
   <button id="hdw4s-go">Connect</button>
 __MORE__
+  </div>
   <p class="err" id="hdw4s-err"></p>
 </div></div>
 <div id="hdw4s-starting" hidden><div class="card">

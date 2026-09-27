@@ -3443,40 +3443,64 @@ def respond(wf, status, body=b"", extra=()):
     wf.flush()
 
 
-def gate_page(title, detail, action):
-    """A page that ASKS. The button is the whole mechanism: minting happens only
-    because a person pressed it, so a browser restoring twenty tabs produces
-    twenty questions and zero desktops rather than twenty desktops nobody asked
-    for.
+# THE ONE LOOK FOR EVERY PAGE THIS ROUTER SERVES, and it is the session page's
+# own card (#hdw4s-gate in hdw4s-gate-index): a #141414 backdrop, a #242424 card
+# with a 12px radius and the same shadow. The pages used to be bare text on a
+# 100vh body with the browser's 8px margin, which is a scrollbar on every one of
+# them, and the directory's links were the browser's default blue on dark grey,
+# which a visitor read as broken. Static, one <style>, no script, no font and no
+# request after the first, because these pages must render on an unwell machine.
+#
+# THREE BUTTON WEIGHTS, and which one a control gets is the design: .primary is
+# the ONE filled accent on a page and it is always the safe habit (New desktop);
+# .secondary is an ordinary way on (Resume, Keep it); .small is the control that
+# asks before it destroys anything (Discard...). A person who does not read the
+# words still presses the filled one first.
+PAGE_CSS = (
+    "html,body{margin:0}"
+    "body{min-height:100vh;display:flex;align-items:center;"
+    "justify-content:center;background:#141414;color:#eee;"
+    "font:16px/1.55 system-ui,sans-serif}"
+    ".card{box-sizing:border-box;width:min(40rem,calc(100vw - 2rem));"
+    "margin:1rem;padding:2rem 2.25rem;background:#242424;border-radius:12px;"
+    "box-shadow:0 10px 40px #000a}"
+    "h1{font-size:1.3rem;margin:0 0 .6rem;color:#fff}"
+    "h2{font-size:.95rem;margin:1.4rem 0 .2rem;color:#ddd;font-weight:600}"
+    "p{margin:.45rem 0;color:#b9b9b9}"
+    ".note{color:#8a8a8a}"
+    ".btn{display:inline-block;box-sizing:border-box;font:inherit;"
+    "line-height:1.3;padding:.65rem 1.15rem;border-radius:8px;cursor:pointer;"
+    "text-decoration:none}"
+    ".primary{background:#772953;color:#fff;border:0}"
+    ".secondary{background:transparent;color:#eee;border:1px solid #6e6e6e}"
+    ".small{font-size:13px;padding:.25rem .7rem;border-radius:6px;"
+    "background:transparent;color:#b0b0b0;border:1px solid #4d4d4d}"
+    ".actions{display:flex;gap:.75rem;align-items:center;margin-top:1.3rem}"
+    "form{margin:0}"
+    ".rows{margin-top:.8rem}"
+    ".row{padding:.9rem 0;border-top:1px solid #363636}"
+    ".row:last-child{border-bottom:1px solid #363636}"
+    ".top{display:flex;justify-content:space-between;align-items:center;"
+    "gap:1rem}"
+    ".name{font-weight:600;color:#fff}"
+    ".facts{color:#a8a8a8;font-size:.9em}"
+    ".ends{display:flex;align-items:center;gap:.7rem;margin-top:.45rem;"
+    "color:#a8a8a8;font-size:.9em}"
+    ".create{margin-top:1.6rem}"
+    ".create .note{display:block;margin-top:.5rem}"
+)
 
-    THE BUTTON IS THE DIRECTORY'S OWN CREATE, POST /sessions/new, and not a
-    link to the front door. It was a link to "/", and "/" RESUMES the newest
-    desktop this browser owns: with a second desktop open in another tab,
-    "Start a new desktop" took that one over (bug 1, met by the owner after a
-    GNOME logout). The label promises a new desktop, so the button asks for
-    exactly that, through the one mint site that already exists for a press.
-    Being a POST also keeps a prefetch or a restored tab from pressing it.
-    Asserted by test_the_ended_pages_button_starts_a_NEW_desktop."""
+
+def card(title, inner):
+    """A page: TITLE as its heading, INNER (markup) under it, on the card."""
     return ("<!doctype html><meta charset=utf-8><title>%s</title>"
-            "<body style=\"font:16px/1.5 system-ui;background:#242424;color:#ddd;"
-            "display:flex;align-items:center;justify-content:center;height:100vh\">"
-            "<div style=\"max-width:32rem;padding:2rem\">"
-            "<h1 style=\"font-size:1.3rem\">%s</h1>"
-            "<p style=\"color:#b9b9b9\">%s</p>"
-            "<form method=\"post\" action=\"/sessions/new\" style=\"margin:1em 0\">"
-            "<button type=\"submit\" style=\"display:inline-block;margin-top:1rem;"
-            "padding:.65rem 1.15rem;background:#772953;color:#fff;"
-            "font:inherit;border:0;cursor:pointer;"
-            "text-decoration:none;border-radius:.35rem\">%s</button></form></div>"
-            % (title, title, detail, action)).encode()
+            "<style>%s</style><body><div class=\"card\"><h1>%s</h1>%s</div>"
+            % (title, PAGE_CSS, title, inner)).encode()
 
 
 def page(title, detail):
-    return ("<!doctype html><meta charset=utf-8><title>%s</title>"
-            "<body style=\"font:16px/1.5 system-ui;background:#242424;color:#ddd;"
-            "display:flex;align-items:center;justify-content:center;height:100vh\">"
-            "<div style=\"max-width:32rem;padding:2rem\"><h1 style=\"font-size:1.3rem\">%s</h1>"
-            "<p style=\"color:#b9b9b9\">%s</p></div>" % (title, title, detail)).encode()
+    """A page that says one thing: DETAIL is a sentence, not markup."""
+    return card(title, "<p>%s</p>" % detail)
 
 
 def starting_page():
@@ -3680,6 +3704,20 @@ def arrival(own, wf, identity, query, new_identity):
     # the mint, and an inference would then be wrong in the one direction that
     # matters -- skipping the gate on a desktop somebody may be watching.
     minted_here = False
+    # A BARE ARRIVAL FROM A BROWSER THAT HAS A LIVE DESKTOP IS SHOWN ITS
+    # DESKTOPS, not handed the newest one. Opening the address again is how
+    # people ask for a SECOND desktop -- two novice walks, independently, did
+    # exactly that -- and resuming answered a question they had not asked, on
+    # a card whose only button took the desktop back from the other tab. The
+    # owner's rule for a returning browser is the same: one that owns sessions
+    # gets the session manager. The liveness walk below is unchanged, so dead
+    # records are still dropped and a browser whose desktops are ALL gone still
+    # gets a new one; only where a live one sends the visitor changes.
+    #
+    # ANY QUERY KEEPS THE RESUME. ?gate= chooses the arm for the test rigs,
+    # and a query is never what a person types; the directory is for the bare
+    # address. Asserted by test_the_bare_address_shows_your_desktops.
+    to_directory = False
     if owned and arm in ("takeover", "off"):
         # Resume the most recent session this identity owns -- IF IT IS STILL
         # THERE. Not a slot lookup: the sid is what is resumed, so a reaped
@@ -3697,8 +3735,11 @@ def arrival(own, wf, identity, query, new_identity):
             why = session_replaced(rec, rec["instance"])
             if why is None:
                 sid = candidate
-                log_arrival("resumed a session", identity, rec["instance"],
-                            sid, "arm %s, %d owned" % (arm, len(owned)))
+                to_directory = not query
+                log_arrival("sent to the directory" if to_directory
+                            else "resumed a session", identity,
+                            rec["instance"], sid,
+                            "arm %s, %d owned" % (arm, len(owned)))
                 break
             # DROPPED HERE, and this is forget()'s first real call site. It has
             # existed since the table did, with exactly one caller inside a
@@ -3751,12 +3792,20 @@ def arrival(own, wf, identity, query, new_identity):
                                                     len(own.instances_in_use())))
         minted_here = True
 
+    if to_directory:
+        # Nothing is resumed and nothing is marked: the directory is a GET that
+        # never mints, and each of its rows is the same /s/<sid>/ address the
+        # resume would have sent this tab to, meeting the same card.
+        extra.append(("Location", "/sessions/"))
+        respond(wf, 302, b"", extra)
+        return
+
     location = "/s/%s/" % sid
     if query:
         location += "?" + query.decode("latin-1")
     extra.append(("Location", location))
-    # ONLY WHERE THIS REQUEST MINTED. A RESUMED session -- which may well have a
-    # viewer on it -- is redirected exactly as it always was and meets the card.
+    # ONLY WHERE THIS REQUEST MINTED. A RESUMED session (an arrival carrying a
+    # query) -- which may well have a viewer on it -- meets the card.
     if minted_here:
         extra.append(fresh_mint_header(sid))
     respond(wf, 302, b"", extra)
@@ -3971,9 +4020,10 @@ def create_form(disabled=False):
     THE RULING THIS EXISTS FOR, 2026-09-25: *"instead of just offering me to
     take back the session, this should also be the place where i can create a
     brand new one."* Before this, a visitor who already had a desktop had no
-    way to ask for a second: the front door resumes the one they have, which is
-    the arrival rule working correctly and is also the thing that blocked him
-    from exercising most of the product.
+    way to ask for a second: the front door resumed the one they had, which was
+    the arrival rule working correctly and was also the thing that blocked him
+    from exercising most of the product. (The bare front door now shows such a
+    browser this directory; see arrival().)
 
     IT IS NOT A CONTRADICTION OF THE ARRIVAL RULE and must not be read as a
     softening of it. "Minting is a damage" is about minting WITHOUT BEING
@@ -3986,10 +4036,11 @@ def create_form(disabled=False):
     test_asking_for_a_second_desktop_takes_a_GESTURE, which was watched minting
     on a GET before this address was claimed.
 
-    The mock's rule, kept: one object on this page looks pressable. The rows
-    are quiet, discard is an underlined word at the far end of a row, and this
-    is the only filled, bordered thing on the screen. That is the whole
-    mechanism for leading the habitual click somewhere safe.
+    The mock's rule, kept in its strong form: this is the only FILLED object
+    on the page. The rows' Resume is outlined and their Discard is small and
+    bordered, so both read as pressable -- a Resume drawn as a default blue
+    link read as broken to a visitor -- while the habitual click still lands
+    here, on the one act that cannot cost anybody anything.
     """
     if disabled:
         # Rendered as PLAIN TEXT rather than a disabled control. A disabled
@@ -3997,15 +4048,11 @@ def create_form(disabled=False):
         # unwell machine reads that as the page being broken. Saying the
         # machine has no room is a fact about the machine; a greyed-out button
         # is a fact about the page.
-        return ("<p style=\"margin-top:2rem;color:#8a8a8a\">"
+        return ("<p class=\"note create\">"
                 "There is no room for another desktop right now.</p>")
-    return ("<form method=\"post\" action=\"/sessions/new\" "
-            "style=\"margin-top:2rem\">"
-            "<button type=\"submit\" style=\"font:inherit;font-size:1.15rem;"
-            "font-weight:600;background:#772953;color:#fff;border:0;"
-            "border-radius:.35rem;padding:.85rem 1.4rem;cursor:pointer\">"
-            "New desktop</button>"
-            "<span style=\"display:block;margin-top:.5rem;color:#8a8a8a\">"
+    return ("<form class=\"create\" method=\"post\" action=\"/sessions/new\">"
+            "<button class=\"btn primary\" type=\"submit\">New desktop</button>"
+            "<span class=\"note\">"
             "A clean desktop. Nothing from any of the others.</span>"
             "</form>")
 
@@ -4044,14 +4091,13 @@ def create_refused_page(rows, pool):
     if rows:
         body += ("<p>Nothing you have has changed. These are still yours, and "
                  "discarding one you are finished with frees a slot.</p>")
-        for r in rows:
-            body += row_html(r)
+        body += rows_html(rows)
     body += create_form(disabled=True)
-    body += ("<p style=\"margin-top:1.5rem;color:#8a8a8a\">If this keeps "
+    body += ("<p class=\"note\" style=\"margin-top:1.5rem\">If this keeps "
              "happening, tell whoever runs this machine: its pool of "
              "ephemeral desktops is full, and the refusal is recorded in its "
              "log with the time and the size of the pool.</p>")
-    return page("No desktop could be started", body)
+    return card("No desktop could be started", body)
 
 
 def console_page(rows, note=None):
@@ -4060,14 +4106,15 @@ def console_page(rows, note=None):
     WHAT IS TAKEN FROM THE MOCK AND WHY, because these are decisions somebody
     already made carefully and re-deriving them would have lost the reasons:
 
-      * ROWS, NOT CARDS. No border, no fill, no shadow, no radius. "One object
-        on this page looks pressable" is the whole mechanism for leading the
-        habitual click, and it is why the discard control cannot be a second
-        button competing with the thing you actually came to press.
+      * ROWS, NOT CARDS, inside the one card every page of ours sits on. "One
+        FILLED object on this page" is the mechanism for leading the habitual
+        click; Resume is outlined and Discard is small, so neither competes
+        with the thing a person pressing by habit should land on.
       * EVERY ROW CARRIES WHEN IT DISAPPEARS. That line is the promise that
         abandonment needs no cleanup, made before the fact rather than after it.
-      * DISCARD SITS AT THE OPPOSITE END OF THE ROW from the thing you click,
-        and it asks first. Its confirmation's prominent button is KEEP IT, and
+      * DISCARD SITS IN THE OPPOSITE CORNER OF THE ROW from Resume, on the
+        line that says how the desktop ends by itself, and it asks first (the
+        ellipsis on its label is the platform's sign for that). Its confirmation's prominent button is KEEP IT, and
         deliberately not the accent colour, so the reflex trained by the big
         button lands on the safe half.
 
@@ -4099,17 +4146,21 @@ def console_page(rows, note=None):
         body = ("<p>You have no desktops on this machine right now.</p>"
                 + create_form())
     else:
-        body = "<p>These are yours. Nobody else can see them.</p>"
-        for r in rows:
-            body += row_html(r)
+        # SAYS WHAT THE SCOPE IS TIED TO. "These are yours. Nobody else can
+        # see them." left a visitor asking: mine by what? The answer is the
+        # identity model -- a cookie in this browser -- so the line names the
+        # browser, which is also what explains the list being empty elsewhere.
+        body = ("<p>Started from this browser. Only this browser can see "
+                "them.</p>")
+        body += rows_html(rows)
         body += create_form()
         if any(r["memory_mb"] is not None for r in rows) and len(rows) > 1:
-            body += ("<p style=\"color:#8a8a8a\">If one of these is using far "
+            body += ("<p class=\"note\">If one of these is using far "
                      "more memory than the others, that is the one "
                      "misbehaving.</p>")
     if note:
         body = "<p><b>%s</b></p>" % note + body
-    return page("Your desktops", body)
+    return card("Your desktops", body)
 
 
 def describe_span(seconds):
@@ -4138,7 +4189,18 @@ def describe_span(seconds):
 
 
 def row_html(r):
-    """One row. Quiet, and with exactly one pressable thing in it.
+    """One row: the desktop's name as its heading, Resume beside it, and the
+    two ways it ends -- Discard, or by itself -- on one line underneath.
+
+    RESUME IS A BUTTON AND DISCARD IS IN THE OTHER CORNER, and both are
+    structure rather than wording. A visitor read the old Resume, a default
+    blue link, as broken; and the old Discard, grey text on Resume's own line,
+    as one careless click from losing a desktop. So Resume is an outlined
+    button on the name's line, and Discard is a small bordered button at the
+    start of the line below, beside the sentence saying the desktop also ends
+    by itself -- the two endings read as one decision, away from the press
+    that continues. The targets are unchanged: Resume is GET /s/<sid>/ (the
+    card), Discard is GET of the confirmation page.
 
     THE ROW NAMES ITS DESKTOP, and it did not until a visitor could have two.
     With one row there was nothing to tell apart and "Resume" was enough; the
@@ -4157,14 +4219,9 @@ def row_html(r):
     hdw4s-ephemeral-slots, kept in step by nobody.
 
     So it is read from the page the slot actually serves. Absent or unreadable
-    answers None and the row falls back to the bare verb, because a name is a
-    convenience and this page has to render on a machine that is unwell.
+    answers None and the row is headed with the bare word, because a name is
+    a convenience and this page has to render on a machine that is unwell.
     """
-    if r["discarding"]:
-        right = "<span style=\"color:#8a8a8a\">discarding</span>"
-    else:
-        right = ("<a href=\"/sessions/%s/discard\" "
-                 "style=\"color:#8a8a8a\">Discard</a>" % r["sid"])
     facts = []
     facts.append("started %s ago" % describe_span(r["age"]))
     if r["memory_mb"] is not None:
@@ -4173,17 +4230,23 @@ def row_html(r):
         facts.append("%d processes" % r["pids"])
     if not r["started"]:
         facts.append("still starting")
-    label = "Resume %s" % r["name"] if r["name"] else "Resume"
-    when = ("" if r["idle_window"] is None else
-            "<div style=\"color:#8a8a8a;font-size:0.9em\">"
-            "Goes by itself once nobody has connected for %s.</div>"
-            % describe_span(r["idle_window"]))
-    return ("<div style=\"display:flex;justify-content:space-between;"
-            "align-items:baseline;padding:0.75rem 0\">"
-            "<div><a href=\"/s/%s/\">%s</a>"
-            "<div style=\"color:#b9b9b9;font-size:0.9em\">%s</div>%s</div>"
-            "<div>%s</div></div>"
-            % (r["sid"], label, ", ".join(facts), when, right))
+    if r["discarding"]:
+        ends = "<span>discarding</span>"
+    else:
+        ends = ("<a href=\"/sessions/%s/discard\" class=\"btn small\">"
+                "Discard&hellip;</a>" % r["sid"])
+        if r["idle_window"] is not None:
+            ends += ("<span>or it ends by itself after %s with nobody "
+                     "connected.</span>" % describe_span(r["idle_window"]))
+    return ("<div class=\"row\"><div class=\"top\"><div>"
+            "<div class=\"name\">%s</div><div class=\"facts\">%s</div></div>"
+            "<a href=\"/s/%s/\" class=\"btn secondary\">Resume</a></div>"
+            "<div class=\"ends\">%s</div></div>"
+            % (r["name"] or "Desktop", ", ".join(facts), r["sid"], ends))
+
+
+def rows_html(rows):
+    return "<div class=\"rows\">%s</div>" % "".join(row_html(r) for r in rows)
 
 
 def discard_confirmation_page(r):
@@ -4205,24 +4268,95 @@ def discard_confirmation_page(r):
     half-built, because a "Undo" that sometimes silently does nothing is worse
     than no undo at all.
     """
-    return page(
+    return card(
         "Discard this desktop?",
         "<p>It has been running for %s and is using %s. Everything in it goes: "
         "anything open, anything downloaded, and anything you are signed in to."
-        "</p><p><b>This cannot be undone.</b></p>"
-        "<p style=\"margin-top:2rem\">"
-        "<a href=\"/sessions/\" style=\"display:inline-block;padding:0.6rem 1.2rem;"
-        "border:1px solid #888;color:#ddd;text-decoration:none\">Keep it</a>"
-        "&nbsp;&nbsp;&nbsp;"
-        "<form method=\"post\" action=\"/sessions/%s/discard\" "
-        "style=\"display:inline\">"
-        "<button type=\"submit\" style=\"background:none;border:none;"
-        "color:#8a8a8a;text-decoration:underline;cursor:pointer;"
-        "font:inherit\">Discard</button></form></p>"
+        "</p><p><b style=\"color:#eee\">This cannot be undone.</b></p>"
+        "<div class=\"actions\">"
+        "<a href=\"/sessions/\" class=\"btn secondary\">Keep it</a>"
+        "<form method=\"post\" action=\"/sessions/%s/discard\">"
+        "<button class=\"btn small\" type=\"submit\">Discard</button></form>"
+        "</div>"
         % (describe_span(r["age"]),
            "an unknown amount of memory" if r["memory_mb"] is None
            else "%d MB of memory" % r["memory_mb"],
            r["sid"]))
+
+
+
+def ended_page(rows, gone):
+    """The page a tab gets once its desktop has ended: the directory, headed
+    with the one fact the visitor came for.
+
+    IT IS THE SESSION MANAGER, NOT A ONE-BUTTON CARD, because what a person
+    needs next depends on what else they have, and one button in front of
+    everybody was a guess. Someone with another desktop still running needs
+    that one -- a visitor who logged out of one of two said they would simply
+    close this tab -- and for them the list is the next thing; someone with
+    nothing left needs New desktop. Both are here, and the ended desktop is
+    not listed: its record was forgotten on the way in.
+
+    "EVERYTHING THAT WAS IN IT IS GONE" ONLY WHEN GONE, which is when this
+    router saw the desktop stop (session_replaced() gave a reason). An
+    ephemeral desktop's home and /tmp live and die with its unit, so there it
+    is simply true, and it is the reassurance the visitor was looking for. When
+    the address is merely UNKNOWN to this router, the desktop may still be
+    running -- a restarted router forgets every letting it made -- so that
+    branch says only that the tab's desktop is no longer running here.
+
+    THE ONE FILLED BUTTON IS THE DIRECTORY'S OWN CREATE, POST /sessions/new,
+    and never a link to the front door. It was once a link to "/", which
+    resumed the newest desktop this browser owns: with a second desktop open in
+    another tab, "Start a new desktop" took that one over. A POST also keeps a
+    prefetch, a reload or a restored tab from pressing it. Asserted by
+    test_the_ended_pages_button_starts_a_NEW_desktop and, for the rows, by
+    test_the_ended_page_lists_what_is_still_running.
+    """
+    if gone:
+        body = "<p>Everything that was in it is gone.</p>"
+    else:
+        body = "<p>The desktop this tab was showing is no longer running.</p>"
+    # A row that is being discarded is not "still running", and saying so on
+    # the page about a desktop that ended would be the one false line on it.
+    running = [r for r in rows if not r["discarding"]]
+    if running:
+        body += "<h2>Still running in this browser</h2>" + rows_html(running)
+    body += create_form()
+    return card("This desktop has ended", body)
+
+
+def owned_rows(own, identity):
+    """The rows of IDENTITY's own desktops, for the directory and for the
+    ended page. Built from own.owned_by(identity) and nothing else, which is
+    the directory's whole scope rule: there is no version of this that
+    lists a stranger's desktop."""
+    out = []
+    now = time.time()
+    for s in own.owned_by(identity):
+        rec = own.lookup(s)
+        if rec is None:
+            continue
+        # A DISCARD THAT IS OVER IS NOT A DESKTOP THE VISITOR HAS. The
+        # record survives -- end_session() explains why, and the
+        # resurrection guard depends on it -- but it stops being listed once
+        # the teardown has had its whole window. Without this the row sat
+        # there saying "discarding" indefinitely, because the record is
+        # dropped only by a request that PRESENTS that session id, and a
+        # visitor who discards from this page has no tab left to present it.
+        #
+        # BOUNDED IN TIME rather than by asking whether a teardown is
+        # running. Reading the marker alone was the obvious repair and is
+        # wrong: the request file is removed before the work starts, so the
+        # row would blink out and back at the moment the person is watching
+        # it -- which is the very flicker describe_session() was written to
+        # stop. Same bound as the marker, for one reason rather than two.
+        if rec.get("ended"):
+            ended_at = rec.get("ended_at")
+            if ended_at is None or (now - ended_at) > TEARDOWN_MARKER_MAX:
+                continue
+        out.append(describe_session(rec, s))
+    return out
 
 
 def console(own, wf, identity, new_identity, what, sid, method):
@@ -4245,32 +4379,7 @@ def console(own, wf, identity, new_identity, what, sid, method):
     extra = refresh_headers(own, identity, new_identity)
 
     def rows():
-        out = []
-        now = time.time()
-        for s in own.owned_by(identity):
-            rec = own.lookup(s)
-            if rec is None:
-                continue
-            # A DISCARD THAT IS OVER IS NOT A DESKTOP THE VISITOR HAS. The
-            # record survives -- end_session() explains why, and the
-            # resurrection guard depends on it -- but it stops being listed once
-            # the teardown has had its whole window. Without this the row sat
-            # there saying "discarding" indefinitely, because the record is
-            # dropped only by a request that PRESENTS that session id, and a
-            # visitor who discards from this page has no tab left to present it.
-            #
-            # BOUNDED IN TIME rather than by asking whether a teardown is
-            # running. Reading the marker alone was the obvious repair and is
-            # wrong: the request file is removed before the work starts, so the
-            # row would blink out and back at the moment the person is watching
-            # it -- which is the very flicker describe_session() was written to
-            # stop. Same bound as the marker, for one reason rather than two.
-            if rec.get("ended"):
-                ended_at = rec.get("ended_at")
-                if ended_at is None or (now - ended_at) > TEARDOWN_MARKER_MAX:
-                    continue
-            out.append(describe_session(rec, s))
-        return out
+        return owned_rows(own, identity)
 
     if what == "create":
         if method != b"POST":
@@ -4683,6 +4792,7 @@ def serve(sock, own, expected_b64):
                 arrival(own, wf, identity, query, new_identity)
                 continue
 
+            gone = False
             rec = own.lookup(sid)
             if rec is not None:
                 # RESOLVING IS NOT ENOUGH, and that gap is why the gate below
@@ -4712,6 +4822,7 @@ def serve(sock, own, expected_b64):
                     # out loud, for anything this router cannot say it let.
                     reclaim_slot(own, sid, rec, why)
                     rec = None
+                    gone = True
             if rec is None:
                 # GATE. Not a mint, and the difference is the whole point.
                 #
@@ -4739,12 +4850,13 @@ def serve(sock, own, expected_b64):
                 # them, and those gates may be the only thing it says to us for
                 # days -- letting its identity lapse there would cost it the
                 # OTHER sessions it still owns.
-                respond(wf, 410, gate_page(
-                    "This desktop has ended",
-                    "The session this tab was showing is no longer running. "
-                    "Nothing has been started for you.",
-                    "Start a new desktop"),
-                    refresh_headers(own, identity, new_identity))
+                #
+                # The page lists THIS browser's other desktops, from its own
+                # identity, so a stranger presenting a dead id sees only their
+                # own list. Every pressable on it is a GET that gates or asks,
+                # or the directory's POST create: still no mint without a press.
+                respond(wf, 410, ended_page(owned_rows(own, identity), gone),
+                        refresh_headers(own, identity, new_identity))
                 continue
             if rec["identity"] != identity:
                 # The invariant, refusing: different identities never see each
