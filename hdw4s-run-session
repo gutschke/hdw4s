@@ -1171,12 +1171,19 @@ stream+=(--web-root="${webroot}")
 if [ -n "${stage_fd}" ]; then
   if [ -n "${stage_armed}" ]; then
     stage_line=''
-    if read -r -t 20 -u "${stage_fd}" stage_line; then :; fi
+    stage_rc=0
+    if read -r -t 20 -u "${stage_fd}" stage_line; then :; else stage_rc="$?"; fi
+    # read -t returns more than 128 when it times out, and 1 at end of file:
+    # a watcher that died is a different fact from a desktop that is slow.
     case "${stage_line}" in
       stage\ *) stage_line="${stage_line#stage }"
                 echo "hdw4s: held the stream ${stage_line%% *} ms until the desktop was shown (${stage_line#* })" >&2 ;;
       none\ *)  echo "hdw4s: nothing to hold the stream for: ${stage_line#none }" >&2 ;;
-      *)        echo 'hdw4s: the desktop was not shown within 20s; starting the stream anyway' >&2 ;;
+      *)        if [ "${stage_rc}" -gt 128 ]; then
+                  echo 'hdw4s: the desktop was not shown within 20s; starting the stream anyway' >&2
+                else
+                  echo 'hdw4s: the stage watcher ended without a verdict; starting the stream anyway' >&2
+                fi ;;
     esac
   else
     echo 'hdw4s: the stage watcher did not start; starting the stream without waiting' >&2
