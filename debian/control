@@ -27,8 +27,8 @@ Rules-Requires-Root: no
 # reach GitHub at all, which the package has always needed and never said.
 #
 # python3-xlib left with the other vendored modules and came back as hdw4s's
-# OWN dependency: hdw4s-stage-wait watches for the desktop to be shown before
-# the stream starts. Selkies' vendored copy is not used for that, because it
+# OWN dependency: hdw4s-stage-wait watches for the desktop to finish starting
+# before the stream starts. Selkies' vendored copy is not used for that, because it
 # is an upstream internal that moves when Selkies does. It is in universe, as
 # xdotool already is, so this adds no archive component.
 Package: hdw4s

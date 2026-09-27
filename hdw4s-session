@@ -7,6 +7,22 @@ export LC_ALL='C'
 export PATH='/usr/lib/hdw4s/wrappers:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 set -o nounset -o pipefail
 
+# When this session began, in whole seconds of uptime, for the stream hold in
+# hdw4s-run-session: its deadline has to be counted from the moment the unit's
+# start clock is already running, and this is the earliest point the session
+# controls. Uptime, not the wall clock, which can be stepped. A timing aid must
+# never be able to end the desktop, so a /proc that cannot be read (an LXC
+# host whose FUSE /proc has gone away) or a value that is not a whole number
+# leaves it EMPTY, which hdw4s-run-session reads as "do not hold".
+HDW4S_T0=''
+if read -r uptime_now _ 2>/dev/null < /proc/uptime; then
+  case "${uptime_now%%.*}" in
+    ''|*[!0-9]*) ;;
+    *) HDW4S_T0="${uptime_now%%.*}" ;;
+  esac
+fi
+export HDW4S_T0
+
 # Runs one desktop session. Invoked only by hdw4s@.service, which has already
 # selected the account with User=, created XDG_RUNTIME_DIR and the profile
 # directories, and put the instance name in argv.

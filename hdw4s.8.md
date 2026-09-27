@@ -378,17 +378,21 @@ belongs to the copy of the streaming server, of which there is one.
     file manager's own `local-only` setting does not protect a network home,
     because the kernel calls NFS native; see SHARED HOME DIRECTORIES.
 
-  * `HDW4S_STAGE_HOLD`:
-    Whether the streaming server waits for the desktop to be shown before it
-    starts. Defaults to `on`. GNOME 46's compositor can leave a starting
-    desktop black for good when input arrives in the fraction of a second
-    before its desktop is first shown, and a browser that connects early
-    sends exactly that; the wait closes the window, and costs the visitor
-    about two seconds they spend waiting for the desktop to paint anyway. It
-    gives up after 20 seconds and starts the stream regardless, and on a
+  * `HDW4S_STARTUP_HOLD`:
+    Whether the streaming server waits for the desktop to finish starting
+    before it starts. Defaults to `on`. GNOME 46 can leave a starting desktop
+    black for good in two ways: input that arrives just before its desktop is
+    first shown, and a screen size change in the seconds after that, before
+    it has finished starting. A browser that connects early sends both. The
+    wait ends when GNOME Shell signals the end of its startup, which costs
+    the visitor about three seconds they spend waiting for the desktop to
+    paint anyway; a shell that starts into the overview or with a dialog open
+    gives no such signal, and is released eighteen seconds after its desktop
+    is shown. If the desktop is never shown, the wait gives up before the
+    session's start timeout and starts the stream regardless, and on a
     desktop without GNOME's compositor it does not wait at all. Each session
-    logs how long it waited. It does not cover GNOME Shell being restarted
-    while a visitor is connected.
+    logs how long it waited and why it stopped. It does not cover GNOME Shell
+    being restarted while a visitor is connected.
 
   * `HDW4S_HIDPI`:
     How a high-density client is handled: `scale` (the default) asks for the

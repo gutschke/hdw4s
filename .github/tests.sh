@@ -2780,6 +2780,61 @@ echo '== the tool and the router agree about what a setting means =='
   has 'and it says which members were ever seen to fail' "${out}" 'seen to fail'
 )
 
+echo '== the startup hold fails open, and its deadline matches the gate =='
+# The hold in hdw4s-run-session ends before the unit's ExecStartPost gives up
+# waiting for the stream, and both read HDW4S_ANNOUNCED_GATE_WAIT with a
+# default of their own. Two copies of one number drift the moment one is
+# edited, and a hold whose default outlived the gate's would fail every start
+# whose desktop is never shown.
+#
+# Under -e and nounset, arithmetic on a value that is not a number ENDS the
+# script, and a named session then restarts in a loop -- over a timing aid. The
+# values come from the environment (an older hdw4s-session, across an upgrade,
+# exports none) and from /proc. "09" is the quiet one: it passes a digits-only
+# check and is then an invalid OCTAL number to bash's arithmetic.
+( set +e
+  # A sed expression that matches a literal "${...}", not an expansion.
+  # shellcheck disable=SC2016
+  default_of='s/.*"\${HDW4S_ANNOUNCED_GATE_WAIT:-\([0-9]*\)}".*/\1/p'
+  gate_default="$(sed -n "${default_of}" "${ROOT}/hdw4s-webroot" | sort -u)"
+  hold_default="$(sed -n "${default_of}" "${ROOT}/hdw4s-run-session" | sort -u)"
+  is 'the gate has exactly one default wait' "$(printf '%s\n' "${gate_default}" | grep -c .)" '1'
+  is 'and the hold assumes the same one' "${hold_default}" "${gate_default}"
+
+  fns="$(sed -n '/^is_seconds() {/,/^}/p; /^uptime_s() {/,/^}/p' "${ROOT}/hdw4s-run-session")"
+  has 'the number checks are where this test looks for them' "${fns}" 'uptime_s() {'
+  # The probe is a script for "bash -c", so its "$1" is meant literally here.
+  # shellcheck disable=SC2016
+  probe='is_seconds "$1" && echo "$(( 10#$1 + 1 ))" || echo no'
+  verdicts=''
+  for v in '' '60s' 'x' '1 2' '-5' '1234567890123' '09' '60'; do
+    if said="$(bash -c "set -eu; ${fns}; ${probe}" _ "${v}" 2>/dev/null)"; then
+      verdicts="${verdicts}${said}/"
+    else
+      verdicts="${verdicts}DIED/"
+    fi
+  done
+  is 'only whole numbers are numbers, and none of them kills the script' \
+     "${verdicts}" 'no/no/no/no/no/no/10/61/'
+  now="$(bash -c "set -eu; ${fns}; uptime_s")"
+  case "${now}" in ''|*[!0-9]*) bad 'the clock reads as whole seconds' "got [${now}]" ;;
+                   *) ok 'the clock reads as whole seconds' ;; esac
+
+  # The watcher fails open by saying nothing: no X server, or an argument it
+  # cannot read, must end it quickly with nothing on stdout -- not a traceback
+  # that reaches Ubuntu's crash handler, which takes seconds the unit's start
+  # is waiting on.
+  for args in '' 'x' '3 y'; do
+    start="${SECONDS}"
+    # shellcheck disable=SC2086
+    out="$(env -u DISPLAY python3 -I "${ROOT}/hdw4s-stage-wait" ${args} 2>/dev/null)"
+    rc=$?
+    is "the watcher with no display and arguments [${args}] exits non-zero" "$([ "${rc}" -ne 0 ] && echo yes)" 'yes'
+    is '  and says nothing on stdout' "${out}" ''
+    is '  and does it at once' "$([ $(( SECONDS - start )) -le 2 ] && echo yes)" 'yes'
+  done
+)
+
 echo '== the router, against stand-in slots =='
 # NOT a live test, despite living under .github/live: it spawns the real
 # hdw4s-demux against UNIX-socket backends on loopback and needs no systemd, no
@@ -2823,7 +2878,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=432   # update when tests are added; a wrong number is the point
+EXPECTED=446   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

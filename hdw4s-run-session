@@ -29,7 +29,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_DEBUG_DESKTOP:=off}"
 : "${HDW4S_HIDPI:=scale}"
 : "${HDW4S_ENCODER:=h264enc}"
-: "${HDW4S_STAGE_HOLD:=on}"
+: "${HDW4S_STARTUP_HOLD:=on}"
 
 # The streaming server now defaults this to true and implements resizing itself,
 # so this is no longer a workaround for anything -- it is kept as an explicit
@@ -626,45 +626,132 @@ if [ "${HDW4S_DEBUG_DESKTOP}" = 'on' ]; then
   fi
 fi
 
-# THE STAGE HOLD, part one: arm the watcher BEFORE the desktop starts.
+# THE STARTUP HOLD, part one: arm the watcher BEFORE the desktop starts.
 #
-# mutter 46 can leave a starting desktop black for good. Its stage's first
-# frame is discarded while the stage is not yet shown, the discard never
-# clears the flag saying an update is already scheduled, and one input event
-# queued before the stage is shown then makes clutter refuse every later
-# update. The stream injects the visitor's pointer the moment a browser
-# connects, and browsers connect inside that window, so the stream is started
-# only once the stage window has been shown (part two, below). Upstream fixed
-# it in mutter 47.3 (GNOME issue 3804) and never backported it to 46.
+# GNOME 46 has two defects that leave a starting desktop black for good, and
+# the stream sets off both: it injects the visitor's pointer, and resizes the
+# screen to the browser, the moment a browser connects -- which is usually
+# while the desktop is still starting.
+#
+#   mutter 46: one input event queued before the stage is first shown makes
+#   clutter refuse every later update. Fixed in mutter 47.3 (GNOME issue 3804).
+#   gnome-shell 46: a screen size change between the stage being shown and
+#   the end of startup leaves the whole interface hidden. Fixed in gnome-shell
+#   50 (GNOME issue 9018).
+#
+# So the stream starts only once startup has finished (part two, below), as
+# hdw4s-stage-wait sees it, and with deadlines of its own for when that is not
+# seen. Holding only until the stage was SHOWN was tried first and made the
+# second defect more likely: it moved the resize into exactly its span.
 #
 # The watcher has to be listening before the stage window is CREATED, not
 # merely before it is shown: that is when it can first select on it, and a
 # walk from the root cannot find it later. Hence the order: arm, wait for
 # "armed", then start the desktop.
 #
-# EVERY PATH FAILS OPEN, and the reads are the reason for the shape. This
-# script runs under -e and nounset: a bare "read -t" that times out returns
-# 142 and would end the session, and a named session would then restart in a
-# loop. So each read sits in an "if", and the verdict is judged by its text.
-# The watcher is a process substitution, not a coproc: bash unsets a finished
+# EVERY PATH FAILS OPEN, and the reads and the arithmetic are the reason for
+# the shape. This script runs under -e and nounset: a bare "read -t" that
+# times out returns 142 and would end the session, an arithmetic expansion on
+# a value that is not a number ends it too, and a named session would then
+# restart in a loop. So each read sits in an "if", the verdict is judged by
+# its text, and every number is checked before any arithmetic sees it. The
+# watcher is a process substitution, not a coproc: bash unsets a finished
 # coproc's variables, which nounset turns into the same crash.
 #
-# REMOVE THIS when Ubuntu 24.04 leaves the supported set, or when an Ubuntu
-# update carries mutter commit 24083e1e and the reproducer no longer wedges
-# with HDW4S_STAGE_HOLD=off. It does NOT cover gnome-shell restarting while the
-# stream is already live; a new stage then starts with input flowing.
+# REMOVE THIS when Ubuntu 24.04 leaves the supported set, or when the
+# supported releases carry BOTH fixes and the reproducer no longer goes black,
+# for a motion arm or a resize arm, with HDW4S_STARTUP_HOLD=off. It does NOT
+# cover gnome-shell restarting while the stream is already live; a new stage
+# then starts with input flowing.
+
+# A whole number of seconds, short enough that the arithmetic cannot overflow.
+# Anything else -- empty, "60s", garbage -- is not one.
+is_seconds() {
+  case "${1}" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 12 ]
+}
+# Uptime in whole seconds, or a failure. Truncated, so it can read up to a
+# second EARLY: a deadline compared against it can be overshot by under a
+# second, which the start-deadline margin below absorbs.
+uptime_s() {
+  local up _
+  read -r up _ 2>/dev/null < /proc/uptime || return 1
+  up="${up%%.*}"
+  is_seconds "${up}" || return 1
+  echo "$(( 10#${up} ))"
+}
+# For log lines that quote a value from outside: nothing but what a number or
+# a word needs, so a hostile value cannot write a line of its own.
+quoted() {
+  local v="${1//[!0-9a-zA-Z.]/}"
+  echo "${v:0:24}"
+}
+
+# THE BOUND. Once the stage has been shown for this long without the shell
+# signalling that startup has finished, the stream starts anyway. It is a
+# FALLBACK: an ordinary start gives the signal a second or two after it is
+# shown and never reaches it. A shell that starts into the overview, or with a
+# dialog up, never gives the signal and always waits it out.
+#
+#   B = ceil(2 x the slowest measured time from the stage being shown to the
+#       end of startup) = ceil(2 x 8.91 s) = 18 s.
+#
+# The 8.91 s was one of nine desktops started together on a machine loaded to
+# twice its CPU count. The base is the END OF STARTUP, not the signal, because
+# on a start that never signals only the end of startup makes a release safe.
+# What else protects a release is that no resize can reach the desktop until
+# the stream has started and a browser has connected, about a second under
+# load. Re-derive B if a slower start is ever measured; do not tune it by hand.
+#
+# NOT COVERED: with HDW4S_DPI set to anything but 96, the streaming server
+# rewrites the screen's physical size before any browser connects, and that
+# reaches the same rebuild as a resize. A start released by this bound can
+# then still go black.
+hold_bound=18
+
+# THE START DEADLINE, for a desktop that is never shown at all. The unit's
+# ExecStartPost waits HDW4S_ANNOUNCED_GATE_WAIT seconds (the same variable, and
+# the same default, as hdw4s-webroot reads) for the stream to announce itself,
+# counted from about when the X server is up -- after this session began. The
+# stream takes up to about 1.6 s from being started to announcing (measured
+# under load), so the hold ends 6 s before that wait would: twice that, plus
+# two seconds for this clock's rounding.
+hold_margin=6
+
 stage_fd=''
 stage_pid=''
 stage_armed=''
-if [ "${HDW4S_STAGE_HOLD}" = 'on' ]; then
-  # Its stderr is left on the journal: when it fails open, its one line
-  # there is the only record of why (a missing module looks like a slow start).
-  exec {stage_fd}< <(exec /usr/lib/hdw4s/hdw4s-stage-wait 3)
-  stage_pid="$!"
-  children+=("${stage_pid}")
-  stage_line=''
-  if read -r -t 5 -u "${stage_fd}" stage_line && [ "${stage_line}" = 'armed' ]; then
-    stage_armed=1
+hold_outer=''
+if [ "${HDW4S_STARTUP_HOLD}" = 'on' ]; then
+  hold_skip=''
+  hold_gate="${HDW4S_ANNOUNCED_GATE_WAIT:-60}"
+  hold_t0="${HDW4S_T0:-}"
+  if ! is_seconds "${hold_t0}"; then
+    # Unset when an older hdw4s-session started this script, across an upgrade.
+    hold_skip="the session's start time ($(quoted "${hold_t0:-unset}"))"
+  elif ! is_seconds "${hold_gate}"; then
+    hold_skip="HDW4S_ANNOUNCED_GATE_WAIT ($(quoted "${hold_gate}"))"
+  elif ! hold_now="$(uptime_s)"; then
+    hold_skip='the clock (/proc/uptime)'
+  fi
+  if [ -n "${hold_skip}" ]; then
+    echo "hdw4s: startup hold skipped: ${hold_skip} is not a whole number of seconds; starting the stream unheld" >&2
+  else
+    hold_outer=$(( 10#${hold_t0} + 10#${hold_gate} - hold_margin ))
+    if [ $(( hold_outer - hold_now )) -lt 1 ]; then
+      echo "hdw4s: startup hold skipped: no time left before the start deadline ($(( hold_now - 10#${hold_t0} )) s since the session began, of ${hold_gate})" >&2
+    else
+      # Its stderr is left on the journal: when it fails open, its one line
+      # there is the only record of why (a missing module looks like a slow
+      # start).
+      exec {stage_fd}< <(exec /usr/lib/hdw4s/hdw4s-stage-wait 3 "${hold_bound}")
+      stage_pid="$!"
+      children+=("${stage_pid}")
+      stage_line=''
+      if read -r -t 5 -u "${stage_fd}" stage_line && [ "${stage_line}" = 'armed' ]; then
+        stage_armed=1
+      fi
+    fi
   fi
   # A stop during that read would otherwise go on to start the desktop into a
   # dying unit; the trap only killed what had been started so far.
@@ -1156,46 +1243,107 @@ head -c 1 < "${webroot}/index.html" > /dev/null 2>&1 || {
 }
 stream+=(--web-root="${webroot}")
 
-# THE STAGE HOLD, part two: do not start the stream until the stage is shown.
+# THE STARTUP HOLD, part two: do not start the stream until startup is over.
 #
-# What the watcher reports is the stage WINDOW being mapped, which mutter does
-# only after the stage itself is shown -- the moment that decides whether the
-# desktop can wedge. It says nothing about whether the desktop is healthy; a
-# wedged stage is shown too. Do not turn this into a health check.
+# The watcher reports "shown" when the stage is mapped, then one verdict:
+# "ready" (the shell signalled the end of its startup), "bound" (it has been
+# shown for hold_bound seconds without that signal), or "none" (nothing to
+# watch). "lost" means the stage was destroyed; a new "shown" may follow. None
+# of this says whether the desktop is healthy -- a black desktop is released
+# by "bound" too. Do not turn this into a health check.
 #
-# The wait is logged on every start, not only when it runs out: that line is
-# the field's measurement of how long the hold costs and how often it times
-# out. 20 seconds is seven times the slowest of thirty measured maps (2.5-2.8
-# s on an idle machine). It is spent from the unit's start timeout, and
-# running out only means the old behaviour: the stream starts anyway.
+# Two deadlines of this script's own, so a watcher that dies or hangs costs a
+# bounded wait: the START deadline while nothing has been shown, and hold_bound
+# + 2 seconds after a "shown" (never later than the start deadline). A "lost"
+# puts the start deadline back, so the old stage's bound cannot release the
+# stream inside the new stage's startup. Reaching either deadline only means
+# the old behaviour: the stream starts anyway.
+#
+# Stops: systemd holds back "systemctl stop" until the unit's start job has
+# finished, so a stop requested during this wait arrives after it. Only a
+# start timeout or a signal sent directly reaches the trap here, and "stopping"
+# is how this loop learns of one.
+#
+# One line is logged on every start, naming which way the hold ended: that is
+# the field's measurement of what it costs and how often the signal is missing.
 if [ -n "${stage_fd}" ]; then
   if [ -n "${stage_armed}" ]; then
+    hold_deadline="${hold_outer}"
+    hold_shown=''     # ms after "armed", from the watcher, of the current stage
+    hold_ever_shown=''
+    hold_replaced=0
+    hold_end=''
     stage_line=''
-    stage_rc=0
-    if read -r -t 20 -u "${stage_fd}" stage_line; then :; else stage_rc="$?"; fi
-    # read -t returns more than 128 when it times out, and 1 at end of file:
-    # a watcher that died is a different fact from a desktop that is slow. A
-    # stop kills the watcher too, so it is checked first: otherwise the log
-    # would say the stream is starting, one line before saying it is not.
-    [ -n "${stopping}" ] && stage_line='stopping'
-    case "${stage_line}" in
+    while :; do
+      if ! hold_now="$(uptime_s)"; then hold_end='clock'; break; fi
+      hold_rem=$(( hold_deadline - hold_now ))
+      if [ "${hold_rem}" -lt 1 ]; then hold_end='deadline'; break; fi
+      stage_rc=0
+      if read -r -t "${hold_rem}" -u "${stage_fd}" stage_line; then :; else stage_rc="$?"; fi
+      if [ -n "${stopping}" ]; then hold_end='stopping'; break; fi
+      if [ "${stage_rc}" -ne 0 ]; then
+        # More than 128 is read's own timeout, which the loop's next pass
+        # names; 1 is end of file: the watcher died without a verdict.
+        [ "${stage_rc}" -gt 128 ] && continue
+        hold_end='eof'; break
+      fi
+      case "${stage_line}" in
+        shown\ *)
+          hold_shown="${stage_line#shown }"; hold_shown="${hold_shown%% *}"
+          is_seconds "${hold_shown}" || hold_shown='?'
+          hold_ever_shown=1
+          if hold_now="$(uptime_s)"; then
+            [ $(( hold_now + hold_bound + 2 )) -ge "${hold_outer}" ] ||
+              hold_deadline=$(( hold_now + hold_bound + 2 ))
+          fi ;;
+        lost\ *)
+          hold_replaced=$(( hold_replaced + 1 ))
+          hold_shown=''
+          hold_deadline="${hold_outer}" ;;
+        ready\ *|bound\ *|none\ *)
+          hold_end="${stage_line%% *}"; break ;;
+        *)
+          # Not a line this script knows: fail open rather than guess.
+          hold_end='garbled'; break ;;
+      esac
+    done
+    hold_ms="${stage_line#* }"; hold_ms="${hold_ms%% *}"
+    is_seconds "${hold_ms}" || hold_ms='?'
+    hold_note=''
+    [ "${hold_replaced}" -eq 0 ] ||
+      hold_note=" after ${hold_replaced} stage replacement(s)"
+    case "${hold_end}" in
       stopping) ;;
-      stage\ *) stage_line="${stage_line#stage }"
-                echo "hdw4s: held the stream ${stage_line%% *} ms until the desktop was shown (${stage_line#* })" >&2 ;;
-      none\ *)  echo "hdw4s: nothing to hold the stream for: ${stage_line#none }" >&2 ;;
-      *)        if [ "${stage_rc}" -gt 128 ]; then
-                  echo 'hdw4s: the desktop was not shown within 20s; starting the stream anyway' >&2
-                else
-                  echo 'hdw4s: the stage watcher ended without a verdict; starting the stream anyway' >&2
-                fi ;;
+      ready)
+        echo "hdw4s: held the stream ${hold_ms} ms: the desktop signalled that it had started (shown after ${hold_shown} ms)${hold_note}" >&2 ;;
+      bound)
+        echo "hdw4s: held the stream ${hold_ms} ms: released ${hold_bound} s after the desktop was shown, with no signal that it had started (a start into the overview, a dialog, or a slow or already-black start)${hold_note}" >&2 ;;
+      none)
+        echo "hdw4s: nothing to hold the stream for: ${stage_line#none }" >&2 ;;
+      deadline)
+        if [ -n "${hold_shown}" ] && [ "${hold_deadline}" -lt "${hold_outer}" ]; then
+          echo "hdw4s: the stage watcher gave no verdict within $(( hold_bound + 2 )) s of the desktop being shown; starting the stream anyway${hold_note}" >&2
+        elif [ -n "${hold_shown}" ]; then
+          echo "hdw4s: held the stream to the start deadline: the desktop was shown after ${hold_shown} ms, but the deadline (${hold_gate} s less ${hold_margin}) came before the bound${hold_note}" >&2
+        else
+          echo "hdw4s: held the stream to the start deadline: the desktop was not shown within ${hold_gate} s less ${hold_margin}${hold_note}" >&2
+        fi ;;
+      eof)
+        echo "hdw4s: the stage watcher ended without a verdict ($([ -n "${hold_ever_shown}" ] && echo 'after' || echo 'before') the desktop was shown); starting the stream anyway${hold_note}" >&2 ;;
+      clock)
+        echo 'hdw4s: the clock (/proc/uptime) could not be read while holding the stream; starting it now' >&2 ;;
+      *)
+        echo "hdw4s: the stage watcher said something unexpected ($(quoted "${stage_line}")); starting the stream anyway" >&2 ;;
     esac
   else
     echo 'hdw4s: the stage watcher did not start; starting the stream without waiting' >&2
   fi
+  # The watcher has usually exited by now and been reaped, and kill then
+  # fails: under -e a bare kill here would end every start.
   kill "${stage_pid}" 2>/dev/null || :
   exec {stage_fd}<&-
-elif [ "${HDW4S_STAGE_HOLD}" != 'on' ]; then
-  echo 'hdw4s: stage hold disabled (HDW4S_STAGE_HOLD=off)' >&2
+elif [ "${HDW4S_STARTUP_HOLD}" != 'on' ]; then
+  echo 'hdw4s: startup hold disabled (HDW4S_STARTUP_HOLD=off)' >&2
 fi
 # A stop that arrived during the wait already killed the children; starting
 # the stream now would put it on a dying unit, holding the port with nothing
