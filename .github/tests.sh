@@ -1936,6 +1936,101 @@ echo '== the boot card offers the session directory only where a door serves one
        "$(cat "${d}/rederr2")" 'carries no link'
 )
 
+echo '== a desktop is never named after its slot, and a browser numbers its own =='
+# THE DEFECT, 2026-09-27, three novices of three: a pool desktop was named after its
+# SLOT ("19 . Desktop"), a slot is reused, and a visitor told "everything that was in
+# it is gone" was handed a new desktop called "19" and doubted the word "gone". The
+# owner's ruling: a small per-browser number -- the lowest this browser is not using
+# and has not used in fifteen minutes -- plus an optional name of the visitor's own,
+# both in browser storage. hdw4s-names.js is that rule; .github/names-test.js drives
+# it with no browser, and the arms below make both halves go red once.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  # (1) THE MINTER'S LABEL, which is the text every page shows with no script. Its
+  # slot loop is run as written, with the pool's arithmetic supplied, and every label
+  # it produces must be free of digits. A loop that produced nothing would pass that,
+  # so the number of rows is asserted first.
+  labels() {
+    ( HDW4S_EPHEMERAL_SLOTS=20 HDW4S_EPHEMERAL_PREFIX=ephemeral HDW4S_EPHEMERAL_UID_BASE=900
+      eval "$(sed -n "/^  SLOT_SPECS=''\$/,/^  done\$/p" "$1")"
+      printf '%s' "${SLOT_SPECS}" | cut -f3 )
+  }
+  got="$(labels "${ROOT}/hdw4s-ephemeral-slots")"
+  is 'the slot loop was found and labels all twenty slots' \
+    "$(printf '%s\n' "${got}" | grep -c .)" '20'
+  is 'and no label carries a number' "$(printf '%s\n' "${got}" | grep -c '[0-9]' || :)" '0'
+  # The old label, put back verbatim: its $(( )) is the minter's, not ours to expand.
+  # shellcheck disable=SC2016
+  sed 's|^      '"'"'Desktop'"'"')$|      "$(( i + 1 )) · Desktop")|' \
+    "${ROOT}/hdw4s-ephemeral-slots" > "${d}/red-minter"
+  is 'RED ARM: the old slot-numbered label is caught' \
+    "$(labels "${d}/red-minter" | grep -c '[0-9]' || :)" '20'
+
+  # (2) THE ALLOCATION, and its two red arms: no decay window, and a count that does
+  # not start at the lowest number. Each must turn the suite red, or the suite is
+  # not watching what it names.
+  if ! command -v node >/dev/null; then
+    bad 'the page-script tests can run' 'node is needed for .github/names-test.js'
+    bad 'RED ARM: a number reused inside fifteen minutes is caught' 'node missing'
+    bad 'RED ARM: a count that skips the lowest free number is caught' 'node missing'
+  else
+    out="$(node "${ROOT}/.github/names-test.js" 2>&1)" && rc=0 || rc=$?
+    is 'the per-browser numbering behaves as ruled' "${rc}" '0'
+    [ "${rc}" -eq 0 ] || printf '%s\n' "${out}"
+    sed 's|^  var WINDOW_MS = 15 \* 60 \* 1000;|  var WINDOW_MS = 0;|' \
+      "${ROOT}/hdw4s-names.js" > "${d}/red1.js"
+    has 'RED ARM: a number reused inside fifteen minutes is caught' \
+      "$(node "${ROOT}/.github/names-test.js" "${d}/red1.js" 2>&1 || :)" \
+      'FAIL an ended desktop keeps its number out of use'
+    sed 's|^    var n = 1;$|    var n = 2;|' "${ROOT}/hdw4s-names.js" > "${d}/red2.js"
+    has 'RED ARM: a count that skips the lowest free number is caught' \
+      "$(node "${ROOT}/.github/names-test.js" "${d}/red2.js" 2>&1 || :)" \
+      'FAIL the first desktop is 1'
+  fi
+  # A name is text a person typed; the script may only ever set it as text.
+  is 'the names script never writes markup' \
+    "$(grep -cE 'innerHTML|outerHTML|insertAdjacentHTML|document\.write' "${ROOT}/hdw4s-names.js" || :)" '0'
+
+  # (3) BOTH READERS CARRY IT, and only where the door is the pool's.
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+  HDW4S_DIRECTORY=yes HDW4S_SESSION_NAME=Desktop "${ROOT}/hdw4s-gate-index" \
+    "${d}/in.html" "${d}/pool.html" >/dev/null 2>&1 || bad 'a pool page builds'
+  has 'a pool session page names itself from this browser' \
+    "$(cat "${d}/pool.html")" 'hdw4sNames.sessionPage("Desktop")'
+  has 'on the card heading the script looks for' "$(cat "${d}/pool.html")" 'id="hdw4s-name"'
+  "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/named.html" >/dev/null 2>&1 \
+    || bad 'a named page builds'
+  hasnt 'a named desktop keeps its administrator'"'"'s name, no script' \
+    "$(cat "${d}/named.html")" 'hdw4sNames'
+  hasnt 'the in-page starting card guesses no cause' "$(cat "${d}/pool.html")" 'busy machine'
+
+  pages="$(python3 - "${ROOT}/hdw4s-demux" <<'PY'
+import importlib.machinery, importlib.util, sys
+sys.dont_write_bytecode = True
+l = importlib.machinery.SourceFileLoader("demux", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("demux", l))
+l.exec_module(m)
+row = dict(sid="ab" * 16, name=None, age=60, memory_mb=10, pids=3, started=True,
+           discarding=False, idle_window=3600)
+for name, body in (("dir", m.console_page([row])), ("ended", m.ended_page([row], True)),
+                   ("full", m.create_refused_page([row], 4)),
+                   ("starting", m.starting_page())):
+    print("%s\t%s" % (name, body.decode().replace("\n", " ")))
+PY
+)"
+  for p in dir ended full; do
+    b="$(printf '%s\n' "${pages}" | sed -n "s/^${p}\t//p")"
+    has "the ${p} page names its row by session, for the script" "${b}" \
+      "data-hdw4s-sid=\"$(printf 'ab%.0s' $(seq 16))\">Desktop</div>"
+    has "and runs the names script" "${b}" 'hdw4sNames.directory()'
+  done
+  b="$(printf '%s\n' "${pages}" | sed -n 's/^starting\t//p')"
+  hasnt 'the starting page guesses no cause' "${b}" 'busy'
+  has 'the starting page is on the shared card' "${b}" '<div class="card">'
+  has 'and shows a sign of life' "${b}" 'class="alive"'
+)
+
 echo '== BOTH session kinds publish an identity, or the gate refuses forever =='
 # THE ARM THAT WAS MISSING, AND WHY IT WAS MISSING. The gate's resume path
 # compares the identity a tab connected to against the one published in the web
@@ -2878,7 +2973,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=446   # update when tests are added; a wrong number is the point
+EXPECTED=466   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

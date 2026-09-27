@@ -172,7 +172,7 @@ OVERLAY = r"""
    border:1px solid #6e6e6e;color:#eee;text-decoration:none;line-height:1.3}
 </style>
 <div id="hdw4s-gate" hidden><div class="card">
-  <h1>__NAME__</h1><div id="hdw4s-body"></div>
+  <h1 id="hdw4s-name">__NAME__</h1><div id="hdw4s-body"></div>
   <div id="hdw4s-actions">
   <button id="hdw4s-go">Connect</button>
 __MORE__
@@ -182,7 +182,7 @@ __MORE__
 <div id="hdw4s-starting" hidden><div class="card">
   <h2 id="hdw4s-starting-title">Your desktop is starting</h2>
   <p id="hdw4s-starting-note">It is coming up now. This usually takes a few
-    seconds; on a busy machine it can take a minute.</p>
+    seconds.</p>
 __ACT__
 </div></div>
 <div id="hdw4s-share" hidden>
@@ -1228,7 +1228,7 @@ __ACT__
   show(COLD, COLD_GO);
 })();
 </script>
-"""
+__NAMES__"""
 
 # Refused at GENERATION, not clamped. A default nobody chose is how a whole build
 # quietly serves the wrong arm, and the person who mistyped it is standing right here
@@ -1271,6 +1271,29 @@ ACT = ('  <form id="hdw4s-starting-act" method="post" action="/sessions/new" hid
        '  </form>\n'
        if _dir == "yes" else "")
 
+# THE DESKTOP'S NAME AS THIS BROWSER KNOWS IT, and conditional for the reason ACT and
+# MORE are: it lives in the ephemeral front door's origin, beside the directory that
+# lists the same desktops under the same names. A named desktop keeps the name its
+# administrator gave it and gets no script. The script itself is hdw4s-names.js,
+# installed beside this file and inlined rather than fetched, so the page makes no
+# request for it and hdw4s-demux's pages read the same copy. Found where every
+# sibling is found, under HDW4S_LIBDIR when that is set (the caller, hdw4s-webroot,
+# ran THIS file from there) and beside this file otherwise.
+NAMES = ""
+if _dir == "yes":
+    _lib = os.environ.get("HDW4S_LIBDIR") or os.path.dirname(os.path.abspath(__file__))
+    try:
+        _js = open(os.path.join(_lib, "hdw4s-names.js"), encoding="utf-8").read()
+    except OSError as e:
+        raise SystemExit("hdw4s-gate-index: cannot read hdw4s-names.js (%s) -- refusing "
+                         "to build a pool page that would name every desktop alike" % e)
+    if "</script" in _js.lower():
+        raise SystemExit("hdw4s-gate-index: hdw4s-names.js contains '</script', which "
+                         "would end the inlined script early -- refusing to build")
+    NAMES = ("<script>\n%s\nhdw4sNames.sessionPage(%s);\n</script>\n"
+             % (_js, json.dumps(os.environ.get("HDW4S_SESSION_NAME", "Desktop"))
+                    .replace("<", "\\u003c")))
+
 # The identity is a hash of THIS generator, which is where the gate's behaviour
 # lives -- not the package version, which does not change when the logic does, and
 # not a timestamp, which changes when nothing does. Two pages agree if and only if
@@ -1284,6 +1307,7 @@ OVERLAY = OVERLAY.replace("__SRC__", json.dumps(src_attr)) \
      .replace("__CFG__", json.dumps(cfg)) \
      .replace("__MORE__", MORE) \
      .replace("__ACT__", ACT) \
+     .replace("__NAMES__", NAMES) \
      .replace("__NAME__", html_escape(os.environ.get("HDW4S_SESSION_NAME", "Desktop")))
 html = html.replace("</body>", OVERLAY + "</body>") if "</body>" in html else html + OVERLAY
 

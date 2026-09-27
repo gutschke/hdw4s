@@ -36,4 +36,7 @@ hdw4s*.path              usr/lib/systemd/system
 hdw4s*.slice             usr/lib/systemd/system
 hdw4s-webroot            usr/lib/hdw4s
 hdw4s-gate-index         usr/lib/hdw4s
+# How a browser names its desktops. Read, not run, by the two components above
+# and below it, which find it beside themselves -- one copy, inlined by both.
+hdw4s-names.js           usr/lib/hdw4s
 hdw4s-demux              usr/lib/hdw4s

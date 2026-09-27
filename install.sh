@@ -20,7 +20,7 @@ src="$(cd "$(dirname "$0")" && pwd)"
 SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration}
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
-         hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index
+         hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index hdw4s-names.js
          hdw4s-refuse hdw4s-refuse@.service
          hdw4s-teardown hdw4s-teardown@.service hdw4s-teardown@.path
          hdw4s-incarnation hdw4s-incarnation@.service
@@ -172,7 +172,7 @@ chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wa
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*
 # Imported, not executed.
 chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
-           "${dst}"/*.conf "${dst}"/hdw4s.8*
+           "${dst}"/*.conf "${dst}"/hdw4s.8* "${dst}"/hdw4s-names.js
 
 # The settings layer every ephemeral session starts from, and the Chrome policy
 # that is visible only inside one.

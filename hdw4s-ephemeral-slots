@@ -294,15 +294,15 @@ else
     SLOT_SPECS="${SLOT_SPECS}$(printf '%s\t%s\t%s\n' \
       "${HDW4S_EPHEMERAL_PREFIX}${i}" \
       "$(( HDW4S_EPHEMERAL_UID_BASE + i ))" \
-      "$(( i + 1 )) · Desktop")
+      'Desktop')
 "
     i=$(( i + 1 ))
   done
 fi
 
-# IFS is a literal tab and read is -r, because the label carries spaces and a
-# middle dot. The list is fed from a here-document rather than a pipe so that
-# the loop runs in THIS shell: "reload" is set inside it, and a subshell would
+# IFS is a literal tab and read is -r, because a label may carry spaces. The
+# list is fed from a here-document rather than a pipe so that the loop runs in
+# THIS shell: "reload" is set inside it, and a subshell would
 # discard it -- leaving a drop-in written that nothing ever reads.
 while IFS="$(printf '\t')" read -r name id label; do
   [ -n "${name}" ] || continue
@@ -412,9 +412,13 @@ while IFS="$(printf '\t')" read -r name id label; do
   # tree the occupant could write is a tree the occupant could un-gate. Per slot, as
   # root, before any socket can fire.
   #
-  # The name is the slot's number: it reaches the browser tab through the manifest,
-  # which is the only per-session string the packaged client will read, and it is what
-  # lets a person tell two of their own sessions apart.
+  # The name reaches the browser tab through the manifest, which is the only
+  # per-session string the packaged client will read. For a pool slot it is the
+  # plain word, NOT the slot's number: a slot is reused, and a number a visitor
+  # sees again after being told the desktop is gone reads as the same desktop
+  # (three novices of three, 2026-09-27). Telling one's own desktops apart is the
+  # browser's job -- hdw4s-names.js keeps a per-browser number and an optional
+  # name, replacing this word on the session page and in the directory.
   #
   # "--directory" is a claim about the DOOR, not about the slot: these slots are
   # reached through hdw4s-demux, which serves /sessions/, so the boot card may

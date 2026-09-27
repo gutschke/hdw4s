@@ -3448,8 +3448,10 @@ def respond(wf, status, body=b"", extra=()):
 # with a 12px radius and the same shadow. The pages used to be bare text on a
 # 100vh body with the browser's 8px margin, which is a scrollbar on every one of
 # them, and the directory's links were the browser's default blue on dark grey,
-# which a visitor read as broken. Static, one <style>, no script, no font and no
-# request after the first, because these pages must render on an unwell machine.
+# which a visitor read as broken. One <style>, no font and no request after the
+# first, because these pages must render on an unwell machine. The only script
+# is inlined (names_script(), and the starting page's wait), and every page is
+# whole without it.
 #
 # THREE BUTTON WEIGHTS, and which one a control gets is the design: .primary is
 # the ONE filled accent on a page and it is always the safe habit (New desktop);
@@ -3488,14 +3490,65 @@ PAGE_CSS = (
     "color:#a8a8a8;font-size:.9em}"
     ".create{margin-top:1.6rem}"
     ".create .note{display:block;margin-top:.5rem}"
+    # A NAME THAT CAN BE RENAMED LOOKS LIKE A NAME. The class is added by the
+    # script, only where browser storage works, so a page without either shows
+    # a heading and nothing that promises an edit it cannot keep.
+    ".renamable{cursor:text;border-radius:4px;outline-offset:2px}"
+    ".renamable:hover{text-decoration:underline dotted #8a8a8a}"
+    ".renamable input{font:inherit;color:#fff;background:#141414;"
+    "border:1px solid #6e6e6e;border-radius:4px;padding:.1rem .35rem;"
+    "width:min(16rem,100%)}"
+    # THE STARTING PAGE'S SIGN OF LIFE. A novice read the page as frozen. Three
+    # dots breathing in turn say "still going" and nothing else: no bar, because
+    # nothing here knows how far along the start is, and no spinner glyph, which
+    # a visitor reads by their own meaning. Plain CSS, every engine.
+    ".alive{display:flex;gap:.45rem;margin:1.1rem 0 .2rem}"
+    ".alive i{width:.5rem;height:.5rem;border-radius:50%;background:#772953;"
+    "animation:hdw4s-breathe 1.8s ease-in-out infinite}"
+    ".alive i:nth-child(2){animation-delay:.3s}"
+    ".alive i:nth-child(3){animation-delay:.6s}"
+    "@keyframes hdw4s-breathe{0%,100%{opacity:.25}50%{opacity:1}}"
+    "@media (prefers-reduced-motion:reduce){.alive i{animation-duration:4s}}"
 )
 
 
-def card(title, inner):
-    """A page: TITLE as its heading, INNER (markup) under it, on the card."""
-    return ("<!doctype html><meta charset=utf-8><title>%s</title>"
-            "<style>%s</style><body><div class=\"card\"><h1>%s</h1>%s</div>"
-            % (title, PAGE_CSS, title, inner)).encode()
+def card(title, inner, tail="", head=""):
+    """A page: TITLE as its heading, INNER (markup) under it, on the card.
+    TAIL goes after the card (a script, for the pages that have one); HEAD
+    goes before the body (the starting page's no-script refresh)."""
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s"
+            "<style>%s</style><body><div class=\"card\"><h1>%s</h1>%s</div>%s"
+            % (title, head, PAGE_CSS, title, inner, tail)).encode()
+
+
+def load_names_js():
+    """hdw4s-names.js, the one copy of how this browser names its desktops.
+
+    BESIDE THIS FILE for the reason hdw4s-duration is (see load_duration()),
+    and read once, at start. UNLIKE that one it has a fallback, and the
+    difference is the point: a missing grammar would be a wrong number, a
+    missing name script is the plain word "Desktop" on every row -- which is
+    exactly what a browser with scripts off or storage blocked sees anyway."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "hdw4s-names.js")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            js = f.read()
+    except OSError:
+        return ""
+    # An inlined script ends at the first "</script", wherever it is.
+    return "" if "</script" in js.lower() else js
+
+
+NAMES_JS = load_names_js()
+
+
+def names_script():
+    """The tail of every page that lists this browser's desktops: fill in the
+    names, and let the visitor change one. The page is complete without it."""
+    if not NAMES_JS:
+        return ""
+    return "<script>%s\nhdw4sNames.directory();</script>" % NAMES_JS
 
 
 def page(title, detail):
@@ -3527,19 +3580,17 @@ def starting_page():
     NOTHING HERE TOUCHES THE STREAM. No client is loaded and no WebSocket is
     opened, so no screen size reaches the desktop from this page: the rule that
     nothing may resize before the end of GNOME's startup is untouched."""
-    return ("<!doctype html><meta charset=utf-8>"
-            "<title>Your desktop is starting</title>"
-            "<noscript><meta http-equiv=\"refresh\" content=\"5\"></noscript>"
-            "<body style=\"font:16px/1.5 system-ui;background:#242424;color:#ddd;"
-            "margin:0;display:flex;align-items:center;justify-content:center;height:100vh\">"
-            "<div id=\"hdw4s-starting-page\" style=\"max-width:32rem;padding:2rem\">"
-            "<h1 style=\"font-size:1.3rem\">Your desktop is starting</h1>"
-            "<p style=\"color:#b9b9b9\">It is coming up now. This usually takes a "
-            "few seconds; on a busy machine it can take a minute.</p></div>"
-            "<script>(function(){function poll(){fetch(location.href,"
-            "{cache:'no-store',credentials:'same-origin'}).then(function(){"
-            "location.reload();},function(){setTimeout(poll,1000);});}poll();})();"
-            "</script>").encode()
+    return card(
+        "Your desktop is starting",
+        "<div id=\"hdw4s-starting-page\">"
+        "<p>It is coming up now. This usually takes a few seconds.</p>"
+        "<div class=\"alive\" aria-hidden=\"true\"><i></i><i></i><i></i></div>"
+        "</div>",
+        "<script>(function(){function poll(){fetch(location.href,"
+        "{cache:'no-store',credentials:'same-origin'}).then(function(){"
+        "location.reload();},function(){setTimeout(poll,1000);});}poll();})();"
+        "</script>",
+        "<noscript><meta http-equiv=\"refresh\" content=\"5\"></noscript>")
 
 
 def is_page_navigation(method, rest, headers):
@@ -4101,7 +4152,7 @@ def create_refused_page(rows, pool):
              "happening, tell whoever runs this machine: its pool of "
              "ephemeral desktops is full, and the refusal is recorded in its "
              "log with the time and the size of the pool.</p>")
-    return card("No desktop could be started", body)
+    return card("No desktop could be started", body, names_script())
 
 
 def console_page(rows, note=None):
@@ -4131,10 +4182,15 @@ def console_page(rows, note=None):
     is nothing to create" and the refusal page being designed elsewhere are the
     same page for the same reason.
 
-    IT MUST RENDER ON AN UNWELL MACHINE, so it is static HTML with no script, no
-    font, no image and no request after the first: a rescue that needs anything
-    to load is not a rescue. The numbers are three small reads of files the
-    kernel keeps in memory.
+    IT MUST RENDER ON AN UNWELL MACHINE, so it is static HTML with no font, no
+    image and no request after the first: a rescue that needs anything to load
+    is not a rescue. The numbers are three small reads of files the kernel
+    keeps in memory. ITS ONE SCRIPT IS INLINE AND OPTIONAL: names_script()
+    replaces each row's plain "Desktop" with the name this browser keeps for
+    it. The names live in the browser because the owner ruled they should
+    (per-browser ids, 2026-09-27), so the server has nothing to render them
+    from; with scripts off or storage blocked every row says "Desktop" and
+    the page still does its whole job.
 
     WHAT IS DELIBERATELY NOT TAKEN FROM THE MOCK: its "Resume" versus "Move
     here" distinction, which turns on whether you are connected somewhere else.
@@ -4164,7 +4220,7 @@ def console_page(rows, note=None):
                      "misbehaving.</p>")
     if note:
         body = "<p><b>%s</b></p>" % note + body
-    return card("Your desktops", body)
+    return card("Your desktops", body, names_script())
 
 
 def describe_span(seconds):
@@ -4225,6 +4281,12 @@ def row_html(r):
     So it is read from the page the slot actually serves. Absent or unreadable
     answers None and the row is headed with the bare word, because a name is
     a convenience and this page has to render on a machine that is unwell.
+
+    AND FOR A POOL SLOT THAT PAGE NOW SAYS ONLY "Desktop". The slot number was
+    the name until 2026-09-27, and a slot is reused, so a visitor was handed
+    "19" again after being told everything in 19 was gone. What tells a
+    visitor's rows apart is the per-browser name that names_script() fills in
+    from data-hdw4s-sid (hdw4s-names.js); this text is what shows without it.
     """
     facts = []
     facts.append("started %s ago" % describe_span(r["age"]))
@@ -4243,10 +4305,12 @@ def row_html(r):
             ends += ("<span>or it ends by itself after %s with nobody "
                      "connected.</span>" % describe_span(r["idle_window"]))
     return ("<div class=\"row\"><div class=\"top\"><div>"
-            "<div class=\"name\">%s</div><div class=\"facts\">%s</div></div>"
+            "<div class=\"name\" data-hdw4s-sid=\"%s\">%s</div>"
+            "<div class=\"facts\">%s</div></div>"
             "<a href=\"/s/%s/\" class=\"btn secondary\">Resume</a></div>"
             "<div class=\"ends\">%s</div></div>"
-            % (r["name"] or "Desktop", ", ".join(facts), r["sid"], ends))
+            % (r["sid"], r["name"] or "Desktop", ", ".join(facts), r["sid"],
+               ends))
 
 
 def rows_html(rows):
@@ -4327,7 +4391,7 @@ def ended_page(rows, gone):
     if running:
         body += "<h2>Still running in this browser</h2>" + rows_html(running)
     body += create_form()
-    return card("This desktop has ended", body)
+    return card("This desktop has ended", body, names_script())
 
 
 def owned_rows(own, identity):
