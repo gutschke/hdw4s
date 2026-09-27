@@ -555,8 +555,16 @@ fi
 if [ "${HDW4S_DEBUG_DESKTOP}" = 'on' ]; then
   export GJS_DEBUG_TOPICS='JS ERROR;JS LOG'
   export GJS_DEBUG_OUTPUT='stderr'
-  export G_MESSAGES_DEBUG='all'
   export SHELL_DEBUG='backtrace-warnings'
+  # G_MESSAGES_DEBUG=all IS DELIBERATELY NOT SET, having been measured.
+  # With it, one session wrote 14769 journal lines against 416 for a session
+  # without it -- thirty-five times the volume, written synchronously during the
+  # startup window a visitor is waiting through. The owner reported desktops
+  # feeling slower within the hour of it being switched on, which made his own
+  # reports evidence about the instrument rather than about the product. The
+  # observer was in the log. What it bought was dconf watch_fast chatter;
+  # what it cost was the measurement. GJS_DEBUG_TOPICS above is the line that
+  # actually carries ding's own errors, and it is quiet.
 
   # THE GEOMETRY CONVERSATION, captured while it happens.
   #
@@ -584,8 +592,24 @@ if [ "${HDW4S_DEBUG_DESKTOP}" = 'on' ]; then
         echo "# started $(date -Is), capture window 180s"
         echo "# an empty body below means NOTHING WAS SENT, not that nothing ran"
       } > "${debug_dir}/desktop-geometry.log"
+      # THREE MATCH RULES, AND THE SECOND ONE IS THE REPAIR. Filtering on the
+      # interface alone captured ding ASKING for the geometry and never the
+      # answer, because a D-Bus method RETURN carries no interface at all -- so
+      # the one message that says what ding was actually told was the one
+      # message excluded. Measured 2026-09-26: a captured failure showed the
+      # question at t+0 and a correction 33s later, and the reply in between,
+      # which decides whether the extension answered wrongly or ding mishandled
+      # a good answer, was absent. Two theories, opposite repairs, and no way to
+      # choose. Errors are captured for the same reason: a refused call is an
+      # answer too, and its absence reads identically to silence.
+      #
+      # It is noisier -- every method return on the bus, not only ding's. That
+      # is affordable because the window is bounded at 180s and this is off
+      # unless somebody is chasing a specific desktop.
       timeout 180 dbus-monitor --session \
-        "interface='org.gtk.Actions'" >> "${debug_dir}/desktop-geometry.log" 2>&1 &
+        "interface='org.gtk.Actions'" \
+        "type='method_return'" \
+        "type='error'" >> "${debug_dir}/desktop-geometry.log" 2>&1 &
       children+=($!)
     else
       echo "# dbus-monitor IS NOT INSTALLED -- no capture was taken." \

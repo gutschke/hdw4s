@@ -1,3 +1,18 @@
+hdw4s (2.4.4) unstable; urgency=medium
+
+  * The desktop instrumentation no longer slows the desktop it is measuring.
+    One setting in it wrote thirty-five times the usual log volume while a
+    desktop was starting, which is the moment somebody is waiting, so a machine
+    being watched came up slower than one that was not. It is gone; the part
+    that records the desktop's own errors stays.
+
+  * When it is on, it now also records the ANSWERS to the questions it was
+    already recording. A reply on that bus carries no interface, so the filter
+    that caught every question caught none of the replies -- and the reply is
+    the half that says what the desktop was told.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sat, 26 Sep 2026 21:40:00 -0700
+
 hdw4s (2.4.3) unstable; urgency=medium
 
   * A desktop you have finished with no longer sits in your list saying it is
