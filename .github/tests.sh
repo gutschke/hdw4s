@@ -1815,7 +1815,15 @@ echo '== the starting veil keeps every way out it claims to have =='
   # 3. The paused-stream question removed -- the same repair the stall backstop above
   #    already needed, and the same way of losing it.
   rm -f "${d}/redout.html"
-  sed "s|      if (document.visibilityState === 'hidden' \|\| streamPaused()) return;|      if (false) return;|" \
+  # THE ANCHOR MOVED ONCE, 2026-09-26, and this arm is why that was noticed. The
+  # guarded line gained a body -- it now re-arms the card's suppression window
+  # before returning, so that being unable to sample cannot itself guarantee the
+  # card. The sed above matched a literal that no longer existed, mutated
+  # nothing, and the unmutated page was accepted: the exact shape arm 5 below
+  # exists to catch, arriving in arm 3. When that line changes again, change this
+  # with it, and check the mutation still REMOVES the question rather than merely
+  # failing to match.
+  sed "s|      if (document.visibilityState === 'hidden' \|\| streamPaused()) { armCard(); return; }|      if (false) { armCard(); return; }|" \
     "${ROOT}/hdw4s-gate-index" > "${d}/redv3"
   redv "${d}/redv3" \
     && bad 'a veil that counts a stopped stream is refused' 'it was accepted' \

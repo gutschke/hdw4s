@@ -1,3 +1,22 @@
+hdw4s (2.4.3) unstable; urgency=medium
+
+  * A desktop you have finished with no longer sits in your list saying it is
+    being discarded. The work itself finished in seconds; the page went on
+    reporting it indefinitely, because the only thing that cleared the row was
+    a visit from the tab you had just closed.
+
+  * Reconnecting to a desktop the browser had stopped no longer flashes the
+    "your desktop is starting" card over a picture that is already there. The
+    card is meant to stay away when the desktop has already painted, and the
+    one moment it could not tell -- a stream the browser had stopped -- was
+    exactly the moment it was needed.
+
+  * An administrator can ask a desktop to say what its own startup did, with
+    HDW4S_DEBUG_DESKTOP=on. It is off by default and it is loud: it exists for
+    chasing a desktop that came up wrong, not for running a machine.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sat, 26 Sep 2026 21:05:00 -0700
+
 hdw4s (2.4.2) unstable; urgency=medium
 
   * Closing a tab and asking for a new desktop no longer costs you the old
