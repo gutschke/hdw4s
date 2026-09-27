@@ -378,6 +378,18 @@ belongs to the copy of the streaming server, of which there is one.
     file manager's own `local-only` setting does not protect a network home,
     because the kernel calls NFS native; see SHARED HOME DIRECTORIES.
 
+  * `HDW4S_STAGE_HOLD`:
+    Whether the streaming server waits for the desktop to be shown before it
+    starts. Defaults to `on`. GNOME 46's compositor can leave a starting
+    desktop black for good when input arrives in the fraction of a second
+    before its desktop is first shown, and a browser that connects early
+    sends exactly that; the wait closes the window, and costs the visitor
+    about two seconds they spend waiting for the desktop to paint anyway. It
+    gives up after 20 seconds and starts the stream regardless, and on a
+    desktop without GNOME's compositor it does not wait at all. Each session
+    logs how long it waited. It does not cover GNOME Shell being restarted
+    while a visitor is connected.
+
   * `HDW4S_HIDPI`:
     How a high-density client is handled: `scale` (the default) asks for the
     size of the browser window and lets the browser stretch the result, which

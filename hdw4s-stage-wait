@@ -1,0 +1,188 @@
+#!/usr/bin/python3 -I
+"""Tell the session when GNOME Shell's stage has been shown, so the streaming
+server can be started after it rather than before it.
+
+    hdw4s-stage-wait [grace-seconds]
+
+Prints, on stdout, one line at a time:
+
+    armed            its event selections are in place on the X server
+    stage <ms> id=<window> parent=<window> name=<title>
+                     the compositor's stage window was mapped, <ms> after
+                     armed; the ids say WHICH window released the wait
+    none <reason>    a window manager is running and it has no clutter stage,
+                     so there is nothing to wait for
+
+and exits. Anything else -- no output, an exception, the X server going away
+-- is for the caller to treat as "do not wait", which is why this prints
+nothing it is not sure of. hdw4s-run-session waits on it with its own timeout
+and kills it afterwards; it has no deadline of its own beyond a backstop.
+
+WHY THIS EXISTS. mutter 46 can leave a starting desktop permanently black.
+The stage's first frame is discarded while the stage is not yet shown, that
+discard never clears the flag that says an update is already scheduled, and
+if an input event is queued before the stage is shown, clutter refuses every
+later update. The desktop is then black for good, with every process healthy
+and idle. The streaming server injects the visitor's pointer as soon as a
+browser connects, and a browser typically connects inside that window, which
+is why this was hit several times an evening. Fixed upstream in mutter 47.3
+(GNOME issue 3804, commit 24083e1e) and never backported to 46.
+
+WHAT MARKS THE END OF THE DANGER. The stage is an X window created by the
+compositor's backend and reparented into the composite overlay window when
+compositing starts. mutter maps the stage ACTOR, which is the moment that
+decides the outcome, and only then maps that X window. So an X client that
+sees the stage window mapped knows the decision has been made. It says
+NOTHING about whether the desktop is healthy: a stuck stage is mapped too.
+Do not turn this into a health check.
+
+HOW THE STAGE IS RECOGNISED, without its name. It is the only window whose
+parent is neither the root nor a child of the root: the overlay window is
+never listed among the root's children, while every decoration frame is. The
+title is not used because it is the process name taken from argv[0], and any
+client, including a framed one, can carry any title. The overlay window
+itself is never requested: asking the server for it maps it.
+
+WHEN THERE IS NO STAGE. A desktop whose window manager is not a clutter
+compositor (xfwm4, metacity, a picom setup) never reparents anything into the
+overlay. Once a window manager has announced itself on the root
+(_NET_SUPPORTING_WM_CHECK) and no reparent into the overlay has followed
+within the grace period, this says so and exits, so such a desktop does not
+wait out the caller's timeout on every start. This is decided by what runs,
+not by the session's name or desktop label. One known false match, harmless:
+an XEmbed tray icon also moves from the root into a parent that is not a root
+child, but under GNOME nothing embeds before the stage is shown, and anywhere
+else the answer it produces -- do not wait -- is the right one anyway.
+
+HDW4S_STAGE_WAIT_DEBUG=1 adds "debug wm <ms>" and "debug reparent <ms>" lines
+on stderr: the gap between the window manager announcing itself and the stage
+moving into the overlay is what the grace period has to exceed.
+
+REMOVE THIS when Ubuntu 24.04 leaves hdw4s's supported set, or when an Ubuntu
+update carries mutter commit 24083e1e and the reproducer
+(private/reproduce-motion-deadlock.sh) no longer wedges with
+HDW4S_STAGE_HOLD=off.
+
+python3 -I, so a PYTHONPATH or a user site-packages directory cannot replace
+the X library this reads with. It creates no window, takes no grab, sends no
+input, and changes no property.
+"""
+
+import os
+import select
+import sys
+import time
+
+GRACE = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
+BACKSTOP = 600.0   # never outlive a caller that forgot us
+
+
+def say(line):
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    from Xlib import X, display, error
+
+    dpy = display.Display()
+    root = dpy.screen().root
+    wm_check = dpy.intern_atom("_NET_SUPPORTING_WM_CHECK")
+
+    def root_children():
+        return {w.id for w in root.query_tree().children}
+
+    def watch(win):
+        try:
+            win.change_attributes(event_mask=X.StructureNotifyMask)
+        except error.XError:
+            pass
+
+    root.change_attributes(event_mask=X.SubstructureNotifyMask | X.PropertyChangeMask)
+    for w in root.query_tree().children:
+        watch(w)
+    dpy.sync()
+    armed = time.monotonic()
+    say("armed")
+
+    debug = os.environ.get("HDW4S_STAGE_WAIT_DEBUG") == "1"
+
+    def note(what):
+        if debug:
+            sys.stderr.write("debug %s %d\n" % (what, (time.monotonic() - armed) * 1000))
+            sys.stderr.flush()
+
+    def released(win):
+        """The verdict line, naming the window that ended the wait."""
+        try:
+            parent = win.query_tree().parent.id
+            prop = win.get_property(dpy.intern_atom("_NET_WM_NAME"),
+                                    X.AnyPropertyType, 0, 16)
+            name = prop.value.decode("utf-8", "replace") if prop else ""
+        except error.XError:
+            parent, name = 0, ""
+        return "stage %d id=%#x parent=%#x name=%s" % (
+            (time.monotonic() - armed) * 1000, win.id, parent,
+            name.replace(" ", "_") or "-")
+
+    def done(line):
+        say(line)
+        dpy.close()
+        sys.exit(0)
+
+    def is_stage(win):
+        """Mapped already, and parented where only the stage lives."""
+        try:
+            parent = win.query_tree().parent.id
+            mapped = win.get_attributes().map_state != X.IsUnmapped
+        except error.XError:
+            return False, False
+        in_overlay = parent != root.id and parent not in root_children()
+        return in_overlay, mapped
+
+    stage = None
+    wm_seen = root.get_full_property(wm_check, X.AnyPropertyType, sizehint=1) is not None
+    wm_since = armed if wm_seen else None
+    if wm_seen:
+        note("wm")
+    fd = dpy.fileno()
+    while time.monotonic() - armed < BACKSTOP:
+        if wm_since is not None and stage is None and time.monotonic() - wm_since > GRACE:
+            done("none window manager without a compositor stage")
+        while dpy.pending_events():
+            ev = dpy.next_event()
+            if ev.type == X.CreateNotify:
+                watch(ev.window)
+            elif ev.type == X.ReparentNotify:
+                # The stage moving into the overlay. Selecting on it again is
+                # harmless and closes the race where it was created before
+                # we armed; checking map_state closes the one where it was
+                # already mapped.
+                watch(ev.window)
+                in_overlay, mapped = is_stage(ev.window)
+                if in_overlay:
+                    stage = ev.window.id
+                    note("reparent")
+                    if mapped:
+                        done(released(ev.window))
+            elif ev.type == X.MapNotify:
+                in_overlay, _ = is_stage(ev.window)
+                if in_overlay:
+                    done(released(ev.window))
+            elif ev.type == X.PropertyNotify and ev.atom == wm_check:
+                if wm_since is None:
+                    wm_since = time.monotonic()
+                    note("wm")
+        dpy.flush()
+        select.select([fd], [], [], 0.2)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException as e:   # noqa: BLE001 -- silence is the fail-open signal
+        sys.stderr.write("hdw4s-stage-wait: %s: %s\n" % (type(e).__name__, e))
+        sys.exit(1)

@@ -29,6 +29,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_DEBUG_DESKTOP:=off}"
 : "${HDW4S_HIDPI:=scale}"
 : "${HDW4S_ENCODER:=h264enc}"
+: "${HDW4S_STAGE_HOLD:=on}"
 
 # The streaming server now defaults this to true and implements resizing itself,
 # so this is no longer a workaround for anything -- it is kept as an explicit
@@ -43,8 +44,13 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 # parsing, so drop it once more before anything user-facing is started.
 unset LC_ALL
 
+# "stopping" is how the code after a long wait learns that the unit is being
+# stopped: the trap kills the children but does not exit, so without it a wait
+# that is interrupted would carry on and start the stream on a dying unit.
 children=()
-trap 'trap "" INT TERM QUIT HUP EXIT
+stopping=''
+trap 'stopping=1
+      trap "" INT TERM QUIT HUP EXIT
       [ "${#children[@]}" -eq 0 ] || kill "${children[@]}" 2>/dev/null || :' \
      INT TERM QUIT HUP EXIT
 
@@ -620,8 +626,63 @@ if [ "${HDW4S_DEBUG_DESKTOP}" = 'on' ]; then
   fi
 fi
 
-# shellcheck disable=SC2086
-${webcam_preload} ${HDW4S_SESSION} &
+# THE STAGE HOLD, part one: arm the watcher BEFORE the desktop starts.
+#
+# mutter 46 can leave a starting desktop black for good. Its stage's first
+# frame is discarded while the stage is not yet shown, the discard never
+# clears the flag saying an update is already scheduled, and one input event
+# queued before the stage is shown then makes clutter refuse every later
+# update. The stream injects the visitor's pointer the moment a browser
+# connects, and browsers connect inside that window, so the stream is started
+# only once the stage window has been shown (part two, below). Upstream fixed
+# it in mutter 47.3 (GNOME issue 3804) and never backported it to 46.
+#
+# The watcher has to be listening before the stage window is CREATED, not
+# merely before it is shown: that is when it can first select on it, and a
+# walk from the root cannot find it later. Hence the order: arm, wait for
+# "armed", then start the desktop.
+#
+# EVERY PATH FAILS OPEN, and the reads are the reason for the shape. This
+# script runs under -e and nounset: a bare "read -t" that times out returns
+# 142 and would end the session, and a named session would then restart in a
+# loop. So each read sits in an "if", and the verdict is judged by its text.
+# The watcher is a process substitution, not a coproc: bash unsets a finished
+# coproc's variables, which nounset turns into the same crash.
+#
+# REMOVE THIS when Ubuntu 24.04 leaves the supported set, or when an Ubuntu
+# update carries mutter commit 24083e1e and the reproducer no longer wedges
+# with HDW4S_STAGE_HOLD=off. It does NOT cover gnome-shell restarting while the
+# stream is already live; a new stage then starts with input flowing.
+stage_fd=''
+stage_pid=''
+stage_armed=''
+if [ "${HDW4S_STAGE_HOLD}" = 'on' ]; then
+  # Its stderr is left on the journal: when it fails open, its one line
+  # there is the only record of why (a missing module looks like a slow start).
+  exec {stage_fd}< <(exec /usr/lib/hdw4s/hdw4s-stage-wait 3)
+  stage_pid="$!"
+  children+=("${stage_pid}")
+  stage_line=''
+  if read -r -t 5 -u "${stage_fd}" stage_line && [ "${stage_line}" = 'armed' ]; then
+    stage_armed=1
+  fi
+  # A stop during that read would otherwise go on to start the desktop into a
+  # dying unit; the trap only killed what had been started so far.
+  if [ -n "${stopping}" ]; then
+    echo 'hdw4s: stopped before the desktop started' >&2
+    exit 0
+  fi
+fi
+
+# The watcher's pipe is closed in the desktop, so nothing started under it
+# inherits the descriptor or can read the verdict meant for this script.
+if [ -n "${stage_fd}" ]; then
+  # shellcheck disable=SC2086
+  ${webcam_preload} ${HDW4S_SESSION} {stage_fd}<&- &
+else
+  # shellcheck disable=SC2086
+  ${webcam_preload} ${HDW4S_SESSION} &
+fi
 children+=($!)
 session_pid="$!"
 
@@ -1094,6 +1155,50 @@ head -c 1 < "${webroot}/index.html" > /dev/null 2>&1 || {
   exit 1
 }
 stream+=(--web-root="${webroot}")
+
+# THE STAGE HOLD, part two: do not start the stream until the stage is shown.
+#
+# What the watcher reports is the stage WINDOW being mapped, which mutter does
+# only after the stage itself is shown -- the moment that decides whether the
+# desktop can wedge. It says nothing about whether the desktop is healthy; a
+# wedged stage is shown too. Do not turn this into a health check.
+#
+# The wait is logged on every start, not only when it runs out: that line is
+# the field's measurement of how long the hold costs and how often it times
+# out. 20 seconds is seven times the slowest of thirty measured maps (2.5-2.8
+# s on an idle machine). It is spent from the unit's start timeout, and
+# running out only means the old behaviour: the stream starts anyway.
+if [ -n "${stage_fd}" ]; then
+  if [ -n "${stage_armed}" ]; then
+    stage_line=''
+    if read -r -t 20 -u "${stage_fd}" stage_line; then :; fi
+    case "${stage_line}" in
+      stage\ *) stage_line="${stage_line#stage }"
+                echo "hdw4s: held the stream ${stage_line%% *} ms until the desktop was shown (${stage_line#* })" >&2 ;;
+      none\ *)  echo "hdw4s: nothing to hold the stream for: ${stage_line#none }" >&2 ;;
+      *)        echo 'hdw4s: the desktop was not shown within 20s; starting the stream anyway' >&2 ;;
+    esac
+  else
+    echo 'hdw4s: the stage watcher did not start; starting the stream without waiting' >&2
+  fi
+  kill "${stage_pid}" 2>/dev/null || :
+  exec {stage_fd}<&-
+elif [ "${HDW4S_STAGE_HOLD}" != 'on' ]; then
+  echo 'hdw4s: stage hold disabled (HDW4S_STAGE_HOLD=off)' >&2
+fi
+# A stop that arrived during the wait already killed the children; starting
+# the stream now would put it on a dying unit, holding the port with nothing
+# left to stop it.
+if [ -n "${stopping}" ]; then
+  echo 'hdw4s: stopped while waiting for the desktop; not starting the stream' >&2
+  exit 0
+fi
+if ! kill -0 "${session_pid}" 2>/dev/null; then
+  echo 'hdw4s: the GNOME session exited' >&2
+  wait "${session_pid}" 2>/dev/null || :
+  exit 1
+fi
+
 "${stream[@]}" \
   --addr="${HDW4S_ADDR}" \
   --port="${HDW4S_PORT}" \

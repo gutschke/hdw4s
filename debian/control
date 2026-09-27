@@ -19,12 +19,18 @@ Rules-Requires-Root: no
 # What left the list when Selkies stopped being a wheel in a virtualenv hdw4s
 # built: python3-venv (no virtualenv), python3-gi, python3-gst-1.0,
 # gir1.2-gst* and gstreamer1.0-* (2.0 carries no GStreamer at all -- it encodes
-# through its own pixelflux and pcmflux extension modules), python3-xlib and
-# python3-evdev (vendored inside the package), python3-setuptools (GPUtil's
-# distutils import went with it) and xsel (the clipboard is in-process now).
+# through its own pixelflux and pcmflux extension modules), python3-evdev
+# (vendored inside the package), python3-setuptools (GPUtil's distutils import
+# went with it) and xsel (the clipboard is in-process now).
 # xdotool and ca-certificates are new: the first is the fallback Selkies 2.0
 # forks for any keysym XTEST cannot inject, and the second is what lets curl
 # reach GitHub at all, which the package has always needed and never said.
+#
+# python3-xlib left with the other vendored modules and came back as hdw4s's
+# OWN dependency: hdw4s-stage-wait watches for the desktop to be shown before
+# the stream starts. Selkies' vendored copy is not used for that, because it
+# is an upstream internal that moves when Selkies does. It is in universe, as
+# xdotool already is, so this adds no archive component.
 Package: hdw4s
 Architecture: all
 Depends: ${misc:Depends},
@@ -40,6 +46,7 @@ Depends: ${misc:Depends},
          systemd,
          libglib2.0-bin,
          python3,
+         python3-xlib,
          xauth,
          xdotool,
          x11-xserver-utils,

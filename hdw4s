@@ -1523,6 +1523,7 @@ SESSION_SETTINGS=(
   'HDW4S_IDLE_DAYS:7'
   'HDW4S_PROFILE_DIR:/var/lib/hdw4s'
   'HDW4S_DEBUG_DESKTOP:off'
+  'HDW4S_STAGE_HOLD:on'
 )
 
 declare -A OWNED_BY=(
@@ -1563,6 +1564,7 @@ declare -A SETTABLE=(
   [HDW4S_IDLE_DAYS]='duration'
   [HDW4S_MEDIA_PORTS]='proxied|direct'
   [HDW4S_DEBUG_DESKTOP]='off|on'
+  [HDW4S_STAGE_HOLD]='on|off'
   [HDW4S_ENCODER]='any'
   [SELKIES_VERSION]='any'
 )
