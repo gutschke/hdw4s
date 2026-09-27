@@ -1174,8 +1174,12 @@ if [ -n "${stage_fd}" ]; then
     stage_rc=0
     if read -r -t 20 -u "${stage_fd}" stage_line; then :; else stage_rc="$?"; fi
     # read -t returns more than 128 when it times out, and 1 at end of file:
-    # a watcher that died is a different fact from a desktop that is slow.
+    # a watcher that died is a different fact from a desktop that is slow. A
+    # stop kills the watcher too, so it is checked first: otherwise the log
+    # would say the stream is starting, one line before saying it is not.
+    [ -n "${stopping}" ] && stage_line='stopping'
     case "${stage_line}" in
+      stopping) ;;
       stage\ *) stage_line="${stage_line#stage }"
                 echo "hdw4s: held the stream ${stage_line%% *} ms until the desktop was shown (${stage_line#* })" >&2 ;;
       none\ *)  echo "hdw4s: nothing to hold the stream for: ${stage_line#none }" >&2 ;;
