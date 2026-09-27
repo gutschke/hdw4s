@@ -179,6 +179,16 @@ class Slot(threading.Thread):
         # router's own account of itself -- a component is not evidence about
         # its own behaviour.
         self.seen = False
+        # HOW LONG A START TAKES, and it is a STAND-IN. In the field every
+        # request that reaches a slot whose desktop is starting waits in the
+        # relay's accept queue until hdw4s-proxy@ has started, which is after
+        # the session unit, which is after the startup hold: measured on a
+        # test box, 4.4-4.8 s from navigation to first byte. Here it is a
+        # sleep: a start begins with the first request that finds no session,
+        # and every request until ready_at waits for it, as the queue does.
+        # Zero, the default, is every other test in this file.
+        self.delay = 0.0
+        self.ready_at = 0.0
 
     def publish(self):
         """Mint this session's incarnation token, where hdw4s-webroot puts it."""
@@ -411,6 +421,7 @@ class Slot(threading.Thread):
                 # silence producing no desktop at all. So a new token is minted
                 # exactly when a request arrives at a slot that has none.
                 if self.incarnation is None:
+                    self.ready_at = time.time() + self.delay
                     self.publish()
                     # A SESSION THAT HAS STARTED IS LISTENING. Opened here and
                     # not at bind time, for the same reason the runtime
@@ -423,6 +434,9 @@ class Slot(threading.Thread):
                     h = f.readline()
                     if h in (b"\r\n", b"\n", b""):
                         break
+                wait = self.ready_at - time.time()
+                if wait > 0:
+                    time.sleep(wait)
                 body = ("SLOT=%s PATH=%s" % (self.name,
                         line.split()[1].decode())).encode()
                 forged = (b"Set-Cookie: " + self.forge_cookie.encode() + b"\r\n"
@@ -460,7 +474,7 @@ class Client:
                 pass
             self.sock = None
 
-    def get(self, path, keep=False, auth=True, cookie_override=-1):
+    def get(self, path, keep=False, auth=True, cookie_override=-1, headers=()):
         """Return (status, headers dict, body). keep=True reuses the socket."""
         if self.sock is None:
             self.connect()
@@ -471,6 +485,7 @@ class Client:
         if cookie:
             req.append("Cookie: hdw4s_id=" + cookie)
         req.append("Connection: keep-alive" if keep else "Connection: keep-alive")
+        req.extend(headers)
         self.sock.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
 
         status = int(self.rf.readline().split()[1])
@@ -487,7 +502,7 @@ class Client:
             self.close()
         return status, headers, body
 
-    def post(self, path, auth=True):
+    def post(self, path, auth=True, headers=()):
         """A POST with no body. Separate from get() rather than a flag on it,
         because the console's whole safety rests on the two being different
         requests: ending a desktop must not be reachable by opening a link."""
@@ -499,6 +514,7 @@ class Client:
         if self.cookie:
             req.append("Cookie: hdw4s_id=" + self.cookie)
         req.append("Connection: keep-alive")
+        req.extend(headers)
         self.sock.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
         status = int(self.rf.readline().split()[1])
         headers = {}
@@ -1404,6 +1420,149 @@ def test_the_ended_page_and_restored_tabs_mint_NOTHING(rig):
         "the press did not register as one mint (%d -> %d): this counter "
         "cannot see a mint, so its zero above means nothing"
         % (minted_after, mint_lines(rig)))
+
+
+# A browser's top-level navigation, as it reaches the router. Accept is what
+# every browser sends for one; Sec-Fetch-Dest is what current Chrome, Firefox
+# and Safari add to it. A fetch() from a page sends neither.
+NAVIGATE = ("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "*/*;q=0.8", "Sec-Fetch-Dest: document", "Sec-Fetch-Mode: navigate")
+FETCH = ("Accept: */*", "Sec-Fetch-Dest: empty", "Sec-Fetch-Mode: same-origin")
+
+# THE OWNER'S NUMBER: the browser's own spinner is fine for about two seconds,
+# and after that something of ours must be on the screen unless the desktop is.
+OURS_WITHIN = 2.0
+# STAND-INS, both of them, for how long a desktop takes to start. The field's
+# is 4.4-4.8 s to first byte (a test box, 5 of 5) and up to ~9 s seen; the
+# slow arm injects more than two seconds and the fast arm less than one.
+SLOW_START = 5.0
+FAST_START = 0.3
+
+
+def set_start(rig, seconds):
+    for s in rig.slots:
+        s.delay = seconds
+
+
+def intent_fresh_arrival(rig):
+    """Entry point 1: a browser with nothing, at the front door."""
+    c = rig.client()
+    t0 = time.time()
+    st, h, _ = c.get("/", headers=NAVIGATE)
+    assert st == 302, "the front door did not redirect: %d" % st
+    c.learn_cookie(h)
+    return c, t0, h["location"][0]
+
+
+def intent_directory_new_desktop(rig):
+    """Entry point 2: "New desktop" in the directory, pressed as a browser
+    presses it -- whatever the page offers under that label."""
+    c = rig.client()
+    st, h, body = c.get("/sessions/", headers=NAVIGATE)
+    assert st == 200, "the directory did not serve: %d" % st
+    c.learn_cookie(h)
+    press = [(m, t) for m, t, label in pressables(body) if "New desktop" in label]
+    assert press == [("POST", "/sessions/new")], \
+        "the directory's New desktop is %r" % (press,)
+    t0 = time.time()
+    st, h, _ = c.post("/sessions/new", headers=NAVIGATE)
+    assert st == 303, "New desktop did not redirect: %d" % st
+    return c, t0, h["location"][0]
+
+
+def intent_ended_page_button(rig):
+    """Entry point 3: the ended page's button, after a desktop that had
+    started has been logged out of. Set up with a fast start, so that only the
+    press is timed."""
+    c = rig.client()
+    keep = [s.delay for s in rig.slots]
+    set_start(rig, 0.0)
+    sid, name = arrive_on_slot(rig, c)
+    slot_named(rig, name).logout(leave_rundir=False)
+    st, h, body = c.get("/s/%s/" % sid, headers=NAVIGATE)
+    assert st == 410, "the ended desktop's tab was not gated: %d" % st
+    c.learn_cookie(h)
+    for s, d in zip(rig.slots, keep):
+        s.delay = d
+    buttons = pressables(body)
+    assert len(buttons) == 1, "the ended page offers %r" % (buttons,)
+    method, target, _ = buttons[0]
+    t0 = time.time()
+    if method == "POST":
+        st, h, _ = c.post(target, headers=NAVIGATE)
+    else:
+        st, h, _ = c.get(target, headers=NAVIGATE)
+    assert st in (302, 303), "the ended page's button went nowhere: %d" % st
+    return c, t0, h["location"][0]
+
+
+ENTRY_POINTS = (("a fresh GET /", intent_fresh_arrival),
+                ("New desktop in the directory", intent_directory_new_desktop),
+                ("the ended page's button", intent_ended_page_button))
+
+
+def test_a_SLOW_start_shows_something_of_ours_within_two_seconds(rig):
+    """BUG 2. Since the startup hold, the session page is not served until the
+    desktop has started, so a slow start was spent on the browser's loading
+    tab with nothing of ours. At all three entry points, a start slower than
+    about two seconds (INJECTED LATENCY, A STAND-IN for a real slow start) must
+    put a page of ours on the screen within two seconds of the request that
+    expressed the intent -- and that page must hand over to the desktop's own
+    page once it answers, or it is a dead end dressed as feedback.
+
+    TIMED FROM THE INTENT, not from the session address: the redirect is part
+    of what the visitor waits through. The shape of our page is barely asserted
+    here on purpose; what it looks like is the real-browser run's question."""
+    set_start(rig, SLOW_START)
+    # EVERY ENTRY POINT IS TIMED before any verdict, so a red names all of
+    # the ones that are dark rather than only the first.
+    dark = []
+    for what, intent in ENTRY_POINTS:
+        c, t0, loc = intent(rig)
+        assert loc.startswith("/s/"), "%s went to %s" % (what, loc)
+        st, h, body = c.get(loc, headers=NAVIGATE)
+        took = time.time() - t0
+        if took > OURS_WITHIN:
+            dark.append("%s: %.1f s" % (what, took))
+            continue
+        assert b"SLOT=" not in body, \
+            "%s: the desktop's own page came back early, so the stand-in " \
+            "did not delay anything" % what
+        assert st == 200 and h.get("content-type", [""])[0].startswith(
+            "text/html") and (b"<h1" in body or b"<h2" in body), \
+            "%s: %d within %.1f s, but not a page with anything on it: %r" \
+            % (what, st, took, body[:200])
+        # THE HAND-OVER. What our page asks for (a fetch, not a navigation)
+        # is held until the desktop answers and then gets the desktop's page;
+        # after that a navigation reaches the desktop at once.
+        st, _, body = c.get(loc, headers=FETCH)
+        assert st == 200 and b"SLOT=" in body, \
+            "%s: our page's wait did not end at the desktop: %d %r" \
+            % (what, st, body[:120])
+        t1 = time.time()
+        st, _, body = c.get(loc, headers=NAVIGATE)
+        assert st == 200 and b"SLOT=" in body and time.time() - t1 < 1.0, \
+            "%s: once the desktop answered, the page was not the desktop's" \
+            % what
+    assert not dark, (
+        "NOTHING OF OURS FOR MORE THAN %.0f s after the intent, with a start "
+        "of %.0f s (injected): %s -- the visitor has only the browser's "
+        "loading tab" % (OURS_WITHIN, SLOW_START, "; ".join(dark)))
+
+
+def test_a_FAST_start_shows_nothing_of_ours(rig):
+    """The other half, without which a router that ALWAYS answered with a page
+    of its own would pass the test above: when the desktop's page is there
+    sooner (INJECTED, A STAND-IN for a fast start), the visitor gets exactly
+    that page, at all three entry points, and nothing of ours in front of it."""
+    set_start(rig, FAST_START)
+    for what, intent in ENTRY_POINTS:
+        c, t0, loc = intent(rig)
+        st, _, body = c.get(loc, headers=NAVIGATE)
+        assert st == 200 and b"SLOT=" in body, (
+            "%s: a start of %.1f s (injected) was answered with a page of "
+            "ours instead of the desktop's: %d %r"
+            % (what, FAST_START, st, body[:120]))
 
 
 def fresh_markers(headers):
@@ -3028,6 +3187,68 @@ def red_create_on_a_GET():
         os.unlink(path)
 
 
+LOADING_TAB_ONLY = """
+
+# Appended by the red arm: bug 2 as it was. A page navigation waits for the
+# desktop however long the start takes, so a slow start is spent on the
+# browser's loading tab with nothing of ours.
+STARTING_PAGE_AFTER = 60.0
+"""
+
+OURS_AT_ONCE = """
+
+# Appended by the red arm: our page in front of EVERY start, however fast --
+# the router that would pass the slow arm by never letting the desktop's page
+# through first.
+STARTING_PAGE_AFTER = 0.0
+"""
+
+THE_WAIT_IS_A_NAVIGATION = """
+
+# Appended by the red arm: a router that cannot tell our page's wait from a
+# navigation, so the wait is answered with the page that is waiting.
+def is_page_navigation(method, rest, headers):
+    return method == b"GET" and rest == b"/"
+"""
+
+
+def _red_bug2(extra, suffix, test, oracle):
+    path = scratch_demux(suffix, extra)
+    rig = Rig(nslots=4, gate=None, demux=path)
+    try:
+        test(rig)
+    except AssertionError as e:
+        if oracle not in str(e):
+            raise RuntimeError("the red arm failed, but not on %r: %s"
+                               % (oracle, e))
+        raise
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
+def red_a_slow_start_is_the_loading_tab_again():
+    """BUG 2 put back. Must fail on the dark seconds, at the entry points."""
+    _red_bug2(LOADING_TAB_ONLY, "-loading-tab",
+              test_a_SLOW_start_shows_something_of_ours_within_two_seconds,
+              "NOTHING OF OURS")
+
+
+def red_our_page_in_front_of_a_fast_desktop():
+    """The over-eager repair. Must fail on the FAST arm."""
+    _red_bug2(OURS_AT_ONCE, "-ours-at-once",
+              test_a_FAST_start_shows_nothing_of_ours,
+              "instead of the desktop's")
+
+
+def red_our_page_waits_for_itself():
+    """The loop. Our page's fetch answered with our page: it must fail on the
+    hand-over, not on the timing."""
+    _red_bug2(THE_WAIT_IS_A_NAVIGATION, "-wait-loops",
+              test_a_SLOW_start_shows_something_of_ours_within_two_seconds,
+              "our page's wait did not end at the desktop")
+
+
 ENDED_PAGE_LINKS_TO_THE_FRONT_DOOR = """
 
 # Appended by the red arm: the ended page's button as it was until bug 1 --
@@ -3574,6 +3795,11 @@ def main():
         (test_a_desktop_just_MINTED_is_marked_and_a_resumed_one_is_not,
          dict(gate=None)),
         (test_a_second_desktop_is_a_second_desktop, dict(gate=None)),
+        # BUG 2, on the SHIPPED arm, with a slot per entry point and one spare
+        # for the ended page's second desktop.
+        (test_a_SLOW_start_shows_something_of_ours_within_two_seconds,
+         dict(nslots=4, gate=None)),
+        (test_a_FAST_start_shows_nothing_of_ours, dict(nslots=4, gate=None)),
         (test_each_row_names_its_own_desktop, dict(gate=None)),
         # Two slots, not three, so the pool can be filled by ONE visitor
         # without the run taking three creates to get there.
@@ -3654,6 +3880,9 @@ def main():
                red_a_console_address_that_stops_being_claimed_mints,
                red_create_on_a_GET,
                red_the_ended_pages_button_resumes,
+               red_a_slow_start_is_the_loading_tab_again,
+               red_our_page_in_front_of_a_fast_desktop,
+               red_our_page_waits_for_itself,
                red_every_redirect_marked_as_a_fresh_mint,
                red_startup_guard_notices_a_console_address_that_moved):
         expect_red(fn.__name__, fn)

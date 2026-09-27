@@ -79,6 +79,7 @@ made itself true. os.path.isdir, and nothing else, for that reason and no other.
 
 import base64
 import errno
+import select
 import re
 import hmac
 import http.cookies
@@ -169,6 +170,24 @@ GATE_DEFAULT = os.environ.get("HDW4S_GATE_MODE", "takeover")
 GATE_ARMS = ("mint", "takeover", "off")
 
 IDLE_TIMEOUT = 120.0
+
+# HOW LONG A VISITOR LOOKS AT THE BROWSER'S LOADING TAB BEFORE WE SAY ANYTHING.
+# The session page is not served until the desktop has started (the startup
+# hold, and the relay's socket activation behind it), so a slow start used to
+# be spent on the browser's own spinner with nothing of ours: measured on a
+# test box, 4.4-4.8 s from navigation to first byte, and up to ~9 s seen. The
+# owner's ruling: the spinner is fine for about two seconds; after that,
+# something of ours, unless the desktop is already there. So a page navigation
+# the desktop has not answered within this many seconds is answered with
+# starting_page() instead. 1.5 and not 2, because the visitor's clock started
+# at the request that expressed the intent -- the front door, or a POST -- and
+# the redirect before this request and the paint after it both come out of the
+# same two seconds. Keyed only on "the desktop's page has not come", never on
+# why; the why goes to the log.
+STARTING_PAGE_AFTER = 1.5
+# What forward_request() returns when it did that. Truthy, because the
+# downstream connection can carry another request.
+STARTING = "starting page"
 
 # How long an identity cookie may go unrefreshed before the next response we
 # write carries a fresh one. Not a lifetime -- the lifetime is derived below.
@@ -3460,6 +3479,66 @@ def page(title, detail):
             "<p style=\"color:#b9b9b9\">%s</p></div>" % (title, title, detail)).encode()
 
 
+def starting_page():
+    """What a page navigation gets when the desktop has not answered it within
+    STARTING_PAGE_AFTER: the session page's own "starting" words, and a wait
+    for the desktop's page that ends in a reload of this same address.
+
+    NOTHING ON IT CAN BE PRESSED, and that is the property that keeps this out
+    of the arrival rule. It reloads the address it was served at, which is the
+    request that was already being made; it mints nothing, resumes nothing and
+    chooses nothing. Whatever the session page would have decided (the fresh
+    marker, the Connect card) it still decides, when it arrives.
+
+    THE WAIT IS A fetch() OF THE SAME ADDRESS, and the router tells it from the
+    navigation by is_page_navigation(): a fetch is held until the desktop
+    answers, exactly as the navigation used to be, so there is no second clock
+    here to disagree with the ones behind it (hdw4s-wait's, the relay unit's).
+    ANY answer ends it -- the desktop's page, or the refusal page when the start
+    has failed -- and the reload then shows that answer. A request that dies
+    without one (the router's upstream timeout) is simply asked again.
+
+    Without JavaScript the <noscript> refresh does the same job, cruder.
+
+    NOTHING HERE TOUCHES THE STREAM. No client is loaded and no WebSocket is
+    opened, so no screen size reaches the desktop from this page: the rule that
+    nothing may resize before the end of GNOME's startup is untouched."""
+    return ("<!doctype html><meta charset=utf-8>"
+            "<title>Your desktop is starting</title>"
+            "<noscript><meta http-equiv=\"refresh\" content=\"5\"></noscript>"
+            "<body style=\"font:16px/1.5 system-ui;background:#242424;color:#ddd;"
+            "margin:0;display:flex;align-items:center;justify-content:center;height:100vh\">"
+            "<div id=\"hdw4s-starting-page\" style=\"max-width:32rem;padding:2rem\">"
+            "<h1 style=\"font-size:1.3rem\">Your desktop is starting</h1>"
+            "<p style=\"color:#b9b9b9\">It is coming up now. This usually takes a "
+            "few seconds; on a busy machine it can take a minute.</p></div>"
+            "<script>(function(){function poll(){fetch(location.href,"
+            "{cache:'no-store',credentials:'same-origin'}).then(function(){"
+            "location.reload();},function(){setTimeout(poll,1000);});}poll();})();"
+            "</script>").encode()
+
+
+def is_page_navigation(method, rest, headers):
+    """Is this a browser loading the session PAGE as a document?
+
+    Only such a request may be answered with starting_page(). Everything else
+    to a session -- the client's assets, its WebSocket, and above all our own
+    page's fetch() of this address -- must reach the desktop, or the wait on
+    that page would be answered with the page itself, for ever.
+
+    Sec-Fetch-Dest is what Chrome, Firefox and Safari send today and it is
+    decisive when present. Without it, a navigation is the one request that
+    asks for text/html; fetch() asks for */*. Not browser-specific either way."""
+    if method != b"GET" or rest != b"/":
+        return False
+    if header_value(headers, "Upgrade") is not None:
+        return False
+    dest = header_value(headers, "Sec-Fetch-Dest")
+    if dest is not None:
+        return dest.lower() == b"document"
+    return b"text/html" in (header_value(headers, "Accept") or b"").lower()
+
+
 # --------------------------------------------------------------------------
 # Credential
 # --------------------------------------------------------------------------
@@ -4349,9 +4428,14 @@ def splice(a, b):
 
 
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
-                    extra=()):
+                    extra=(), navigation=False):
     """One upstream connection for ONE request. Never one per downstream
-    connection -- that is the pooling defect this component exists to avoid."""
+    connection -- that is the pooling defect this component exists to avoid.
+
+    Returns whether the downstream connection can carry another request, or
+    STARTING when a page navigation was answered with starting_page() because
+    the desktop had not answered it in time -- which is NOT the desktop
+    answering, and the caller must not treat it as one."""
     path = socket_path(instance)
     up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     up.settimeout(30)
@@ -4437,6 +4521,24 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                 break
             body = rf.read(n + 2)
             up.sendall(body)
+
+    # A PAGE THE DESKTOP HAS NOT ANSWERED IN TIME is answered by us. The request
+    # has already been sent, so the start it triggers goes on; only the reply is
+    # given up, and the page we send asks for it again (starting_page()). The
+    # upstream connection is simply closed: the relay, once it starts, finds a
+    # request whose sender has gone, which costs nothing.
+    if navigation:
+        try:
+            ready, _, _ = select.select([up], [], [], STARTING_PAGE_AFTER)
+        except (OSError, ValueError):
+            ready = [up]
+        if not ready:
+            up.close()
+            log("%s had not answered a page request after %.1f s; sent the "
+                "starting page" % (instance, STARTING_PAGE_AFTER))
+            respond(wf, 200, starting_page(),
+                    [("Cache-Control", "no-store")] + list(extra))
+            return STARTING
 
     # Response.
     status_line = upf.readline()
@@ -4656,7 +4758,16 @@ def serve(sock, own, expected_b64):
             served = forward_request(rec["instance"], method, rest, query,
                                      headers, rf, wf, sock,
                                      refresh_headers(own, identity,
-                                                     new_identity))
+                                                     new_identity),
+                                     is_page_navigation(method, rest, headers))
+            if served is STARTING:
+                # NOT AN ATTACHMENT. The desktop has not answered, so the
+                # slot's published token may still be the LAST occupant's (it
+                # survives a reap), and recording it now would later read as
+                # "a different desktop" and gate this visitor out of their own.
+                # The reload our page makes, once the desktop has answered, is
+                # what attaches.
+                continue
             # A DESKTOP IS NOW THERE, so there is at last a start to attach to.
             # This is the earliest moment such a thing exists: before it, the
             # slot's published token belongs to whoever held it last -- it
