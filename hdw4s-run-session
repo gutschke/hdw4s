@@ -26,6 +26,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_DPI:=follow}"
 : "${HDW4S_INDEXING:=off}"
 : "${HDW4S_THUMBNAILS:=off}"
+: "${HDW4S_DEBUG_DESKTOP:=off}"
 : "${HDW4S_HIDPI:=scale}"
 : "${HDW4S_ENCODER:=h264enc}"
 
@@ -523,6 +524,75 @@ if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
       echo '  comes up on the flat fallback colour and looks exactly like' >&2
       echo '  every other ephemeral desktop on this machine.' >&2
     }
+  fi
+fi
+
+# INSTRUMENTING THE DESKTOP LAYER, off unless asked for.
+#
+# WHY IT EXISTS. On 2026-09-26 a desktop came up black on a production box with
+# every ordinary sign healthy: the shell had started, all three of its startup
+# lines were in the journal, it was burning no CPU, and the desktop-icons
+# process was idle and indistinguishable from a working one. The only thing that
+# differed was the size of the desktop-icons WINDOW -- 66x32 instead of 904x1118
+# -- and the geometry the shell extension published on the bus was correct at
+# the time it was read. So the data was right, the processes were healthy, and
+# nothing anywhere recorded what the desktop layer did with either. An evening
+# of archaeology ended with "static inspection is exhausted".
+#
+# These three variables are the only way that component says anything at all.
+# gjs is silent by default: without GJS_DEBUG_TOPICS an exception inside the
+# desktop-icons app reaches nobody, which is why the journals of a broken and a
+# working session were identical in the part that mattered.
+#
+# WHY IT IS OFF BY DEFAULT rather than always on. G_MESSAGES_DEBUG=all is loud
+# enough to be its own problem on a box running thirty desktops -- it would push
+# the interesting lines out of the journal, which is the failure this is meant
+# to prevent. An administrator turns it on for the session they are chasing.
+#
+# WHY NOT A GLOBAL DEBUG SWITCH. "Debug" that means everything means nobody can
+# turn on the part they need, so the next person adds a second switch. This one
+# names the layer it instruments and nothing else.
+if [ "${HDW4S_DEBUG_DESKTOP}" = 'on' ]; then
+  export GJS_DEBUG_TOPICS='JS ERROR;JS LOG'
+  export GJS_DEBUG_OUTPUT='stderr'
+  export G_MESSAGES_DEBUG='all'
+  export SHELL_DEBUG='backtrace-warnings'
+
+  # THE GEOMETRY CONVERSATION, captured while it happens.
+  #
+  # The desktop's size is published as a GAction state on the session bus and
+  # changes as monitors and work areas change. Reading it AFTERWARDS -- which is
+  # what was available on 2026-09-26 -- answers what it is now, never what
+  # arrived during startup or in what order, and startup is the whole window in
+  # which this goes wrong.
+  #
+  # BOUNDED BY CONSTRUCTION, not by rotation. It runs for a fixed time and
+  # stops, so it cannot fill a runtime directory that lives in RAM on an
+  # ephemeral session. Three minutes covers a start that normally takes ten
+  # seconds and was seen taking ninety.
+  #
+  # IT SAYS WHETHER IT RAN. dbus-monitor is not a dependency of this package and
+  # need not be installed. A capture that silently did not happen is the shape
+  # this project keeps being bitten by -- an empty file reads as "nothing was
+  # sent", which is the opposite of "nobody was listening" -- so the absence is
+  # written INTO the file it would have written.
+  debug_dir="/run/hdw4s/${instance}"
+  if [ -d "${debug_dir}" ]; then
+    if command -v dbus-monitor >/dev/null 2>&1; then
+      {
+        echo "# desktop geometry traffic on the session bus"
+        echo "# started $(date -Is), capture window 180s"
+        echo "# an empty body below means NOTHING WAS SENT, not that nothing ran"
+      } > "${debug_dir}/desktop-geometry.log"
+      timeout 180 dbus-monitor --session \
+        "interface='org.gtk.Actions'" >> "${debug_dir}/desktop-geometry.log" 2>&1 &
+      children+=($!)
+    else
+      echo "# dbus-monitor IS NOT INSTALLED -- no capture was taken." \
+        > "${debug_dir}/desktop-geometry.log"
+      echo 'hdw4s: HDW4S_DEBUG_DESKTOP=on but dbus-monitor is not installed;' >&2
+      echo '  the environment variables are set, the bus capture is not taken.' >&2
+    fi
   fi
 fi
 

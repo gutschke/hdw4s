@@ -1131,6 +1131,42 @@ cmd_enable() {
   [ -e "${ETCDIR}/${inst}.conf" ] || fresh='yes'
   idx="$(alloc_slot "${inst}" "${type}")"
 
+  # THE AUTHORING SLOT GETS ITS IDENTITY HERE, AND THE PLACE IS THE POINT.
+  #
+  # A pooled slot's account is minted at boot by hdw4s-ephemeral-slots, ahead of
+  # any socket. A named session's comes from /etc/passwd and was there already.
+  # A template row had NEITHER -- nothing minted it and nobody had named the
+  # gap -- so "hdw4s enable --template" did not refuse, it HALF-APPLIED: it
+  # wrote this row, wrote the relay's drop-ins, enabled and started the socket,
+  # and only then died a few lines below inside cmd_transport, whose first act
+  # is split_instance and whose first question is "getent passwd <inst>". What
+  # it left behind was a listening door in front of a unit that cannot start.
+  #
+  # WHY IT CANNOT BE DONE LATER, and this is measured rather than argued:
+  # systemd resolves User= when it starts the unit, BEFORE any ExecStartPre= of
+  # ours could run, so a unit cannot mint its own identity -- it fails 217/USER.
+  # The header of hdw4s-ephemeral-slots records the measurement. So the identity
+  # has to exist before that slot's socket can fire, and the socket is enabled
+  # at the end of this function. Here is the last moment that is still true.
+  #
+  # IT CALLS THE MINTER RATHER THAN WRITING THE RECORDS. A slot needs six things
+  # -- the userdb records, the namespaced passwd, the profile mount point, the
+  # gated web root, the numeric-uid drop-in, and the socket's www-data group
+  # that cmd_transport writes below -- and a second implementation of the first
+  # five here would be a copy of a rule that drifts. The uid is DERIVED by the
+  # minter from the slot table, not passed from here: these records live in /run
+  # and the pool is re-minted at every boot, so a uid chosen here would be
+  # silently contradicted by the next boot.
+  if [ "${type}" = 'template' ]; then
+    "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-ephemeral-slots" --template "${inst}" ||
+      die "hdw4s: could not mint an identity for ${inst}; it cannot start without one."
+    # A slot that failed to start before this repair latches, and a latched unit
+    # is not started by an arrival -- so without this the first visit after a
+    # successful enable fails for a reason that has nothing to do with the slot.
+    systemctl reset-failed "hdw4s-ephemeral@${inst}.service" \
+                           "hdw4s-proxy@${inst}.service" 2>/dev/null || :
+  fi
+
   install -d -m0755 "$(dropin_of "${inst}")"
 
   # Four drop-ins below describe an account: who it is, where its home is, which
@@ -1271,6 +1307,39 @@ cmd_enable() {
 
   # And the session is told which loopback port to bind.
   config_write "${ETCDIR}/${inst}.conf" 'HDW4S_PORT' "$(internal_port_of "${idx}")"
+
+  # THE AUTHORING SLOT IS NOT REAPED BY DEFAULT, and this is a correction to an
+  # inherited default rather than a new policy. cmd_reap walks EVERY row of the
+  # table, and ephemeral_shaped() is true of a template -- so the authoring seat
+  # inherited the pool's idle window and would be swept after HDW4S_IDLE_DAYS,
+  # default 7, with the message that its home and settings "are now gone". For a
+  # visitor's slot that is the feature. For the desktop an administrator is
+  # composing a template in, it is the work disappearing while nobody is looking.
+  #
+  # 0 means never, and guard_never_reap already permits it for exactly this type
+  # rather than needing an exception here.
+  #
+  # ONLY WHEN THE KEY IS ABSENT. "enable" is documented as safe to re-run, and an
+  # administrator who deliberately set a window on their authoring slot must get
+  # it back unchanged; writing this unconditionally would silently revert them.
+  #
+  # KEYED ON THE SETTING, NOT ON "fresh". A row that was released and re-enabled
+  # is not fresh -- "release" leaves the .conf file behind -- so keying on fresh
+  # left exactly that slot with the pool's 7-day window and no protection, which
+  # is the case an administrator reaches by retyping the command that did not
+  # work the first time. Measured on a development container: an enable after a
+  # release wrote no HDW4S_IDLE_DAYS at all, because "release" leaves the .conf
+  # behind. Asking the FILE what it already says is the question
+  # that was meant; "is this the first time" was a proxy for it and a wrong one.
+  # Asked of the INSTANCE file and not through setting_of, which merges the
+  # global default in: HDW4S_IDLE_DAYS has a default of 7, so setting_of never
+  # answers empty and the test would never fire. The question here is literally
+  # "has anybody written this key for THIS session", which is a question about
+  # one file.
+  if [ "${type}" = 'template' ] &&
+     ! command grep -qs '^[[:space:]]*HDW4S_IDLE_DAYS=' "${ETCDIR}/${inst}.conf"; then
+    config_write "${ETCDIR}/${inst}.conf" 'HDW4S_IDLE_DAYS' '0'
+  fi
 
   systemctl daemon-reload
   # The socket is what gets enabled, not the session. Nothing runs until
