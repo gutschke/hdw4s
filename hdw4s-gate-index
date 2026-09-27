@@ -838,12 +838,15 @@ __ACT__
     var gaveUp = false;
     // THE CARD IS SCHEDULED; THE SAMPLING IS NOT. Everything that could end the
     // wait starts now, and only the card's appearance is on a timer.
-    if (veilShowTimer) clearTimeout(veilShowTimer);
-    veilShowTimer = setTimeout(function(){
-      veilShowTimer = null;
-      veilEl.classList.add('fade');
-      veilEl.hidden = false;
-    }, VEIL_SUPPRESS);
+    function armCard(){
+      if (veilShowTimer) clearTimeout(veilShowTimer);
+      veilShowTimer = setTimeout(function(){
+        veilShowTimer = null;
+        veilEl.classList.add('fade');
+        veilEl.hidden = false;
+      }, VEIL_SUPPRESS);
+    }
+    armCard();
 
     // A LATCH, BECAUSE THE FIRST SAMPLE HAPPENS BEFORE THE POLLER EXISTS. Without
     // it, an immediate paint called veilDown() -- which clears a timer that had not
@@ -855,7 +858,24 @@ __ACT__
 
     function tick(){
       // (3) above: the question comes BEFORE the reading, never after.
-      if (document.visibilityState === 'hidden' || streamPaused()) return;
+      //
+      // AND WHILE WE CANNOT LOOK, THE CARD MUST NOT ARRIVE EITHER. Returning
+      // here left the suppression timer running, so being unable to sample
+      // GUARANTEED the card -- and the case where we cannot sample is exactly
+      // the case where the desktop is already up. Reported 2026-09-26,
+      // reconnecting to a session the browser had stopped: *"i see the screen
+      // pop up with life content, then it briefly fades black, shows the pop up
+      // for too short of a time to read, and then it disappears and i again see
+      // the life desktop"*. A stopped stream is a paused pipeline, so the
+      // immediate sample below -- whose whole purpose is that an already
+      // painted desktop costs no card -- was skipped in the one situation it
+      // was written for. The card then faded in over a live picture and was
+      // pulled straight back off when the pipeline resumed.
+      //
+      // Pushing the window out rather than cancelling it: if the stream never
+      // resumes, nobody is looking at this tab, and the patience branch below
+      // is likewise unreachable while paused. Both stay quiet together.
+      if (document.visibilityState === 'hidden' || streamPaused()) { armCard(); return; }
       var n = paintedColours();
       if (n === 'waiting') { /* no surface yet: the patience below still bounds us */ }
       else if (n === null) { stop('cannot sample the picture; revealing'); return; }
