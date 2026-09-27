@@ -700,14 +700,18 @@ __ACT__
   // HOW LONG NOTHING AT ALL HAPPENS, and it is the owner's request in one number:
   // *"it makes the product feel slow, if it comes up, stays for 1 or 2 seconds and
   // then disappears ... the solution is to simply suppress the interstitial for a
-  // short while."* Under a second a wait still reads as part of the same click, so
-  // anything resolving inside this window shows no card at all.
+  // short while."* And, once the startup hold made the desktop come up before the
+  // page does: *"For the first couple of seconds, that doesn't warrant us to do
+  // anything ... if it takes a lot longer than a few seconds, the user will wonder if
+  // their button click even had any effect."* So anything resolving inside this
+  // window shows no card at all.
   //
   // IT SUPPRESSES THE CARD AND NOTHING ELSE. The connection is made and the pixels
   // are sampled from the first tick as before -- delaying either would make the
   // wait longer rather than shorter, which is the opposite of the request. The only
-  // thing on this timer is when the card becomes visible.
-  var VEIL_SUPPRESS = 800;
+  // thing on this timer is when the card becomes DUE; see armCard() for why due is
+  // not the same as shown.
+  var VEIL_SUPPRESS = 2000;
   // WHEN THE CARD STOPS PROMISING. It does NOT reveal here any more, and that
   // change is the repair for a defect that shipped this morning: this used to be
   // 90000, and the measured healthy cold start on the production box is 89.0
@@ -838,12 +842,27 @@ __ACT__
     var gaveUp = false;
     // THE CARD IS SCHEDULED; THE SAMPLING IS NOT. Everything that could end the
     // wait starts now, and only the card's appearance is on a timer.
+    //
+    // AND THE TIMER ONLY MAKES THE CARD DUE. It is SHOWN by tick(), in the same step
+    // as a sample that has just read "not painted" -- never on the timer's own say.
+    // Measured 2026-09-27 on the production box, five fresh arrivals in a real
+    // Chrome: the first frame landed 520-560 ms after this function ran, just AFTER
+    // the 500 ms tick, so the timer put the card up at 800 over a desktop that was
+    // already on the screen and the 1000 ms tick took it down again -- four arrivals
+    // out of five (private/evidence/veil-flash-20260927/). A longer window alone moves
+    // that race rather than closing it: a frame landing between the last tick and the
+    // deadline does it again, and ticks were measured running late. Showing only
+    // from the sampling step closes it at any timing. Three earlier repairs each
+    // fixed a real defect nearby and missed this one; keep the property, not the
+    // numbers.
+    var cardDue = false;
     function armCard(){
       if (veilShowTimer) clearTimeout(veilShowTimer);
+      cardDue = false;
       veilShowTimer = setTimeout(function(){
         veilShowTimer = null;
-        veilEl.classList.add('fade');
-        veilEl.hidden = false;
+        cardDue = true;
+        tick();
       }, VEIL_SUPPRESS);
     }
     armCard();
@@ -887,6 +906,11 @@ __ACT__
         recordPaint(Date.now() - t0);
         stop('desktop painted (' + n + ' colours)');
         return;
+      }
+      // Reached only with a reading that says "not painted yet", taken just now.
+      if (cardDue && veilEl.hidden) {
+        veilEl.classList.add('fade');
+        veilEl.hidden = false;
       }
       if (!gaveUp && Date.now() - t0 >= patience) {
         gaveUp = true;
