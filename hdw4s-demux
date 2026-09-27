@@ -3632,6 +3632,12 @@ def needs_trailing_slash(target):
     return len(parts) == 3 and parts[1] == b"s" and bool(parts[2])
 
 
+def is_front_door(path):
+    """The only path that may reach arrival(), which mints: / itself, with or
+    without a query (the query is not part of PATH). See serve()."""
+    return path == b"/"
+
+
 def identity_of(headers):
     raw = header_value(headers, "Cookie")
     if not raw:
@@ -3869,11 +3875,9 @@ def console_target(path):
         return "discard", parts[2].decode("ascii", "replace")
     # /sessions/new -- ASK FOR ANOTHER ONE.
     #
-    # It is claimed HERE, and that is the whole of what stops it minting by
-    # accident. Everything this dispatch does not claim falls through to
-    # arrival(), which mints -- so before this line existed a GET of this
-    # address handed the visitor a desktop nobody had pressed for. Seen red:
-    # private/create-evidence/control-RED-before-create.txt.
+    # It is claimed HERE, or a press of New desktop is a 404. (Before only the
+    # front door reached arrival(), an unclaimed path WAS an arrival, and a GET
+    # of this address handed the visitor a desktop nobody had pressed for.)
     #
     # NEW, not "create" or "mint", because it is the word a person would type
     # and it is not a verb: a verb in a URL reads as something the address
@@ -4484,11 +4488,10 @@ def assert_console_shows_only_your_own(target=None):
     """Prove the console's scope comes from the OWNERSHIP TABLE, not the page.
 
     Runs at every start beside the others. What it catches is a path shape that
-    LOOKS like a console address and is not -- because the cost of getting that
-    wrong is not a 404: anything this parser does not claim falls through to
-    arrival(), which MINTS A DESKTOP. A console URL that stopped being
-    recognised would quietly hand somebody a new desktop every time they tried
-    to end one.
+    LOOKS like a console address and is not, and a console address that stopped
+    being recognised. Anything this parser does not claim is a 404 (only the
+    front door itself reaches arrival()), so the second no longer mints -- but
+    it would still turn every Discard and New desktop into a dead page.
     """
     target = console_target if target is None else target
     assert target(b"/sessions") == ("list", None), "the console list moved"
@@ -4778,16 +4781,30 @@ def serve(sock, own, expected_b64):
                 continue
 
             if sid is None:
-                # THE CONSOLE IS CLAIMED BEFORE THE ARRIVAL, and the order is
-                # the whole safety of it. Everything this dispatch does not
-                # claim falls through to arrival(), which MINTS A DESKTOP -- so
-                # a console address that stopped being recognised would not 404,
-                # it would hand somebody a new desktop every time they tried to
-                # end one. That is why console_target() has a start-up guard of
-                # its own rather than being trusted to keep working.
                 what, csid = console_target(rest)
                 if what is not None:
                     console(own, wf, identity, new_identity, what, csid, method)
+                    continue
+                # ONLY THE FRONT DOOR ITSELF REACHES arrival(), because
+                # arrival() MINTS for a browser that owns nothing live, and
+                # minting is a damage. Everything else not claimed above is a
+                # 404. It used to be the other way round -- every unclaimed
+                # path was an arrival -- and what that did was measured on a
+                # test box: our pages carried no icon link, so the browser
+                # asked for /favicon.ico straight after them, and a visitor
+                # who discarded their last desktop was handed a new one within
+                # a second. A restored tab on the ended page, a bookmark to an
+                # odd path, or a mistyped console address did the same.
+                #
+                # Not a redirect to / either: that would be the same mint one
+                # request later, for a request that asked for no desktop.
+                if not is_front_door(rest):
+                    respond(wf, 404, card(
+                        "Nothing here",
+                        "<p>This address is not a page of this machine.</p>"
+                        "<div class=\"actions\"><a class=\"btn secondary\" "
+                        "href=\"/sessions/\">Your desktops</a></div>"),
+                        refresh_headers(own, identity, new_identity))
                     continue
                 arrival(own, wf, identity, query, new_identity)
                 continue

@@ -1168,11 +1168,12 @@ def test_opening_the_discard_address_only_asks(rig):
 def test_the_console_never_mints(rig):
     """THE FAILURE THAT WOULD BE SILENT, and the reason the parser has a guard.
 
-    Everything the console's dispatch does not claim falls through to arrival(),
-    which mints. So a console address that stopped being recognised would not
-    404 -- it would hand somebody a NEW DESKTOP every time they tried to end
-    one, and the symptom would be a pool that fills up while people are trying
-    to empty it.
+    Everything the console's dispatch does not claim used to fall through to
+    arrival(), which mints, so a console address that stopped being
+    recognised handed somebody a NEW DESKTOP every time they tried to end one.
+    Only the front door reaches arrival() now (test_only_the_front_door_mints),
+    and the same break is a 404 -- which this test still refuses, because the
+    console must SERVE.
 
     Asserted for a visitor with NO sessions, which is the case that would hide
     it: with a session already owned, the shipped gate arm resumes and the
@@ -1210,7 +1211,7 @@ def test_asking_for_a_second_desktop_takes_a_GESTURE(rig):
     SEEN RED BEFORE IT WAS SEEN GREEN, against the tree with no create address
     at all: /sessions/new fell through console_target() to arrival(), which
     minted a desktop for a visitor who had pressed nothing. That is the same
-    fall-through red_a_console_address_that_stops_being_claimed_mints exists
+    fall-through red_a_console_address_that_stops_being_claimed exists
     for, one address wider.
     """
     c = rig.client()
@@ -1437,6 +1438,74 @@ def test_the_ended_page_and_restored_tabs_mint_NOTHING(rig):
         "the press did not register as one mint (%d -> %d): this counter "
         "cannot see a mint, so its zero above means nothing"
         % (minted_after, mint_lines(rig)))
+
+
+# Addresses a browser asks for on its own, or a person or an old bookmark might
+# present, that are not the front door. The first is the one that was SEEN: a
+# page with no icon link makes Chrome ask for /favicon.ico, straight after the
+# page it was on. The rest are shapes that sit next to real addresses.
+NOT_THE_FRONT_DOOR = ("/favicon.ico", "/anything-else", "/index.html", "/s",
+                      "/s/", "/sessions/abc", "/robots.txt?x=1")
+
+
+def test_only_the_front_door_mints(rig):
+    """MEASURED ON A TEST BOX: after each discard of a browser's last desktop the
+    journal showed "a visitor discarded their own session", "dropped a dead
+    session" and "minted a session" for the same visitor within about a
+    second. The pages carried no icon link, the browser asked for
+    /favicon.ico, and every path the router did not claim went to the front
+    door -- which, for a browser with no live desktop, starts one. So ending
+    your last desktop started another, and an ended page reopened by a
+    restored tab could do the same. Minting is a damage and only a request for
+    the front door itself may do it.
+
+    Asked twice, because the two states reach the mint differently: a browser
+    that has never had a desktop, and one whose only desktop it has just
+    discarded (its record is still in the table and is dropped on the way).
+
+    THE COUNTER IS SEEN MOVING at the end: GET / from the same browser must
+    mint exactly one, or the zeros above could come from a counter that cannot
+    count."""
+    def ask_all(c, when):
+        # Every path is asked before any verdict, so the count below is the
+        # whole damage rather than the first request's.
+        before, wrong = mint_lines(rig), []
+        for path in NOT_THE_FRONT_DOOR:
+            st, h, _ = c.get(path)
+            c.learn_cookie(h)
+            if st != 404 or "location" in h:
+                wrong.append("%s -> %d%s" % (
+                    path, st, " " + h["location"][0] if "location" in h else ""))
+        after = mint_lines(rig)
+        print("       %s: 'minted a session' lines %d -> %d over %d requests "
+              "that are not the front door" % (when, before, after,
+                                              len(NOT_THE_FRONT_DOOR)))
+        if after != before or wrong:
+            return ("%s: %d desktop(s) minted by paths that are not the front "
+                    "door (lines %d -> %d); answered: %s"
+                    % (when, after - before, before, after, "; ".join(wrong)))
+        return None
+
+    # BOTH STATES ARE ASKED before any verdict, so a red names both.
+    dark = [ask_all(rig.client(), "a fresh browser")]
+
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    st, h, _ = a.post("/sessions/%s/discard" % sid)
+    assert st == 303, "could not discard the desktop: %d" % st
+    st, h, _ = a.get(h["location"][0])
+    assert st == 200, "the directory after a discard: %d" % st
+    dark.append(ask_all(a, "after discarding its last desktop"))
+    dark = [d for d in dark if d]
+    assert not dark, " || ".join(dark)
+
+    before = mint_lines(rig)
+    st, h, _ = a.get("/")
+    assert st == 302 and h["location"][0].startswith("/s/"), \
+        "the front door did not start a desktop: %d" % st
+    assert mint_lines(rig) == before + 1, (
+        "GET / moved the mint counter by %d, not 1: its zeros above mean "
+        "nothing" % (mint_lines(rig) - before))
 
 
 def test_the_bare_address_shows_your_desktops(rig):
@@ -3055,9 +3124,8 @@ def console(own, wf, identity, new_identity, what, sid, method):
 
 CONSOLE_PARSER_STOPS_MATCHING = """
 
-# Appended by the red arm: a console dispatch that claims nothing. The point is
-# that this does NOT produce a 404 -- everything the dispatch declines falls
-# through to arrival(), which MINTS.
+# Appended by the red arm: a console dispatch that claims nothing. Every console
+# address then gets the router's answer for a path it does not know.
 def console_target(path):
     return None, None
 """
@@ -3308,12 +3376,10 @@ def red_every_redirect_marked_as_a_fresh_mint():
         os.unlink(path)
 
 
-def red_a_console_address_that_stops_being_claimed_mints():
-    """The silent one: a parser that quietly stops matching hands out desktops.
-
-    Not a 404. Everything the console dispatch declines falls through to
-    arrival(), so a visitor trying to END a desktop is given ANOTHER ONE, and
-    the symptom is a pool that fills up while people are trying to empty it.
+def red_a_console_address_that_stops_being_claimed():
+    """A parser that quietly stops matching. Before only the front door reached
+    arrival(), this handed a visitor trying to END a desktop ANOTHER ONE; now it
+    is a 404 in place of the console, and the green arm must still see that.
     The start-up guard is put back too, so this fails where the green arm
     asserts rather than at start-up -- the separate arm below is the one about
     start-up.
@@ -3459,6 +3525,32 @@ def arrival(own, wf, identity, query, new_identity):
     return _shipped_arrival(own, wf, identity, query or b"gate=" +
                             GATE_DEFAULT.encode(), new_identity)
 """
+
+
+EVERY_PATH_IS_THE_FRONT_DOOR = """
+
+# Appended by the red arm: the catch-all put back. Every path the router does
+# not otherwise claim is an arrival again, which is what the browser's own
+# /favicon.ico request reached on the test box.
+def is_front_door(path):
+    return True
+"""
+
+
+def red_every_path_is_the_front_door():
+    """The router fix undone on purpose; must fail on the mint count."""
+    path = scratch_demux("-catchall", EVERY_PATH_IS_THE_FRONT_DOOR)
+    rig = Rig(gate=None, demux=path)
+    try:
+        test_only_the_front_door_mints(rig)
+    except AssertionError as e:
+        if "minted by paths that are not the front door" not in str(e):
+            raise RuntimeError(
+                "the red arm failed, but not on the mint: %s" % e)
+        raise
+    finally:
+        rig.stop()
+        os.unlink(path)
 
 
 def red_the_bare_address_resumes():
@@ -3984,6 +4076,9 @@ def main():
         (test_the_ended_page_and_restored_tabs_mint_NOTHING, dict(gate=None)),
         # UNPINNED: the shipped arm is the one whose bare arrival changed.
         (test_the_bare_address_shows_your_desktops, dict(gate=None)),
+        # UNPINNED: the shipped arm is the one whose front door mints for a
+        # browser that owns nothing live.
+        (test_only_the_front_door_mints, dict(gate=None)),
         (test_the_ended_page_lists_what_is_still_running, dict(gate=None)),
         (test_every_pressable_keeps_its_target, dict(gate=None)),
         # UNPINNED for the same reason, and it needs one more thing: the
@@ -4076,10 +4171,12 @@ def main():
                red_a_logout_still_consumes_the_slot,
                red_reclaim_on_mismatch_alone,
                red_scope_checked_by_the_page,
-               red_a_console_address_that_stops_being_claimed_mints,
+               red_a_console_address_that_stops_being_claimed,
+               red_every_path_is_the_front_door,
                red_create_on_a_GET,
                red_the_ended_pages_button_resumes,
                red_the_bare_address_resumes,
+
                red_a_slow_start_is_the_loading_tab_again,
                red_our_page_in_front_of_a_fast_desktop,
                red_our_page_waits_for_itself,
