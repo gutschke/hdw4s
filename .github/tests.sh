@@ -2957,6 +2957,69 @@ echo '== the startup hold fails open, and its deadline matches the gate =='
   done
 )
 
+echo '== the teardown ends a desktop that is still starting =='
+# THE DEFECT, measured on production 2026-09-27: a GNOME logout with the tab open,
+# the tab's reconnect socket-activated a fresh desktop in the slot, the router asked
+# for it to be reclaimed, and hdw4s-teardown answered "ephemeral20 is activating, so
+# there is nothing to end". The desktop came up six seconds later, owned by nobody.
+#
+# WHAT IS REAL AND WHAT IS STOOD IN FOR. Real: hdw4s-teardown itself, unmodified,
+# its decision and its ladder. Stood in for: systemctl, by an exported shell function
+# (the script pins PATH, and a function is found before PATH is searched), and the
+# session's cgroup, by a directory with a cgroup.procs naming a pid that does not
+# exist -- so nothing is signalled and no compositor is found. Nothing here shows
+# that systemd stops anything; it shows what this script ASKS for.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  systemctl() {
+    printf '%s\n' "$*" >> "${STUB_LOG}"
+    case "$*" in
+      'show -p ActiveState --value '*) printf '%s\n' "${STUB_STATE}";;
+    esac
+  }
+  export -f systemctl
+  # One run of the script against a fresh stand-in, in STATE. Prints what it said.
+  teardown_in() {
+    rm -rf "${d}/req" "${d}/cg"; : > "${d}/log"
+    mkdir -p "${d}/req" "${d}/cg/hdw4s-ephemeral0.slice"
+    echo 999999999 > "${d}/cg/hdw4s-ephemeral0.slice/cgroup.procs"
+    : > "${d}/cg/hdw4s-ephemeral0.slice/cgroup.kill"
+    STUB_LOG="${d}/log" STUB_STATE="$1" \
+      HDW4S_TEARDOWN_DIR="${d}/req" HDW4S_SESSION_CGROUP_ROOT="${d}/cg" \
+      bash "${2:-${ROOT}/hdw4s-teardown}" ephemeral0 2>&1
+  }
+  killed() { cat "${d}/cg/hdw4s-ephemeral0.slice/cgroup.kill"; }
+
+  # THE CONTROL FIRST: an active desktop is ended, so the rig can see an ending.
+  out="$(teardown_in active)"
+  is 'an active desktop is ended through its own cgroup' "$(killed)" '1'
+  has 'and its unit is stopped' "$(cat "${d}/log")" 'stop hdw4s-ephemeral@ephemeral0.service'
+
+  # THE DEFECT: an activating desktop is ended too.
+  out="$(teardown_in activating)"
+  hasnt 'an activating desktop is not "nothing to end"' "${out}" 'nothing to end'
+  is 'an activating desktop is ended through its own cgroup' "$(killed)" '1'
+  has 'and its start is cancelled by a stop' "$(cat "${d}/log")" 'stop hdw4s-ephemeral@ephemeral0.service'
+
+  # THE PERMIT ARM: a unit that is not running is not killed, but any start still
+  # queued for it is replaced by a stop.
+  out="$(teardown_in inactive)"
+  has 'an inactive desktop is nothing to end' "${out}" 'nothing to end'
+  is 'and nothing is killed' "$(killed)" ''
+  has 'but a pending start is still cancelled' "$(cat "${d}/log")" 'stop --no-block hdw4s-ephemeral@ephemeral0.service'
+
+  # RED ARM: the defect put back -- only "active" is worth ending -- must lose the
+  # activating desktop, or the arms above are not about this line.
+  sed 's/^  active|activating|deactivating|reloading|refreshing) ;;$/  active) ;;/' \
+    "${ROOT}/hdw4s-teardown" > "${d}/red"
+  if cmp -s "${ROOT}/hdw4s-teardown" "${d}/red"; then
+    bad 'the red arm mutates the teardown' 'the sed matched nothing'
+  else
+    teardown_in activating "${d}/red" >/dev/null
+    is 'a teardown that ends only active desktops leaves an activating one' "$(killed)" ''
+  fi
+)
+
 echo '== the router, against stand-in slots =='
 # NOT a live test, despite living under .github/live: it spawns the real
 # hdw4s-demux against UNIX-socket backends on loopback and needs no systemd, no
@@ -3000,7 +3063,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=470   # update when tests are added; a wrong number is the point
+EXPECTED=479   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

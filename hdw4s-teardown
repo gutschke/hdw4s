@@ -138,10 +138,40 @@ trap 'rm -f "${REQDIR}/ending/${SLOT}"' EXIT
 rm -f "${REQDIR}/${SLOT}"
 
 state="$(systemctl show -p ActiveState --value "${UNIT}" 2>/dev/null || echo unknown)"
-if [ "${state}" != active ]; then
-  say "${SLOT} is ${state}, so there is nothing to end."
-  exit 0
-fi
+# ONLY A UNIT THAT IS NOT RUNNING AND NOT ON ITS WAY IS "NOTHING TO END".
+#
+# This used to be "anything but active", and an ACTIVATING desktop is the one this
+# script meets most often from the reclaim. Measured on production 2026-09-27: a
+# GNOME logout with the tab still open, the tab's reconnect socket-activated a fresh
+# desktop in the slot 29 ms after the old one exited, the router asked for it to be
+# reclaimed, and this said "ephemeral20 is activating, so there is nothing to end" --
+# and the desktop reached "Started" six seconds later and ran for nobody.
+#
+# An activating desktop is never a wanted start when it reaches this script. Via the
+# reclaim, the router asks only when the slot runs a desktop this router let to
+# NOBODY -- a different incarnation, and no other letting holds the slot -- and a new
+# mint cannot race it, because a slot with a teardown request or marker is not let.
+# Via a discard, it is the discarder's own desktop, and they asked for it to end.
+# The rungs below are all correct for a unit part way through starting: the polite
+# stop cancels the start job, and the cgroup and the final stop do the rest.
+#
+# THE INACTIVE CASE STILL ASKS FOR A STOP, and it costs nothing. A start job is
+# queued before the unit says "activating": measured on a development box, the
+# reconnect's job was installed while the old desktop was still deactivating and ran
+# the moment it reached "failed". Whether this script can ever read "inactive" or
+# "failed" with such a job still pending is NOT measured; a stop replaces a pending
+# start job rather than letting it run, and for a unit with no job it is a no-op, so
+# the question does not have to be settled to be safe.
+case "${state}" in
+  inactive|failed)
+    systemctl stop --no-block "${UNIT}" 2>/dev/null || :
+    say "${SLOT} is ${state}, so there is nothing to end."
+    exit 0;;
+  active|activating|deactivating|reloading|refreshing) ;;
+  *)
+    say "${SLOT} is in a state this does not know (${state}), so nothing is ended."
+    exit 0;;
+esac
 
 cg="${CGROOT}/hdw4s-${SLOT}.slice"
 
