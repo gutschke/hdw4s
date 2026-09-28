@@ -3918,9 +3918,9 @@ BARE_ADDRESS_RESUMES = """
 _shipped_arrival = arrival
 
 
-def arrival(own, wf, identity, query, new_identity):
+def arrival(own, wf, identity, query, new_identity, dest=None):
     return _shipped_arrival(own, wf, identity, query or b"gate=" +
-                            GATE_DEFAULT.encode(), new_identity)
+                            GATE_DEFAULT.encode(), new_identity, dest)
 """
 
 
@@ -5089,6 +5089,63 @@ def red_a_service_workers_script_is_served():
         _remove_scratch_demuxes()
 
 
+def test_only_a_page_request_mints_at_the_front_door(rig):
+    """An <img> or <iframe> on some other page must not spend a slot.
+
+    Every such fetch carries the visitor's browser to the front door, and a
+    browser that owns nothing live is minted a desktop there. The browser
+    says what it is fetching in Sec-Fetch-Dest; only "document" -- a tab
+    opening the address, which is what a link does -- may mint."""
+    for dest in ("image", "iframe", "empty", "script"):
+        c = rig.client()
+        st, h, _ = c.get("/", headers=("Sec-Fetch-Dest: %s" % dest,))
+        assert st == 403 and "location" not in h, (
+            "a front-door request for an %s was answered %d%s -- another page "
+            "can spend this browser on a slot"
+            % (dest, st, " to %s" % h["location"][0] if "location" in h else ""))
+        assert "set-cookie" not in h, \
+            "a front-door request for an %s handed out an identity" % dest
+    assert mint_lines(rig) == 0, \
+        "a request that was not for a page minted a desktop"
+    # THE PERMIT ARMS: a tab opening the address, and a client that sends no
+    # Sec-Fetch-Dest at all (every rig here, curl, an old browser).
+    st, h, _ = rig.client().get("/", headers=("Sec-Fetch-Dest: document",))
+    assert st == 302 and h["location"][0].startswith("/s/"), \
+        "a tab opening the front door was not given a desktop: %d" % st
+    st, h, _ = rig.client().get("/")
+    assert st == 302 and h["location"][0].startswith("/s/"), \
+        "a client sending no Sec-Fetch-Dest was not given a desktop: %d" % st
+    assert mint_lines(rig) == 2, "the permitted arrivals minted %d" \
+        % mint_lines(rig)
+
+
+MINT_FOR_ANY_DEST = """
+
+# Appended by the red arm: the front door mints whatever is fetching it.
+_shipped_arrival_dest = arrival
+
+
+def arrival(own, wf, identity, query, new_identity, dest=None):
+    return _shipped_arrival_dest(own, wf, identity, query, new_identity, None)
+"""
+
+
+def red_an_image_mints_at_the_front_door():
+    path = scratch_demux("-anydest.py", MINT_FOR_ANY_DEST)
+    rig = Rig(gate=None, demux=path)
+    try:
+        try:
+            test_only_a_page_request_mints_at_the_front_door(rig)
+        except AssertionError as e:
+            if "can spend this browser on a slot" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 FRAMEABLE_AGAIN = """
 
 # Appended by the red arm: the router's pages as they were, frameable.
@@ -5286,6 +5343,7 @@ def main():
         (test_a_press_on_this_machines_own_page_still_acts, dict(gate=None)),
         (test_no_page_of_the_routers_can_be_framed, dict(gate=None)),
         (test_a_desktop_cannot_install_a_service_worker, dict(gate=None)),
+        (test_only_a_page_request_mints_at_the_front_door, dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -5375,6 +5433,7 @@ def main():
                red_the_directory_can_be_framed,
                red_a_desktop_installs_a_service_worker,
                red_a_service_workers_script_is_served,
+               red_an_image_mints_at_the_front_door,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)

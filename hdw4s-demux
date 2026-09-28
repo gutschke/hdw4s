@@ -4196,8 +4196,11 @@ def refresh_headers(own, identity, new_identity):
     return []
 
 
-def arrival(own, wf, identity, query, new_identity):
-    """Decide where this tab goes, and send it there. One place, per §13."""
+def arrival(own, wf, identity, query, new_identity, dest=None):
+    """Decide where this tab goes, and send it there. One place, per §13.
+
+    DEST is the request's Sec-Fetch-Dest, None when the browser sent none.
+    """
     extra = refresh_headers(own, identity, new_identity)
 
     arm = gate_arm(query)
@@ -4271,6 +4274,19 @@ def arrival(own, wf, identity, query, new_identity):
         # is a QUESTION rather than an instruction -- a browser restoring twenty
         # tabs presents twenty dead addresses and must not be handed twenty
         # desktops.
+        #
+        # AND ONLY FOR A PAGE. A browser that says what it is fetching and says
+        # it is not a document -- an <img>, an <iframe>, a fetch() -- is a page
+        # somewhere spending this browser on a slot, and minting is a damage.
+        # A link to the front door is still a document, so it still works; a
+        # client that sends no Sec-Fetch-Dest (curl, the rigs, an old browser)
+        # is judged as before. No cookie on this answer: a stranger's <img>
+        # must not hand a browser an identity either.
+        if dest is not None and dest.lower() != b"document":
+            respond(wf, 403, page(
+                "Not a page",
+                "Open this address in a tab to get a desktop."))
+            return
         instance, sid = let_slot(own, identity)
         if instance is None:
             # Logged BEFORE the response, and with the cookie still attached:
@@ -5624,7 +5640,8 @@ def serve(sock, own, expected_b64):
                         "href=\"/sessions/\">Your desktops</a></div>"),
                         refresh_headers(own, identity, new_identity))
                     continue
-                arrival(own, wf, identity, query, new_identity)
+                arrival(own, wf, identity, query, new_identity,
+                        header_value(headers, "Sec-Fetch-Dest"))
                 continue
 
             gone = False
