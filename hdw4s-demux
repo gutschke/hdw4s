@@ -5004,6 +5004,125 @@ def assert_console_shows_only_your_own(target=None):
 
 
 # --------------------------------------------------------------------------
+# A press that came from another site
+# --------------------------------------------------------------------------
+#
+# EVERY POST THE CONSOLE ACTS ON SPENDS OR ENDS SOMETHING: /sessions/new lets a
+# slot, /sessions/<sid>/resume connects without the card, and
+# /sessions/<sid>/discard ends a desktop. Each was checked only for the cookie,
+# so what stood between a page elsewhere and those acts was the browser's
+# SameSite=Lax -- which does not hold cookies back from a SAME-SITE sibling
+# (another host under the same registrable domain), and which a cookieless
+# request does not need at all, because serve() mints an identity for it.
+#
+# The rule is the browser's own account of where the request came from, and
+# the refusal is deliberately narrow in what it will judge:
+#
+#   Sec-Fetch-Site present   the browser says who asked. Only "same-origin"
+#                            acts; "same-site", "cross-site", "none" and any
+#                            value we do not know are refused. Every browser
+#                            this product is accepted on sends it.
+#   only Origin present      a browser that predates Sec-Fetch-Site (Safari
+#                            before 16.4, Firefox before 90) but names the
+#                            page that asked. Acts when that page's HOST is
+#                            this request's Host; "null" and a mismatch are
+#                            refused. Hostnames only, not ports: the proxy
+#                            line "hdw4s nginx" prints passes $host, which
+#                            carries no port.
+#   neither                  ACTS. What sends neither is a client acting for
+#                            itself -- curl, a test rig, a script holding its
+#                            own cookie -- and refusing it would protect
+#                            nobody: it can equally GET the front door, which
+#                            mints. The browsers that send neither on a form
+#                            POST are older than any this product supports
+#                            (Firefox before 70, from 2019, sent no Origin
+#                            there); for them the only protection is
+#                            SameSite, as before. Read from the browsers'
+#                            published behaviour, not measured here.
+#
+# Refused with a 403 and NO cookie. The visitor's own identity does not lapse
+# over one unrefreshed response, and a page elsewhere must not be able to make
+# this router hand a brand-new browser an identity either.
+
+def _host_of(authority):
+    """The lower-cased host of HOST[:PORT] or [V6]:PORT, without the port."""
+    a = authority.strip().lower()
+    if a.startswith(b"["):
+        return a.split(b"]", 1)[0] + b"]"
+    return a.rsplit(b":", 1)[0] if a.count(b":") == 1 else a
+
+
+def _loggable(value, limit=80):
+    """A header value as a log can carry it: printable ASCII, bounded. It came
+    from whoever sent the request, so it must not be able to write a line."""
+    text = value.decode("latin-1")
+    text = "".join(c if " " <= c <= "~" else "?" for c in text)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def cross_site_refusal(headers):
+    """None when a POST to the console may act, else why not (for the log)."""
+    site = header_value(headers, "Sec-Fetch-Site")
+    if site is not None:
+        if site.lower() == b"same-origin":
+            return None
+        return "Sec-Fetch-Site: %s" % _loggable(site, 32)
+    origin = header_value(headers, "Origin")
+    if origin is None:
+        return None
+    if origin.lower() == b"null":
+        return "Origin: null, and no Sec-Fetch-Site"
+    host = header_value(headers, "Host")
+    scheme, sep, authority = origin.partition(b"://")
+    if not sep or host is None or _host_of(authority) != _host_of(host):
+        return "Origin: %s, Host: %s, and no Sec-Fetch-Site" % (
+            _loggable(origin), "(none)" if host is None else _loggable(host))
+    return None
+
+
+def refuse_cross_site(wf, what, why, identity):
+    """Answer a POST that another page made, and say so ONCE for the admin."""
+    say_once(("cross-site", what, why.split(",")[0][:48]),
+             "refused a %s POST that another page asked this browser to make "
+             "(%s); visitor %s. Nothing was done. This is said once per kind "
+             "of request. If it is logged for presses made on this machine's "
+             "own pages and names an Origin, the reverse proxy is not passing "
+             "the browser's Host (proxy_set_header Host $host, as \"hdw4s "
+             "nginx\" prints it)." % (what, why, visitor_tag(identity)))
+    respond(wf, 403, card(
+        "That did not come from this page",
+        "<p>Another page asked this browser to act on your desktops here, so "
+        "nothing was done. If you meant to, do it from your desktops page."
+        "</p><div class=\"actions\"><a class=\"btn secondary\" "
+        "href=\"/sessions/\">Your desktops</a></div>"))
+
+
+def assert_cross_site_posts_are_refused(judge=None):
+    """Prove the judge refuses what another page can send, and permits ours.
+
+    Runs at every start beside the others. Both directions, because a judge
+    that refused everything would pass every refusal below and take New
+    desktop, Resume and Discard away from everybody."""
+    judge = cross_site_refusal if judge is None else judge
+    h = lambda *lines: [l + b"\r\n" for l in (b"Host: pool.example",) + lines]
+    for bad in (b"Sec-Fetch-Site: cross-site", b"Sec-Fetch-Site: same-site",
+                b"Sec-Fetch-Site: none"):
+        assert judge(h(bad)) is not None, "%r was let act" % bad
+    assert judge(h(b"Sec-Fetch-Site: cross-site",
+                   b"Origin: https://pool.example")) is not None, \
+        "a matching Origin overruled the browser's Sec-Fetch-Site"
+    for bad in (b"Origin: https://evil.example", b"Origin: null",
+                b"Origin: https://pool.example.evil.example"):
+        assert judge(h(bad)) is not None, "%r was let act" % bad
+    assert judge(h(b"Sec-Fetch-Site: same-origin")) is None, \
+        "a press on this machine's own page was refused"
+    assert judge(h(b"Origin: https://pool.example:8443")) is None, \
+        "an older browser's press on this machine's own page was refused"
+    assert judge(h()) is None, \
+        "a client that sends neither header was refused"
+
+
+# --------------------------------------------------------------------------
 # Proxying
 # --------------------------------------------------------------------------
 
@@ -5311,6 +5430,13 @@ def serve(sock, own, expected_b64):
             if sid is None:
                 what, csid = console_target(rest)
                 if what is not None:
+                    # EVERY console POST, not only the three that act today:
+                    # a fourth that acts would otherwise arrive unguarded.
+                    why = cross_site_refusal(headers) \
+                        if method == b"POST" else None
+                    if why is not None:
+                        refuse_cross_site(wf, what, why, identity)
+                        continue
                     console(own, wf, identity, new_identity, what, csid, method)
                     continue
                 # ONLY THE FRONT DOOR ITSELF REACHES arrival(), because
@@ -5645,6 +5771,8 @@ def main():
     # docstring: what this does not claim is MINTED, so a parser that quietly
     # stopped matching would turn "end my desktop" into "give me another one".
     assert_console_shows_only_your_own(console_target)
+    # And the press that another page made, refused and ours permitted.
+    assert_cross_site_posts_are_refused(cross_site_refusal)
 
     # The third guard REPORTS and does not refuse, and the asymmetry with the
     # two above is deliberate. Those two fail closed because what they catch is

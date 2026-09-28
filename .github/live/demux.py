@@ -4788,6 +4788,137 @@ def red_concurrent_arrivals_share_a_slot():
         _remove_scratch_demuxes()
 
 
+# --- a press that another page made --------------------------------------
+#
+# Every console POST was checked for the cookie and nothing else, so what kept a
+# page elsewhere from spending a slot, connecting without the card or ending a
+# desktop was the browser's SameSite=Lax -- which does not hold cookies back
+# from a same-site sibling, and which a cookieless request does not need.
+
+ANOTHER_PAGE = [
+    ("Sec-Fetch-Site: cross-site",),
+    ("Sec-Fetch-Site: same-site",),
+    ("Sec-Fetch-Site: none",),
+    # The browser's word wins over an Origin that happens to match.
+    ("Sec-Fetch-Site: cross-site", "Origin: http://demux.test"),
+    # An older browser, with no Sec-Fetch-Site, naming the page that asked.
+    ("Origin: https://elsewhere.example",),
+    ("Origin: null",),
+    ("Origin: http://demux.test.elsewhere.example",),
+]
+
+
+def test_a_press_from_another_page_is_refused(rig):
+    """Every console POST another page can make is refused, acts on nothing,
+    hands out no identity, and is said once per kind of request."""
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    mints = mint_lines(rig)
+    for hdrs in ANOTHER_PAGE:
+        for path in ("/sessions/new", "/sessions/%s/resume" % sid,
+                     "/sessions/%s/discard" % sid):
+            st, h, body = a.post(path, headers=hdrs)
+            assert st == 403, (
+                "a POST to %s carrying %s was not refused: %d -- another page "
+                "can act on this visitor's desktops" % (path, hdrs, st))
+            assert "location" not in h, \
+                "a refused POST to %s still sent the browser on" % path
+            assert not fresh_markers(h), \
+                "a refused POST to %s handed out a connect marker" % path
+            assert "Your desktops" in body.decode(), \
+                "the refusal gives the visitor no way on"
+    assert mint_lines(rig) == mints, \
+        "a refused POST minted a desktop anyway"
+    assert rig.teardown_requests() == [], \
+        "a refused discard asked for a teardown anyway: %r" \
+        % rig.teardown_requests()
+
+    # A browser with NO cookie, which is what a page elsewhere most often
+    # produces: it must not be handed an identity, and nothing is let.
+    stranger = rig.client()
+    st, h, _ = stranger.post("/sessions/new",
+                             headers=("Sec-Fetch-Site: cross-site",))
+    assert st == 403, "a cookieless cross-site create was not refused: %d" % st
+    assert "set-cookie" not in h, \
+        "a refused cross-site POST handed a new browser an identity"
+    assert mint_lines(rig) == mints, "a cookieless cross-site create minted"
+
+    # ONCE, for the admin: seven attempts of one kind at create, one line.
+    log = [l for l in rig.stderr_text().splitlines()
+           if "another page asked" in l and "a create POST" in l
+           and "Sec-Fetch-Site: cross-site" in l]
+    assert len(log) == 1, (
+        "repeated cross-site presses at create were logged %d time(s): %r"
+        % (len(log), log))
+    assert "visitor " in log[0] and "Nothing was done" in log[0], \
+        "the refusal line does not say who or what happened: %r" % log[0]
+
+
+def test_a_press_on_this_machines_own_page_still_acts(rig):
+    """THE PERMIT ARM, without which the refusal above is satisfied by a
+    router that refuses every POST -- New desktop, Resume and Discard gone for
+    everybody, with every refusal test green."""
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    # A browser that says the press came from this origin.
+    st, h, _ = a.post("/sessions/new", headers=("Sec-Fetch-Site: same-origin",))
+    assert st == 303, "a same-origin New desktop was refused: %d" % st
+    # An older browser: no Sec-Fetch-Site, an Origin naming this host. The
+    # port differs from Host's on purpose -- the proxy passes $host, which
+    # carries none.
+    st, h, _ = a.post("/sessions/%s/resume" % sid,
+                      headers=("Origin: http://demux.test:8443",))
+    assert st == 303, "an older browser's same-origin Resume was refused: %d" % st
+    # NEITHER HEADER: a client acting for itself. Every rig and script that
+    # posts here does so from a real browser on this origin, but the suite's
+    # own client sends neither, and so does curl.
+    st, h, _ = a.post("/sessions/%s/resume" % sid)
+    assert st == 303, "a POST carrying neither header was refused: %d" % st
+    st, h, _ = a.post("/sessions/%s/discard" % sid,
+                      headers=("Sec-Fetch-Site: same-origin",))
+    assert st == 303, "a same-origin Discard was refused: %d" % st
+    assert len(rig.teardown_requests()) == 1, \
+        "a same-origin Discard asked for no teardown"
+
+
+CROSS_SITE_PERMITTED = """
+
+# Appended by the red arm: every console POST acts, wherever it came from --
+# the router as it was. The start-up check is disarmed too, or the router
+# would refuse to start and the arm would be red for that instead.
+def cross_site_refusal(headers):
+    return None
+
+
+def assert_cross_site_posts_are_refused(judge=None):
+    return None
+"""
+
+
+def red_a_press_from_another_page_acts():
+    path = scratch_demux("-crosssite.py", CROSS_SITE_PERMITTED)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_press_from_another_page_is_refused(rig)
+        except AssertionError as e:
+            if "another page can act on this visitor's desktops" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
+def red_startup_guard_notices_a_lax_judge():
+    load_demux().assert_cross_site_posts_are_refused(lambda headers: None)
+
+
+def red_startup_guard_notices_a_judge_that_refuses_everything():
+    load_demux().assert_cross_site_posts_are_refused(lambda headers: "no")
+
+
 def main():
     print("== hdw4s-demux, stand-in slots, no browser ==")
     print("Real: the demultiplexer, TCP, HTTP, cookies, UNIX upstreams.")
@@ -4907,6 +5038,10 @@ def main():
         # twelve arrivals, so the refusal past the pool is exercised too.
         (test_a_burst_through_the_real_front_door_is_let_distinct_slots,
          dict(nslots=9)),
+        # The refusal and the permit are a PAIR, listed together so that
+        # neither can be removed alone.
+        (test_a_press_from_another_page_is_refused, dict(gate=None)),
+        (test_a_press_on_this_machines_own_page_still_acts, dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -4990,7 +5125,10 @@ def main():
                red_resume_of_a_desktop_that_is_not_yours,
                red_startup_guard_notices_a_console_address_that_moved,
                red_concurrent_arrivals_share_a_slot,
-               red_a_reclaim_interleaves_with_a_letting):
+               red_a_reclaim_interleaves_with_a_letting,
+               red_a_press_from_another_page_acts,
+               red_startup_guard_notices_a_lax_judge,
+               red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)
 
     print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
