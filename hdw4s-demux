@@ -1156,6 +1156,25 @@ class Ownership:
         log("took back %d letting(s) from %s%s"
             % (len(self._by_sid), self._path,
                "" if not dropped else "; %d malformed row(s) dropped" % dropped))
+        # A TABLE WRITTEN BY A ROUTER THAT DID NOT DO THIS AT MINT carries
+        # lettings whose desktops ended with no tab coming back to say so, and
+        # each of them disarmed every later reclaim of its slot. Settled here,
+        # once, by the same rule mint_session() now applies as it goes -- so an
+        # upgrade cleans the table it inherits and nobody has to wipe it.
+        settled = 0
+        with self._lock:
+            newest = {}
+            for sid, r in self._by_sid.items():
+                if r["minted"] > newest.get(r["instance"], (None, -1.0))[1]:
+                    newest[r["instance"]] = (sid, r["minted"])
+            for inst, (sid, minted) in newest.items():
+                settled += self._supersede_locked(inst, sid, minted)
+            if settled:
+                self._save()
+        if settled:
+            log("marked %d letting(s) ended: a later letting of the same slot "
+                "was made after each, so its desktop had already gone"
+                % settled)
 
     def _save(self):
         """Write the table down. Called with self._lock HELD, after a change.
@@ -1232,8 +1251,36 @@ class Ownership:
             "ended_at": None,
             }
             self._by_identity.setdefault(identity, []).append(sid)
+            self._supersede_locked(instance, sid, self._by_sid[sid]["minted"])
             self._save()
         return sid
+
+    def _supersede_locked(self, instance, sid, minted):
+        """Mark every earlier letting of INSTANCE ended. Called with _lock HELD.
+
+        A RECORDED FACT, NOT AN INFERENCE FROM AN INSTRUMENT. A slot is let only
+        when nothing holds it -- no desktop in it, no fresh mint on it, no
+        teardown under way (slots_in_use(), under the letting lock) -- so by the
+        time a later letting exists, the desktop of every earlier one had
+        already gone. Nothing else ever says so when no tab comes back: such a
+        letting stayed live and un-ended in this table for as long as the table
+        lived, and holders_of() counted it. Measured on a development box
+        2026-09-28: three lettings whose desktops had logged out with no tab
+        open, and the reclaim of a desktop later started in that slot for
+        nobody answered "has been let to somebody else since" and gave up. It
+        then ran for nobody until the idle sweep, seven days on a stock box.
+
+        ended_at stays None: this is not a discard, and the directory lists an
+        ended row only while a discard is plausibly still under way.
+        """
+        n = 0
+        for s, r in self._by_sid.items():
+            if s != sid and r["instance"] == instance and \
+                    r["minted"] < minted and not r.get("ended"):
+                r["ended"] = ("%s was let again after this letting, so the "
+                              "desktop it had was already gone" % instance)
+                n += 1
+        return n
 
     def attach(self, sid, incarnation):
         """Record that a desktop has answered for SID, and which start it is.
@@ -1354,8 +1401,16 @@ class Ownership:
             return {r["instance"] for r in self._by_sid.values()
                     if not r.get("ended")}
 
-    def holders_of(self, instance, besides=None):
-        """Every sid whose letting names INSTANCE, other than BESIDES.
+    def holders_of(self, instance, besides=None, since=None, now=None):
+        """Every sid whose letting names INSTANCE, other than BESIDES, and
+        that may still have a desktop in it.
+
+        SINCE, when given, is the mint time of the letting asking: only a
+        letting made AFTER it can be "somebody else since". One made before it
+        had lost its desktop before the asker was let the slot (see
+        _supersede_locked()), and counting it is what disarmed the reclaim.
+        A letting that never had a desktop answer it and is past MINT_GRACE
+        holds nothing either: that is session_replaced()'s own bound.
 
         ASKED RATHER THAN INFERRED FROM CALL ORDER, and that is the whole reason
         it is a method here instead of a set difference at the call site. The
@@ -1368,9 +1423,12 @@ class Ownership:
         desktop, and a guard whose correctness is a property of statement order
         is not a guard.
         """
+        now = time.time() if now is None else now
         with self._lock:
             return [s for s, r in self._by_sid.items()
                     if r["instance"] == instance and s != besides
+                    and (since is None or r["minted"] > since)
+                    and (r.get("live") or now - r["minted"] < MINT_GRACE)
                     # AN ENDED LETTING DOES NOT HOLD A SLOT, and counting one
                     # disarmed the reclaim completely. Measured on production
                     # 2026-09-26: "did not reclaim a slot: ephemeral0 has been
@@ -3378,7 +3436,7 @@ def reclaimable(own, sid, rec, rundir=None, webroot=None):
             % instance
     if was == now:
         return "%s is still running the desktop this letting is for" % instance
-    others = own.holders_of(instance, besides=sid)
+    others = own.holders_of(instance, besides=sid, since=rec.get("minted"))
     if others:
         # RE-LET IN THE INTERVAL. The window between a logout and the runtime
         # directory going away is wide enough to mint onto, measured at roughly

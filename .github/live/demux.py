@@ -6105,6 +6105,119 @@ def red_startup_guard_notices_a_judge_that_refuses_everything():
     load_demux().assert_cross_site_posts_are_refused(lambda headers: "no")
 
 
+# --- lettings whose desktops ended with nobody watching -------------------
+#
+# Measured on a development box 2026-09-28: three visitors each had a desktop
+# in one slot and logged out with no tab open, so no request ever came back to
+# tell the router their desktops were gone. Their lettings stayed live and
+# un-ended, and when a desktop was later started in that slot for nobody, the
+# reclaim that should have ended it answered "has been let to somebody else
+# since" -- about those three -- and gave up. On a stock box it then runs until
+# the idle sweep, seven days later.
+
+
+def test_lettings_that_ended_unseen_do_not_disarm_the_reclaim(rig):
+    """Three unseen endings, then a desktop for nobody: it is reclaimed."""
+    name = None
+    for _ in range(3):
+        c = rig.client()
+        _, name = arrive_on_slot(rig, c)
+        # No tab comes back: the desktop goes and nothing asks about it.
+        slot_named(rig, name).logout(leave_rundir=False)
+    d = rig.client()
+    sid, name_d = arrive_on_slot(rig, d)
+    assert name_d == name, \
+        "the fourth visitor was not given the slot the other three had left"
+    slot = slot_named(rig, name)
+    # The fourth visitor's desktop goes too, and another one is started in
+    # the slot by something other than this router -- for nobody.
+    slot.logout(leave_rundir=False)
+    slot.resurrect()
+    st, _, _ = d.get("/s/%s/" % sid)
+    assert st == 410, "the visitor was not gated at a different desktop: %d" % st
+    said = rig.stderr_text()
+    assert "let to somebody else since" not in said, (
+        "the reclaim of a desktop running for nobody was refused because of "
+        "lettings whose desktops had already ended:\n%s" % said)
+    assert rig.teardown_requests() == [name], (
+        "a desktop running for nobody in %s was not reclaimed: %r"
+        % (name, rig.teardown_requests()))
+
+
+def test_a_table_with_lettings_that_ended_unseen_is_settled_at_start(rig=None):
+    """An upgrade inherits such lettings; the router settles them as it starts.
+
+    The shape of the two rows found on production: live, not ended, and a later
+    letting of the same slot made after each of them."""
+    m = load_demux()
+    m.log = lambda msg: None
+    tmp = tempfile.mkdtemp(prefix="demux-table-")
+    path = os.path.join(tmp, "ownership.json")
+    now = time.time()
+
+    def row(ident, inst, minted, ended=None):
+        return {"identity": ident, "instance": inst, "minted": minted,
+                "live": True, "incarnation": "i%d" % int(minted),
+                "ended": ended, "ended_at": None}
+    rows = {"a" * 32: row("x" * 32, "ephemeral0", now - 900),
+            "b" * 32: row("y" * 32, "ephemeral0", now - 600),
+            "c" * 32: row("z" * 32, "ephemeral0", now - 300),
+            "d" * 32: row("w" * 32, "ephemeral1", now - 800)}
+    with open(path, "w") as f:
+        json.dump({"version": 1, "sessions": rows}, f)
+    try:
+        own = m.Ownership(path)
+        ended = {s: bool((own.lookup(s) or {}).get("ended")) for s in rows}
+        assert ended == {"a" * 32: True, "b" * 32: True,
+                         "c" * 32: False, "d" * 32: False}, (
+            "the lettings a later letting of their slot superseded were not "
+            "settled at start (True = ended): %r" % ended)
+        assert own.holders_of("ephemeral0", besides="c" * 32) == [], \
+            "a settled letting still counts as holding its slot"
+        with open(path) as f:
+            written = json.load(f)["sessions"]
+        assert written["a" * 32]["ended"] and written["b" * 32]["ended"], \
+            "the settlement was not written down, so the next start redoes it"
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+EARLIER_LETTINGS_HOLD_AGAIN = """
+
+# Appended by the red arm: the rule as it was. Nothing is settled at a mint or
+# at start, and every un-ended letting of the slot holds it.
+Ownership._supersede_locked = lambda self, instance, sid, minted: 0
+_shipped_holders_of = Ownership.holders_of
+
+
+def _holders_of_any(self, instance, besides=None, since=None, now=None):
+    with self._lock:
+        return [s for s, r in self._by_sid.items()
+                if r["instance"] == instance and s != besides
+                and not r.get("ended")]
+
+
+Ownership.holders_of = _holders_of_any
+"""
+
+
+def red_lettings_that_ended_unseen_disarm_the_reclaim():
+    path = scratch_demux("-orphans.py", EARLIER_LETTINGS_HOLD_AGAIN)
+    rig = Rig(nslots=1, demux=path)
+    try:
+        try:
+            test_lettings_that_ended_unseen_do_not_disarm_the_reclaim(rig)
+        except AssertionError as e:
+            if "had already ended" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def main():
     print("== hdw4s-demux, stand-in slots, no browser ==")
     print("Real: the demultiplexer, TCP, HTTP, cookies, UNIX upstreams.")
@@ -6218,6 +6331,9 @@ def main():
         # ONE slot, so the second visitor has exactly one place to go and a
         # re-let is the only thing that can have happened.
         (test_a_slot_re_let_to_somebody_else_is_not_reclaimed, dict(nslots=1)),
+        # ONE slot, so every letting is of the same slot, as on the box.
+        (test_lettings_that_ended_unseen_do_not_disarm_the_reclaim,
+         dict(nslots=1)),
         (test_a_letting_that_never_came_back_cannot_reach_the_next_one,
          dict(nslots=1)),
         # NINE slots, as on the container where the burst was measured, and
@@ -6254,6 +6370,7 @@ def main():
                test_a_slot_that_is_never_reaped_is_reported_at_start,
                test_a_duration_already_in_seconds_is_refused,
                test_the_records_the_refusal_log_is_read_from_survive_a_restart,
+               test_a_table_with_lettings_that_ended_unseen_is_settled_at_start,
                # In-process, with the window between the pick and the record
                # held open; see concurrent_lettings().
                test_concurrent_arrivals_are_let_distinct_slots,
@@ -6311,6 +6428,7 @@ def main():
                red_the_window_is_open_again,
                red_a_logout_still_consumes_the_slot,
                red_reclaim_on_mismatch_alone,
+               red_lettings_that_ended_unseen_disarm_the_reclaim,
                red_the_table_is_forgotten_at_a_restart,
                red_a_logout_with_the_tab_open_resurrects_again,
                red_a_refusal_is_logged_per_request,
