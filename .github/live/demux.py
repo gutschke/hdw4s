@@ -78,11 +78,25 @@ class Slot(threading.Thread):
     def write_doors(cls):
         if cls.doors_file is None:
             return
+        # THE WHOLE WRITE IS UNDER THE LOCK, not only the read of the dict. It
+        # used to take the lock for the read and then write one shared ".new"
+        # file outside it, so two slots opening their doors at the same instant
+        # -- which is what a burst of arrivals does -- truncated each other's
+        # temporary file, and the loser's os.replace() found it already moved:
+        # FileNotFoundError, swallowed by serve(), which closed the connection
+        # unanswered. The router then correctly answered that visitor 502, and
+        # the burst test read it as a slot let twice. Measured: 4 failures in
+        # 80 runs, each one exactly a run in which this raised, and in none of
+        # them did the router's log show a second mint on any slot.
+        with cls.doors_lock:
+            cls._write_doors_locked()
+
+    @classmethod
+    def _write_doors_locked(cls):
         rows = ["  sl  local_address rem_address   st tx_queue rx_queue tr"
                 " tm->when retrnsmt   uid  timeout inode\n"]
-        with cls.doors_lock:
-            open_ports = sorted(p for p, up in cls.doors.items() if up)
-            shut_ports = sorted(p for p, up in cls.doors.items() if not up)
+        open_ports = sorted(p for p, up in cls.doors.items() if up)
+        shut_ports = sorted(p for p, up in cls.doors.items() if not up)
         i = 0
         for port in open_ports:
             rows.append("%4d: 0100007F:%04X 00000000:0000 0A 00000000:00000000"
@@ -4681,9 +4695,11 @@ def test_a_burst_through_the_real_front_door_is_let_distinct_slots(rig):
         if st == 302:
             c.learn_cookie(h)
             st2, _, body = c.get(h["location"][0])
-            # 410 HERE IS THE DEFECT'S OTHER FACE. A slot let twice gates the
+            # 410 HERE IS THE DEFECT'S USUAL FACE. A slot let twice gates the
             # EARLIER letting as superseded, so a visitor who was just handed a
-            # desktop is told it has ended before they ever saw it.
+            # desktop is told it has ended before they ever saw it. But a
+            # refusal is only CALLED a re-let below if the router's log shows
+            # one: a 502 once came from this rig's own stand-in, not the router.
             where = body.decode().split("SLOT=")[1].split()[0] \
                 if st2 == 200 else "answered %d" % st2
         with lock:
@@ -4698,10 +4714,23 @@ def test_a_burst_through_the_real_front_door_is_let_distinct_slots(rig):
     slots = [w for st, w in got if st == 302]
     refused = [st for st, _ in got if st != 302]
     lost = [w for w in slots if w.startswith("answered")]
+    # THE ROUTER'S OWN COUNT OF LETTINGS PER SLOT decides what a refusal was.
+    # Asked of the log rather than inferred from the status, because two
+    # causes answer a fresh visitor with an error and only one is a re-let.
+    import collections
+    import re
+    let = collections.Counter(re.findall(r"minted a session: slot (\S+),",
+                                         rig.stderr_text()))
+    twice = sorted(n for n, k in let.items() if k > 1)
+    assert not twice, (
+        "a burst of arrivals let %s to more than one visitor (%s), and %d "
+        "visitor(s) were then refused their new desktop (%s)"
+        % (", ".join(twice), dict(let), len(lost), ", ".join(lost) or "none"))
     assert not lost, (
         "%d visitor(s) handed a desktop in a burst were refused it on arrival "
-        "(%s): their slot had been let AGAIN, to somebody else"
-        % (len(lost), ", ".join(lost)))
+        "(%s), and the router's log shows NO slot let twice (%s) -- not a "
+        "re-let; look at the stand-in slot and at forward_request()"
+        % (len(lost), ", ".join(lost), dict(let)))
     assert len(slots) == len(set(slots)), \
         "a burst of arrivals put two visitors on one slot: %s" % sorted(slots)
     assert len(slots) == len(rig.slots), \
