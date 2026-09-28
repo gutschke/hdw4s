@@ -148,6 +148,12 @@ ProtectSystem=strict
 # right way round, and it is why the console reports the error instead of
 # assuming the write worked.
 ReadWritePaths=/run/hdw4s-teardown
+# AND THE START REQUEST, the same shape for the opposite act: one file whose name is
+# a slot, which hdw4s-start@<slot> turns into a start as root. This is now the only
+# way a pool desktop starts -- a connection cannot (the relay is Requisite= on the
+# session) -- so without this line nothing starts at all, and the router says so
+# per mint rather than reporting a start that never happens.
+ReadWritePaths=/run/hdw4s-start
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

@@ -1,0 +1,43 @@
+#!/bin/bash -e
+# START ONE EPHEMERAL DESKTOP, BECAUSE THE ROUTER LET ITS SLOT TO A VISITOR.
+#
+#   hdw4s-start <slot>
+#
+# Run as root by hdw4s-start@<slot>.service, which hdw4s-start@<slot>.path
+# triggers when the router writes /run/hdw4s-start/<slot>. It is the ONLY way an
+# ephemeral desktop is started: the slot's relay is Requisite= on the session,
+# so a connection can no longer start one. See "Starting a desktop" in
+# hdw4s-demux for the request's format and why.
+#
+# WHAT THIS DOES, AND ALL IT DOES:
+#   1. takes the request -- renames it to /run/hdw4s-start-taken/<slot>, root's,
+#      so a request is taken at most once and a later one is a new file;
+#   2. asks systemd to start hdw4s-ephemeral@<slot>.service, which runs the
+#      incarnation hook (this start's token) before the session itself.
+# The request's CONTENT is never read here and never reaches a command line:
+# the file's NAME is the instruction, filled in by systemd from the unit's own
+# instance name (%i), exactly as a teardown request is. A consumer that needs a
+# field of the request (the start size) reads the taken copy as root, binds it
+# to this start's token, and deletes it -- hdw4s-incarnation, which runs next.
+#
+# --no-block: the start takes seconds and nothing here waits on it. The router
+# waits instead, on the desktop's own port, which is what it can see.
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o pipefail
+
+slot="${1:?usage: hdw4s-start <slot>}"
+case "${slot}" in
+  ''|*/*|.*) echo "hdw4s-start: refusing a slot name '${slot}'" >&2; exit 2 ;;
+esac
+req="${HDW4S_START_DIR:-/run/hdw4s-start}/${slot}"
+taken="${HDW4S_START_TAKEN_DIR:-/run/hdw4s-start-taken}"
+
+install -d -m 0700 "${taken}"
+# A rename is the take: if two triggers race, exactly one finds the file.
+mv -f "${req}" "${taken}/${slot}" 2>/dev/null || {
+  echo "hdw4s-start: no request for ${slot} (already taken)" >&2
+  exit 0
+}
+systemctl start --no-block "hdw4s-ephemeral@${slot}.service"
+echo "hdw4s-start: asked for the desktop in ${slot} to be started"

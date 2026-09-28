@@ -65,6 +65,24 @@ def expect_red(name, fn):
 # Stand-in slots
 # --------------------------------------------------------------------------
 
+# WHAT A CONNECTION TO A SLOT WITH NO DESKTOP GETS: hdw4s-refuse@'s answer. Read
+# out of the shipped responder rather than written out again here, because a
+# second spelling of it is a stand-in that can drift from the thing it stands in
+# for without any test noticing.
+def _shipped_refusal():
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(HERE)), "hdw4s-refuse")
+    loader = importlib.machinery.SourceFileLoader("hdw4s_refuse", path)
+    mod = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(mod)
+    return mod.RESPONSE
+
+
+REFUSE_RESPONSE = _shipped_refusal()
+
+
 class Slot(threading.Thread):
     """A backend that says which slot it is, so a mis-route is visible."""
 
@@ -194,6 +212,17 @@ class Slot(threading.Thread):
         # identity. A backend is the untrusted side here; it must not be able to
         # reach the cookie the router owns.
         self.forge_cookie = None
+        # How many times a desktop was started here on purpose (start()), and
+        # how many connections found no desktop and were refused. The oracle
+        # for "no connection started a desktop" is that the second never
+        # changes the first.
+        self.starts = 0
+        self.refused = 0
+        # THE OLD RELAY, for red arms only: True is a relay BindsTo= its
+        # session, as every pool slot had until only the mint could start a
+        # desktop -- a connection to a slot with no desktop then STARTS one.
+        # The shipped shape is False (Requisite=): it is refused.
+        self.starts_on_connect = False
         # Any other response header a hostile desktop might send, as whole
         # "Name: value" lines. Kept apart from forge_cookie so a test about one
         # header cannot pass by accident on the other's filter.
@@ -268,6 +297,41 @@ class Slot(threading.Thread):
             time.sleep(max(0.0, rundir_after - door_after))
             import shutil
             shutil.rmtree(self.rundir, ignore_errors=True)
+        threading.Thread(target=later, daemon=True).start()
+
+    def start_desktop(self):
+        """A desktop started ON PURPOSE: hdw4s-start@ acting on the router's
+        start request, which is now the only way one starts. A start of a slot
+        whose desktop is already running is a no-op, as "systemctl start" of an
+        active unit is.
+
+        THE PORT OPENS WHEN THE DESKTOP IS READY, after self.delay -- the real
+        session binds it only once it can serve -- and the runtime directory
+        exists from the start, as the unit's RuntimeDirectory= does while it is
+        still activating. The router waits for exactly that port before its
+        first connection, so what this models is what the router reads."""
+        if self.incarnation is not None:
+            return
+        self.starts += 1
+        # THE DESKTOP BEFORE ITS RUNTIME DIRECTORY. The real relay is After= the
+        # session, so a connection made while the unit is activating WAITS for
+        # it; here the directory appears only once the desktop exists, so a
+        # connection the router makes on seeing it is never refused. The other
+        # order would be a race the real system does not have.
+        self.ready_at = time.time() + self.delay
+        self.publish()
+        os.makedirs(self.rundir, mode=0o700, exist_ok=True)
+        if self.port is None:
+            return
+        if self.delay <= 0:
+            self.open_door()
+            return
+        token = self.incarnation
+
+        def later():
+            time.sleep(self.delay)
+            if not self.stop and self.incarnation == token:
+                self.open_door()
         threading.Thread(target=later, daemon=True).start()
 
     def publish(self):
@@ -489,28 +553,24 @@ class Slot(threading.Thread):
                 # That is the property it was chosen for, and a stand-in that
                 # loses it is worse than none, because the loss shows up as a
                 # confident number rather than as an error.
-                self.seen = True
                 self.asked.append(line)
-                try:
-                    os.makedirs(self.rundir, mode=0o700, exist_ok=True)
-                except OSError:
-                    pass
-                # A CONNECTION IS WHAT STARTS A SESSION HERE, measured on the
-                # box: the slot's socket unit outlives the session, and one
-                # connection to it re-activates the relay, whose BindsTo=
-                # starts a FRESH session -- with a control, 45 seconds of
-                # silence producing no desktop at all. So a new token is minted
-                # exactly when a request arrives at a slot that has none.
-                if self.incarnation is None:
+                # A CONNECTION STARTS NOTHING. It used to: the slot's relay was
+                # BindsTo= its session, so one connection to a slot with no
+                # desktop started a fresh one (measured on the box, with a
+                # control). The relay of a pool slot is now Requisite= on the
+                # session, so a connection to a slot with no desktop is refused
+                # -- the relay fails, and hdw4s-refuse@ answers the connection
+                # with its 503 and closes it. A desktop is started ON PURPOSE,
+                # by the router's start request (Slot.start_desktop(), driven by the
+                # rig's stand-in for hdw4s-start@).
+                if self.incarnation is None and self.starts_on_connect:
+                    self.start_desktop()
                     self.ready_at = time.time() + self.delay
-                    self.publish()
-                    # A SESSION THAT HAS STARTED IS LISTENING. Opened here and
-                    # not at bind time, for the same reason the runtime
-                    # directory is created here: a slot nobody has opened has a
-                    # listening SLOT SOCKET and no session behind it, so no
-                    # door of its own.
-                    if self.port is not None:
-                        self.open_door()
+                if self.incarnation is None:
+                    self.refused += 1
+                    c.sendall(REFUSE_RESPONSE)
+                    return
+                self.seen = True
                 upgrade = False
                 length, chunked = 0, False
                 while True:
@@ -742,6 +802,16 @@ class Rig:
         os.makedirs(self.webroot)
         self.teardowndir = os.path.join(self.tmp, "teardown")
         os.makedirs(self.teardowndir)
+        # WHERE THE ROUTER ASKS FOR A DESKTOP TO BE STARTED, and the stand-in for
+        # the root side that acts on it (hdw4s-start@<slot>.path and .service):
+        # a thread that TAKES each request -- removes it, as the real one renames
+        # it away -- and starts that slot's desktop. Every request taken is kept
+        # in start_requests, in order, so a test can say exactly which starts the
+        # router asked for.
+        self.startdir = os.path.join(self.tmp, "start")
+        os.makedirs(self.startdir)
+        self.start_requests = []
+        self._watching = True
         self.slots = []
         for i in range(nslots):
             name = "ephemeral%d" % i
@@ -783,6 +853,7 @@ class Rig:
                    HDW4S_REAP_STAMP_DIR=self.reapdir,
                    HDW4S_WEBROOT_DIR=self.webroot,
                    HDW4S_TEARDOWN_DIR=self.teardowndir,
+                   HDW4S_START_DIR=self.startdir,
                    HDW4S_PROC_NET_TCP=Slot.doors_file,
                    HDW4S_DEMUX_BIND="127.0.0.1",
                    HDW4S_DEMUX_PORT=str(self.port),
@@ -796,7 +867,30 @@ class Rig:
         # was. The MUTATION IS THE SUBJECT, never the checker: the assertions
         # the red arms run are byte-identical to the green one's.
         self.demux = DEMUX if demux is None else demux
+        threading.Thread(target=self._take_start_requests, daemon=True).start()
         self._spawn()
+
+    def _take_start_requests(self):
+        """The stand-in for hdw4s-start@<slot>: take each request, start that
+        slot. A name that is not a slot of this rig is taken and started
+        nowhere, and recorded, so a test can see the router asked for it."""
+        while self._watching:
+            try:
+                names = sorted(os.listdir(self.startdir))
+            except OSError:
+                names = []
+            for name in names:
+                if name.startswith("."):
+                    continue
+                try:
+                    os.unlink(os.path.join(self.startdir, name))
+                except OSError:
+                    continue
+                self.start_requests.append(name)
+                for sl in self.slots + self.strays:
+                    if sl.name == name and not sl.stop:
+                        sl.start_desktop()
+            time.sleep(0.01)
 
     # The spawn is a method rather than eight lines of __init__ because the
     # fixture could not express a RESTART at all while it was inline: every
@@ -931,6 +1025,7 @@ class Rig:
         return Client(self.port, self.cred if cred is None else cred, cookie)
 
     def stop(self):
+        self._watching = False
         self.proc.terminate()
         try:
             self.proc.wait(5)
@@ -4267,6 +4362,10 @@ def red_a_logout_with_the_tab_open_resurrects_again():
     """RED ARM: without the wait, the tab's reconnect starts a desktop."""
     path = scratch_demux("-nosettle.py", NO_SETTLE_AFTER_A_HANG_UP)
     rig = Rig(nslots=2, demux=path)
+    # ON THE OLD RELAY, which started a desktop on connect: the world this wait
+    # was written for. Under Requisite= no connection starts one at all.
+    for sl in rig.slots:
+        sl.starts_on_connect = True
     try:
         try:
             test_a_logout_with_the_tab_open_starts_no_desktop(rig)
@@ -4458,6 +4557,11 @@ def red_the_window_is_open_again():
     """
     path = scratch_demux("-nodoor.py", NO_DOOR_CHECK)
     rig = Rig(nslots=2, demux=path)
+    # ON THE OLD RELAY, which started a desktop on connect: the door check was
+    # written for that world. Under Requisite= the reload is refused by the
+    # relay and gated on that refusal, door check or not.
+    for sl in rig.slots:
+        sl.starts_on_connect = True
     try:
         c = rig.client()
         sid, name = arrive_on_slot(rig, c)
@@ -4506,6 +4610,10 @@ def red_a_logout_still_consumes_the_slot():
     # behaving correctly -- needs both gone before it comes back.
     path = scratch_demux("-noneither.py", NO_DOOR_AND_NO_RECLAIM)
     rig = Rig(nslots=2, demux=path)
+    # ON THE OLD RELAY: the leak needed a connection that started a desktop,
+    # which only a relay BindsTo= its session could do.
+    for sl in rig.slots:
+        sl.starts_on_connect = True
     try:
         c = rig.client()
         try:
@@ -6218,6 +6326,135 @@ def red_lettings_that_ended_unseen_disarm_the_reclaim():
         _remove_scratch_demuxes()
 
 
+# --- only the router starts a desktop; a connection never does ------------
+#
+# Every pool desktop used to be started by the first CONNECTION to its slot: the
+# relay was BindsTo= its session and socket-activated, so any connection was a
+# start instruction. A tab reconnecting after its desktop logged out, a request
+# in the seconds a dying desktop still listened, anything that reached the
+# socket. Four rounds of guards narrowed that race; a development box still
+# caught a reconnect proxied 29 ms before the last guard's record existed
+# (evidence/resurrection-20260928/verify-e858c81). Now the relay is Requisite=:
+# a connection to a slot with no desktop is refused, and a desktop starts only
+# when the router asks (START_DIR, hdw4s-start@).
+
+
+# THE PORT HELD PAST THE OLD THREE-SECOND WINDOW after a logout, on purpose.
+# Measured on a development box 2026-09-28: with a tab streaming audio the
+# streaming server held its port 2.4 to 2.8 s against a dead sound server, and
+# production added a one-second stall. A stand-in that closed the port inside
+# the window could not tell a structure that refuses from a clock that won.
+HELD_PAST_ANY_WINDOW = 3.5
+
+
+def test_no_connection_starts_a_desktop(rig):
+    """REQUIREMENT 1, and 3 at its end: nothing but the router's own start
+    request starts a desktop, and a slot that refused a connection starts the
+    next desktop asked of it.
+
+    One slot, one life, every way a connection used to start a desktop: the
+    tab's reconnect the instant its stream closes after a logout (the port held
+    past any window, as measured with a stalled audio pipeline), a request with
+    no stream open, the same once the desktop is wholly gone, and the requests
+    a browser makes by itself (its icon, a prefetch). The ORACLE IS THE SLOT'S
+    OWN COUNT OF STARTS, beside the start requests the router made: one of each
+    per letting, and the refusal seen at least once -- Requisite=, refusing."""
+    slot = rig.slots[0]
+    a = rig.client()
+    sid, name = arrive_on_slot(rig, a)
+    assert name == slot.name and slot.starts == 1
+    stream_until_dropped(rig, a, sid, slot, lambda: slot.log_out_under_a_stream(
+        door_after=HELD_PAST_ANY_WINDOW, rundir_after=HELD_PAST_ANY_WINDOW + 0.5))
+    st, _, _ = a.get("/s/%s/" % sid)                     # the tab's reconnect
+    assert slot.starts == 1, (
+        "the tab's reconnect after a logout started a desktop (%d starts)"
+        % slot.starts)
+    assert st == 410, "the reconnect was not shown the ended page: %d" % st
+    a.get("/s/%s/" % sid)                                # no stream open
+    time.sleep(HELD_PAST_ANY_WINDOW + 0.8)               # the desktop is gone
+    a.get("/s/%s/" % sid)
+    a.get("/favicon.ico")
+    a.get("/", headers=("Sec-Fetch-Dest: document", "Sec-Purpose: prefetch"))
+    assert slot.starts == 1, (
+        "a connection started a desktop in %s: %d starts for one letting"
+        % (name, slot.starts))
+    assert rig.start_requests == [name], (
+        "the router asked for starts nobody's first request needed: %r"
+        % rig.start_requests)
+    assert slot.refused >= 1, (
+        "no connection was ever refused, so nothing here shows the relay "
+        "refusing -- a guard never seen refusing")
+    # REQUIREMENT 3: the refusal did not latch the slot. The next visitor is
+    # let the same slot, it starts, and it serves.
+    b = rig.client()
+    sid_b, name_b = arrive_on_slot(rig, b)
+    assert name_b == name and slot.starts == 2, (
+        "after a refused connection the slot did not start the next desktop "
+        "asked of it (%s, %d starts)" % (name_b, slot.starts))
+    assert rig.start_requests == [name, name], rig.start_requests
+
+
+def test_the_first_request_after_a_mint_reaches_its_desktop(rig):
+    """REQUIREMENT 2: a desktop that takes seconds to start is waited for, not
+    connected to early -- a connection before it runs is refused now, so an
+    early one would hand the visitor the relay's refusal. A page gets the
+    starting page when it always did, and nothing ever gets a 502 or a 503."""
+    for sl in rig.slots:
+        sl.delay = 2.5
+    c = rig.client()
+    st, h, _ = c.get("/")
+    assert st == 302, "arrival did not redirect: %d" % st
+    c.learn_cookie(h)
+    where = h["location"][0]
+    st, _, body = c.get(where, headers=("Accept: text/html",
+                                        "Sec-Fetch-Dest: document"))
+    assert st == 200 and b"SLOT=" not in body, (
+        "a page asked for while the desktop was starting got %d, not the "
+        "starting page" % st)
+    # Not a page: an asset the client asks for while the desktop is starting.
+    # It waits, and reaches the desktop.
+    st, _, body = c.get(where + "app.js")
+    assert st == 200 and b"SLOT=" in body, (
+        "a request made while the desktop was starting got %d instead of the "
+        "desktop: %r" % (st, body[:80]))
+    assert sum(sl.refused for sl in rig.slots) == 0, (
+        "the router connected before the desktop was running and was refused")
+
+
+CONNECTION_STARTS_A_DESKTOP = True     # read by the two red arms below
+
+
+def red_a_connection_starts_a_desktop_again():
+    """RED ARM for requirement 1: the relay BindsTo= its session again."""
+    rig = Rig(nslots=1)
+    for sl in rig.slots:
+        sl.starts_on_connect = CONNECTION_STARTS_A_DESKTOP
+    try:
+        test_no_connection_starts_a_desktop(rig)
+    finally:
+        rig.stop()
+
+
+CONNECT_WITHOUT_WAITING = """
+
+# Appended by the red arm: the first request connects at once, as every request
+# did when a connection was what started the desktop.
+def await_desktop(instance, navigation, door=None, clock=None, sleep=None):
+    return "up"
+"""
+
+
+def red_the_first_request_is_refused():
+    """RED ARM for requirement 2: no wait for the desktop before connecting."""
+    path = scratch_demux("-nowait.py", CONNECT_WITHOUT_WAITING)
+    rig = Rig(gate=None, demux=path)
+    try:
+        test_the_first_request_after_a_mint_reaches_its_desktop(rig)
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def main():
     print("== hdw4s-demux, stand-in slots, no browser ==")
     print("Real: the demultiplexer, TCP, HTTP, cookies, UNIX upstreams.")
@@ -6334,6 +6571,10 @@ def main():
         # ONE slot, so every letting is of the same slot, as on the box.
         (test_lettings_that_ended_unseen_do_not_disarm_the_reclaim,
          dict(nslots=1)),
+        # ONE slot, so the next visitor can only be let the slot that refused.
+        (test_no_connection_starts_a_desktop, dict(nslots=1)),
+        (test_the_first_request_after_a_mint_reaches_its_desktop,
+         dict(gate=None)),
         (test_a_letting_that_never_came_back_cannot_reach_the_next_one,
          dict(nslots=1)),
         # NINE slots, as on the container where the burst was measured, and
@@ -6429,6 +6670,8 @@ def main():
                red_a_logout_still_consumes_the_slot,
                red_reclaim_on_mismatch_alone,
                red_lettings_that_ended_unseen_disarm_the_reclaim,
+               red_a_connection_starts_a_desktop_again,
+               red_the_first_request_is_refused,
                red_the_table_is_forgotten_at_a_restart,
                red_a_logout_with_the_tab_open_resurrects_again,
                red_a_refusal_is_logged_per_request,

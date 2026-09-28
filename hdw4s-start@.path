@@ -1,0 +1,19 @@
+[Unit]
+Description=Watch for a request to start the HDW4S ephemeral desktop in slot %i
+Documentation=man:hdw4s(8)
+After=hdw4s-ephemeral-slots.service
+Requires=hdw4s-ephemeral-slots.service
+# The directory this watches is created by hdw4s-ephemeral-slots, which also
+# starts one of these per pool slot -- the teardown watcher's arrangement, for
+# the same reasons (see hdw4s-teardown@.path).
+
+[Path]
+# THE FILE'S NAME IS THE SLOT, AND THAT IS THE WHOLE AUTHORISATION MODEL, as for a
+# teardown request: the router can create a file in one directory (0770, group
+# www-data) and the only thing it can say by doing so is "this slot". Everything
+# privileged happens on this side, keyed by %i.
+PathExists=/run/hdw4s-start/%i
+Unit=hdw4s-start@%i.service
+
+[Install]
+WantedBy=multi-user.target

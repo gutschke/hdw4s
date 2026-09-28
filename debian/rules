@@ -59,3 +59,8 @@ override_dh_installsystemd:
 # outlives a boot into a different configuration.
 	dh_installsystemd --no-enable --no-start hdw4s-teardown@.path
 	dh_installsystemd --no-enable --no-start hdw4s-teardown@.service
+# The start watcher and the start, for the same reasons: one .path per slot,
+# started by hdw4s-ephemeral-slots from the number actually configured. The
+# router's start request is the only way a pool desktop starts.
+	dh_installsystemd --no-enable --no-start hdw4s-start@.path
+	dh_installsystemd --no-enable --no-start hdw4s-start@.service

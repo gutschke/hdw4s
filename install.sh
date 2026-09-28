@@ -24,6 +24,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration}
          hdw4s-title.js
          hdw4s-refuse hdw4s-refuse@.service
          hdw4s-teardown hdw4s-teardown@.service hdw4s-teardown@.path
+         hdw4s-start hdw4s-start@.service hdw4s-start@.path
          hdw4s-incarnation hdw4s-incarnation@.service
          hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-demux hdw4s-demux.socket hdw4s-demux.service
@@ -260,7 +261,10 @@ ln -sf "${dst}/hdw4s" "${sys}/sbin/hdw4s"
 # suffix is a unit, and there is nothing else for that test to catch.
 for u in "${SOURCES[@]}"; do
   case "${u}" in
-    *.service|*.socket|*.timer|*.slice) ;;
+    # .path too: the teardown and start watchers are path units, and a list
+    # without the suffix installed neither -- found when the start watcher
+    # was added, and true of the teardown watcher since it was written.
+    *.service|*.socket|*.timer|*.slice|*.path) ;;
     *) continue;;
   esac
   ln -sf "${dst}/${u}" "/etc/systemd/system/${u}"
@@ -308,24 +312,30 @@ if [ -r "${ETCDIR}/instances" ]; then
     # is a named-desktop unit that will never run an authoring session: the
     # relay listens, every start fails on the dependency, and the front door
     # goes on accepting connections it can never serve.
+    # An ephemeral-shaped relay is Requisite= on its session, a named one
+    # BindsTo=: see "hdw4s enable". Requisite= starts nothing, so a connection
+    # to a pool slot can never start a desktop -- only the router's start
+    # request can (hdw4s-start@).
     case "${type}" in
-      ephemeral|template) sunit="hdw4s-ephemeral@${inst}.service";;
-      *)                  sunit="hdw4s@${inst}.service";;
+      ephemeral|template) sunit="hdw4s-ephemeral@${inst}.service"; dep='Requisite';;
+      *)                  sunit="hdw4s@${inst}.service"; dep='BindsTo';;
     esac
-    # Existing drop-ins are migrated, not skipped. They were written with
-    # "Requires=", which does not end a relay whose session EXITS ON ITS OWN --
-    # the GNOME logout path -- leaving the relay forwarding to a dead port and
-    # every later visitor getting a dropped connection. Measured: HTTP 000 with
-    # Requires=, HTTP 200 in one second with BindsTo=. An upgrade has to correct
-    # this, because nothing else rewrites the file: "hdw4s enable" is not re-run
-    # on a machine that is already enabled.
+    # Existing drop-ins are migrated, not skipped, because nothing else rewrites
+    # the file: "hdw4s enable" is not re-run on a machine that is already
+    # enabled. Two older shapes: "Requires=", which does not end a relay whose
+    # session EXITS ON ITS OWN (measured HTTP 000 against HTTP 200 with
+    # BindsTo=); and, for a pool slot, "BindsTo=", which starts a desktop on
+    # every connection. Anything else was written by somebody on purpose.
     if [ -e "${d}/30-session.conf" ]; then
-      grep -q '^Requires=' "${d}/30-session.conf" 2>/dev/null || continue
+      if ! grep -q '^Requires=' "${d}/30-session.conf" 2>/dev/null; then
+        [ "${dep}" = 'Requisite' ] || continue
+        grep -q '^BindsTo=' "${d}/30-session.conf" 2>/dev/null || continue
+      fi
     fi
     printf '%s\n' \
       '# Written by "hdw4s enable": the session unit behind this relay.' \
       '[Unit]' \
-      "BindsTo=${sunit}" \
+      "${dep}=${sunit}" \
       "After=${sunit}" \
       > "${d}/30-session.conf"
   done < "${ETCDIR}/instances"

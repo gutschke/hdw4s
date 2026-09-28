@@ -37,9 +37,15 @@ After=hdw4s-ephemeral-slots.service
 # streaming server can serve a page that asks for it.
 Wants=hdw4s-incarnation@%i.service
 After=hdw4s-incarnation@%i.service
-# Stops with the last thing that wanted it; the pool's admission unit is what
-# wants it, so a slot nobody is using does not linger.
-StopWhenUnneeded=yes
+# NOT StopWhenUnneeded=, which this unit carried while the relay's BindsTo= was
+# what kept it needed. A desktop is now started on purpose -- by the router's
+# start request, through hdw4s-start@ -- and nothing else holds it: the relay is
+# Requisite= on it, which starts nothing and pins nothing until a connection
+# exists. With StopWhenUnneeded= a desktop started that way is stopped as
+# unneeded within seconds, before its visitor's first request (measured
+# 2026-09-28, a direct start deactivated in 6 s). A desktop ends by its own
+# logout, by a teardown, or by the reaper, each of which stops this unit
+# explicitly.
 
 [Service]
 # ---- identity -------------------------------------------------------------

@@ -1288,10 +1288,30 @@ cmd_enable() {
   # them. The 61-second race that test warned about does not occur on the logout
   # path; a logout is a clean exit and the slot is back in about a second, with
   # the tmpfs home wiped.
+  #
+  # AN EPHEMERAL-SHAPED SLOT IS Requisite=, NOT BindsTo=, and the difference is
+  # the whole of what stops a connection from starting a desktop. BindsTo=
+  # starts the session when the relay starts, and the relay is socket-activated,
+  # so every connection to the slot -- a tab reconnecting after its desktop
+  # logged out, a request in the seconds a dying desktop still listened -- was an
+  # instruction to start a desktop for nobody. Four rounds of guards narrowed
+  # that race and none closed it. Requisite= starts nothing: a relay whose
+  # session is not running fails, hdw4s-refuse@ drains the connection, and the
+  # desktop is started only by the router's start request (hdw4s-start@). After=
+  # goes with it, so a relay started while that start is still activating waits
+  # for it instead of failing.
+  #
+  # The relay then outlives its session, which is what the table above warns
+  # about -- and it is harmless now, because the next desktop in the slot is
+  # started on purpose and binds the same port, and the router waits for that
+  # port before it connects. A NAMED desktop keeps BindsTo=: it is reached at
+  # its own hostname and coming back on connect is its whole design.
+  local sdep='BindsTo'
+  ! ephemeral_shaped "${type}" || sdep='Requisite'
   printf '%s\n' \
     '# Written by "hdw4s enable": the session unit behind this relay.' \
     '[Unit]' \
-    "BindsTo=$(unit_of "${inst}")" \
+    "${sdep}=$(unit_of "${inst}")" \
     "After=$(unit_of "${inst}")" \
     > "${DROPIN}/hdw4s-proxy@${inst}.service.d/30-session.conf"
   # Only the port. The wait that goes with it lives in the unit, because a

@@ -3805,11 +3805,172 @@ def let_slot(own, identity):
             return None, None
         sid = own.mint_session(identity, instance)
         # WRITTEN DOWN BEFORE THE REDIRECT, and the order is the point. The
-        # redirect is what starts the desktop, so a reservation recorded after
-        # it would leave the slot unheld across exactly the window where this
-        # process can die and forget it.
+        # redirect leads to the letting's first request, which is what asks
+        # for the desktop to be started (start_for_first_request()), so a
+        # reservation recorded after it would leave the slot unheld across
+        # exactly the window where this process can die and forget it.
         reserve_slot(instance)
     return instance, sid
+
+
+# --------------------------------------------------------------------------
+# Starting a desktop: the router asks, and nothing else can
+# --------------------------------------------------------------------------
+#
+# ONLY THE ROUTER STARTS AN EPHEMERAL DESKTOP, and only for a letting it made. It used to be the first CONNECTION to
+# the slot's socket that started it -- socket activation, with the relay bound to
+# the session -- and that made every connection a start instruction: a stale tab
+# reconnecting after a logout, a request landing in the seconds a dying desktop
+# still listened, a prefetch, anything that could reach the socket. Four rounds
+# of guards (a three-second wait after a hang-up, a port check, two records of a
+# desktop's end) each narrowed that race and none closed it; measured on a
+# development box 2026-09-28, a reconnect was still proxied 29 ms before the last
+# of those records existed. So the race is removed instead of won: the relay of
+# an ephemeral slot is Requisite= on its session (a connection to a slot with no
+# desktop is refused, never a start), and the one act that starts a desktop is
+# this request, written by the one component that decides a visitor gets one.
+#
+# WHEN: AT THE LETTING'S FIRST REQUEST, not at the mint. Only for a letting whose
+# desktop has never answered (so never a desktop that has ended, and never a
+# resurrection), only while the slot shows no desktop, and under the letting
+# lock. Not at the mint because a mint whose redirect is never followed -- a
+# client that does not follow redirects, a tab closed at once -- would then start
+# a desktop that runs for nobody until the idle sweep, seven days on a stock box,
+# where today such a mint holds its slot for MINT_GRACE and starts nothing. The
+# first request is the moment the visitor is known to be there, and it is the
+# same moment the desktop started under the old shape.
+#
+# THE REQUEST, as an interface other code builds on:
+#
+#   <START_DIR>/<slot>   a regular file, written by this router only (the
+#                        directory is root's, mode 0770, group www-data, which
+#                        this service joins; no session user is in it). The
+#                        FILE NAME IS THE SLOT and is the whole instruction, as
+#                        for a teardown request. Written beside and renamed
+#                        over, under the letting lock, at the letting's first
+#                        request (start_for_first_request()).
+#   its content          zero or more LF-terminated lines "<key> <value...>",
+#                        at most 4 KiB, ASCII. Nothing is defined yet and every
+#                        reader must ignore a key it does not know. RESERVED for
+#                        the start size, written by this router in the same
+#                        write, under the same lock: exactly one of
+#                          measured <W> <H>
+#                          invalid <rule>
+#                          absent <why>
+#                        No component may interpolate any field into a shell
+#                        command; each reader re-validates what it uses.
+#
+# WHO CONSUMES IT, AS ROOT, AND IN WHAT ORDER -- which is what makes a field in
+# it belong to exactly one start:
+#
+#   1. hdw4s-start@<slot>.path sees the file (PathExists=) and runs
+#      hdw4s-start@<slot>.service, root, which RENAMES it to
+#      /run/hdw4s-start-taken/<slot> (root, 0700 directory) -- so a request is
+#      taken at most once, and a second one for the slot is a new file -- and
+#      only then asks systemd to start hdw4s-ephemeral@<slot>.
+#   2. That start runs hdw4s-incarnation@<slot> first (After=), which mints
+#      THIS start's token. A consumer that must bind a field to this start
+#      does so there, as root, and DELETES the taken request as it reads it:
+#      exactly once per start, and a start nobody asked for through this path
+#      (an administrator's systemctl start) finds no request and no field.
+#   3. Only then does the session itself start.
+
+START_DIR = os.environ.get("HDW4S_START_DIR", "/run/hdw4s-start")
+
+# HOW LONG A REQUEST THAT IS NOT A PAGE WAITS FOR A DESKTOP BEING STARTED. The
+# same thirty seconds forward_request() already gives an upstream to answer, so
+# nothing that used to be served is now refused sooner. A page does not wait
+# this long: it gets the starting page after STARTING_PAGE_AFTER, as before.
+FIRST_ANSWER_WAIT = 30.0
+
+
+def await_desktop(instance, navigation, door=None, clock=time.monotonic,
+                  sleep=time.sleep):
+    """Wait for the desktop a MINT asked for to be listening. Before a letting's
+    first connection, never after.
+
+    WHY THE ROUTER WAITS INSTEAD OF CONNECTING. A connection no longer starts a
+    desktop; the relay of an ephemeral slot is Requisite= on its session, so a
+    connection that arrives before the start request has become a running unit
+    is refused -- and the first request after a mint is always that early,
+    because the redirect is milliseconds and a start is seconds. So the first
+    connection is made only once the desktop's own port is listening, which is
+    the moment it can answer. The port is read from the kernel's table
+    (slot_door_open()), which opens nothing.
+
+    WHEN THE PORT CANNOT BE READ -- no port configured, or the kernel's table
+    unreadable -- the session's runtime directory stands in for it: it exists
+    from the moment the unit starts activating, and the relay's After= then
+    holds the connection until the session is active. Connecting before even
+    that is the race a refusal loses: measured in the stand-in, a slot whose
+    port line was missing had its first request refused about half the time.
+
+    Returns "up", "starting" (a page navigation that has waited
+    STARTING_PAGE_AFTER: it gets the starting page, exactly when it used to),
+    "late" (anything else, after FIRST_ANSWER_WAIT: the answer a desktop that
+    never answered always got), or "unknown" when neither the port nor the
+    runtime directory can be read -- then the request is forwarded as before.
+    """
+    ask = slot_door_open if door is None else door
+    end = clock() + (STARTING_PAGE_AFTER if navigation else FIRST_ANSWER_WAIT)
+    while True:
+        up = ask(instance)
+        if up is None:
+            if not occupancy_readable():
+                return "unknown"
+            up = slot_occupied(instance)
+        if up:
+            return "up"
+        if clock() >= end:
+            return "starting" if navigation else "late"
+        sleep(0.05)
+
+
+def start_for_first_request(own, rec):
+    """Ask for REC's desktop to be started, if this is the moment. True if asked.
+
+    Asked for a letting whose desktop has never answered, and only while its
+    slot shows no desktop at all -- a desktop already starting or running is
+    left alone, which is what makes a second first-request (a browser opens two
+    connections) and a router restart harmless. Under the letting lock, so a
+    reclaim's decision cannot interleave with it.
+    """
+    if rec.get("live") or rec.get("ended"):
+        return False
+    instance = rec["instance"]
+    with own.letting:
+        if occupancy_readable() and slot_occupied(instance):
+            return False
+        return request_start(instance)
+
+
+def request_start(instance, root=None, lines=()):
+    """Ask for the desktop in INSTANCE to be started. True when asked.
+
+    A failure is logged and the letting stands: its visitor meets the starting
+    page and then the router's own answer that the desktop never came, which is
+    what a start that fails for any other reason also produces -- not a
+    connection that starts it behind the router's back, which is what this
+    replaced.
+    """
+    base = START_DIR if root is None else root
+    body = "".join("%s\n" % l for l in lines).encode("ascii", "replace")[:4096]
+    tmp = os.path.join(base, ".%s.%d" % (instance, os.getpid()))
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o660)
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+        os.replace(tmp, os.path.join(base, instance))
+        return True
+    except OSError as e:
+        log("could not ask for %s to be started: %s. Its visitor will wait on "
+            "the starting page for a desktop that is not coming."
+            % (instance, e.strerror or e))
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -4072,6 +4233,46 @@ def load_names_js():
 
 
 NAMES_JS = load_names_js()
+
+
+def load_refusal_page():
+    """hdw4s-refuse's page, exactly as that responder sends it, or None.
+
+    WHY THE ROUTER NEEDS IT. A connection to a pool slot whose desktop is not
+    running no longer starts one: the relay is Requisite= on the session, so it
+    fails, and hdw4s-refuse@ answers the connection with this page. For a
+    letting whose desktop HAD answered, that refusal is systemd's own account
+    that the desktop is gone -- recorded when the relay's start was refused, not
+    guessed from how soon a port closed -- and the visitor must meet the ended
+    page, not a page saying a desktop "could not be started".
+
+    READ, NOT IMPORTED: the literal is taken from the file's syntax tree, so
+    nothing in it runs in this process. Beside this file for the reason
+    hdw4s-duration is. None when it cannot be read, and then a refusal is
+    relayed as the 503 it is, which is what happened before this existed.
+    """
+    import ast
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "hdw4s-refuse")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "PAGE"
+                    for t in node.targets):
+                value = ast.literal_eval(node.value)
+                return value if isinstance(value, bytes) and value else None
+    except (OSError, SyntaxError, ValueError):
+        return None
+    return None
+
+
+REFUSAL_PAGE = load_refusal_page()
+
+# What forward_request() returns when the desktop behind a letting that HAD one
+# is not running: its relay was refused (see load_refusal_page()).
+REFUSED = "refused: no desktop behind this slot"
 
 
 def names_script():
@@ -5794,7 +5995,8 @@ def registers_a_service_worker(headers):
 
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                     extra=(), navigation=False, hung_up=None,
-                    version=b"HTTP/1.1", body=("none", None)):
+                    version=b"HTTP/1.1", body=("none", None),
+                    refusal_ends=False):
     """One upstream connection for ONE request. Never one per downstream
     connection -- that is the pooling defect this component exists to avoid.
 
@@ -5956,6 +6158,22 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                               "Try again."), extra)
         return False
 
+    # THE RELAY'S REFUSAL, for a letting whose desktop had answered: nothing of
+    # it is sent, and the caller gates the visitor (REFUSED). Recognised only by
+    # the whole of hdw4s-refuse's page, so a desktop's own 503 is relayed as it
+    # always was -- and a desktop that forges the page can end only its own
+    # visitor's letting.
+    prefix = b""
+    if refusal_ends and REFUSAL_PAGE and status == 503 and \
+            framing == ("length", len(REFUSAL_PAGE)):
+        try:
+            prefix = upf.read(len(REFUSAL_PAGE))
+        except OSError:
+            prefix = b""
+        if prefix == REFUSAL_PAGE:
+            up.close()
+            return REFUSED
+
     # A downstream that asked in HTTP/1.0 cannot read chunks: it is sent the
     # decoded body and the end of the connection instead.
     rechunk = version != b"HTTP/1.0"
@@ -5965,6 +6183,8 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
     else:
         dechunk = framing[0] == "chunked"
     wf.write(response_head(instance, status, fields, framing, extra, upgrade))
+    if prefix:
+        wf.write(prefix)
     wf.flush()
 
     if status == 101:
@@ -5998,7 +6218,7 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         elif dechunk:
             ended = relay_chunked(upf, wf, rechunk)
         elif kind == "length":
-            left = length
+            left = length - len(prefix)
             while left > 0:
                 chunk = upf.read(min(left, 65536))
                 if not chunk:
@@ -6246,6 +6466,30 @@ def serve(sock, own, expected_b64):
                     refresh_headers(own, identity, new_identity))
                 continue
 
+            if not rec.get("live"):
+                # THE LETTING'S FIRST REQUEST ASKS FOR ITS DESKTOP, and waits
+                # for it. See start_for_first_request() and await_desktop():
+                # connecting earlier is refused by the relay now that a
+                # connection cannot start anything.
+                start_for_first_request(own, rec)
+                navigation = is_page_navigation(method, rest, headers)
+                state = await_desktop(rec["instance"], navigation)
+                if state == "starting":
+                    log("%s had not answered a page request after %.1f s; "
+                        "sent the starting page"
+                        % (rec["instance"], STARTING_PAGE_AFTER))
+                    respond(wf, 200, starting_page(),
+                            [("Cache-Control", "no-store")]
+                            + refresh_headers(own, identity, new_identity))
+                    continue
+                if state == "late":
+                    log("%s did not start listening within %d s of a request"
+                        % (rec["instance"], FIRST_ANSWER_WAIT))
+                    respond(wf, 502, page("That desktop is not answering",
+                                          "Try again."),
+                            refresh_headers(own, identity, new_identity))
+                    continue
+
             unread = False
             served = forward_request(rec["instance"], method, rest, query,
                                      headers, rf, wf, sock,
@@ -6253,7 +6497,23 @@ def serve(sock, own, expected_b64):
                                                      new_identity),
                                      is_page_navigation(method, rest, headers),
                                      hung_up=lambda: own.hung_up(sid),
-                                     version=version, body=body)
+                                     version=version, body=body,
+                                     refusal_ends=bool(rec.get("live")))
+            if served is REFUSED:
+                # THE DESKTOP THIS LETTING HAD IS NOT RUNNING, on systemd's own
+                # word: its relay's Requisite= was refused. Gated exactly as a
+                # letting whose desktop was seen to stop -- and reclaimed if a
+                # desktop nobody asked for is somehow in the slot.
+                why = "the desktop behind %s is not running (its relay was " \
+                    "refused)" % rec["instance"]
+                own.forget(sid)
+                log("gated a returning visitor at %s: %s"
+                    % (rec["instance"], why))
+                say_once(("unknown", sid))
+                reclaim_slot(own, sid, rec, why)
+                respond(wf, 410, ended_page(owned_rows(own, identity), True),
+                        refresh_headers(own, identity, new_identity))
+                continue
             if served is STARTING:
                 # NOT AN ATTACHMENT. The desktop has not answered, so the
                 # slot's published token may still be the LAST occupant's (it

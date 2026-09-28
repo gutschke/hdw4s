@@ -1076,10 +1076,21 @@ echo '== the relay names no session unit, and enable supplies one =='
            "${SB}/units/hdw4s-proxy@bob.service.d" \
            "${SB}/units/hdw4s-proxy@dave.service.d" \
            "${SB}/units/hdw4s-proxy@eve.service.d" \
-           "${SB}/units/hdw4s-proxy@tmpl.service.d"
+           "${SB}/units/hdw4s-proxy@tmpl.service.d" \
+           "${SB}/units/hdw4s-proxy@fred.service.d" \
+           "${SB}/units/hdw4s-proxy@gwen.service.d"
   printf '%s\n' '# comment' '0 alice' '1 bob' '2 carol' '3 dave ephemeral' '4 eve' \
-                 '5 tmpl template' \
+                 '5 tmpl template' '6 fred ephemeral' '7 gwen' \
     > "${SB}/etc/hdw4s/instances"
+  # A POOL SLOT'S DROP-IN FROM BEFORE ONLY THE MINT STARTED A DESKTOP: BindsTo=,
+  # which starts the session on every connection. The upgrade must turn it into
+  # Requisite=, or an upgraded box keeps starting desktops for nobody. And a
+  # named desktop's BindsTo= is its design and must be left exactly as it is.
+  printf '%s\n' '[Unit]' 'BindsTo=hdw4s-ephemeral@fred.service' \
+                 'After=hdw4s-ephemeral@fred.service' \
+    > "${SB}/units/hdw4s-proxy@fred.service.d/30-session.conf"
+  printf '%s\n' '[Unit]' 'BindsTo=hdw4s@gwen.service' 'After=hdw4s@gwen.service' \
+    > "${SB}/units/hdw4s-proxy@gwen.service.d/30-session.conf"
   printf 'keep me\n' > "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf"
   # A drop-in from before the BindsTo fix. An upgrade has to correct it, because
   # nothing else rewrites the file -- "hdw4s enable" is not re-run on a machine
@@ -1107,7 +1118,7 @@ echo '== the relay names no session unit, and enable supplies one =='
   # desktop unit for an ephemeral slot, and the relay then failed every start
   # with result 'dependency' while the front door went on listening.
   case "$(cat "${SB}/units/hdw4s-proxy@dave.service.d/30-session.conf" 2>/dev/null)" in
-    *'BindsTo=hdw4s-ephemeral@dave.service'*) ok 'an ephemeral slot names the ephemeral unit';;
+    *'Requisite=hdw4s-ephemeral@dave.service'*) ok 'an ephemeral slot names the ephemeral unit';;
     *) bad 'an ephemeral slot names the ephemeral unit' 'missing or wrong';;
   esac
   # The fourth type, in the same run. The installers cannot call the CLI's
@@ -1117,13 +1128,22 @@ echo '== the relay names no session unit, and enable supplies one =='
   # which never starts an authoring session: the relay listens and every start
   # fails on the dependency, with the front door still accepting.
   case "$(cat "${SB}/units/hdw4s-proxy@tmpl.service.d/30-session.conf" 2>/dev/null)" in
-    *'BindsTo=hdw4s-ephemeral@tmpl.service'*) ok 'and so does the template slot';;
+    *'Requisite=hdw4s-ephemeral@tmpl.service'*) ok 'and so does the template slot';;
     *) bad 'and so does the template slot' 'missing or wrong';;
   esac
   case "$(cat "${SB}/units/hdw4s-proxy@eve.service.d/30-session.conf" 2>/dev/null)" in
     *'BindsTo=hdw4s@eve.service'*) ok 'an old Requires= drop-in is migrated';;
     *) bad 'an old Requires= drop-in is migrated' 'not migrated';;
   esac
+  case "$(cat "${SB}/units/hdw4s-proxy@fred.service.d/30-session.conf" 2>/dev/null)" in
+    *'BindsTo='*) bad 'a pool slot bound to its session is migrated to Requisite=' \
+                  'still BindsTo=: every connection can start a desktop';;
+    *'Requisite=hdw4s-ephemeral@fred.service'*)
+                  ok 'a pool slot bound to its session is migrated to Requisite=';;
+    *) bad 'a pool slot bound to its session is migrated to Requisite=' 'missing or wrong';;
+  esac
+  is 'a named desktop keeps its BindsTo=' \
+     "$(grep -c '^BindsTo=hdw4s@gwen.service' "${SB}/units/hdw4s-proxy@gwen.service.d/30-session.conf")" '1'
   is 'an existing drop-in is left alone' \
      "$(cat "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf")" 'keep me'
   is 'an instance with no relay directory is skipped' \
@@ -3547,7 +3567,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=553   # update when tests are added; a wrong number is the point
+EXPECTED=555   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

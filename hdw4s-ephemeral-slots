@@ -65,6 +65,7 @@ PROXYDIR="${HDW4S_PROXY_RUNDIR:-/run/hdw4s-proxy}"
 # for the same reason PROXYDIR is: nothing else creates it, and a path unit
 # watching a directory that does not exist reports active and can never fire.
 TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
+STARTDIR="${HDW4S_START_DIR:-/run/hdw4s-start}"
 INCARNDIR="${HDW4S_INCARNATION_DIR:-/run/hdw4s-incarnation}"
 # shellcheck source=/dev/null
 [ ! -r "${ETCDIR}/hdw4s.conf" ] || . "${ETCDIR}/hdw4s.conf"
@@ -194,6 +195,11 @@ install -d -m 0755 "${USERDB}" "${NSDIR}" "${DROPDIR}" "${PROFILEDIR}" "${PROXYD
 # a request to destroy somebody's desktop, and the group is the whole of who may
 # ask. The name inside it is a slot and nothing else; see hdw4s-teardown@.path.
 install -d -m 0770 -g www-data "${TEARDOWNDIR}"
+# AND THE ONE WAY A POOL DESKTOP IS STARTED, with the same access story: the
+# router writes "start this slot" here and hdw4s-start@<slot> does it as root.
+# A connection cannot start one any more (the relay is Requisite= on the
+# session), so this directory is the whole of who can.
+install -d -m 0770 -g www-data "${STARTDIR}"
 # 0700, not 0755: this one holds a token per live slot, so its listing is a list of
 # which slots exist. Made separately rather than loosened into the line above.
 install -d -m 0700 "${INCARNDIR}"
@@ -566,6 +572,9 @@ if [ -z "${ONE_SHOT}" ]; then
     # --no-block: this runs at boot, before the pool is servable, and a path unit
     # that is slow to come up must not hold the rest of it.
     systemctl start --no-block "hdw4s-teardown@${name}.path" 2>/dev/null || :
+    # And the start watcher, under the same gate: the router only ever mints a
+    # pool slot, and the authoring slot is started by its administrator.
+    systemctl start --no-block "hdw4s-start@${name}.path" 2>/dev/null || :
   done <<SPECS
 ${SLOT_SPECS}
 SPECS
