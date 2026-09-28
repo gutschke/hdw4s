@@ -1532,6 +1532,9 @@ STATE_INVENTORY = {
     # When each slot's last-request file was last rewritten. Losing it costs
     # one extra write to a tmpfs.
     "_touched": "rate limiter",
+    # Which refusals have been logged. Cleared wholesale above its bound; the
+    # cost of that is one repeated log line per session still being refused.
+    "_SAID": "rate limiter",
     # Rebound once, by main(), from the pool the box is configured with. An
     # authority: it is the Max-Age a browser is handed, so a wrong value locks
     # somebody out of a running desktop. Pinned on purpose -- and pinned is
@@ -2207,6 +2210,37 @@ def visitor_tag(identity):
     lines, and not "which browser is this".
     """
     return hashlib.sha256(identity.encode("ascii", "replace")).hexdigest()[:8]
+
+
+# WHICH REFUSALS HAVE BEEN SAID. A tab that is refused does not ask once: it asks
+# for its page, its script, its manifest, its stylesheet and its identity, and it
+# retries every few seconds -- measured on production after a restart of this
+# router, where every one of those was answered 410 and the log said NOTHING, so
+# an administrator could not see a visitor being turned away at all. One line per
+# refused session is what an operator can read; one per request is what would be
+# silenced by the next person to be annoyed by it.
+_SAID = set()
+_said_lock = threading.Lock()
+
+
+def say_once(key, msg=None):
+    """Log MSG the first time KEY is seen by this process, and never again.
+
+    MSG None marks KEY as said without saying anything -- for an event that has
+    already been logged in other words, so that its follow-up requests are not
+    reported as a second event. Bounded like Ownership._refreshed, because a
+    stranger can present unlimited made-up session ids; clearing it costs one
+    repeated line per session still being refused.
+    """
+    with _said_lock:
+        if key in _SAID:
+            return False
+        if len(_SAID) > 20000:
+            _SAID.clear()
+        _SAID.add(key)
+    if msg is not None:
+        log(msg)
+    return True
 
 
 def log_arrival(what, identity, instance, sid, why=None):
@@ -5240,6 +5274,9 @@ def serve(sock, own, expected_b64):
                     own.forget(sid)
                     log("gated a returning visitor at %s: %s"
                         % (rec["instance"], why))
+                    # Said, in the line above; the tab's next requests are the
+                    # same event and are not reported again below.
+                    say_once(("unknown", sid))
                     # AND THE SLOT IS RECLAIMED IF WE LET IT. Gating alone
                     # leaves a full desktop running in that slot for nobody --
                     # which is the leak: one visitor ending four sessions
@@ -5283,12 +5320,21 @@ def serve(sock, own, expected_b64):
                 # a POST Resume of one of those desktops, or the directory's
                 # POST create: still no mint, and no silent connect, without a
                 # press.
+                say_once(("unknown", sid),
+                         "refused session %s: there is no letting on record "
+                         "for it, so everything under it is answered with the "
+                         "ended page (410); visitor %s"
+                         % (sid, visitor_tag(identity)))
                 respond(wf, 410, ended_page(owned_rows(own, identity), gone),
                         refresh_headers(own, identity, new_identity))
                 continue
             if rec["identity"] != identity:
                 # The invariant, refusing: different identities never see each
                 # other's sessions. This is the negative the close is tested with.
+                say_once(("foreign", sid, visitor_tag(identity)),
+                         "refused session %s to visitor %s: it belongs to a "
+                         "different browser (403)"
+                         % (sid, visitor_tag(identity)))
                 respond(wf, 403, page(
                     "Not your desktop",
                     "This address belongs to a different browser."),

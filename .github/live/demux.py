@@ -2752,6 +2752,58 @@ def test_refusal_is_logged_with_what_it_takes_to_judge_it(rig):
         "a missing sweep record was reported as something other than missing"
 
 
+def test_a_refused_session_is_logged_once(rig):
+    """A REFUSAL AN ADMINISTRATOR CANNOT SEE IS NOT A REFUSAL ANYBODY CAN FIX.
+
+    Measured on production 2026-09-27: after a restart of the router the owner's
+    tab asked for its page, its script, its manifest, its stylesheet and its
+    identity, every one was answered 410, and the log said nothing at all. So
+    each refusal is said -- ONCE per refused session, because a tab asks many
+    times, and a line per request is a line somebody silences.
+
+    Three events, each asked several times: a session nobody holds (410), a
+    stranger presenting somebody else's session (403), and a visitor gated at
+    a desktop that stopped, whose gate line is the event and whose follow-up
+    requests must not be reported as a second one.
+    """
+    madeup = secrets_hex()
+    for _ in range(5):
+        st, _, _ = rig.client().get("/s/%s/" % madeup)
+        assert st == 410, "a made-up session was not refused: %d" % st
+
+    a = rig.client()
+    sid, name = arrive_on_slot(rig, a)
+    stranger = rig.client()
+    for _ in range(3):
+        st, h, _ = stranger.get("/s/%s/" % sid)
+        stranger.learn_cookie(h)
+        assert st == 403, "a stranger was not refused: %d" % st
+
+    b = rig.client()
+    sid_b, name_b = arrive_on_slot(rig, b)
+    slot_named(rig, name_b).logout(leave_rundir=False)
+    for _ in range(4):
+        st, _, _ = b.get("/s/%s/" % sid_b)
+        assert st == 410, "a visitor whose desktop stopped was not gated: %d" % st
+
+    log = rig.stderr_text().splitlines()
+    unknown = [l for l in log if madeup in l]
+    assert len(unknown) == 1 and "410" in unknown[0], (
+        "a session nobody holds was refused five times and logged %d time(s): "
+        "%r" % (len(unknown), unknown))
+    foreign = [l for l in log if sid in l and "different browser" in l]
+    assert len(foreign) == 1 and "403" in foreign[0], (
+        "a stranger was refused three times and it was logged %d time(s): %r"
+        % (len(foreign), foreign))
+    # Every line about that visitor's return; the mint that let them in is not
+    # one of those.
+    gated = [l for l in log if "minted" not in l
+             and (sid_b in l or ("gated" in l and name_b in l))]
+    assert len(gated) == 1 and "gated" in gated[0], (
+        "a visitor gated at a stopped desktop, asking four times, was logged "
+        "%d time(s): %r" % (len(gated), gated))
+
+
 def test_last_request_record_is_written_where_the_connection_is_accepted(rig):
     """The accurate column, and why there are two.
 
@@ -4369,6 +4421,33 @@ def red_the_table_is_forgotten_at_a_restart():
         _remove_scratch_demuxes()
 
 
+SAY_EVERY_TIME = """
+
+# Appended by the red arm: every refused request is its own log line.
+def say_once(key, msg=None):
+    if msg is not None:
+        log(msg)
+    return True
+"""
+
+
+def red_a_refusal_is_logged_per_request():
+    """RED ARM: a line per request, which is the log somebody silences."""
+    path = scratch_demux("-sayall.py", SAY_EVERY_TIME)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_refused_session_is_logged_once(rig)
+        except AssertionError as e:
+            if "was refused five times and logged 5 time(s)" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def red_reclaim_on_mismatch_alone():
     """RED ARM: a router that reclaims without asking whose slot it is.
 
@@ -4412,6 +4491,7 @@ def main():
              test_cookie_slides_beyond_the_front_door,
              test_refusal_is_logged_with_what_it_takes_to_judge_it,
              test_last_request_record_is_written_where_the_connection_is_accepted,
+             test_a_refused_session_is_logged_once,
              test_a_session_cannot_set_our_cookie,
              test_cookie_lifetime_guard, test_refresh_rate_limit,
              test_state_inventory_guard,
@@ -4573,6 +4653,7 @@ def main():
                red_reclaim_on_mismatch_alone,
                red_the_table_is_forgotten_at_a_restart,
                red_a_logout_with_the_tab_open_resurrects_again,
+               red_a_refusal_is_logged_per_request,
                red_scope_checked_by_the_page,
                red_a_console_address_that_stops_being_claimed,
                red_every_path_is_the_front_door,
