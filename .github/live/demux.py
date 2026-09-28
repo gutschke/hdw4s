@@ -3024,13 +3024,32 @@ def test_a_session_cannot_set_our_cookie(rig):
     """
     a = rig.client()
     sid, _ = arrive(rig, a)
-    before = a.cookie
+    forged = "f" * 32
+    # WRITTEN AS A BROWSER READS A NAME, not as the filter used to. The first
+    # version of this test looked only at values starting "hdw4s_id=", which
+    # is the filter's own blind spot restated -- measured by the threat review:
+    # "hdw4s_id =X" reached the browser and Chrome 153 took it as our cookie.
+    # So the oracle is every Set-Cookie the browser receives that carries the
+    # forged token, whatever its spelling.
+    for spelling in ("hdw4s_id=%s", "hdw4s_id =%s; Path=/; Secure",
+                     "hdw4s_id\t=%s; Path=/", " hdw4s_id=%s",
+                     "hdw4s_fresh=%s; Path=/", "=hdw4s_id=%s",
+                     "hdw4s_id; x=%s"):
+        for s in rig.slots:
+            s.forge_cookie = spelling % forged
+        st, h, _ = a.get("/s/%s/" % sid)
+        got = [v for v in h.get("set-cookie", []) if forged in v]
+        assert not got, "a session set our cookie by writing %r: %r" \
+            % (spelling % "X", got)
+    # THE PERMIT ARM: a session's own cookies still reach its page. A filter
+    # that dropped every Set-Cookie would pass everything above.
     for s in rig.slots:
-        s.forge_cookie = "hdw4s_id=" + ("f" * 32)
+        s.forge_cookie = "selkies_pref=%s; Path=/" % forged
     st, h, _ = a.get("/s/%s/" % sid)
-    got = [v for v in h.get("set-cookie", []) if v.startswith("hdw4s_id=")]
-    assert not any(("f" * 32) in v for v in got), \
-        "a session set our identity cookie: %r" % got
+    for s in rig.slots:
+        s.forge_cookie = None
+    assert any(forged in v for v in h.get("set-cookie", [])), \
+        "a session's own cookie was dropped on its way to the browser"
 
 
 # --- guards exercised without a network ------------------------------------
@@ -4924,6 +4943,31 @@ def assert_cross_site_posts_are_refused(judge=None):
 """
 
 
+PREFIX_FILTER_AGAIN = """
+
+# Appended by the red arm: the filter as it shipped, matching a prefix of the
+# raw value rather than the name a browser reads out of it.
+def session_may_set_cookie(value):
+    return not value.strip().startswith(b"hdw4s_id=")
+"""
+
+
+def red_a_padded_name_sets_our_cookie():
+    path = scratch_demux("-cookieprefix.py", PREFIX_FILTER_AGAIN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_session_cannot_set_our_cookie(rig)
+        except AssertionError as e:
+            if "hdw4s_id =X" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def red_a_press_from_another_page_acts():
     path = scratch_demux("-crosssite.py", CROSS_SITE_PERMITTED)
     rig = Rig(demux=path)
@@ -5156,6 +5200,7 @@ def main():
                red_concurrent_arrivals_share_a_slot,
                red_a_reclaim_interleaves_with_a_letting,
                red_a_press_from_another_page_acts,
+               red_a_padded_name_sets_our_cookie,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)

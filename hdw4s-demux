@@ -5243,6 +5243,38 @@ def splice(a, b, names=("", ""), first=None, hung_up=None):
                 pass
 
 
+def session_may_set_cookie(value):
+    """False for a Set-Cookie VALUE a session must not get to the browser.
+
+    THE NAME IS READ AS A BROWSER READS IT, and reading it any other way was a
+    measured hole. The filter used to drop only a value that began with
+    "hdw4s_id=", but a browser takes the name as everything before the first
+    "=" of the first ";"-part, with spaces and tabs around it removed. So
+    "hdw4s_id =X" passed the router and, measured in Chrome 153, overwrote the
+    HttpOnly identity the router had set: hostile code in one visitor's desktop
+    could plant the ATTACKER's identity in that browser, and the visitor's next
+    New desktop was then listed to the attacker and served to them.
+
+    Refused, and each measured in Chrome 153 on 2026-09-27:
+      a name starting "hdw4s_", in any case -- every cookie of ours, present
+        and future: hdw4s_id, and hdw4s_fresh, which skips the Connect card.
+        Chrome compares names case-sensitively, so "HDW4S_ID" is a different
+        cookie and harmless today; it is refused anyway because nothing a
+        desktop does needs a name that close to ours.
+      a NAMELESS cookie, a first part with no "=" at all. Chrome keeps it and
+        sends its value BARE ("Cookie: hdw4s_id=R; hdw4s_id"), which puts a
+        session-chosen word in the header our identity is parsed from.
+      an EMPTY name, "=hdw4s_id=X". Chrome drops this one by itself
+        (measured); it is refused because a browser that kept it as nameless
+        would send "hdw4s_id=X" bare, which is our cookie, byte for byte.
+    """
+    pair = value.split(b";", 1)[0]
+    if b"=" not in pair:
+        return False
+    name = pair.split(b"=", 1)[0].strip(b" \t")
+    return bool(name) and not name.lower().startswith(b"hdw4s_")
+
+
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                     extra=(), navigation=False, hung_up=None):
     """One upstream connection for ONE request. Never one per downstream
@@ -5376,9 +5408,10 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         # A session must not be able to set OUR cookie. It cannot read one --
         # the Cookie header is stripped on the way up -- and it must not be able
         # to write one either, or a compromised desktop rewrites the identity of
-        # every browser it answers.
-        if h.lower().startswith(b"set-cookie:") and \
-                h.lower().split(b":", 1)[1].strip().startswith(b"hdw4s_id="):
+        # every browser it answers. See session_may_set_cookie().
+        name, sep, value = h.partition(b":")
+        if sep and name.strip().lower() == b"set-cookie" and \
+                not session_may_set_cookie(value):
             continue
         wf.write(h)
     # Ours goes on last, so the sliding window is wound on by every exchange a
