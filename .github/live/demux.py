@@ -509,6 +509,7 @@ class Slot(threading.Thread):
                     if self.port is not None:
                         self.open_door()
                 upgrade = False
+                length, chunked = 0, False
                 while True:
                     h = f.readline()
                     if h in (b"\r\n", b"\n", b""):
@@ -516,6 +517,21 @@ class Slot(threading.Thread):
                     if h.lower().startswith(b"upgrade:") and \
                             b"websocket" in h.lower():
                         upgrade = True
+                    if h.lower().startswith(b"content-length:"):
+                        length = int(h.split(b":", 1)[1])
+                    if h.lower().replace(b" ", b"") == \
+                            b"transfer-encoding:chunked\r\n":
+                        chunked = True
+                # THE BODY, read and reported back as BODY=, so a test can see
+                # what of a request's body reached the desktop.
+                got = f.read(length) if length else b""
+                while chunked:
+                    n = int(f.readline().split(b";")[0], 16)
+                    if n == 0:
+                        f.readline()
+                        break
+                    got += f.read(n)
+                    f.readline()
                 if upgrade:
                     c.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
                               b"Upgrade: websocket\r\n"
@@ -536,6 +552,8 @@ class Slot(threading.Thread):
                     return
                 body = ("SLOT=%s PATH=%s" % (self.name,
                         line.split()[1].decode())).encode()
+                if got:
+                    body += b" BODY=" + got
                 forged = (b"Set-Cookie: " + self.forge_cookie.encode() + b"\r\n"
                           if self.forge_cookie else b"")
                 forged += b"".join(x.encode() + b"\r\n"
@@ -5512,6 +5530,128 @@ def red_a_101_is_taken_from_anyone():
         _remove_scratch_demuxes()
 
 
+def one_request(rig, client, method, path, extra, body, wait=2.0):
+    """ONE request with BODY, framed by EXTRA, and every byte of the answer."""
+    s = socket.create_connection(("127.0.0.1", rig.port), 10)
+    head = ["%s %s HTTP/1.1" % (method, path), "Host: demux.test",
+            "Authorization: Basic " + client.auth,
+            "Cookie: hdw4s_id=" + client.cookie] + list(extra)
+    s.sendall(("\r\n".join(head) + "\r\n\r\n").encode() + body)
+    s.settimeout(wait)
+    got = b""
+    try:
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            got += b
+    except socket.timeout:
+        pass
+    finally:
+        s.close()
+    return got
+
+
+def test_a_request_body_is_never_read_as_a_request(rig):
+    """One request in, one response out, whatever its body holds.
+
+    Measured before this was written: a body on any request the router
+    answers itself -- the directory, the front door, a 404 -- was never read,
+    so the next read on the connection took it as a request and a second
+    response went back for it. The reverse proxy framed ONE request; it got
+    two answers, and the spare one is the answer to whatever it sends down
+    that connection next, which may be another visitor's. A page on the
+    shared origin can send such a body with fetch().
+
+    And framing two parsers could read differently -- the request-side twin
+    of the response rule -- is refused before anything is answered."""
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    inner = ("GET /sessions/ HTTP/1.1\r\nHost: demux.test\r\n"
+             "Authorization: Basic %s\r\n\r\n" % a.auth).encode()
+    mints = mint_lines(rig)
+    for method, path, extra in (
+            ("POST", "/sessions/", ()), ("GET", "/", ()),
+            ("GET", "/nothing-here", ()),
+            ("GET", "/s/%s/sw.js" % sid, ("Service-Worker: script",)),
+            ("POST", "/s/%s/" % sid, ())):
+        got = one_request(rig, a, method, path,
+                          list(extra) + ["Content-Length: %d" % len(inner)],
+                          inner)
+        assert got.count(b"HTTP/1.1 ") == 1, \
+            "one %s %s with a body was answered %d times" \
+            % (method, path, got.count(b"HTTP/1.1 "))
+    chunked = b"%x\r\n%s\r\n0\r\n\r\n" % (len(inner), inner)
+    got = one_request(rig, a, "POST", "/sessions/",
+                      ["Transfer-Encoding: chunked"], chunked)
+    assert got.count(b"HTTP/1.1 ") == 1, \
+        "a chunked body to the directory was answered %d times" \
+        % got.count(b"HTTP/1.1 ")
+    for label, extra, body in (
+            ("Content-Length with Transfer-Encoding",
+             ["Content-Length: %d" % len(chunked),
+              "Transfer-Encoding: chunked"], chunked),
+            ("two Content-Lengths",
+             ["Content-Length: 0", "Content-Length: %d" % len(inner)], inner),
+            ("a signed Content-Length",
+             ["Content-Length: +%d" % len(inner)], inner),
+            ("a space before the colon",
+             ["Content-Length : %d" % len(inner)], inner),
+            ("a transfer coding that is not chunked",
+             ["Transfer-Encoding: gzip, chunked"], chunked)):
+        got = one_request(rig, a, "POST", "/s/%s/" % sid, extra, body)
+        assert got.startswith(b"HTTP/1.1 400 ") and \
+            got.count(b"HTTP/1.1 ") == 1 and b"SLOT=" not in got, \
+            "a request with %s was answered %r" % (label, got[:80])
+    assert mint_lines(rig) == mints, "a request body minted a desktop"
+    # PERMIT ARM: a desktop still gets its request bodies, both framings, and
+    # the connection still carries the next request after one.
+    st, _, body = a.get("/s/%s/" % sid)
+    got = one_request(rig, a, "POST", "/s/%s/up" % sid,
+                      ["Content-Length: 5"], b"hello")
+    assert b"BODY=hello" in got, \
+        "a desktop did not get a request's body: %r" % got[-80:]
+    got = one_request(rig, a, "POST", "/s/%s/up" % sid,
+                      ["Transfer-Encoding: chunked"],
+                      b"3;x=y\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n")
+    assert b"BODY=hello" in got, \
+        "a desktop did not get a chunked request's body: %r" % got[-80:]
+    got = one_request(rig, a, "POST", "/s/%s/up" % sid,
+                      ["Content-Length: 5"],
+                      b"hello" + ("GET /s/%s/next HTTP/1.1\r\nHost: demux.test"
+                                  "\r\nAuthorization: Basic %s\r\nCookie: "
+                                  "hdw4s_id=%s\r\n\r\n"
+                                  % (sid, a.auth, a.cookie)).encode())
+    assert b"BODY=hello" in got and b"PATH=/next" in got, \
+        "the connection did not carry a request after a forwarded body: %r" \
+        % got[-120:]
+
+
+UNREAD_BODIES_AGAIN = """
+
+# Appended by the red arm: no request has a body, as far as the router knows --
+# which is what its own pages assumed before request_framing().
+def request_framing(headers):
+    return "none", None
+"""
+
+
+def red_a_request_body_is_read_as_a_request():
+    path = scratch_demux("-unread.py", UNREAD_BODIES_AGAIN)
+    rig = Rig(demux=path, gate=None)
+    try:
+        try:
+            test_a_request_body_is_never_read_as_a_request(rig)
+        except AssertionError as e:
+            if "was answered 2 times" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def test_a_request_a_parser_splits_differently_is_refused(rig):
     """The request side of the same rule: refused whole, never judged."""
     a = rig.client()
@@ -5943,6 +6083,7 @@ def main():
         (test_a_101_nobody_asked_for_is_refused, dict(gate=None)),
         (test_every_framing_a_desktop_uses_still_reaches_the_browser,
          dict(gate=None)),
+        (test_a_request_body_is_never_read_as_a_request, dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -6039,6 +6180,7 @@ def main():
                red_an_interim_head_is_relayed,
                red_ambiguous_framing_is_resolved,
                red_a_101_is_taken_from_anyone,
+               red_a_request_body_is_read_as_a_request,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)

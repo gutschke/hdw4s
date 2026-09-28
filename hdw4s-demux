@@ -5449,19 +5449,15 @@ def read_final_head(f, asked_upgrade):
     raise Unrelayable("more than %d interim responses" % INTERIM_MAX)
 
 
-def response_framing(method, status, fields):
-    """How this response's body is delimited, by RFC 9112 section 6.3.
-
-    ("none", length) for HEAD, 204 and 304 -- no body, whatever the fields
-    say; LENGTH is a valid Content-Length to repeat to a HEAD, or None.
-    ("length", n), ("chunked", None), or ("close", None).
+def message_framing(fields):
+    """(chunked, length) declared by a message's fields, or Unrelayable.
 
     AMBIGUITY IS REFUSED, not resolved: Content-Length together with
     Transfer-Encoding, more than one Content-Length, a length that is not
     digits, a transfer coding other than exactly "chunked". RFC 9112 lets a
     recipient pick Transfer-Encoding in the first case; this one does not,
-    because the router then writes its own framing and a desktop that sent
-    both was not writing HTTP for anybody's benefit but its own."""
+    because whoever sent both was not writing HTTP for anybody's benefit but
+    their own, and two readers of it can end the message in two places."""
     lengths = [v for n, v in fields if n == b"content-length"]
     codings = [v for n, v in fields if n == b"transfer-encoding"]
     if lengths and codings:
@@ -5477,6 +5473,17 @@ def response_framing(method, status, fields):
         length = int(lengths[0])
     if codings and codings[0].lower() != b"chunked":
         raise Unrelayable("a transfer coding other than chunked")
+    return bool(codings), length
+
+
+def response_framing(method, status, fields):
+    """How this response's body is delimited, by RFC 9112 section 6.3.
+
+    ("none", length) for HEAD, 204 and 304 -- no body, whatever the fields
+    say; LENGTH is a valid Content-Length to repeat to a HEAD, or None.
+    ("length", n), ("chunked", None), or ("close", None). Ambiguity is
+    refused by message_framing()."""
+    codings, length = message_framing(fields)
     if method == b"HEAD" or status in (204, 304):
         return "none", (length if method == b"HEAD" else None)
     if codings:
@@ -5484,6 +5491,33 @@ def response_framing(method, status, fields):
     if length is not None:
         return "length", length
     return "close", None
+
+
+def request_framing(headers):
+    """How a request's body is delimited: ("none", None), ("length", n) or
+    ("chunked", None). Unrelayable for framing two parsers could read
+    differently, by message_framing()'s rule.
+
+    A REQUEST'S BODY MUST BE ACCOUNTED FOR BY WHOEVER ANSWERS THE REQUEST, or
+    it is read as the next request on the connection -- and the reverse
+    proxy's connection to this router may carry another visitor's request
+    next. The router's own pages never read a body; serve() closes the
+    connection after answering one that had a body, rather than read it."""
+    fields = []
+    for h in headers:
+        name, _, value = h.partition(b":")
+        low = name.strip().lower()
+        if low in (b"content-length", b"transfer-encoding"):
+            if name != name.strip():
+                raise Unrelayable("whitespace around the name %s"
+                                  % _loggable(low))
+            fields.append((low, value.strip(b" \t\r\n")))
+    chunked, length = message_framing(fields)
+    if chunked:
+        return "chunked", None
+    if length:
+        return "length", length
+    return "none", None
 
 
 # WHAT A DESKTOP'S RESPONSE MAY CARRY TO THE BROWSER: fields whose effect ends
@@ -5635,7 +5669,7 @@ def registers_a_service_worker(headers):
 
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                     extra=(), navigation=False, hung_up=None,
-                    version=b"HTTP/1.1"):
+                    version=b"HTTP/1.1", body=("none", None)):
     """One upstream connection for ONE request. Never one per downstream
     connection -- that is the pooling defect this component exists to avoid.
 
@@ -5712,26 +5746,28 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
 
     upf = up.makefile("rb")
 
-    # Request body, if any.
-    clen = header_value(headers, "Content-Length")
-    if clen:
-        left = int(clen)
+    # Request body, if any, as request_framing() read it in serve(). Chunks
+    # are decoded and written again with our sizes, like a response's.
+    kind, left = body
+    if kind == "length":
         while left > 0:
             chunk = rf.read(min(left, 65536))
             if not chunk:
                 break
             up.sendall(chunk)
             left -= len(chunk)
-    elif (header_value(headers, "Transfer-Encoding") or b"").lower() == b"chunked":
-        while True:
-            size_line = read_line(rf)
-            up.sendall(size_line)
-            n = int(size_line.strip().split(b";")[0], 16)
-            if n == 0:
-                up.sendall(read_line(rf))
-                break
-            body = rf.read(n + 2)
-            up.sendall(body)
+    elif kind == "chunked":
+        upw = up.makefile("wb")
+        try:
+            whole = relay_chunked(rf, upw, True)
+        except (Unrelayable, Closed) as e:
+            whole = False
+            log("refused a chunked request body for %s: %s"
+                % (instance, e if isinstance(e, Unrelayable) else "cut short"))
+        if not whole:
+            up.close()
+            respond(wf, 400, page("Bad request", "That was not HTTP."), extra)
+            return False
 
     # A PAGE THE DESKTOP HAS NOT ANSWERED IN TIME is answered by us. The request
     # has already been sent, so the start it triggers goes on; only the reply is
@@ -5875,8 +5911,13 @@ def serve(sock, own, expected_b64):
     sock.settimeout(IDLE_TIMEOUT)
     rf = sock.makefile("rb")
     wf = sock.makefile("wb")
+    # A request body nobody read. See request_framing(): it is never read as
+    # the next request, so the connection ends instead.
+    unread = False
     try:
         while True:
+            if unread:
+                return
             try:
                 line = read_line(rf)
             except (Closed, socket.timeout, OSError):
@@ -5899,6 +5940,17 @@ def serve(sock, own, expected_b64):
             if unsafe_header_line([line] + headers) is not None:
                 respond(wf, 400, page("Bad request", "That was not HTTP."))
                 return
+            try:
+                body = request_framing(headers)
+            except Unrelayable as e:
+                say_once(("ambiguous-request", str(e)),
+                         "refused a request with %s: two parsers could end "
+                         "its body in different places (400). Said once per "
+                         "reason." % e)
+                respond(wf, 400, page("Bad request", "That was not HTTP."))
+                return
+            # Until forward_request() takes it, this body is unread.
+            unread = body[0] != "none"
 
             if not authorized(headers, expected_b64):
                 respond(wf, 401, page(
@@ -6069,13 +6121,14 @@ def serve(sock, own, expected_b64):
                     refresh_headers(own, identity, new_identity))
                 continue
 
+            unread = False
             served = forward_request(rec["instance"], method, rest, query,
                                      headers, rf, wf, sock,
                                      refresh_headers(own, identity,
                                                      new_identity),
                                      is_page_navigation(method, rest, headers),
                                      hung_up=lambda: own.hung_up(sid),
-                                     version=version)
+                                     version=version, body=body)
             if served is STARTING:
                 # NOT AN ATTACHMENT. The desktop has not answered, so the
                 # slot's published token may still be the LAST occupant's (it
