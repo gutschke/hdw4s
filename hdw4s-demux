@@ -1120,15 +1120,24 @@ class Ownership:
             log("WARNING: the ownership table at %s is not one this router "
                 "wrote; starting without it." % self._path)
             return
-        dropped = 0
-        for sid, rec in sorted(rows.items(), key=lambda kv: (
-                kv[1].get("minted", 0) if isinstance(kv[1], dict) else 0)):
-            if not _letting_is_well_formed(sid, rec):
-                dropped += 1
-                continue
-            row = {k: rec.get(k) for k in OWNERSHIP_FIELDS}
-            self._by_sid[sid] = row
-            self._by_identity.setdefault(row["identity"], []).append(sid)
+        # CHECKED BEFORE SORTED. Sorting first compared "minted" across rows,
+        # and one row with a string there raised TypeError at start -- a router
+        # that crash-loops on its own state file, for as long as the file lives.
+        try:
+            good = [(sid, rec) for sid, rec in rows.items()
+                    if _letting_is_well_formed(sid, rec)]
+            dropped = len(rows) - len(good)
+            for sid, rec in sorted(good, key=lambda kv: kv[1]["minted"]):
+                row = {k: rec.get(k) for k in OWNERSHIP_FIELDS}
+                self._by_sid[sid] = row
+                self._by_identity.setdefault(row["identity"], []).append(sid)
+        except Exception as e:
+            # Whatever the file held, it must not stop the front door starting.
+            self._by_sid.clear()
+            self._by_identity.clear()
+            log("WARNING: the ownership table at %s could not be taken back "
+                "(%r); starting without it." % (self._path, e))
+            return
         log("took back %d letting(s) from %s%s"
             % (len(self._by_sid), self._path,
                "" if not dropped else "; %d malformed row(s) dropped" % dropped))
@@ -1280,7 +1289,7 @@ class Ownership:
         with self._lock:
             rec = self._by_sid.get(sid)
             if rec is not None:
-                rec["hung_up"] = time.time() if now is None else now
+                rec["hung_up"] = time.monotonic() if now is None else now
 
     def pending_mints(self, since):
         """[(instance, minted)] for slots handed out whose desktop has not
@@ -2965,7 +2974,7 @@ HANGUP_SETTLE = 3.0
 
 
 def settle_after_hang_up(rec, instance, replaced=session_replaced,
-                         clock=time.time, sleep=time.sleep):
+                         clock=time.monotonic, sleep=time.sleep):
     """session_replaced(), asked until the world has caught up with a hang-up.
 
     For a record whose desktop has not hung up on us -- or never answered us,
