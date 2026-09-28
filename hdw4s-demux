@@ -5287,6 +5287,44 @@ def session_may_set_cookie(value):
     return bool(name) and not name.lower().startswith(b"hdw4s_")
 
 
+def session_may_send(line):
+    """False for a response header line a session must not get to the browser.
+
+    Two, and both are about the ONE ORIGIN every desktop in the pool shares
+    with the router's own pages and with each other:
+
+      Set-Cookie of ours     see session_may_set_cookie().
+      Service-Worker-Allowed widens the scope a service worker may claim past
+                             the directory its script was served from, so a
+                             desktop could register one over / -- the front
+                             door, the directory and every other visitor's
+                             session address -- and answer their requests
+                             from inside that visitor's own browser. Dropped
+                             always: nothing we serve needs it.
+    """
+    name, sep, value = line.partition(b":")
+    if not sep:
+        return True
+    name = name.strip().lower()
+    if name == b"set-cookie":
+        return session_may_set_cookie(value)
+    return name != b"service-worker-allowed"
+
+
+def registers_a_service_worker(headers):
+    """True for a request a browser makes to fetch a service worker's script.
+
+    The browser sends "Service-Worker: script" on exactly that fetch and on
+    nothing else, so refusing it refuses the registration and nothing a page
+    needs. A desktop serves pages on the pool's one origin; a worker it
+    registered even at its own address outlives the desktop in that browser.
+    Neither Selkies (2.0.0rc1, 2.0.0) nor anything of ours registers one --
+    searched, with the search seen to find the client's WebSocket and its
+    manifest link in the same trees.
+    """
+    return header_value(headers, "Service-Worker") is not None
+
+
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                     extra=(), navigation=False, hung_up=None):
     """One upstream connection for ONE request. Never one per downstream
@@ -5421,9 +5459,7 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         # the Cookie header is stripped on the way up -- and it must not be able
         # to write one either, or a compromised desktop rewrites the identity of
         # every browser it answers. See session_may_set_cookie().
-        name, sep, value = h.partition(b":")
-        if sep and name.strip().lower() == b"set-cookie" and \
-                not session_may_set_cookie(value):
+        if not session_may_send(h):
             continue
         wf.write(h)
     # Ours goes on last, so the sliding window is wound on by every exchange a
@@ -5527,6 +5563,21 @@ def serve(sock, own, expected_b64):
             # a tab whose only traffic for a while was that redirect got no
             # cookie back and its window did not slide.
             sid, rest, query = parse_target(target)
+            if registers_a_service_worker(headers):
+                # BEFORE any identity is minted or any session resolved: this
+                # request is answered the same whoever sends it, and it must
+                # not reach a desktop, start one, or hand out a cookie.
+                say_once(("service-worker", sid),
+                         "refused a service worker's script under %s: a page "
+                         "on this origin tried to register one, and none of "
+                         "ours does. Said once per session address."
+                         % (("/s/%s/" % sid) if sid else "the router's own "
+                            "pages"))
+                respond(wf, 403, page(
+                    "Not available",
+                    "This address cannot be installed as a background "
+                    "worker."))
+                continue
             identity = identity_of(headers)
             new_identity = False
             if identity is None:

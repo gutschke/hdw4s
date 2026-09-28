@@ -191,6 +191,13 @@ class Slot(threading.Thread):
         # identity. A backend is the untrusted side here; it must not be able to
         # reach the cookie the router owns.
         self.forge_cookie = None
+        # Any other response header a hostile desktop might send, as whole
+        # "Name: value" lines. Kept apart from forge_cookie so a test about one
+        # header cannot pass by accident on the other's filter.
+        self.extra_headers = ()
+        # Every request line this slot has been asked, so a test can say a
+        # refused request NEVER REACHED the desktop rather than inferring it.
+        self.asked = []
         # Set when this slot has actually served something. The oracle for "did
         # the router start a desktop" is the SLOT saying it was used, not the
         # router's own account of itself -- a component is not evidence about
@@ -470,6 +477,7 @@ class Slot(threading.Thread):
                 # loses it is worse than none, because the loss shows up as a
                 # confident number rather than as an error.
                 self.seen = True
+                self.asked.append(line)
                 try:
                     os.makedirs(self.rundir, mode=0o700, exist_ok=True)
                 except OSError:
@@ -516,6 +524,8 @@ class Slot(threading.Thread):
                         line.split()[1].decode())).encode()
                 forged = (b"Set-Cookie: " + self.forge_cookie.encode() + b"\r\n"
                           if self.forge_cookie else b"")
+                forged += b"".join(x.encode() + b"\r\n"
+                                   for x in self.extra_headers)
                 c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
                           b"Content-Type: text/plain\r\n%s\r\n%s"
                           % (len(body), forged, body))
@@ -4968,6 +4978,117 @@ def test_no_page_of_the_routers_can_be_framed(rig):
             % (what, st, csp, xfo))
 
 
+def test_a_desktop_cannot_install_a_service_worker(rig):
+    """Neither half of a registration reaches the browser or the desktop.
+
+    Every desktop in the pool serves pages on the one origin the router's own
+    pages use. A service worker registered there outlives the desktop in the
+    visitor's browser, and with Service-Worker-Allowed it may claim / -- the
+    front door, the directory, and every other session address."""
+    a = rig.client()
+    sid, body = arrive(rig, a)
+    slot = slot_named(rig, body.split("SLOT=")[1].split()[0])
+
+    # 1. The widening header is dropped; an ordinary one still passes, or a
+    #    filter that dropped every header would satisfy this.
+    slot.extra_headers = ("Service-Worker-Allowed: /",
+                          "service-worker-allowed : /",
+                          "X-Desktop-Ordinary: kept")
+    st, h, _ = a.get("/s/%s/app.js" % sid)
+    slot.extra_headers = ()
+    assert st == 200, "the desktop's script did not serve: %d" % st
+    assert "service-worker-allowed" not in h and \
+        not any(k.strip() == "service-worker-allowed" for k in h), \
+        "a desktop widened a service worker's scope: %r" % h
+    assert h.get("x-desktop-ordinary") == ["kept"], \
+        "the desktop's ordinary headers were dropped along with it"
+
+    # 2. The registration fetch itself is refused, and never reaches the slot.
+    before = len(slot.asked)
+    mints = mint_lines(rig)
+    for _ in range(3):
+        st, h, body = a.get("/s/%s/sw.js" % sid,
+                            headers=("Service-Worker: script",))
+        assert st == 403, \
+            "a service worker's script was served to the browser: %d" % st
+        assert b"SLOT=" not in body, "the refusal came from the desktop"
+    assert len(slot.asked) == before, \
+        "a refused registration still reached the desktop: %r" \
+        % slot.asked[before:]
+    # And the same address without that header is an ordinary script.
+    st, _, body = a.get("/s/%s/sw.js" % sid)
+    assert st == 200 and b"SLOT=" in body, \
+        "an ordinary request for the same address was refused too: %d" % st
+
+    # 3. Said once, for the admin, and it minted nothing.
+    lines = [l for l in rig.stderr_text().splitlines()
+             if "service worker" in l and sid in l]
+    assert len(lines) == 1, \
+        "three refused registrations were logged %d time(s): %r" \
+        % (len(lines), lines)
+    assert mint_lines(rig) == mints, "a refused registration minted a desktop"
+    # Nor at the router's own pages, where no session resolves it.
+    st, h, _ = rig.client().get("/", headers=("Service-Worker: script",))
+    assert st == 403 and "set-cookie" not in h and mint_lines(rig) == mints, \
+        "a registration at the front door was answered %d, or minted" % st
+
+
+SERVICE_WORKERS_AGAIN = """
+
+# Appended by the red arm: both halves undone. The header filter is back to
+# cookies only, and no request is recognised as a registration.
+def session_may_send(line):
+    name, sep, value = line.partition(b":")
+    if sep and name.strip().lower() == b"set-cookie":
+        return session_may_set_cookie(value)
+    return True
+
+
+def registers_a_service_worker(headers):
+    return False
+"""
+
+
+def red_a_desktop_installs_a_service_worker():
+    path = scratch_demux("-serviceworker.py", SERVICE_WORKERS_AGAIN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_desktop_cannot_install_a_service_worker(rig)
+        except AssertionError as e:
+            if "widened a service worker's scope" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
+REGISTRATION_SERVED_AGAIN = """
+
+# Appended by the red arm: only the registration refusal undone.
+def registers_a_service_worker(headers):
+    return False
+"""
+
+
+def red_a_service_workers_script_is_served():
+    path = scratch_demux("-swscript.py", REGISTRATION_SERVED_AGAIN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_desktop_cannot_install_a_service_worker(rig)
+        except AssertionError as e:
+            if "script was served to the browser" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 FRAMEABLE_AGAIN = """
 
 # Appended by the red arm: the router's pages as they were, frameable.
@@ -5164,6 +5285,7 @@ def main():
         (test_a_press_from_another_page_is_refused, dict(gate=None)),
         (test_a_press_on_this_machines_own_page_still_acts, dict(gate=None)),
         (test_no_page_of_the_routers_can_be_framed, dict(gate=None)),
+        (test_a_desktop_cannot_install_a_service_worker, dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -5251,6 +5373,8 @@ def main():
                red_a_press_from_another_page_acts,
                red_a_padded_name_sets_our_cookie,
                red_the_directory_can_be_framed,
+               red_a_desktop_installs_a_service_worker,
+               red_a_service_workers_script_is_served,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)
