@@ -722,6 +722,9 @@ stage_fd=''
 stage_pid=''
 stage_armed=''
 hold_outer=''
+# HOW THE HOLD ENDED, as one word, for the page (see "startup hold outcome"
+# below). Anything that does not reach a verdict leaves it "unknown".
+hold_outcome='unknown'
 if [ "${HDW4S_STARTUP_HOLD}" = 'on' ]; then
   hold_skip=''
   hold_gate="${HDW4S_ANNOUNCED_GATE_WAIT:-60}"
@@ -1315,12 +1318,16 @@ if [ -n "${stage_fd}" ]; then
     case "${hold_end}" in
       stopping) ;;
       ready)
+        hold_outcome='started'
         echo "hdw4s: held the stream ${hold_ms} ms: the desktop signalled that it had started (shown after ${hold_shown} ms)${hold_note}" >&2 ;;
       bound)
+        hold_outcome='bound'
         echo "hdw4s: held the stream ${hold_ms} ms: released ${hold_bound} s after the desktop was shown, with no signal that it had started (a start into the overview, a dialog, or a slow or already-black start)${hold_note}" >&2 ;;
       none)
+        hold_outcome='none'
         echo "hdw4s: nothing to hold the stream for: ${stage_line#none }" >&2 ;;
       deadline)
+        hold_outcome='deadline'
         if [ -n "${hold_shown}" ] && [ "${hold_deadline}" -lt "${hold_outer}" ]; then
           echo "hdw4s: the stage watcher gave no verdict within $(( hold_bound + 2 )) s of the desktop being shown; starting the stream anyway${hold_note}" >&2
         elif [ -n "${hold_shown}" ]; then
@@ -1343,8 +1350,25 @@ if [ -n "${stage_fd}" ]; then
   kill "${stage_pid}" 2>/dev/null || :
   exec {stage_fd}<&-
 elif [ "${HDW4S_STARTUP_HOLD}" != 'on' ]; then
+  hold_outcome='off'
   echo 'hdw4s: startup hold disabled (HDW4S_STARTUP_HOLD=off)' >&2
 fi
+# THE OUTCOME, ONCE, IN ONE WORD, for the page that decides whether to fit the
+# desktop to the tab. "started" means the hold was released by the desktop's
+# own end-of-startup signal; every other word -- a bound, a deadline, a watcher
+# that died, a hold that was off or skipped -- means nobody knows that startup
+# is over. The owner's rule is "first, do no harm": a screen size change inside
+# GNOME 46's startup can leave the desktop black for good (gnome-shell issue
+# 9018, the defect this hold exists for), a wrong size cannot, so the page
+# resizes on "started" and on nothing else.
+#
+# It is a line in this start's journal rather than a file this script writes,
+# because the only place a page can read it is the web root, and this script
+# runs as the occupant, who must never be able to write the tree its own page is
+# served from. The unit's announced-gate reads this line as root and publishes
+# the word -- see "hdw4s-webroot announced-gate". The occupant CAN print a line
+# like this one too; all that buys is a resize of their own desktop.
+echo "hdw4s: startup hold outcome: ${hold_outcome}" >&2
 # A stop that arrived during the wait already killed the children; starting
 # the stream now would put it on a dying unit, holding the port with nothing
 # left to stop it.

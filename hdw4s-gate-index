@@ -867,6 +867,70 @@ __ACT__
     } catch(e) { return null; }
   }
 
+  // FIT THE DESKTOP TO THE TAB, ONCE, AFTER A START THAT IS KNOWN TO BE OVER.
+  //
+  // A first start often shows the desktop at the wrong size until the visitor
+  // resizes the window. The cure is one more resolution request once the picture is
+  // up -- but a screen size change INSIDE GNOME 46's startup can leave the desktop
+  // black for good (gnome-shell issue 9018; the startup hold in hdw4s-run-session
+  // exists for it), and a page cannot see where startup is. The server can: the
+  // hold's outcome is published beside this page as hdw4s-startup/outcome. The
+  // owner's rule, verbatim: "if we trigger the 18s timeout, then don't bother about
+  // the resize. that's the pragmatic solution of 'first, do no harm' ... unlike a
+  // black screen which would be". So:
+  //
+  //   "started"  the hold ended on the desktop's own end-of-startup signal: fit.
+  //   ANYTHING ELSE -- a fallback release, no file, a failed fetch, a word this
+  //              page does not know -- is unknown, and unknown does NOT resize.
+  //
+  // It runs only after the veil has SEEN the desktop painted, which is later than
+  // the resolution the client already sends on connecting; so on a "started" start
+  // it adds no exposure the client had not already taken.
+  //
+  // IT ASKS THE CLIENT THROUGH ITS OWN MESSAGE, NOT A WINDOW EVENT. The streaming
+  // client's dashboard resets the stream to the window size with a same-origin
+  // "resetResolutionToWindow" message; that is what is sent here. Dispatching a
+  // synthetic resize event was tried for a different problem and made the client
+  // latch a transient size for good -- see the reload in boot() below. The message
+  // also clears a manual resolution, so a visitor who chose one is left alone, and a
+  // secondary page (a shared viewer, a second display) never asks: it does not own
+  // the size.
+  var OUTCOME = 'hdw4s-startup/outcome';
+  var fitAsked = false;
+  function fetchOutcome(cb){
+    var done = false;
+    function once(v){ if (!done) { done = true; cb(v); } }
+    setTimeout(function(){ once(null); }, 5000);
+    try {
+      fetch(OUTCOME, {cache: 'no-store'}).then(function(r){
+        if (!r.ok) return once(null);
+        return r.text().then(function(t){ once((t || '').trim() || null); },
+                             function(){ once(null); });
+      }, function(){ once(null); });
+    } catch(e) { once(null); }
+  }
+  function fitAfterStart(){
+    if (fitAsked) return;
+    fitAsked = true;
+    if (SECONDARY) return;
+    fetchOutcome(function(word){
+      if (word !== 'started') {
+        try { console.log('[hdw4s gate] not fitting the desktop to this tab: the startup '
+                          + 'outcome is ' + (word || 'unknown')); } catch(e){}
+        return;
+      }
+      if (window.manual_resolution || window.manualResolution) {
+        try { console.log('[hdw4s gate] not fitting the desktop to this tab: a manual '
+                          + 'resolution is set'); } catch(e){}
+        return;
+      }
+      try {
+        window.postMessage({type: 'resetResolutionToWindow'}, location.origin);
+        console.log('[hdw4s gate] startup is over; fitting the desktop to this tab');
+      } catch(e){}
+    });
+  }
+
   function veilUp(){
     if (!veilEl) return;
     var t0 = Date.now();
@@ -937,6 +1001,7 @@ __ACT__
         // about a failure.
         recordPaint(Date.now() - t0);
         stop('desktop painted (' + n + ' colours)');
+        fitAfterStart();
         return;
       }
       // Reached only with a reading that says "not painted yet", taken just now.

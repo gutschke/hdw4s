@@ -422,6 +422,23 @@ ExecStart=/usr/lib/hdw4s/hdw4s-session %i --ephemeral
 # by INVOCATION_ID so that a journal holding other starts cannot be misread. Its wait
 # expiring is a failure that says which thing it could not establish, never a pass.
 ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate %i
+# WHERE THAT SAME LINE PUBLISHES HOW THE STARTUP HOLD ENDED, for the page to decide
+# whether it may fit the desktop to the tab (hdw4s-webroot, publish_outcome). One
+# directory of the web root, made writable inside this namespace and nothing else:
+# ProtectSystem=strict keeps the rest of /usr read-only, and the directory is root's
+# and 0755, so root (the "!" line above) can write it and the occupant cannot. The
+# occupant writing anything the pool's one origin serves is the thing to never allow.
+#
+# "-" because a tree built by an older package has no such directory, and the
+# answer then is that nobody publishes and the page does not resize -- never a
+# session that fails to start. The path is the default HDW4S_WEBROOT_DIR, which a
+# unit cannot expand; a tree elsewhere degrades the same way.
+#
+# NOT on the named unit, deliberately: its "ExecStartPre=+... provision" rebuilds the
+# tree with "rm -rf", and "+" keeps this unit's mounts, so the directory would be a
+# mount point there and the rebuild -- and the start -- would fail. A named desktop
+# publishes nothing and its page does not resize.
+ReadWritePaths=-/usr/share/hdw4s/webroot/%i/hdw4s-startup
 
 [Install]
 WantedBy=multi-user.target

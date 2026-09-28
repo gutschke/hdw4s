@@ -1935,6 +1935,105 @@ JS
   fi
 )
 
+echo '== the page fits the desktop to its tab only after a start that is known to be over =='
+# THE PROBLEM: a first start often shows the desktop at the wrong size until the
+# visitor resizes the window. THE RULE, the owner's: resize only when the startup
+# hold ended on the desktop's own end-of-startup signal; never after a fallback
+# release; unknown means no resize ("first, do no harm" -- a resize inside GNOME 46's
+# startup can leave the desktop black, a wrong size cannot).
+#
+# Run on the functions the generator WRITES. Stood in for: the browser -- fetch() is a
+# promise with one status and one body, postMessage records what it was asked to send.
+# Nothing here shows the streaming client acting on the message, nor a screen
+# changing size; that needs a real desktop and a real browser.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+  if ! command -v node >/dev/null; then
+    bad 'the page-script tests can run' 'node is needed to run the page script'
+    exit 0
+  fi
+  # One page, one answer from the server. Prints what the page posted, if anything.
+  #   $1 status  $2 body  $3 extra setup (JS)  $4 generator (default: the real one)
+  fits() {
+    rm -f "${d}/out.html"
+    python3 "${4:-${ROOT}/hdw4s-gate-index}" "${d}/in.html" "${d}/out.html" >/dev/null 2>&1 \
+      || { echo 'the generator refused the page'; return; }
+    python3 - "${d}/out.html" > "${d}/fns.js" <<'PY'
+import re, sys
+html = open(sys.argv[1], encoding="utf-8").read()
+out = []
+for pat in (r"\n  var OUTCOME = .*?;\n", r"\n  var fitAsked = false;\n",
+            r"\n  function fetchOutcome\(.*?\n  \}\n", r"\n  function fitAfterStart\(.*?\n  \}\n"):
+    m = re.search(pat, html, re.S)
+    if m:
+        out.append(m.group(0))
+print("".join(out))
+PY
+    node - "${d}/fns.js" "$1" "$2" "${3:-}" <<'JS'
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const status = Number(process.argv[3]), body = process.argv[4], setup = process.argv[5];
+if (!/function fitAfterStart/.test(src)) { process.stdout.write('no fitAfterStart in the page'); process.exit(0); }
+const posted = [];
+let asked = '';
+const window = {postMessage: (m, o) => posted.push(m.type + '@' + o)};
+const location = {origin: 'https://door.example'};
+const fetch = (u) => { asked = u; return status < 0 ? Promise.reject(new Error('net'))
+  : Promise.resolve({status, ok: status >= 200 && status < 300, text: () => Promise.resolve(body)}); };
+const setTimeout = () => 0;
+const console = {log: () => {}};
+let SECONDARY = false;
+eval(setup);
+const f = new Function('fetch', 'location', 'setTimeout', 'console', 'window', 'SECONDARY',
+                       src + '\nreturn fitAfterStart;')(fetch, location, setTimeout, console, window, SECONDARY);
+f(); f();
+setTimeout; setImmediate(() => setImmediate(() =>
+  process.stdout.write('posted=[' + posted.join(',') + '] asked=' + asked)));
+JS
+  }
+
+  # THE POSITIVE CONTROL, and the problem itself: a real release fits, once, through
+  # the client's own message and to the page's own origin.
+  is 'a start released on the real end-of-startup mark fits the desktop, once' \
+    "$(fits 200 $'started\n')" \
+    'posted=[resetResolutionToWindow@https://door.example] asked=hdw4s-startup/outcome'
+  # EVERY FALLBACK, AND EVERY WAY OF NOT KNOWING, DOES NOT.
+  for w in bound none deadline off unknown '' 'Started' 'started now'; do
+    is "the outcome [${w}] does not resize" "$(fits 200 "${w}")" \
+      'posted=[] asked=hdw4s-startup/outcome'
+  done
+  is 'a missing outcome (404) does not resize' "$(fits 404 'started')" \
+    'posted=[] asked=hdw4s-startup/outcome'
+  is 'a failed fetch does not resize' "$(fits -1 '')" 'posted=[] asked=hdw4s-startup/outcome'
+  # The visitor's own choice, and the pages that do not own the size.
+  is 'a manual resolution (websockets client) is left alone' \
+    "$(fits 200 started 'window.manual_resolution = true;')" \
+    'posted=[] asked=hdw4s-startup/outcome'
+  is 'a manual resolution (webrtc client) is left alone' \
+    "$(fits 200 started 'window.manualResolution = true;')" \
+    'posted=[] asked=hdw4s-startup/outcome'
+  is 'a secondary page never asks' "$(fits 200 started 'SECONDARY = true;')" 'posted=[] asked='
+
+  # RED ARM: a page that resizes on anything it is told must be caught resizing
+  # after a fallback release. Seen red here, or the arms above prove nothing.
+  sed "s/if (word !== 'started') {/if (word === null) {/" \
+    "${ROOT}/hdw4s-gate-index" > "${d}/red"
+  if cmp -s "${ROOT}/hdw4s-gate-index" "${d}/red"; then
+    bad 'the red arm mutates the page' 'the sed matched nothing'
+  else
+    is 'RED ARM: a page that ignores the outcome resizes after the 18 s fallback' \
+      "$(fits 200 bound '' "${d}/red")" \
+      'posted=[resetResolutionToWindow@https://door.example] asked=hdw4s-startup/outcome'
+  fi
+  # And the page is asked to do it at all: only the paint may trigger it.
+  n="$(grep -c 'fitAfterStart();' "${ROOT}/hdw4s-gate-index" || :)"
+  is 'the fit is asked for in exactly one place' "${n}" '1'
+  paint="$(sed -n "/stop('desktop painted/,/return;/p" "${ROOT}/hdw4s-gate-index")"
+  has 'and that place is the veil seeing the desktop painted' "${paint}" 'fitAfterStart();'
+)
+
 echo '== the boot card offers the session directory only where a door serves one =='
 # THE DEFECT, reported by the owner 2026-09-25: "named sessions now have a link to where
 # the user can see all their sessions ... and that link doesn't work."
@@ -2840,6 +2939,68 @@ STUB
   hasnt 'and does NOT say the server was silent'                   "${out}" 'said nothing about its web root'
   PROBE='yes'
 
+  # THE STARTUP HOLD'S OUTCOME, published for the page by the same read. The page
+  # fits the desktop to its tab only on "started", so what matters is that nothing
+  # but a real "started" line ever publishes that word, that a stale one never
+  # survives into a new start, and that no failure here ever fails the session.
+  mkdir -p "${d}/webroot/probe/hdw4s-startup"
+  out_f="${d}/webroot/probe/hdw4s-startup/outcome"
+  ACC="INFO:server:Using custom web_root directory: ${d}/webroot/probe"
+  published() { cat "${out_f}" 2>/dev/null || echo '(none)'; }
+  for w in started bound none deadline off unknown; do
+    SAID="hdw4s: startup hold outcome: ${w}"$'\n'"${ACC}"
+    out="$( ( gate ) 2>&1 )"; rc=$?
+    is "the outcome [${w}] is published as itself, and the start passes" \
+       "${rc} $(published)" "0 ${w}"
+  done
+  is 'published readable by the streaming server, which serves it as the occupant' \
+     "$(stat -c %a "${out_f}")" '644'
+  # Words it does not know, and a line that is not the outcome's shape, are UNKNOWN.
+  for said in 'hdw4s: startup hold outcome: startedx' \
+              'hdw4s: startup hold outcome: started; rm -rf /' \
+              'hdw4s: startup hold outcome: STARTED'; do
+    SAID="${said}"$'\n'"${ACC}"
+    out="$( ( gate ) 2>&1 )"; rc=$?
+    is "[${said#hdw4s: }] publishes unknown" "${rc} $(published)" '0 unknown'
+  done
+  # No outcome line at all: an older run-session, or one that died first.
+  SAID="${ACC}"
+  out="$( ( gate ) 2>&1 )"; rc=$?
+  is 'no outcome line publishes unknown' "${rc} $(published)" '0 unknown'
+  # A STALE "started" from an earlier start must not survive a start that fails.
+  printf 'started\n' > "${out_f}"
+  SAID="WARNING:server:web_root directory ${d}/webroot/probe not found or missing index.html"
+  out="$( ( gate ) 2>&1 )"; rc=$?
+  is 'a start that fails still clears the last start'"'"'s outcome' "${rc} $(published)" '1 (none)'
+  # Nowhere to write -- a tree from an older package, or a unit that did not make the
+  # directory writable -- is silence, NEVER a failed start.
+  chmod 0555 "${d}/webroot/probe/hdw4s-startup"
+  SAID="hdw4s: startup hold outcome: started"$'\n'"${ACC}"
+  out="$( ( gate ) 2>&1 )"; rc=$?
+  is 'an unwritable outcome directory does not fail the start' "${rc} $(published)" '0 (none)'
+  has 'and says the page will not resize' "${out}" 'will not resize'
+  chmod 0755 "${d}/webroot/probe/hdw4s-startup"
+  rm -rf "${d}/webroot/probe/hdw4s-startup"
+  out="$( ( gate ) 2>&1 )"; rc=$?
+  is 'a tree with no outcome directory does not fail the start' "${rc}" '0'
+  has 'and says so' "${out}" 'will not resize'
+  # RED ARM: a publisher that trusts whatever word it reads must be caught
+  # publishing one it does not know.
+  sed 's/    \*) word=.unknown. ;;/    *) ;;/' "${ROOT}/hdw4s-webroot" > "${d}/red-webroot"
+  if cmp -s "${ROOT}/hdw4s-webroot" "${d}/red-webroot"; then
+    bad 'the outcome red arm mutates the publisher' 'the sed matched nothing'
+  else
+    chmod +x "${d}/red-webroot"
+    mkdir -p "${d}/webroot/probe/hdw4s-startup"
+    SAID='hdw4s: startup hold outcome: startedx'$'\n'"${ACC}"
+    ( env INVOCATION_ID='abcd1234' HDW4S_JOURNALCTL="${d}/bin/journalctl" \
+          HDW4S_WEBROOT_DIR="${d}/webroot" HDW4S_ANNOUNCED_GATE_WAIT='1' \
+          PROBE=yes SAID="${SAID}" "${d}/red-webroot" announced-gate probe ) >/dev/null 2>&1
+    is 'RED ARM: a publisher without the word list publishes a word the page never asked for' \
+       "$(published)" 'startedx'
+  fi
+  SAID=''
+
   # No invocation to read. Without it the query would return whatever the journal
   # holds for every start the unit has ever had, which is how two wrong
   # conclusions were reached on 2026-09-25.
@@ -3033,6 +3194,63 @@ echo '== the startup hold fails open, and its deadline matches the gate =='
   done
 )
 
+echo '== the session says, in one word, how the startup hold ended =='
+# The page fits the desktop to its tab only when this word is "started" (see the
+# page's fitAfterStart and hdw4s-webroot's publish_outcome), so the word must be
+# "started" for the desktop's own end-of-startup signal and for NOTHING else.
+#
+# Real: hdw4s-run-session's own hold loop and verdict, cut out of the script.
+# Stood in for: the watcher, by a file of the lines it would print, and the clock.
+( set +e
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  cut_hold() {
+    sed -n '/^is_seconds() {/,/^}/p; /^uptime_s() {/,/^}/p; /^quoted() {/,/^}/p' "$1"
+    # The SECOND "if stage_fd": the first one only starts the desktop.
+    awk '/^if \[ -n "\$\{stage_fd\}" \]; then$/ { prev = $0; next_is = 1; next }
+         next_is { next_is = 0; if ($0 ~ /stage_armed/) { on = 1; print prev } }
+         on { print } on && /^echo "hdw4s: startup hold outcome: / { on = 0 }' "$1"
+  }
+  cut_hold "${ROOT}/hdw4s-run-session" > "${d}/hold.sh"
+  has 'the hold is where this test looks for it' "$(cat "${d}/hold.sh")" 'startup hold outcome'
+  # $1: the watcher's lines. Prints the outcome line only.
+  outcome_for() {
+    printf '%b' "$1" > "${d}/lines"
+    bash -c 'set -eu
+      HDW4S_STARTUP_HOLD=on; stopping=""; hold_bound=18; hold_gate=60; hold_margin=6
+      hold_outcome=unknown; stage_armed="${ARMED}"; stage_pid=999999999
+      hold_outer=$(( $(cut -d. -f1 /proc/uptime) + 3 ))
+      exec {stage_fd}< "'"${d}"'/lines"
+      . "'"${2:-${d}/hold.sh}"'"' 2>&1 | grep 'startup hold outcome'
+  }
+  ARMED=1; export ARMED
+  is 'the desktop signalled the end of its startup -> started' \
+    "$(outcome_for 'shown 10 id=1 parent=2 name=x\nready 2000 shown=10\n')" \
+    'hdw4s: startup hold outcome: started'
+  is 'the 18 s fallback -> bound' \
+    "$(outcome_for 'shown 10 id=1 parent=2 name=x\nbound 18010 shown=10\n')" \
+    'hdw4s: startup hold outcome: bound'
+  is 'nothing to watch -> none' "$(outcome_for 'none no SHAPE extension\n')" \
+    'hdw4s: startup hold outcome: none'
+  is 'a watcher that dies -> unknown' "$(outcome_for 'shown 10 id=1 parent=2 name=x\n')" \
+    'hdw4s: startup hold outcome: unknown'
+  is 'a line nobody knows -> unknown' "$(outcome_for 'ready-ish 5\n')" \
+    'hdw4s: startup hold outcome: unknown'
+  ARMED=''
+  is 'a watcher that never armed -> unknown, even with "ready" in its pipe' \
+    "$(outcome_for 'ready 2000 shown=10\n')" 'hdw4s: startup hold outcome: unknown'
+  ARMED=1
+  # RED ARM: a script that calls a fallback "started" must be caught.
+  sed "s/hold_outcome='bound'/hold_outcome='started'/" "${ROOT}/hdw4s-run-session" > "${d}/red"
+  if cmp -s "${ROOT}/hdw4s-run-session" "${d}/red"; then
+    bad 'the hold red arm mutates the script' 'the sed matched nothing'
+  else
+    cut_hold "${d}/red" > "${d}/red-hold.sh"
+    is 'RED ARM: a fallback release reported as started is caught' \
+      "$(outcome_for 'shown 10 id=1 parent=2 name=x\nbound 18010 shown=10\n' "${d}/red-hold.sh")" \
+      'hdw4s: startup hold outcome: started'
+  fi
+)
+
 echo '== the teardown ends a desktop that is still starting =='
 # THE DEFECT, measured on production 2026-09-27: a GNOME logout with the tab open,
 # the tab's reconnect socket-activated a fresh desktop in the slot, the router asked
@@ -3139,7 +3357,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=483   # update when tests are added; a wrong number is the point
+EXPECTED=525   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

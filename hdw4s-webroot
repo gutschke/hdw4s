@@ -161,6 +161,14 @@ m["name"] = m["short_name"] = name
 json.dump(m, open(p, "w"))
 PY
   fi
+  # WHERE THE STARTUP HOLD'S OUTCOME IS PUBLISHED for this tree's page -- see
+  # publish_outcome below. An empty root-owned directory, made here because this is
+  # the one writer that runs as root outside every session; the session unit makes
+  # it, and only it, writable to root inside its namespace. 0755 and root's, never
+  # the occupant's: a directory the occupant could write would let a session serve
+  # pages of its own choosing from the pool's one origin.
+  install -d -m 0755 "${stage}/hdw4s-startup" ||
+    die 'could not make the startup outcome directory'
   # The upstream document is the generator's INPUT and is not left where the server can
   # reach it: an ungated copy served beside the gated one hands the next arrival exactly
   # what the gate exists to prevent, to anyone who knows the filename.
@@ -294,6 +302,62 @@ be told this is the desktop it was using, which is the bug this file exists to p
 # Exec line, so this needs no lookup, no credential, and no particular position in the
 # Exec sequence. Measured in FIRST ExecStartPost position, which is the one the
 # credential was missing from.
+# THE STARTUP HOLD'S OUTCOME, published where this session's page can read it:
+# <web root>/hdw4s-startup/outcome, one word. The page fits the desktop to its tab
+# only when that word is "started" -- the hold ended on the desktop's own
+# end-of-startup signal -- because a screen size change inside GNOME 46's startup
+# can leave it black for good, and a desktop at the wrong size is merely annoying.
+# The owner's rule, verbatim: "if we trigger the 18s timeout, then don't bother
+# about the resize ... first, do no harm."
+#
+# So EVERY FAILURE HERE IS SILENCE, and silence is the safe answer: a missing file,
+# an unreadable one, a word the page does not know -- all mean "unknown", and
+# unknown means no resize. Nothing in this function may fail the session, which is
+# why it never calls die.
+#
+# Written by root, from a line hdw4s-run-session puts in this start's journal,
+# because the writer that knows the answer runs as the occupant and the occupant
+# must never write the tree its own page is served from. Only a word from the fixed
+# list below is ever written, so no journal content reaches the served tree. A line
+# the occupant forges can make its OWN page resize its OWN desktop, and nothing else.
+outcome_dir() { echo "${1}/hdw4s-startup"; }
+clear_outcome() {
+  local f; f="$(outcome_dir "$1")/outcome"
+  rm -f "${f}" 2>/dev/null || :
+  # A stale "started" left by an earlier start is the one way this could say yes
+  # for a start that does not deserve it, so a file that will not go is said out
+  # loud rather than left to be read.
+  [ ! -e "${f}" ] ||
+    echo "hdw4s-webroot: could not clear '${f}'; the page may read an earlier start's outcome" >&2
+}
+publish_outcome() {
+  local root="$1" word="$2" dir tmp
+  case "${word}" in
+    started|bound|none|deadline|off|unknown) ;;
+    *) word='unknown' ;;
+  esac
+  dir="$(outcome_dir "${root}")"
+  [ -d "${dir}" ] || {
+    echo "hdw4s-webroot: no '${dir}' in this web root; the page will not resize" >&2
+    return 0
+  }
+  # Written beside and renamed over, so a page never reads half a word; mode 0644
+  # set explicitly because the unit's UMask=0077 would leave it unreadable to the
+  # streaming server, which serves it as the occupant.
+  tmp="$(mktemp "${dir}/.outcome.XXXXXX" 2>/dev/null)" || {
+    echo "hdw4s-webroot: '${dir}' is not writable here; the page will not resize" >&2
+    return 0
+  }
+  if printf '%s\n' "${word}" > "${tmp}" && chmod 0644 "${tmp}" &&
+     mv -f "${tmp}" "${dir}/outcome"; then
+    echo "hdw4s-webroot: published the startup hold's outcome: ${word}"
+  else
+    rm -f "${tmp}" 2>/dev/null || :
+    echo "hdw4s-webroot: could not publish the startup hold's outcome; the page will not resize" >&2
+  fi
+  return 0
+}
+
 cmd_announced_gate() {
   local inst="$1"
   # DERIVED the same way "gate" and "provision" derive it, and compared exactly. A
@@ -319,6 +383,8 @@ its own invocation. Refusing rather than reading a journal that mixes starts."
   # would be the defect this whole area cost a day to; this one gives up and says which
   # of two things it could not establish.
   local nonce="hdw4s-probe-$$-${RANDOM}${RANDOM}"
+  # Before anything else, so no page this start serves can read the last start's.
+  clear_outcome "${expect}"
   echo "hdw4s-webroot: ${inst}: reading this start's web-root decision from the
 journal of invocation ${inv} (probe ${nonce})" >&2
 
@@ -326,8 +392,9 @@ journal of invocation ${inv} (probe ${nonce})" >&2
   # same snapshot, and journalctl does the filtering: only matching lines are ever
   # buffered here. The checker must not read an unbounded stream from the thing it
   # distrusts into a shell variable.
-  local pat="${nonce}|Using custom web_root directory: |web_root directory .* not found or missing index"
-  local ticks=$(( budget * 4 )) i hits probe='' accepted refused
+  local held='startup hold outcome: '
+  local pat="${nonce}|Using custom web_root directory: |web_root directory .* not found or missing index|${held}"
+  local ticks=$(( budget * 4 )) i hits probe='' accepted refused outcome
   for (( i = 0; i < ticks; i++ )); do
     hits="$("${jctl}" "_SYSTEMD_INVOCATION_ID=${inv}" --case-sensitive=yes \
               --grep="${pat}" --no-pager --output=cat 2>/dev/null || :)"
@@ -353,6 +420,12 @@ is stopped rather than allowed up looking healthy. Check that
 announced '${accepted}' and this session's own tree is '${expect}'. Whatever it is
 serving is not the gated client this start built, so the session is stopped."
       echo "hdw4s-webroot: ${inst}: the streaming server announced '${expect}' as its web root"
+      # The hold's outcome is logged before the streaming server is started, on the
+      # same stream, so it is in this snapshot whenever the announcement is. Not
+      # found means unknown, which publishes as such -- never as a guess.
+      outcome="$(printf '%s\n' "${hits}" |
+                 sed -n "s/.*${held}\([a-z]*\)\$/\1/p" | head -n1 || :)"
+      publish_outcome "${expect}" "${outcome:-unknown}"
       return 0
     fi
     sleep 0.25
