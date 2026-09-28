@@ -1391,6 +1391,50 @@ if _dir == "yes":
              % (_js, json.dumps(os.environ.get("HDW4S_SESSION_NAME", "Desktop"))
                     .replace("<", "\\u003c")))
 
+# THE TAB IS NAMED BY US, ON EVERY SESSION PAGE, from the first paint. Upstream's
+# <title> is the word "Selkies", and a page held behind the gate never loads the client
+# that would have replaced it -- so a tab the client's own recovery reloaded in the
+# background sat there reading "Selkies" until somebody looked. The owner, 2026-09-27:
+# the people using this do not know that name and it confuses them. So the element is
+# rewritten here with the session's name, and hdw4s-title.js is inlined straight after
+# it to keep it ours once the client loads and writes its own (see that file for how,
+# and for the idle marker).
+#
+# FOR BOTH KINDS, unlike NAMES above: a named desktop keeps its administrator's name,
+# and that name is exactly what this keeps in the tab. Inlined rather than fetched for
+# the reason NAMES is, and refused rather than skipped when it cannot be read -- a page
+# built without it is a page whose tab says "Selkies" again the moment the manifest
+# cannot be fetched, and nothing else would notice.
+_lib = os.environ.get("HDW4S_LIBDIR") or os.path.dirname(os.path.abspath(__file__))
+try:
+    _tjs = open(os.path.join(_lib, "hdw4s-title.js"), encoding="utf-8").read()
+except OSError as e:
+    raise SystemExit("hdw4s-gate-index: cannot read hdw4s-title.js (%s) -- refusing to "
+                     "build a session page whose tab the client would name" % e)
+if "</script" in _tjs.lower():
+    raise SystemExit("hdw4s-gate-index: hdw4s-title.js contains '</script', which "
+                     "would end the inlined script early -- refusing to build")
+_tname = os.environ.get("HDW4S_SESSION_NAME", "Desktop")
+TITLE = ("<title>%s</title>\n<script>\n%s\nwindow.hdw4sTitleKeeper = "
+         "hdw4sTitle.install(%s, %s);\n</script>"
+         % (html_escape(_tname), _tjs,
+            json.dumps(_tname).replace("<", "\\u003c"),
+            json.dumps(src_attr).replace("<", "\\u003c")))
+# Every <title> upstream's page carries goes, and ours takes the first one's place --
+# or the head's first line when it has none. A second, surviving <title> would be the
+# one a browser honours if ours were ever moved after it.
+_titles = re.findall(r"<title\b[^>]*>.*?</title>", html, re.S | re.I)
+if _titles:
+    html = html.replace(_titles[0], "\0HDW4S-TITLE\0", 1)
+    for _t in _titles[1:]:
+        html = html.replace(_t, "", 1)
+    html = html.replace("\0HDW4S-TITLE\0", TITLE, 1)
+elif re.search(r"<head\b[^>]*>", html, re.I):
+    html = re.sub(r"(<head\b[^>]*>)", lambda m: m.group(1) + "\n" + TITLE, html,
+                  count=1, flags=re.I)
+else:
+    html = TITLE + "\n" + html
+
 # The identity is a hash of THIS generator, which is where the gate's behaviour
 # lives -- not the package version, which does not change when the logic does, and
 # not a timestamp, which changes when nothing does. Two pages agree if and only if
@@ -1605,6 +1649,19 @@ for _label, _needle in (("link to the session directory", 'href="/sessions/"'),
             "Selkies, which answers 404 to them and hands the person a blank page. "
             "Refusing to build a card that promises a page its own door cannot serve."
             % (_dir, "carries" if _offers else "carries no", _label))
+
+# THE TAB MAY NOT BE NAMED BY UPSTREAM, checked on the bytes about to be written for
+# the reason every guard above is. What it catches: the rewrite above no longer
+# matching upstream's page (a new attribute, a different element), which would leave
+# upstream's word in the tab strip of every session and fail nothing else.
+_now = re.findall(r"<title\b[^>]*>(.*?)</title>", html, re.S | re.I)
+if _now != [html_escape(_tname)]:
+    raise SystemExit("hdw4s-gate-index: the page about to be written is titled %r, "
+                     "not %r -- refusing to build a session page whose tab names "
+                     "somebody else's product" % (_now, _tname))
+if "hdw4sTitle.install(" not in html.split("</head>", 1)[0] and "</head>" in html:
+    raise SystemExit("hdw4s-gate-index: the title keeper is not in the page's <head>, "
+                     "so the client's own write would stand -- refusing to build")
 
 open(dst, "w", encoding="utf-8").write(html)
 print("hdw4s-gate-index: built %s (deferred %s)" % (dst, src_attr))

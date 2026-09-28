@@ -2233,6 +2233,73 @@ PY
   has 'and shows a sign of life' "${b}" 'class="alive"'
 )
 
+echo '== the tab strip never names upstream, and says when a tab is idle =='
+# THE DEFECT, the owner, 2026-09-27: a background tab the client had reloaded to
+# recover read "Selkies" -- a word the people using this never otherwise see, for a
+# product they do not know is there -- and "knowing that a tab is idle is useful, but
+# the title should stay". Upstream's page is titled with that word and a page held
+# behind the gate never loads the client that would replace it; and when the client
+# does load it writes the word itself and only then asks the manifest. MEASURED in a
+# real browser against the tree before this (.github/live/tab_title.py): a named card
+# read "Selkies" for as long as it stood, and a pool page whose manifest could not be
+# fetched ended on "Selkies" after its own name. Both kinds are asserted: the named
+# one is where nothing replaced it at all.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  cat > "${d}/in.html" <<'HTML'
+<!doctype html><html><head><meta charset="UTF-8" /><title>Selkies</title>
+<link rel="manifest" href="manifest.json"><link rel="icon" href="icon.png" />
+<script type="module" crossorigin src="./assets/x.js"></script></head>
+<body><div id="root"></div></body></html>
+HTML
+  title_of() { python3 -c 'import re,sys; print("|".join(re.findall(r"<title\b[^>]*>(.*?)</title>", open(sys.argv[1]).read(), re.S | re.I)))' "$1"; }
+  HDW4S_SESSION_NAME='Desktop' "${ROOT}/hdw4s-gate-index" \
+    "${d}/in.html" "${d}/named.html" >/dev/null 2>&1 || bad 'a named page builds'
+  HDW4S_DIRECTORY=yes HDW4S_SESSION_NAME='Desktop' "${ROOT}/hdw4s-gate-index" \
+    "${d}/in.html" "${d}/pool.html" >/dev/null 2>&1 || bad 'a pool page builds'
+  HDW4S_SESSION_NAME='Mail & <b>' "${ROOT}/hdw4s-gate-index" \
+    "${d}/in.html" "${d}/odd.html" >/dev/null 2>&1 || bad 'an odd name builds'
+  is 'a named session page is titled with its own name, once' "$(title_of "${d}/named.html")" 'Desktop'
+  is 'so is a pool one' "$(title_of "${d}/pool.html")" 'Desktop'
+  is 'and a name is text, never markup' "$(title_of "${d}/odd.html")" 'Mail &amp; &lt;b&gt;'
+  for k in named pool; do
+    has "the ${k} page keeps its title in its head" \
+      "$(sed -n '1,/<\/head>/p' "${d}/${k}.html")" 'hdw4sTitle.install("Desktop", "./assets/x.js")'
+  done
+  # THE GUARD, seen refusing: a generator whose rewrite no longer matches upstream's
+  # title leaves the word beside ours, and must refuse rather than ship it.
+  sed 's/^if _titles:$/if False:/' "${ROOT}/hdw4s-gate-index" > "${d}/red-gate"
+  chmod +x "${d}/red-gate"
+  HDW4S_LIBDIR="${ROOT}" "${d}/red-gate" "${d}/in.html" "${d}/red.html" > "${d}/red.err" 2>&1 \
+    && rc=0 || rc=$?
+  is 'RED ARM: a page still titled by upstream is refused' "${rc}" '1'
+  has 'and says why' "$(cat "${d}/red.err")" 'names somebody else'"'"'s product'
+  if ! command -v node >/dev/null; then
+    bad 'the title keeper tests can run' 'node is needed for .github/title-test.js'
+    bad 'RED ARM: a client write that stands is caught' 'node missing'
+    bad 'RED ARM: an idle marker blind to the card is caught' 'node missing'
+  else
+    out="$(node "${ROOT}/.github/title-test.js" 2>&1)" && rc=0 || rc=$?
+    is 'the title keeper behaves as ruled' "${rc}" '0'
+    [ "${rc}" -eq 0 ] || printf '%s\n' "${out}"
+    python3 - "${ROOT}/hdw4s-title.js" "${d}/red1.js" <<'PY'
+import sys
+s = open(sys.argv[1]).read()
+a = s.index("    if (desc) {\n      try {\n        Object.defineProperty")
+b = s.index("    function look()")
+open(sys.argv[2], "w").write(s[:a] + s[b:])
+PY
+    has 'RED ARM: a client write that stands is caught' \
+      "$(node "${ROOT}/.github/title-test.js" "${d}/red1.js" 2>&1 || :)" \
+      'FAIL a foreign write lands as ours'
+    sed 's|return modules.indexOf(src) >= 0 \&\& gateHidden !== false;|return modules.indexOf(src) >= 0;|' \
+      "${ROOT}/hdw4s-title.js" > "${d}/red2.js"
+    has 'RED ARM: an idle marker blind to the card is caught' \
+      "$(node "${ROOT}/.github/title-test.js" "${d}/red2.js" 2>&1 || :)" \
+      'FAIL not connected while the card is up'
+  fi
+)
+
 echo '== BOTH session kinds publish an identity, or the gate refuses forever =='
 # THE ARM THAT WAS MISSING, AND WHY IT WAS MISSING. The gate's resume path
 # compares the identity a tab connected to against the one published in the web
@@ -3383,7 +3450,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=530   # update when tests are added; a wrong number is the point
+EXPECTED=540   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

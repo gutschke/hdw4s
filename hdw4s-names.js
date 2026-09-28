@@ -165,22 +165,21 @@
     if (!name) return;
     var h = root.document.getElementById('hdw4s-name');
     if (h) h.textContent = name;
-    root.document.title = name;
-    // The streaming client sets the title from its manifest once it loads, and
-    // the manifest can only carry the generic word. Put ours back when THAT is
-    // what it wrote, and only then: any other title is somebody else's to set.
-    try {
-      var head = root.document.head || root.document.documentElement;
-      new root.MutationObserver(function () {
-        if (root.document.title === baked) root.document.title = name;
-      }).observe(head, {childList: true, subtree: true, characterData: true});
-    } catch (e) {}
+    // THE TAB IS hdw4s-title.js's, which the page carries in its head: it keeps
+    // the client from writing its own word there and adds the idle marker, so
+    // the name goes to it. Without it (a page built before it existed) this
+    // writes the title directly, which is what it always did.
+    var keeper = root.hdw4sTitleKeeper;
+    var titled = function (n) {
+      if (keeper) keeper.name(n); else root.document.title = n;
+    };
+    titled(name);
     // Keeps this desktop's number "in use" for as long as a tab shows it.
     root.setInterval(function () {
       var n = mine();
       if (n && n !== name) {
         name = n;
-        root.document.title = name;
+        titled(name);
         if (h) h.textContent = name;
       }
     }, TOUCH_MS);

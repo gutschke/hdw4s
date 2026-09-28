@@ -39,4 +39,7 @@ hdw4s-gate-index         usr/lib/hdw4s
 # How a browser names its desktops. Read, not run, by the two components above
 # and below it, which find it beside themselves -- one copy, inlined by both.
 hdw4s-names.js           usr/lib/hdw4s
+# What the tab strip says on a session page. Read, not run, by hdw4s-gate-index,
+# which inlines it into the head of every session page it builds, named or pooled.
+hdw4s-title.js           usr/lib/hdw4s
 hdw4s-demux              usr/lib/hdw4s
