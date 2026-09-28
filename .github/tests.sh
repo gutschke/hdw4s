@@ -2300,6 +2300,62 @@ PY
   fi
 )
 
+echo '== the installed app is never named upstream, on either kind of desktop =='
+# The owner, 2026-09-27: the people using this must never meet the upstream name --
+# "either in the tab strip or in the pwa". An installed app is named from the web
+# manifest the page LINKS, so that is the file asserted, for a named desktop
+# (provisioned with no name, as hdw4s@.service does) and a pool one. The fixture
+# links a RENAMED manifest: rewriting only manifest.json, as the builder used to,
+# leaves the linked one saying "Selkies" in the app launcher, where nothing looks.
+# The icons are asserted UNCHANGED: the one icon everywhere is upstream's, and a
+# rewrite that dropped them would leave the installed app with none.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  mkdir -p "${d}/pkg" "${d}/web" "${d}/run"
+  up='{"name":"Selkies","short_name":"Selkies","icons":[{"src":"icon-512.png","type":"image/png","sizes":"512x512"}],"start_url":"."}'
+  printf '%s' "${up}" > "${d}/pkg/manifest.json"
+  printf '%s' "${up}" > "${d}/pkg/app.webmanifest"
+  : > "${d}/pkg/x.js"; : > "${d}/pkg/icon-512.png"
+  page() {
+    printf '<html><head><title>Selkies</title><link rel="manifest" href="%s" crossorigin="use-credentials"></head><body><script type="module" src="./x.js"></script></body></html>' \
+      "$1" > "${d}/pkg/index.html"
+  }
+  printf '#!/bin/bash\ncat >/dev/null\necho %s\n' "${d}/pkg" > "${d}/py"
+  chmod +x "${d}/py"
+  run() {
+    HDW4S_SELKIES_PY="${d}/py" HDW4S_LIBDIR="${ROOT}" HDW4S_WEBROOT_DIR="${d}/web" \
+    HDW4S_INCARNATION_DIR="${d}/run" "${ROOT}/hdw4s-webroot" "$@" >/dev/null 2>"${d}/err"
+  }
+  field() { python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print("%s|%s" % (m.get("name"), m.get("short_name")) if sys.argv[2]=="name" else json.dumps(m.get("icons")))' "$1" "$2" 2>/dev/null; }
+
+  page manifest.json
+  run provision named1 || bad 'a named desktop provisions' "$(cat "${d}/err")"
+  is 'a named desktop'"'"'s app is named after it' \
+    "$(field "${d}/web/named1/manifest.json" name)" 'Desktop|Desktop'
+
+  page app.webmanifest
+  run provision named2 || bad 'a named desktop provisions' "$(cat "${d}/err")"
+  is 'and so is the manifest its page LINKS, whatever it is called' \
+    "$(field "${d}/web/named2/app.webmanifest" name)" 'Desktop|Desktop'
+  is 'and the packaged one beside it' \
+    "$(field "${d}/web/named2/manifest.json" name)" 'Desktop|Desktop'
+  run build --directory ephemeral0 "${d}/web/ephemeral0" Desktop \
+    || bad 'a pool slot builds' "$(cat "${d}/err")"
+  is 'a pool desktop'"'"'s app too' \
+    "$(field "${d}/web/ephemeral0/app.webmanifest" name)" 'Desktop|Desktop'
+  is 'and its icon is upstream'"'"'s, untouched' \
+    "$(field "${d}/web/ephemeral0/app.webmanifest" icons)" \
+    '[{"src": "icon-512.png", "type": "image/png", "sizes": "512x512"}]'
+
+  # Seen refusing: a manifest the tree does not hold cannot be rewritten, so the
+  # tree is not built at all. The file EXISTS beside the tree, so the asset check
+  # (every reference resolves) passes and only the manifest rule can refuse.
+  printf '%s' "${up}" > "${d}/web/elsewhere.json"
+  page ../elsewhere.json
+  run provision named3 && rc=0 || rc=$?
+  is 'RED ARM: a page linking a manifest outside its tree is refused' "${rc}" '1'
+)
+
 echo '== BOTH session kinds publish an identity, or the gate refuses forever =='
 # THE ARM THAT WAS MISSING, AND WHY IT WAS MISSING. The gate's resume path
 # compares the identity a tab connected to against the one published in the web
@@ -3450,7 +3506,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=540   # update when tests are added; a wrong number is the point
+EXPECTED=546   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

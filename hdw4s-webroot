@@ -149,18 +149,50 @@ cmd_build() {
     "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-gate-index" \
       "${src}/index.html" "${stage}/index.html" || die 'could not build the gated index'
 
-  # The tab's name comes from the manifest, which the client fetches and applies to
-  # document.title. It is a generated JSON file in the packaged tree, so a per-session
-  # name costs one rewrite and no client change at all.
-  if [ -r "${stage}/manifest.json" ]; then
-    python3 - "${stage}/manifest.json" "${name}" <<'PY' || die 'could not set the manifest name'
-import json, sys
-p, name = sys.argv[1], sys.argv[2]
-m = json.load(open(p))
-m["name"] = m["short_name"] = name
-json.dump(m, open(p, "w"))
+  # THE INSTALLED APP'S NAME, and the one the tab starts from. Both come from the web
+  # manifest: a browser names an installed app after its "name"/"short_name", and the
+  # title keeper hdw4s-gate-index inlines reads "name" for the tab. Upstream's says
+  # "Selkies", which the owner ruled must never reach the people using this -- they do
+  # not know that product is there -- so every manifest the page LINKS is rewritten
+  # with this session's name, for named desktops and the pool alike.
+  #
+  # WHICH FILE IS DERIVED FROM THE PAGE, not assumed to be manifest.json. A browser
+  # installs whatever <link rel="manifest"> names, so a rename upstream would leave
+  # the packaged file rewritten and the linked one saying "Selkies" -- in the app
+  # launcher, where no test looks. The packaged manifest.json is rewritten too
+  # whether linked or not, because it is served either way.
+  #
+  # A linked manifest that is absent, outside the tree or not JSON is refused: the
+  # tree about to be served would put upstream's name on the visitor's shelf. A page
+  # that links NO manifest is not refused: nothing can be installed from it, so there
+  # is no name to get wrong.
+  python3 - "${stage}" "${name}" <<'PY' || die 'could not set the manifest name'
+import json, os, re, sys
+root, name = sys.argv[1], sys.argv[2]
+page = open(os.path.join(root, "index.html"), encoding="utf-8").read()
+linked = []
+for tag in re.findall(r"<link\b[^>]*>", page, re.I):
+    if not re.search(r"""\brel=["']?[^"'>]*\bmanifest\b""", tag, re.I):
+        continue
+    href = re.search(r"""\bhref=["']?([^"'\s>]+)""", tag, re.I)
+    if not href or re.match(r"^([a-z]+:|//|/)", href.group(1), re.I):
+        sys.exit("hdw4s-webroot: the page links a manifest this tree does not hold: %s"
+                 % tag)
+    path = os.path.normpath(os.path.join(root, href.group(1).split("?")[0]))
+    if not path.startswith(os.path.normpath(root) + os.sep):
+        sys.exit("hdw4s-webroot: the page links a manifest outside its tree: %s" % tag)
+    linked.append(path)
+paths = set(linked)
+if os.path.exists(os.path.join(root, "manifest.json")):
+    paths.add(os.path.join(root, "manifest.json"))
+for p in sorted(paths):
+    with open(p, encoding="utf-8") as f:
+        m = json.load(f)
+    m["name"] = m["short_name"] = name
+    text = json.dumps(m)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(text)
 PY
-  fi
   # WHERE THE STARTUP HOLD'S OUTCOME IS PUBLISHED for this tree's page -- see
   # publish_outcome below. An empty root-owned directory, made here because this is
   # the one writer that runs as root outside every session; the session unit makes

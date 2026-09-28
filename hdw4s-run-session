@@ -1143,13 +1143,16 @@ lockdown=(
   --second-screen='true|locked'
   # Branding, partially. This names the sidebar heading and nothing else.
   #
-  # The browser TAB is named by the web manifest, which the client fetches and
-  # applies to document.title -- so for an ephemeral session it is set in the
-  # generated web root below rather than here, and needs no client change. A
-  # session that gets no web root keeps the packaged manifest and reads
-  # "Selkies". The per-session "Desktop: <host>" form is gone either way: the
-  # old script computed it in the browser, where the hostname is known, and
-  # neither a setting nor a manifest can do that.
+  # The browser TAB and an installed app are named by the web root below, which
+  # EVERY session gets -- named desktops too, since the gate became universal --
+  # and without which it does not start: hdw4s-gate-index writes the title
+  # element and inlines hdw4s-title.js, which keeps the client's own word out of
+  # the tab, and hdw4s-webroot rewrites the manifest the page links. There used
+  # to be a sentence here saying a session with no web root keeps the packaged
+  # manifest and reads "Selkies"; no such session exists any more, and the
+  # sentence was being read as a live gap. An administrator who wants each
+  # named desktop told apart serves a manifest of their own at the proxy (the
+  # "hdw4s proxy" sample does), and the title keeper reads its name.
   --ui-title=Desktop
 )
 
