@@ -5033,6 +5033,65 @@ def test_a_desktop_cannot_install_a_service_worker(rig):
         "a registration at the front door was answered %d, or minted" % st
 
 
+def test_a_header_block_a_browser_splits_differently_is_refused(rig):
+    """One line here, two lines in the browser: the whole response is refused.
+
+    Measured by the threat review in Chrome 153: a lone CR ends a header line
+    in the browser but not in this router, so a forged cookie rode inside a
+    line the filter read as harmless. The oracle is every byte of every
+    header the browser receives, not the router's reading of them."""
+    a = rig.client()
+    sid, body = arrive(rig, a)
+    slot = slot_named(rig, body.split("SLOT=")[1].split()[0])
+    forged = "f" * 32
+    for line in ("Set-Cookie: a=1\rSet-Cookie: hdw4s_id=%s; Path=/" % forged,
+                 "X-Ordinary: 1\rService-Worker-Allowed: /%s" % forged,
+                 "X-Ordinary: 1\0Set-Cookie: hdw4s_id=%s" % forged,
+                 " Set-Cookie: hdw4s_id=%s" % forged):
+        slot.extra_headers = ("X-Before: 1", line)
+        st, h, got = a.get("/s/%s/" % sid)
+        slot.extra_headers = ()
+        leaked = [(k, v) for k, vs in h.items() for v in vs
+                  if forged in k or forged in v]
+        assert not leaked, \
+            "a header line the browser splits in two reached it: %r" % leaked
+        assert st == 502, \
+            "a response with %r was answered %d, not refused" % (line, st)
+    # PERMIT ARM: an ordinary response from the same desktop still serves.
+    st, _, got = a.get("/s/%s/" % sid)
+    assert st == 200 and b"SLOT=" in got, \
+        "an ordinary response was refused after the bad ones: %d" % st
+    lines = [l for l in rig.stderr_text().splitlines()
+             if "refused a response from" in l]
+    assert len(lines) == 1, \
+        "four refused responses from one slot were logged %d time(s)" \
+        % len(lines)
+
+
+SPLIT_BY_LF_ONLY = """
+
+# Appended by the red arm: every header block judged line by line, as it was.
+def unsafe_header_line(lines):
+    return None
+"""
+
+
+def red_a_lone_cr_carries_a_forged_cookie():
+    path = scratch_demux("-lonecr.py", SPLIT_BY_LF_ONLY)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_header_block_a_browser_splits_differently_is_refused(rig)
+        except AssertionError as e:
+            if "the browser splits in two reached it" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 SERVICE_WORKERS_AGAIN = """
 
 # Appended by the red arm: both halves undone. The header filter is back to
@@ -5344,6 +5403,8 @@ def main():
         (test_no_page_of_the_routers_can_be_framed, dict(gate=None)),
         (test_a_desktop_cannot_install_a_service_worker, dict(gate=None)),
         (test_only_a_page_request_mints_at_the_front_door, dict(gate=None)),
+        (test_a_header_block_a_browser_splits_differently_is_refused,
+         dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -5434,6 +5495,7 @@ def main():
                red_a_desktop_installs_a_service_worker,
                red_a_service_workers_script_is_served,
                red_an_image_mints_at_the_front_door,
+               red_a_lone_cr_carries_a_forged_cookie,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)

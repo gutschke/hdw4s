@@ -5303,6 +5303,37 @@ def session_may_set_cookie(value):
     return bool(name) and not name.lower().startswith(b"hdw4s_")
 
 
+def unsafe_header_line(lines):
+    """Why a header block cannot be judged line by line, or None if it can.
+
+    EVERY FILTER ON A DESKTOP'S HEADERS ASSUMES THE BROWSER SPLITS THE BLOCK
+    WHERE THIS ROUTER DOES, and it does not. This router splits on LF; Chrome
+    153 also ends a line at a lone CR -- measured by the threat review: ONE
+    line "Set-Cookie: a=1<CR>Set-Cookie: hdw4s_id=X; Path=/" was judged here as
+    the harmless cookie "a" and forwarded verbatim, and the browser set our
+    identity to X. The same trick carried Service-Worker-Allowed past its
+    filter. So the block is refused whole, not repaired:
+
+      a CR anywhere but the line's own ending    split differently by a browser
+      a NUL                                      no browser line has one
+      a line that begins with SP or HTAB         obs-fold, which RFC 9112 lets
+                                                 a proxy reject; measured
+                                                 harmless in Chrome today, and
+                                                 refused so that "today" is not
+                                                 what the filter rests on.
+    """
+    for i, line in enumerate(lines):
+        body = line[:-2] if line.endswith(b"\r\n") else \
+            line[:-1] if line.endswith(b"\n") else line
+        what = ("a carriage return inside a line" if b"\r" in body else
+                "a NUL byte" if b"\0" in body else
+                "a folded continuation line" if i and body[:1] in (b" ", b"\t")
+                else None)
+        if what is not None:
+            return "%s (line %d of its header block)" % (what, i + 1)
+    return None
+
+
 def session_may_send(line):
     """False for a response header line a session must not get to the browser.
 
@@ -5468,6 +5499,19 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                               "Try again."), extra)
         return False
     resp_headers = read_headers(upf)
+    bad = unsafe_header_line([status_line] + resp_headers)
+    if bad is not None:
+        # NOTHING OF THIS RESPONSE IS FORWARDED, not even its status line: the
+        # filter below judges lines as THIS parser splits them, and a line a
+        # browser would split differently is one the filter never saw.
+        up.close()
+        say_once(("unsafe-header", instance),
+                 "refused a response from %s: %s. Nothing of it was sent to "
+                 "the browser, which was answered 502. Said once per slot."
+                 % (instance, bad))
+        respond(wf, 502, page("That desktop sent something unreadable",
+                              "Try again."), extra)
+        return False
 
     wf.write(status_line)
     for h in resp_headers:
