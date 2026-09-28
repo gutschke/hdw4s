@@ -3493,8 +3493,22 @@ PAGE_CSS = (
     # A NAME THAT CAN BE RENAMED LOOKS LIKE A NAME. The class is added by the
     # script, only where browser storage works, so a page without either shows
     # a heading and nothing that promises an edit it cannot keep.
-    ".renamable{cursor:text;border-radius:4px;outline-offset:2px}"
-    ".renamable:hover{text-decoration:underline dotted #8a8a8a}"
+    #
+    # AND UNDER THE POINTER IT SAYS IT CAN BE CHANGED. The owner, 2026-09-27:
+    # the rounded outline "only happens after an edit has succeeded. it should
+    # also happen before doing the first edit ... as they move the mouse pointer
+    # over the list". What he had seen was the browser's own focus ring, drawn
+    # because the script refocuses the name after Enter; hover drew a dotted
+    # underline nobody noticed. So the outline is ours, drawn on hover and on
+    # keyboard focus alike, and never at rest -- a hint, not a box on every
+    # row. It hugs the name (fit-content, padded and pulled back by the same
+    # amount so the text does not move) rather than the facts line under it,
+    # and steps aside while the field is open, which has its own border.
+    ".renamable{cursor:text;border-radius:5px;outline:1px solid transparent;"
+    "padding:0 .4rem;margin:0 -.4rem;width:fit-content;max-width:100%}"
+    ".renamable:hover{outline-color:#8a8a8a}"
+    ".renamable:focus-visible{outline:2px solid #b0b0b0}"
+    ".renamable:has(input){outline-color:transparent}"
     ".renamable input{font:inherit;color:#fff;background:#141414;"
     "border:1px solid #6e6e6e;border-radius:4px;padding:.1rem .35rem;"
     "width:min(16rem,100%)}"

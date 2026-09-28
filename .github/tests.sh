@@ -2025,6 +2025,32 @@ PY
       "data-hdw4s-sid=\"$(printf 'ab%.0s' $(seq 16))\">Desktop</div>"
     has "and runs the names script" "${b}" 'hdw4sNames.directory()'
   done
+  # (4) A NAME THAT CAN BE RENAMED SAYS SO UNDER THE POINTER. The owner, 2026-09-27:
+  # the rounded outline "only happens after an edit has succeeded. it should also
+  # happen before doing the first edit ... as they move the mouse pointer over the
+  # list". What he saw was the browser's focus ring, drawn because the script
+  # refocuses the name after Enter; hover drew only a dotted underline. So the rule
+  # asserted is the stylesheet's, per state: hover and keyboard focus outline the
+  # name, and at rest nothing does (he asked for a hint, not a box on every row).
+  css="$(python3 - "${ROOT}/hdw4s-demux" <<'PY'
+import importlib.machinery, importlib.util, re, sys
+sys.dont_write_bytecode = True
+l = importlib.machinery.SourceFileLoader("demux", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("demux", l))
+l.exec_module(m)
+for sels, decls in re.findall(r"([^{}]+)\{([^{}]*)\}", m.PAGE_CSS):
+    for s in sels.split(","):
+        print("%s\t%s" % (s.strip(), decls))
+PY
+)"
+  rule() { printf '%s\n' "${css}" | sed -n "s/^$1\t//p"; }
+  has 'the stylesheet was read (control: .renamable has its cursor)' \
+    "$(rule '\.renamable')" 'cursor:text'
+  has 'hovering a renamable name outlines it' "$(rule '\.renamable:hover')" 'outline'
+  has 'keyboard focus on a renamable name outlines it' \
+    "$(rule '\.renamable:focus-visible')" 'outline'
+  hasnt 'and at rest the outline is not drawn' "$(rule '\.renamable')" 'solid #'
+
   b="$(printf '%s\n' "${pages}" | sed -n 's/^starting\t//p')"
   hasnt 'the starting page guesses no cause' "${b}" 'busy'
   has 'the starting page is on the shared card' "${b}" '<div class="card">'
@@ -2973,7 +2999,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=466   # update when tests are added; a wrong number is the point
+EXPECTED=470   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
