@@ -31,7 +31,8 @@ router, instead of the front door latching off.
 
 THE THREE CARRIERS, and none of them is a capability.
 
-  cookie hdw4s_id   per browser (and per storage partition, so a private window
+  cookie __Host-hdw4s_id
+                    per browser (and per storage partition, so a private window
                     is a separate identity for free)  -- IDENTITY: what this
                     browser may own. Minted here. NEVER derived from a request
                     header: no vhost in this estate strips a client's identity
@@ -82,7 +83,6 @@ import errno
 import select
 import re
 import hmac
-import http.cookies
 import json
 import os
 import secrets
@@ -287,6 +287,15 @@ COOKIE_LIFETIME = COOKIE_FLOOR_SECONDS
 # that sent it here" -- a mint or a Resume, nothing else. The cookie keeps its
 # old name because the page-side reader already knows it; the name is wire
 # format, not a claim about which of the two it was.
+#
+# NOT __Host- PREFIXED, unlike IDENTITY_COOKIE, and on purpose. The prefix
+# stops a script from writing a TWIN; this cookie is meant to be read and
+# deleted by script, so a desktop's page can write it under any name the
+# page-side reader looks for, prefix or not. What it can buy by doing so is
+# skipping the Connect card on a desktop the router already serves to THIS
+# browser -- the same browser's own desktop, which the owner ruled is not a
+# boundary. Renaming it would add a third file to keep in step and refuse
+# nothing.
 FRESH_COOKIE = "hdw4s_fresh"
 # Long enough to survive a redirect and a page load on an unwell box, short
 # enough that it is gone before anybody could restore a tab. The page deletes it
@@ -4138,19 +4147,51 @@ def is_front_door(path):
     return path == b"/"
 
 
+# THE IDENTITY COOKIE'S NAME CARRIES THE __Host- PREFIX, and the prefix is the
+# point rather than decoration. Every desktop serves script on this origin, and
+# script can write cookies. Under the old bare name one line of it --
+# document.cookie = "hdw4s_id=<attacker's>; path=/; secure; domain=<host>" --
+# set a DOMAIN cookie beside the router's host-only HttpOnly one, the browser
+# sent both, and the parser here (SimpleCookie) took the last: measured by the
+# threat review in Chrome 153, end to end, the victim's directory then listed
+# the attacker's identity and the victim's next New desktop was the attacker's
+# to open. A __Host- cookie must be Secure, Path=/ and carry no Domain, so the
+# browser refuses a domain twin and a path shadow of it (measured, same
+# review). What it cannot refuse is a script that first evicts ours by
+# flooding the jar and then writes its own: that route is known and open by
+# the owner's ruling of 2026-09-28 (a separate origin for desktops is the only
+# fix, and it is filed, not built).
+#
+# Changing the name drops every existing browser's identity at the upgrade:
+# its desktops are no longer listed to it and end on their idle window.
+IDENTITY_COOKIE = "__Host-hdw4s_id"
+
+
 def identity_of(headers):
-    raw = header_value(headers, "Cookie")
-    if not raw:
+    """This browser's identity, or None.
+
+    Read from EVERY Cookie line, by name, exactly. The bare legacy name, and
+    every other name a script could set, is never looked at. If more than one
+    distinct value arrives under our name -- which a __Host- cookie should
+    make impossible short of the flood above -- NONE of them is believed:
+    picking one is how a planted twin won, and the cost of refusing is only a
+    fresh identity for a browser whose jar has been tampered with."""
+    found = set()
+    for h in headers:
+        name, sep, value = h.partition(b":")
+        if not sep or name.strip().lower() != b"cookie":
+            continue
+        for pair in value.decode("latin-1").split(";"):
+            k, eq, v = pair.partition("=")
+            if eq and k.strip() == IDENTITY_COOKIE:
+                found.add(v.strip())
+    if len(found) != 1:
+        if len(found) > 1:
+            say_once(("identities", len(found)),
+                     "a browser presented %d different identity cookies; "
+                     "none was believed. Said once per count." % len(found))
         return None
-    try:
-        jar = http.cookies.SimpleCookie()
-        jar.load(raw.decode("latin-1"))
-    except Exception:
-        return None
-    m = jar.get("hdw4s_id")
-    if not m or not m.value:
-        return None
-    v = m.value
+    v = found.pop()
     # Our own mint is 32 hex characters. Anything else is somebody's guess.
     if len(v) != 32 or any(c not in "0123456789abcdef" for c in v):
         return None
@@ -4179,8 +4220,10 @@ def set_cookie_header(identity, lifetime=None):
     # a fuse lit at first contact.
     if lifetime is None:
         lifetime = COOKIE_LIFETIME
-    return ("hdw4s_id=%s; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=%d"
-            % (identity, lifetime))
+    # No Domain, Path=/ and Secure: all three are what IDENTITY_COOKIE's
+    # prefix requires, and a browser drops the cookie if any is missing.
+    return ("%s=%s; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=%d"
+            % (IDENTITY_COOKIE, identity, lifetime))
 
 
 def refresh_headers(own, identity, new_identity):

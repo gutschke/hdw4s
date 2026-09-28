@@ -37,6 +37,9 @@ DEMUX = os.path.join(os.path.dirname(os.path.dirname(HERE)), "hdw4s-demux")
 
 PASS, FAIL = [], []
 
+# The router's identity cookie, as the router names it (IDENTITY_COOKIE).
+ID_COOKIE = "__Host-hdw4s_id"
+
 
 def check(name, ok, detail=""):
     (PASS if ok else FAIL).append(name)
@@ -600,7 +603,7 @@ class Client:
         if self.auth and auth:
             req.append("Authorization: Basic " + self.auth)
         if cookie:
-            req.append("Cookie: hdw4s_id=" + cookie)
+            req.append("Cookie: " + ID_COOKIE + "=" + cookie)
         req.append("Connection: keep-alive" if keep else "Connection: keep-alive")
         req.extend(headers)
         self.sock.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
@@ -629,7 +632,7 @@ class Client:
         if self.auth and auth:
             req.append("Authorization: Basic " + self.auth)
         if self.cookie:
-            req.append("Cookie: hdw4s_id=" + self.cookie)
+            req.append("Cookie: " + ID_COOKIE + "=" + self.cookie)
         req.append("Connection: keep-alive")
         req.extend(headers)
         self.sock.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
@@ -648,7 +651,7 @@ class Client:
 
     def learn_cookie(self, headers):
         for sc in headers.get("set-cookie", []):
-            if sc.startswith("hdw4s_id="):
+            if sc.startswith(ID_COOKIE + "="):
                 self.cookie = sc.split("=", 1)[1].split(";")[0]
         return self.cookie
 
@@ -2797,7 +2800,7 @@ def test_cookie_slides_beyond_the_front_door(rig):
 
     st, h2, _ = a.get(loc)
     assert st == 200, "the session path did not serve: %d" % st
-    got = [v for v in h2.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    got = [v for v in h2.get("set-cookie", []) if v.startswith(ID_COOKIE + "=")]
     assert got, (
         "a response from the SESSION PATH carried no identity -- a tab that "
         "stays put never has its window wound on and ages out in place")
@@ -2808,7 +2811,7 @@ def test_cookie_slides_beyond_the_front_door(rig):
 
     # And it is a rate limit, not a header on every asset fetch.
     st, h3, _ = a.get(loc)
-    again = [v for v in h3.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    again = [v for v in h3.get("set-cookie", []) if v.startswith(ID_COOKIE + "=")]
     assert not again, \
         "every response carried a cookie; the rate limit does nothing"
 
@@ -2822,7 +2825,7 @@ def test_cookie_max_age_is_the_derived_lifetime(rig):
     """
     c = rig.client()
     st, h, _ = c.get("/")
-    sc = [v for v in h.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    sc = [v for v in h.get("set-cookie", []) if v.startswith(ID_COOKIE + "=")]
     assert sc, "a fresh browser was given no identity at all"
     age = int(sc[0].split("Max-Age=")[1].split(";")[0])
     assert age == 80 * 86400, (
@@ -3001,7 +3004,7 @@ def test_a_suffixed_window_is_honoured(rig):
     """
     c = rig.client()
     st, h, _ = c.get("/")
-    sc = [v for v in h.get("set-cookie", []) if v.startswith("hdw4s_id=")]
+    sc = [v for v in h.get("set-cookie", []) if v.startswith(ID_COOKIE + "=")]
     assert sc, "a fresh browser was given no identity at all"
     age = int(sc[0].split("Max-Age=")[1].split(";")[0])
     assert age == 60 * 86400, (
@@ -3075,7 +3078,8 @@ def test_a_session_cannot_set_our_cookie(rig):
     a = rig.client()
     sid, _ = arrive(rig, a)
     forged = "f" * 32
-    for spelling in ("hdw4s_id=%s", "hdw4s_id =%s; Path=/; Secure",
+    for spelling in ("__Host-hdw4s_id=%s; Path=/; Secure",
+                     "hdw4s_id=%s", "hdw4s_id =%s; Path=/; Secure",
                      "hdw4s_id\t=%s; Path=/", " hdw4s_id=%s",
                      "hdw4s_fresh=%s; Path=/", "=hdw4s_id=%s",
                      "hdw4s_id; x=%s", "selkies_pref=%s; Path=/"):
@@ -4165,7 +4169,7 @@ def open_stream(rig, client, sid):
     s.settimeout(10)
     req = ["GET /s/%s/websocket HTTP/1.1" % sid, "Host: demux.test",
            "Authorization: Basic " + client.auth,
-           "Cookie: hdw4s_id=" + client.cookie,
+           "Cookie: " + ID_COOKIE + "=" + client.cookie,
            "Upgrade: websocket", "Connection: Upgrade",
            "Sec-WebSocket-Version: 13",
            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="]
@@ -5151,7 +5155,7 @@ def raw_exchange(rig, client, requests, wait=3.0, version="HTTP/1.1",
     for method, path, extra in requests:
         req = ["%s %s %s" % (method, path, version), "Host: demux.test",
                "Authorization: Basic " + client.auth,
-               "Cookie: hdw4s_id=" + client.cookie] + list(extra)
+               "Cookie: " + ID_COOKIE + "=" + client.cookie] + list(extra)
         out.append("\r\n".join(req) + "\r\n\r\n")
     s.sendall("".join(out).encode())
     s.settimeout(wait)
@@ -5535,7 +5539,7 @@ def one_request(rig, client, method, path, extra, body, wait=2.0):
     s = socket.create_connection(("127.0.0.1", rig.port), 10)
     head = ["%s %s HTTP/1.1" % (method, path), "Host: demux.test",
             "Authorization: Basic " + client.auth,
-            "Cookie: hdw4s_id=" + client.cookie] + list(extra)
+            "Cookie: " + ID_COOKIE + "=" + client.cookie] + list(extra)
     s.sendall(("\r\n".join(head) + "\r\n\r\n").encode() + body)
     s.settimeout(wait)
     got = b""
@@ -5620,8 +5624,9 @@ def test_a_request_body_is_never_read_as_a_request(rig):
                       ["Content-Length: 5"],
                       b"hello" + ("GET /s/%s/next HTTP/1.1\r\nHost: demux.test"
                                   "\r\nAuthorization: Basic %s\r\nCookie: "
-                                  "hdw4s_id=%s\r\n\r\n"
-                                  % (sid, a.auth, a.cookie)).encode())
+                                  "%s=%s\r\n\r\n"
+                                  % (sid, a.auth, ID_COOKIE,
+                                     a.cookie)).encode())
     assert b"BODY=hello" in got and b"PATH=/next" in got, \
         "the connection did not carry a request after a forwarded body: %r" \
         % got[-120:]
@@ -5652,12 +5657,101 @@ def red_a_request_body_is_read_as_a_request():
         _remove_scratch_demuxes()
 
 
+def test_a_planted_identity_is_never_believed(rig):
+    """A second identity cookie in one browser's request never wins.
+
+    Measured by the Round D threat review in Chrome 153, end to end: one line
+    of a desktop page's script, document.cookie = "hdw4s_id=<attacker's>;
+    path=/; secure; domain=<host>", sat BESIDE the router's host-only HttpOnly
+    cookie; the browser sent both and the router believed the last, so the
+    victim's directory listed the attacker's desktops and the victim's next
+    New desktop was the attacker's to open.
+
+    Two things now stand in the way, and only ONE of them is in this file.
+    The browser's: the cookie is __Host-hdw4s_id, which Chrome refuses to let
+    a script twin by Domain or shadow by Path (measured by the review; a
+    browser property, NOT exercised here -- private/threatd-round-d/
+    plant-chain.py with NAME=__Host-hdw4s_id is its probe). The router's,
+    exercised here: the bare legacy name is never read, and when two
+    different values arrive under our name -- in one Cookie line or two --
+    neither is believed.
+
+    KNOWN AND OPEN, by the owner's ruling of 2026-09-28: a script that floods
+    the cookie jar until the browser evicts ours, then writes its own
+    __Host-hdw4s_id, plants the attacker's identity with only ONE value
+    present, which nothing here can tell from the real one (measured, Chrome
+    153). Only a separate origin for desktops closes it; the ruling files
+    that as a nice-to-have, because it makes every deployment need another
+    DNS name and certificate."""
+    atk, vic = rig.client(), rig.client()
+    sid_a, _ = arrive(rig, atk)
+    sid_v, _ = arrive(rig, vic)
+    ia, iv = atk.cookie, vic.cookie
+    for label, lines in (
+            ("the legacy name beside ours",
+             ["Cookie: %s=%s; hdw4s_id=%s" % (ID_COOKIE, iv, ia)]),
+            ("the legacy name alone", ["Cookie: hdw4s_id=%s" % ia]),
+            ("a twin of ours, attacker's last",
+             ["Cookie: %s=%s; %s=%s" % (ID_COOKIE, iv, ID_COOKIE, ia)]),
+            ("a twin of ours, attacker's first",
+             ["Cookie: %s=%s; %s=%s" % (ID_COOKIE, ia, ID_COOKIE, iv)]),
+            ("a twin in a second Cookie line",
+             ["Cookie: %s=%s" % (ID_COOKIE, iv),
+              "Cookie: %s=%s" % (ID_COOKIE, ia)])):
+        st, _, body = vic.get("/sessions/", cookie_override=None,
+                              headers=lines)
+        assert st == 200 and sid_a not in body.decode(), \
+            "with %s, the victim's directory listed the attacker's desktop" \
+            % label
+    # PERMIT ARM: one identity, presented once or twice alike, is believed.
+    for lines in (["Cookie: %s=%s" % (ID_COOKIE, iv)],
+                  ["Cookie: a=1; %s=%s; %s=%s" % (ID_COOKIE, iv, ID_COOKIE, iv)]):
+        st, _, body = vic.get("/sessions/", cookie_override=None,
+                              headers=lines)
+        assert sid_v in body.decode(), \
+            "the victim's own identity was not believed: %r" % lines
+
+
+LAST_COOKIE_WINS_AGAIN = """
+
+# Appended by the red arm: the identity read as SimpleCookie read it -- the
+# last duplicate wins, from the first Cookie line only.
+import http.cookies
+
+
+def identity_of(headers):
+    raw = header_value(headers, "Cookie")
+    if not raw:
+        return None
+    jar = http.cookies.SimpleCookie()
+    jar.load(raw.decode("latin-1"))
+    m = jar.get(IDENTITY_COOKIE) or jar.get("hdw4s_id")
+    return m.value if m else None
+"""
+
+
+def red_a_planted_identity_is_believed():
+    path = scratch_demux("-lastcookie.py", LAST_COOKIE_WINS_AGAIN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_planted_identity_is_never_believed(rig)
+        except AssertionError as e:
+            if "listed the attacker's desktop" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def test_a_request_a_parser_splits_differently_is_refused(rig):
     """The request side of the same rule: refused whole, never judged."""
     a = rig.client()
     sid, _ = arrive(rig, a)
     mints = mint_lines(rig)
-    for line in ("X-Ordinary: 1\rCookie: hdw4s_id=" + "0" * 32,
+    for line in ("X-Ordinary: 1\rCookie: %s=%s" % (ID_COOKIE, "0" * 32),
                  "X-Ordinary: 1\0",
                  " folded: 1"):
         st, _, body = a.get("/s/%s/" % sid, headers=("X-Before: 1", line))
@@ -5913,7 +6007,7 @@ def red_a_desktops_cookie_is_relayed():
         try:
             test_a_session_cannot_set_our_cookie(rig)
         except AssertionError as e:
-            if "by writing 'hdw4s_id=X'" not in str(e):
+            if "by writing '__Host-hdw4s_id=X" not in str(e):
                 raise RuntimeError(
                     "the red arm went red for the wrong reason: %s" % e)
             raise
@@ -6084,6 +6178,7 @@ def main():
         (test_every_framing_a_desktop_uses_still_reaches_the_browser,
          dict(gate=None)),
         (test_a_request_body_is_never_read_as_a_request, dict(gate=None)),
+        (test_a_planted_identity_is_never_believed, dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -6181,6 +6276,7 @@ def main():
                red_ambiguous_framing_is_resolved,
                red_a_101_is_taken_from_anyone,
                red_a_request_body_is_read_as_a_request,
+               red_a_planted_identity_is_believed,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)
