@@ -195,6 +195,16 @@ class Slot(threading.Thread):
         # "Name: value" lines. Kept apart from forge_cookie so a test about one
         # header cannot pass by accident on the other's filter.
         self.extra_headers = ()
+        # A WHOLE RESPONSE, as raw bytes, for the tests whose subject is what
+        # the router does with a response it did not expect: interim heads,
+        # framing that two parsers could read differently, a 101 nobody asked
+        # for. Sent in place of the ordinary answer to every non-upgrade
+        # request while set, and the connection closed after it -- so that
+        # nothing the router relays can have come from anywhere but these
+        # bytes. A LIST, consumed one response per request, because the router
+        # opens one upstream connection per request and a test of keep-alive
+        # needs the second answer to be a different one.
+        self.raw = []
         # Every request line this slot has been asked, so a test can say a
         # refused request NEVER REACHED the desktop rather than inferring it.
         self.asked = []
@@ -520,6 +530,10 @@ class Slot(threading.Thread):
                 wait = self.ready_at - time.time()
                 if wait > 0:
                     time.sleep(wait)
+                raw = self.raw.pop(0) if self.raw else None
+                if raw is not None:
+                    c.sendall(raw)
+                    return
                 body = ("SLOT=%s PATH=%s" % (self.name,
                         line.split()[1].decode())).encode()
                 forged = (b"Set-Cookie: " + self.forge_cookie.encode() + b"\r\n"
@@ -3031,38 +3045,42 @@ def test_a_session_cannot_set_our_cookie(rig):
     It cannot read one -- the Cookie header is stripped on the way up -- and if
     it could write one, a compromised session would reassign the identity of
     every browser it answers, which is the ownership table defeated from below.
+
+    NO Set-Cookie of a desktop's reaches the browser, whatever its name. A
+    cookie on this origin has one reader, the router, because nothing of the
+    Cookie header is passed up; so there is no desktop cookie to keep, and no
+    name for a filter to read differently from the browser. The first filter
+    did: "hdw4s_id =X" passed it and Chrome 153 took it as our cookie
+    (measured by the threat review). The spellings below are kept as that
+    history, and because a name filter coming back would have to pass them.
     """
     a = rig.client()
     sid, _ = arrive(rig, a)
     forged = "f" * 32
-    # WRITTEN AS A BROWSER READS A NAME, not as the filter used to. The first
-    # version of this test looked only at values starting "hdw4s_id=", which
-    # is the filter's own blind spot restated -- measured by the threat review:
-    # "hdw4s_id =X" reached the browser and Chrome 153 took it as our cookie.
-    # So the oracle is every Set-Cookie the browser receives that carries the
-    # forged token, whatever its spelling.
     for spelling in ("hdw4s_id=%s", "hdw4s_id =%s; Path=/; Secure",
                      "hdw4s_id\t=%s; Path=/", " hdw4s_id=%s",
                      "hdw4s_fresh=%s; Path=/", "=hdw4s_id=%s",
-                     "hdw4s_id; x=%s"):
+                     "hdw4s_id; x=%s", "selkies_pref=%s; Path=/"):
         for s in rig.slots:
             s.forge_cookie = spelling % forged
         st, h, _ = a.get("/s/%s/" % sid)
         got = [v for v in h.get("set-cookie", []) if forged in v]
-        assert not got, "a session set our cookie by writing %r: %r" \
+        assert not got, "a session set a cookie by writing %r: %r" \
             % (spelling % "X", got)
-    # THE PERMIT ARM: a session's own cookies still reach its page. A filter
-    # that dropped every Set-Cookie would pass everything above.
+    # THE PERMIT ARM: the same response's other fields still reach the page. A
+    # router that dropped every field, or refused every response carrying a
+    # Set-Cookie, would pass everything above.
     for s in rig.slots:
         s.forge_cookie = "selkies_pref=%s; Path=/" % forged
-    st, h, _ = a.get("/s/%s/" % sid)
+        s.extra_headers = ("Cache-Control: no-store",)
+    st, h, body = a.get("/s/%s/" % sid)
     for s in rig.slots:
         s.forge_cookie = None
-    assert any(forged in v for v in h.get("set-cookie", [])), \
-        "a session's own cookie was dropped on its way to the browser"
+        s.extra_headers = ()
+    assert st == 200 and b"SLOT=" in body and \
+        h.get("cache-control") == ["no-store"], \
+        "a response carrying a cookie lost its other fields: %d %r" % (st, h)
 
-
-# --- guards exercised without a network ------------------------------------
 
 def test_cookie_lifetime_guard(rig=None):
     """The start-up guard, in BOTH directions.
@@ -4990,17 +5008,19 @@ def test_a_desktop_cannot_install_a_service_worker(rig):
     slot = slot_named(rig, body.split("SLOT=")[1].split()[0])
 
     # 1. The widening header is dropped; an ordinary one still passes, or a
-    #    filter that dropped every header would satisfy this.
+    #    filter that dropped every header would satisfy this. (A space before
+    #    the colon is no longer a spelling to drop: the whole response is
+    #    refused for it, in test_a_header_block_a_browser_splits_differently_is_refused.)
     slot.extra_headers = ("Service-Worker-Allowed: /",
-                          "service-worker-allowed : /",
-                          "X-Desktop-Ordinary: kept")
+                          "SERVICE-WORKER-ALLOWED: /",
+                          "Cache-Control: max-age=7")
     st, h, _ = a.get("/s/%s/app.js" % sid)
     slot.extra_headers = ()
     assert st == 200, "the desktop's script did not serve: %d" % st
     assert "service-worker-allowed" not in h and \
         not any(k.strip() == "service-worker-allowed" for k in h), \
         "a desktop widened a service worker's scope: %r" % h
-    assert h.get("x-desktop-ordinary") == ["kept"], \
+    assert h.get("cache-control") == ["max-age=7"], \
         "the desktop's ordinary headers were dropped along with it"
 
     # 2. The registration fetch itself is refused, and never reaches the slot.
@@ -5044,10 +5064,17 @@ def test_a_header_block_a_browser_splits_differently_is_refused(rig):
     sid, body = arrive(rig, a)
     slot = slot_named(rig, body.split("SLOT=")[1].split()[0])
     forged = "f" * 32
-    for line in ("Set-Cookie: a=1\rSet-Cookie: hdw4s_id=%s; Path=/" % forged,
-                 "X-Ordinary: 1\rService-Worker-Allowed: /%s" % forged,
+    # The first two are on fields the router RELAYS, so it is the grammar and
+    # not the field list that stops them: the router writes a relayed value
+    # out again, and a CR left inside it is a line the browser splits.
+    for line in ("Cache-Control: a\rSet-Cookie: hdw4s_id=%s; Path=/" % forged,
+                 "Content-Type: text/html\rService-Worker-Allowed: /%s"
+                 % forged,
+                 "Set-Cookie: a=1\rSet-Cookie: hdw4s_id=%s; Path=/" % forged,
                  "X-Ordinary: 1\0Set-Cookie: hdw4s_id=%s" % forged,
-                 " Set-Cookie: hdw4s_id=%s" % forged):
+                 " Set-Cookie: hdw4s_id=%s" % forged,
+                 "Set-Cookie : hdw4s_id=%s" % forged,
+                 "Cache-Control: \x0bhdw4s_id=%s" % forged):
         slot.extra_headers = ("X-Before: 1", line)
         st, h, got = a.get("/s/%s/" % sid)
         slot.extra_headers = ()
@@ -5064,8 +5091,425 @@ def test_a_header_block_a_browser_splits_differently_is_refused(rig):
     lines = [l for l in rig.stderr_text().splitlines()
              if "refused a response from" in l]
     assert len(lines) == 1, \
-        "four refused responses from one slot were logged %d time(s)" \
+        "seven refused responses from one slot were logged %d time(s)" \
         % len(lines)
+
+
+# --- what the router writes for a desktop's response ----------------------
+#
+# WHAT THESE ESTABLISH, AND WHAT THEY DO NOT. Established by test, against the
+# real router over real sockets: that for each response shape below the bytes
+# the router writes toward the browser contain nothing of a forged cookie or
+# Service-Worker-Allowed, that the response is refused (502) where framing is
+# ambiguous, and that the ordinary shapes -- a length, chunks, a body to close,
+# HEAD, 204, 304, the stream's 101 -- still arrive whole and leave the
+# connection usable. The oracle is EVERY BYTE the router sent, not a parser's
+# reading of the first response: stopping at the first head is exactly the
+# blind spot the interim route used.
+#
+# Resting on reading, not on test: that Chrome (or any browser, or the reverse
+# proxy) parses the router's own output the way the RFC says. The router's
+# output is canonical -- one status line, lower-case token names, values
+# without control characters, one framing field it chose -- so what is left to
+# disagree about is small, but it was measured only for the three routes the
+# threat review drove through Chrome 153, not for this output as a whole.
+
+FORGED = b"f" * 32
+FORGED_FINAL = (b"HTTP/1.1 200 OK\r\nSet-Cookie: hdw4s_id=" + FORGED +
+                b"; Path=/\r\nService-Worker-Allowed: /\r\n"
+                b"Content-Length: 2\r\n\r\nok")
+
+
+def raw_exchange(rig, client, requests, wait=3.0, version="HTTP/1.1",
+                 complete=False):
+    """Send REQUESTS, pipelined down ONE connection, and return every byte the
+    router sent back before it closed or went quiet for WAIT seconds -- or,
+    with COMPLETE, as soon as one whole response per request has arrived,
+    which is what lets a caller time a connection that stays open.
+
+    Each request is (method, path, extra header lines)."""
+    s = socket.create_connection(("127.0.0.1", rig.port), 10)
+    out = []
+    for method, path, extra in requests:
+        req = ["%s %s %s" % (method, path, version), "Host: demux.test",
+               "Authorization: Basic " + client.auth,
+               "Cookie: hdw4s_id=" + client.cookie] + list(extra)
+        out.append("\r\n".join(req) + "\r\n\r\n")
+    s.sendall("".join(out).encode())
+    s.settimeout(wait)
+    got = b""
+    try:
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            got += b
+            if complete and answered(got, [r[0] for r in requests]):
+                break
+    except socket.timeout:
+        pass
+    finally:
+        s.close()
+    return got
+
+
+def answered(data, methods):
+    """Does DATA hold one whole response per method, and nothing after?"""
+    try:
+        got, left = split_responses(data, methods)
+    except (ValueError, IndexError):
+        return False
+    return len(got) == len(methods) and not left and \
+        all(len(g[2]) == int(g[1]["content-length"][0])
+            for g, m in zip(got, methods)
+            if "content-length" in g[1] and m != "HEAD"
+            and g[0] not in (204, 304))
+
+
+def split_responses(data, methods):
+    """The responses in DATA, as (status, {name: [values]}, body), read with
+    the framing each one declares. METHODS says which request each answers,
+    because a HEAD's answer has no body whatever its length says. Returns what
+    it could read, and the bytes left over."""
+    got = []
+    for method in methods:
+        head, sep, rest = data.partition(b"\r\n\r\n")
+        if not sep:
+            break
+        lines = head.split(b"\r\n")
+        status = int(lines[0].split()[1])
+        h = {}
+        for line in lines[1:]:
+            k, _, v = line.decode("latin-1").partition(":")
+            h.setdefault(k.strip().lower(), []).append(v.strip())
+        if method == "HEAD" or status in (204, 304):
+            body, data = b"", rest
+        elif "content-length" in h:
+            n = int(h["content-length"][0])
+            body, data = rest[:n], rest[n:]
+        elif h.get("transfer-encoding") == ["chunked"]:
+            body = b""
+            while True:
+                size, _, rest = rest.partition(b"\r\n")
+                n = int(size, 16)
+                if n == 0:
+                    _, _, rest = rest.partition(b"\r\n")
+                    break
+                body += rest[:n]
+                rest = rest[n + 2:]
+            data = rest
+        else:
+            body, data = rest, b""
+        got.append((status, h, body))
+    return got, data
+
+
+def serving_slot(rig, client):
+    sid, body = arrive(rig, client)
+    return sid, slot_named(rig, body.split("SLOT=")[1].split()[0])
+
+
+def test_an_interim_response_carries_nothing_to_the_browser(rig):
+    """A 1xx head, then a final one: nothing of either is relayed as it came.
+
+    The measured route (threat review, Chrome 153): the router checked only
+    the 103's fields and relayed the rest unread, so the final 200's
+    Set-Cookie: hdw4s_id reached the browser and planted an attacker's
+    identity. Interim responses are now read and dropped, and the final one is
+    parsed and rewritten like any other."""
+    a = rig.client()
+    sid, slot = serving_slot(rig, a)
+    for label, interim in (
+            ("103", b"HTTP/1.1 103 Early Hints\r\nLink: </x>; rel=preload\r\n"
+                    b"\r\n"),
+            ("100", b"HTTP/1.1 100 Continue\r\n\r\n"),
+            ("102+103", b"HTTP/1.1 102 Processing\r\n\r\n"
+                        b"HTTP/1.1 103 Early Hints\r\n\r\n"),
+            ("199", b"HTTP/1.1 199 Whatever\r\nX-A: 1\r\n\r\n")):
+        slot.raw = [interim + FORGED_FINAL]
+        data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ())])
+        slot.raw = []
+        assert FORGED not in data and \
+            b"service-worker-allowed" not in data.lower(), \
+            "after a %s, a forged final head reached the browser: %r" \
+            % (label, data[:300])
+        got, _ = split_responses(data, ["GET"])
+        assert got and got[0][0] == 200 and got[0][2] == b"ok", \
+            "after a %s, the final response did not arrive whole: %r" \
+            % (label, data[:300])
+        assert data.count(b"HTTP/1.1 ") == 1, \
+            "the %s head itself was relayed: %r" % (label, data[:300])
+    # More interim heads than any server sends is refused, not read for ever.
+    slot.raw = [b"HTTP/1.1 103 Early Hints\r\n\r\n" * 20 + FORGED_FINAL]
+    data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ())])
+    slot.raw = []
+    assert FORGED not in data and data.startswith(b"HTTP/1.1 502 "), \
+        "twenty interim heads were answered %r" % data[:60]
+    # PERMIT ARM: the same desktop's ordinary answer still serves.
+    st, _, body = a.get("/s/%s/" % sid)
+    assert st == 200 and b"SLOT=" in body, \
+        "an ordinary response was refused after the interim ones: %d" % st
+
+
+SMUGGLED = (b"HTTP/1.1 200 OK\r\nSet-Cookie: hdw4s_id=" + FORGED +
+            b"; Path=/\r\nContent-Length: 0\r\n\r\n")
+
+
+def test_framing_two_parsers_could_read_differently_is_refused(rig):
+    """A response whose end two parsers could put in different places is
+    refused whole, before a byte of it is relayed.
+
+    What is at stake is more than the one browser: a response that ends
+    earlier for the reader than for the router leaves the rest in the
+    connection as the answer to the NEXT request on it -- and the reverse
+    proxy's connection to this router may be carrying another visitor's
+    request next. Each case below hides a whole second response, with a
+    forged cookie, where one reading of the framing puts it."""
+    a = rig.client()
+    sid, slot = serving_slot(rig, a)
+    chunked_end = b"0\r\n\r\n"
+    cases = (
+        ("Content-Length with Transfer-Encoding",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+         b"Content-Length: %d\r\n\r\n" % (len(chunked_end) + len(SMUGGLED))
+         + chunked_end + SMUGGLED),
+        ("Transfer-Encoding with Content-Length",
+         b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
+         b"Transfer-Encoding: chunked\r\n\r\n"
+         % (len(chunked_end) + len(SMUGGLED)) + chunked_end + SMUGGLED),
+        ("two different Content-Lengths",
+         b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nContent-Length: 0\r\n\r\n"
+         % len(SMUGGLED) + SMUGGLED),
+        ("two equal Content-Lengths",
+         b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nContent-Length: %d\r\n\r\n"
+         % (len(SMUGGLED), len(SMUGGLED)) + SMUGGLED),
+        ("a signed Content-Length",
+         b"HTTP/1.1 200 OK\r\nContent-Length: +%d\r\n\r\n" % len(SMUGGLED)
+         + SMUGGLED),
+        ("a transfer coding that is not chunked",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: xchunked\r\n\r\n" + SMUGGLED),
+        ("chunked twice",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+         b"Transfer-Encoding: chunked\r\n\r\n" + chunked_end + SMUGGLED),
+    )
+    for label, raw in cases:
+        slot.raw = [raw]
+        data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ()),
+                                     ("GET", "/s/%s/y" % sid, ())])
+        slot.raw = []
+        assert FORGED not in data, \
+            "with %s, a smuggled response reached the browser: %r" \
+            % (label, data[:400])
+        assert data.startswith(b"HTTP/1.1 502 "), \
+            "with %s, the response was answered %r, not refused" \
+            % (label, data[:40])
+    # A chunk that runs past its declared size is the same thing mid-body.
+    slot.raw = [b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                b"2\r\nok" + SMUGGLED + b"\r\n0\r\n\r\n"]
+    data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ()),
+                                 ("GET", "/s/%s/y" % sid, ())])
+    slot.raw = []
+    assert FORGED not in data, \
+        "a chunk longer than its size smuggled a response: %r" % data[:400]
+    # PERMIT ARM.
+    st, _, body = a.get("/s/%s/" % sid)
+    assert st == 200 and b"SLOT=" in body, \
+        "an ordinary response was refused after the ambiguous ones: %d" % st
+
+
+def test_a_101_nobody_asked_for_is_refused(rig):
+    """A 101 turns the connection into a raw pipe from the desktop, so it is
+    taken only as the answer to a request that asked for an upgrade."""
+    a = rig.client()
+    sid, slot = serving_slot(rig, a)
+    slot.raw = [b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n\r\n" + SMUGGLED]
+    data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ())])
+    slot.raw = []
+    assert FORGED not in data and data.startswith(b"HTTP/1.1 502 "), \
+        "a 101 to a plain request was answered %r" % data[:200]
+    # PERMIT ARM: the stream itself, which does ask.
+    ws = open_stream(rig, a, sid)
+    ws.close()
+
+
+def test_every_framing_a_desktop_uses_still_reaches_the_browser(rig):
+    """The permit arm of the two above: every ordinary shape still arrives
+    whole, and a connection that should carry another request still does.
+
+    Each case sends its request and then an ordinary one down the SAME
+    connection, so a router that framed the first wrongly -- waited for a body
+    a HEAD never has, or left bytes behind -- is caught by the second."""
+    a = rig.client()
+    sid, slot = serving_slot(rig, a)
+    big = bytes(range(256)) * 800
+    chunks = b"".join(b"%x\r\n%s\r\n" % (len(big[i:i + 70000]),
+                                          big[i:i + 70000])
+                      for i in range(0, len(big), 70000))
+    cases = (
+        ("a length", "GET",
+         b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+         b"Content-Length: 5\r\n\r\nhello", 200, b"hello"),
+        ("chunks, an extension and a trailer", "GET",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+         b"3;x=y\r\nhel\r\n2\r\nlo\r\n0\r\nX-Trailer: 1\r\n\r\n", 200,
+         b"hello"),
+        ("chunks larger than one read", "GET",
+         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+         + chunks + b"0\r\n\r\n", 200, big),
+        ("a HEAD with a length and no body", "HEAD",
+         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", 200, b""),
+        ("a 304", "GET",
+         b"HTTP/1.1 304 Not Modified\r\nETag: \"x\"\r\n\r\n", 304, b""),
+        ("a 204", "GET", b"HTTP/1.1 204 No Content\r\n\r\n", 204, b""),
+        ("a redirect", "GET",
+         b"HTTP/1.1 301 Moved Permanently\r\nLocation: /s/x/\r\n"
+         b"Content-Length: 0\r\n\r\n", 301, b""),
+    )
+    for label, method, raw, want_status, want_body in cases:
+        slot.raw = [raw]
+        t0 = time.time()
+        data = raw_exchange(rig, a, [(method, "/s/%s/x" % sid, ()),
+                                     ("GET", "/s/%s/next" % sid, ())],
+                            complete=True)
+        took = time.time() - t0
+        slot.raw = []
+        got, left = split_responses(data, [method, "GET"])
+        assert len(got) == 2 and not left, \
+            "after %s, the connection did not carry the next request " \
+            "(%.1f s): %r" % (label, took, data[:300])
+        assert got[0][0] == want_status and got[0][2] == want_body, \
+            "%s arrived as %d with %d bytes" \
+            % (label, got[0][0], len(got[0][2]))
+        assert got[1][0] == 200 and b"PATH=/next" in got[1][2], \
+            "after %s, the next request was answered %r" % (label, got[1])
+        assert took < 2.5, "%s took %.1f s: something waited for a body" \
+            % (label, took)
+    # A body that runs to the end of the connection arrives, and then the
+    # connection ends: there is no length to carry a second request past.
+    slot.raw = [b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"
+                b"until close"]
+    data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ())])
+    slot.raw = []
+    got, _ = split_responses(data, ["GET"])
+    assert got and got[0][2] == b"until close", \
+        "a body to close arrived as %r" % data[:200]
+    # A downstream that speaks HTTP/1.0 cannot read chunks, so it is sent the
+    # decoded body.
+    slot.raw = [b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                b"3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n"]
+    data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ())],
+                        version="HTTP/1.0")
+    slot.raw = []
+    assert data.endswith(b"\r\n\r\nhello") and b"chunked" not in data, \
+        "a chunked body reached an HTTP/1.0 downstream as %r" % data[-80:]
+    # A body cut short ends the connection rather than leaving the reader
+    # waiting on bytes that the NEXT response would then supply.
+    slot.raw = [b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort"]
+    t0 = time.time()
+    data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ()),
+                                 ("GET", "/s/%s/next" % sid, ())])
+    slot.raw = []
+    assert b"PATH=/next" not in data and time.time() - t0 < 2.5, \
+        "a body cut short left the connection open for another request"
+    # A field the router does not relay is said once for the admin, however
+    # often it comes, and the response still serves.
+    for _ in range(3):
+        slot.raw = [b"HTTP/1.1 200 OK\r\nX-Future-Field: 1\r\n"
+                    b"Content-Length: 2\r\n\r\nok"]
+        data = raw_exchange(rig, a, [("GET", "/s/%s/x" % sid, ())])
+        slot.raw = []
+        assert data.endswith(b"\r\n\r\nok") and b"x-future" not in \
+            data.lower(), "an unlisted field was relayed: %r" % data[:200]
+    lines = [l for l in rig.stderr_text().splitlines()
+             if "x-future-field" in l]
+    assert len(lines) == 1, \
+        "a dropped field was logged %d time(s): %r" % (len(lines), lines)
+
+
+INTERIM_RELAYED_AGAIN = """
+
+# Appended by the red arm: the first head taken as the answer, whatever it is.
+def read_final_head(f, asked_upgrade):
+    return read_response_head(f)
+"""
+
+
+def red_an_interim_head_is_relayed():
+    path = scratch_demux("-interim.py", INTERIM_RELAYED_AGAIN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_an_interim_response_carries_nothing_to_the_browser(rig)
+        except AssertionError as e:
+            if "a forged final head reached the browser" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
+FIRST_LENGTH_WINS_AGAIN = """
+
+# Appended by the red arm: framing resolved the way the router used to, by the
+# first Content-Length it found, and nothing refused.
+def response_framing(method, status, fields):
+    if method == b"HEAD" or status in (204, 304):
+        return "none", None
+    for n, v in fields:
+        if n == b"content-length":
+            return "length", int(v)
+    for n, v in fields:
+        if n == b"transfer-encoding" and v.lower() == b"chunked":
+            return "chunked", None
+    return "close", None
+"""
+
+
+def red_ambiguous_framing_is_resolved():
+    path = scratch_demux("-framing.py", FIRST_LENGTH_WINS_AGAIN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_framing_two_parsers_could_read_differently_is_refused(rig)
+        except AssertionError as e:
+            if "not refused" not in str(e) and \
+                    "smuggled response reached" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
+ANY_101_TAKEN = """
+
+# Appended by the red arm: a 101 taken from the desktop whoever asked.
+_shipped_read_final_head = read_final_head
+
+
+def read_final_head(f, asked_upgrade):
+    return _shipped_read_final_head(f, True)
+"""
+
+
+def red_a_101_is_taken_from_anyone():
+    path = scratch_demux("-any101.py", ANY_101_TAKEN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_101_nobody_asked_for_is_refused(rig)
+        except AssertionError as e:
+            if "a 101 to a plain request" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
 
 
 def test_a_request_a_parser_splits_differently_is_refused(rig):
@@ -5122,9 +5566,13 @@ def red_a_request_with_a_lone_cr_is_judged():
 
 SPLIT_BY_LF_ONLY = """
 
-# Appended by the red arm: every header block judged line by line, as it was.
-def unsafe_header_line(lines):
-    return None
+# Appended by the red arm: a field value taken as it came, control characters
+# and all -- the grammar's value rule undone, the field list left as shipped.
+def parse_field(body):
+    name, sep, value = body.partition(b":")
+    if not sep or not name or not all(c in _TOKEN for c in name):
+        raise Unrelayable("a field line that is not name: value")
+    return name.lower(), value.strip(b" \\t")
 """
 
 
@@ -5146,13 +5594,9 @@ def red_a_lone_cr_carries_a_forged_cookie():
 
 SERVICE_WORKERS_AGAIN = """
 
-# Appended by the red arm: both halves undone. The header filter is back to
-# cookies only, and no request is recognised as a registration.
-def session_may_send(line):
-    name, sep, value = line.partition(b":")
-    if sep and name.strip().lower() == b"set-cookie":
-        return session_may_set_cookie(value)
-    return True
+# Appended by the red arm: both halves undone. The field is relayed again, and
+# no request is recognised as a registration.
+RESPONSE_FIELDS = RESPONSE_FIELDS | {b"service-worker-allowed"}
 
 
 def registers_a_service_worker(headers):
@@ -5314,23 +5758,22 @@ def red_the_directory_can_be_framed():
         _remove_scratch_demuxes()
 
 
-PREFIX_FILTER_AGAIN = """
+COOKIES_RELAYED_AGAIN = """
 
-# Appended by the red arm: the filter as it shipped, matching a prefix of the
-# raw value rather than the name a browser reads out of it.
-def session_may_set_cookie(value):
-    return not value.strip().startswith(b"hdw4s_id=")
+# Appended by the red arm: a desktop's Set-Cookie relayed again. With no name
+# filter behind it, the plainest spelling of our cookie is the first to leak.
+RESPONSE_FIELDS = RESPONSE_FIELDS | {b"set-cookie"}
 """
 
 
-def red_a_padded_name_sets_our_cookie():
-    path = scratch_demux("-cookieprefix.py", PREFIX_FILTER_AGAIN)
+def red_a_desktops_cookie_is_relayed():
+    path = scratch_demux("-cookierelay.py", COOKIES_RELAYED_AGAIN)
     rig = Rig(demux=path)
     try:
         try:
             test_a_session_cannot_set_our_cookie(rig)
         except AssertionError as e:
-            if "hdw4s_id =X" not in str(e):
+            if "by writing 'hdw4s_id=X'" not in str(e):
                 raise RuntimeError(
                     "the red arm went red for the wrong reason: %s" % e)
             raise
@@ -5493,6 +5936,13 @@ def main():
          dict(gate=None)),
         (test_a_request_a_parser_splits_differently_is_refused,
          dict(gate=None)),
+        (test_an_interim_response_carries_nothing_to_the_browser,
+         dict(gate=None)),
+        (test_framing_two_parsers_could_read_differently_is_refused,
+         dict(gate=None)),
+        (test_a_101_nobody_asked_for_is_refused, dict(gate=None)),
+        (test_every_framing_a_desktop_uses_still_reaches_the_browser,
+         dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -5578,7 +6028,7 @@ def main():
                red_concurrent_arrivals_share_a_slot,
                red_a_reclaim_interleaves_with_a_letting,
                red_a_press_from_another_page_acts,
-               red_a_padded_name_sets_our_cookie,
+               red_a_desktops_cookie_is_relayed,
                red_the_directory_can_be_framed,
                red_a_desktop_installs_a_service_worker,
                red_a_service_workers_script_is_served,
@@ -5586,6 +6036,9 @@ def main():
                red_a_lone_cr_carries_a_forged_cookie,
                red_a_prefetch_mints_at_the_front_door,
                red_a_request_with_a_lone_cr_is_judged,
+               red_an_interim_head_is_relayed,
+               red_ambiguous_framing_is_resolved,
+               red_a_101_is_taken_from_anyone,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)

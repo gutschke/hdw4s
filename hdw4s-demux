@@ -3785,8 +3785,8 @@ def header_value(headers, name):
 # out of the visitor, which the cross-site refusal passes by design. Nothing of
 # ours frames these pages. Both headers, because frame-ancestors is the
 # standard and X-Frame-Options is what a browser that predates it reads.
-# On every response this router writes itself; a desktop's own responses are
-# forwarded as the desktop wrote them.
+# On every response this router writes itself. A desktop's responses carry what
+# the desktop wrote of these, if anything: both are on RESPONSE_FIELDS.
 FRAME_HEADERS = (("Content-Security-Policy", "frame-ancestors 'none'"),
                  ("X-Frame-Options", "DENY"))
 
@@ -5287,56 +5287,23 @@ def splice(a, b, names=("", ""), first=None, hung_up=None):
                 pass
 
 
-def session_may_set_cookie(value):
-    """False for a Set-Cookie VALUE a session must not get to the browser.
-
-    THE NAME IS READ AS A BROWSER READS IT, and reading it any other way was a
-    measured hole. The filter used to drop only a value that began with
-    "hdw4s_id=", but a browser takes the name as everything before the first
-    "=" of the first ";"-part, with spaces and tabs around it removed. So
-    "hdw4s_id =X" passed the router and, measured in Chrome 153, overwrote the
-    HttpOnly identity the router had set: hostile code in one visitor's desktop
-    could plant the ATTACKER's identity in that browser, and the visitor's next
-    New desktop was then listed to the attacker and served to them.
-
-    Refused, and each measured in Chrome 153 on 2026-09-27:
-      a name starting "hdw4s_", in any case -- every cookie of ours, present
-        and future: hdw4s_id, and hdw4s_fresh, which skips the Connect card.
-        Chrome compares names case-sensitively, so "HDW4S_ID" is a different
-        cookie and harmless today; it is refused anyway because nothing a
-        desktop does needs a name that close to ours.
-      a NAMELESS cookie, a first part with no "=" at all. Chrome keeps it and
-        sends its value BARE ("Cookie: hdw4s_id=R; hdw4s_id"), which puts a
-        session-chosen word in the header our identity is parsed from.
-      an EMPTY name, "=hdw4s_id=X". Chrome drops this one by itself
-        (measured); it is refused because a browser that kept it as nameless
-        would send "hdw4s_id=X" bare, which is our cookie, byte for byte.
-    """
-    pair = value.split(b";", 1)[0]
-    if b"=" not in pair:
-        return False
-    name = pair.split(b"=", 1)[0].strip(b" \t")
-    return bool(name) and not name.lower().startswith(b"hdw4s_")
-
-
 def unsafe_header_line(lines):
-    """Why a header block cannot be judged line by line, or None if it can.
+    """Why a REQUEST's header block cannot be judged line by line, or None.
 
-    EVERY FILTER ON A DESKTOP'S HEADERS ASSUMES THE BROWSER SPLITS THE BLOCK
-    WHERE THIS ROUTER DOES, and it does not. This router splits on LF; Chrome
-    153 also ends a line at a lone CR -- measured by the threat review: ONE
-    line "Set-Cookie: a=1<CR>Set-Cookie: hdw4s_id=X; Path=/" was judged here as
-    the harmless cookie "a" and forwarded verbatim, and the browser set our
-    identity to X. The same trick carried Service-Worker-Allowed past its
-    filter. So the block is refused whole, not repaired:
+    EVERY FILTER ON A REQUEST'S HEADERS ASSUMES THE OTHER PARSERS SPLIT THE
+    BLOCK WHERE THIS ROUTER DOES, and they need not. This router splits on LF;
+    Chrome 153 also ends a line at a lone CR -- measured by the threat review
+    on a DESKTOP'S response, where one line "Set-Cookie: a=1<CR>Set-Cookie:
+    hdw4s_id=X; Path=/" was judged here as the harmless cookie "a" and
+    forwarded verbatim. A desktop's response is no longer judged line by line
+    at all (read_response_head() parses it and the router writes its own);
+    a request still is, because the Cookie stripped on the way up and every
+    Sec-Fetch-* are found line by line. So the block is refused whole:
 
-      a CR anywhere but the line's own ending    split differently by a browser
+      a CR anywhere but the line's own ending    split differently elsewhere
       a NUL                                      no browser line has one
       a line that begins with SP or HTAB         obs-fold, which RFC 9112 lets
-                                                 a proxy reject; measured
-                                                 harmless in Chrome today, and
-                                                 refused so that "today" is not
-                                                 what the filter rests on.
+                                                 a recipient reject.
     """
     for i, line in enumerate(lines):
         body = line[:-2] if line.endswith(b"\r\n") else \
@@ -5350,28 +5317,306 @@ def unsafe_header_line(lines):
     return None
 
 
-def session_may_send(line):
-    """False for a response header line a session must not get to the browser.
+# --------------------------------------------------------------------------
+# A desktop's response: parsed, never relayed as it came
+# --------------------------------------------------------------------------
+#
+# THE SHAPE, and why it is this one. Every byte that comes back up a slot's
+# socket is the occupant's: a desktop runs untrusted code as its occupant, and
+# the occupant controls the streaming server. The browser that receives the
+# answer stores cookies and service workers for ONE origin that the router's own
+# pages and every desktop in the pool share. So the router never forwards a
+# desktop's response HEAD at all. It reads it with the strict grammar below,
+# decides from what it read, and WRITES ITS OWN: its own status line, its own
+# framing, and only fields whose effect ends with this one response.
+#
+# Three filters used to sit on the raw bytes, and each one was defeated by the
+# next thing nobody had enumerated -- a space before the "=" of a cookie name, a
+# lone CR that the browser splits on and the router did not, and an interim 1xx
+# block after which the rest was relayed unread. A filter on bytes that are
+# then forwarded is only as good as its model of every parser downstream. A
+# response the router composes itself from parsed parts has one parser: this
+# one. What it did not understand, it does not write.
+#
+# WHY NOT THE STANDARD LIBRARY'S PARSER (http.client). It is built to be
+# lenient, which is the opposite of the job: it accepts folded lines, reads a
+# header block through email.parser, which has its own ideas about line ends,
+# and skips only "100 Continue" among the interim responses. Its leniency is the
+# thing the browser and this router would then disagree about. The grammar
+# needed is small, RFC 9112's, and is written out here where it can be read.
+#
+# WHY NOT A FIELD DENY-LIST on top of the old relay, which is what the three
+# fixes were. A deny-list has to name every field with an effect beyond the
+# response, and the browser keeps adding them: Clear-Site-Data can delete the
+# router's identity cookie, Service-Worker-Allowed widens a worker's scope, and
+# Strict-Transport-Security, Alt-Svc, NEL, Report-To, Accept-CH and Set-Login
+# all leave state behind for the whole origin. RESPONSE_FIELDS below is the
+# other way round: what reaches the browser is what somebody decided is
+# confined to the response it arrived on. A field a future Selkies adds is
+# DROPPED and said once in the log, which is a visible cost; a field a deny-list
+# missed is an invisible one.
 
-    Two, and both are about the ONE ORIGIN every desktop in the pool shares
-    with the router's own pages and with each other:
+class Unrelayable(Exception):
+    """A desktop's response the router will not turn into one of its own."""
 
-      Set-Cookie of ours     see session_may_set_cookie().
-      Service-Worker-Allowed widens the scope a service worker may claim past
-                             the directory its script was served from, so a
-                             desktop could register one over / -- the front
-                             door, the directory and every other visitor's
-                             session address -- and answer their requests
-                             from inside that visitor's own browser. Dropped
-                             always: nothing we serve needs it.
-    """
-    name, sep, value = line.partition(b":")
-    if not sep:
-        return True
-    name = name.strip().lower()
-    if name == b"set-cookie":
-        return session_may_set_cookie(value)
-    return name != b"service-worker-allowed"
+
+# RFC 9110 token and field-value characters. A value may carry obs-text
+# (0x80-0xFF), because a download's filename is written that way by aiohttp;
+# it may not carry a control character, and CR and NUL are control characters.
+_TOKEN = frozenset(b"!#$%&'*+-.^_`|~0123456789"
+                   b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+_FIELD_VALUE = frozenset(b"\t") | frozenset(range(0x20, 0x7f)) \
+    | frozenset(range(0x80, 0x100))
+# Patterns as bytes, not compiled objects: the state sweep (STATE_INVENTORY)
+# asks what every module-level mutable is for, and a constant needs no answer.
+_STATUS_LINE = rb"HTTP/1\.[01] ([1-5][0-9][0-9])(?: [\t -~\x80-\xff]*)?"
+_CHUNK_SIZE = rb"([0-9A-Fa-f]{1,15})[ \t]*(?:;[\t -~\x80-\xff]*)?"
+
+HEAD_LINE_MAX = 16384
+HEAD_FIELDS_MAX = 100
+INTERIM_MAX = 8
+
+
+def read_head_line(f):
+    """One line of a head, without its ending. LF or CRLF ends it; a line that
+    does not end within HEAD_LINE_MAX bytes is refused rather than read on."""
+    line = f.readline(HEAD_LINE_MAX + 1)
+    if not line:
+        raise Closed()
+    if not line.endswith(b"\n"):
+        raise Unrelayable("a line longer than %d bytes, or cut short"
+                          % HEAD_LINE_MAX)
+    return line[:-2] if line.endswith(b"\r\n") else line[:-1]
+
+
+def parse_field(body):
+    """(lowercased name, value) of one field line, by RFC 9112 section 5.
+
+    No whitespace before the colon (5.1 says a server MUST reject it), no
+    folded continuation (a leading SP or HTAB is not a token character), and
+    no control character in the value. A lone CR fails the last of those, so
+    no line is ever split differently by a browser: the router never writes a
+    received line out again anyway."""
+    name, sep, value = body.partition(b":")
+    if not sep or not name or not all(c in _TOKEN for c in name):
+        raise Unrelayable("a field line that is not \"name: value\"")
+    value = value.strip(b" \t")
+    if not all(c in _FIELD_VALUE for c in value):
+        raise Unrelayable("a control character in the value of %s"
+                          % _loggable(name))
+    return name.lower(), value
+
+
+def read_response_head(f):
+    """(status, [(name, value), ...]) of one response head, or Unrelayable."""
+    m = re.fullmatch(_STATUS_LINE, read_head_line(f))
+    if m is None:
+        raise Unrelayable("a status line that is not HTTP/1.x")
+    fields = []
+    while True:
+        body = read_head_line(f)
+        if not body:
+            return int(m.group(1)), fields
+        if len(fields) >= HEAD_FIELDS_MAX:
+            raise Unrelayable("more than %d fields" % HEAD_FIELDS_MAX)
+        fields.append(parse_field(body))
+
+
+def read_final_head(f, asked_upgrade):
+    """The head the browser is owed an answer from, skipping every interim one.
+
+    AN INTERIM RESPONSE IS NEVER RELAYED. 100 Continue means nothing
+    downstream: this router has sent the whole request body before it reads a
+    byte of the answer, and the reverse proxy runs its own Expect handshake
+    with the browser. 103 Early Hints carries only preload hints, which are an
+    optimisation. Relaying either is a second head the browser treats specially,
+    and the measured hole was exactly that: a 103 was checked, and everything
+    after it was relayed unread. Each interim head is still parsed with the
+    same grammar, so a malformed one refuses the response like any other.
+
+    101 is not interim here: it is the answer to a WebSocket upgrade, and it is
+    accepted only when the request asked for one. A 101 to anything else would
+    turn an ordinary exchange into a raw byte pipe from the desktop."""
+    for _ in range(INTERIM_MAX + 1):
+        status, fields = read_response_head(f)
+        if status == 101:
+            if not asked_upgrade:
+                raise Unrelayable("a 101 to a request that asked for no "
+                                  "upgrade")
+            return status, fields
+        if status >= 200:
+            return status, fields
+    raise Unrelayable("more than %d interim responses" % INTERIM_MAX)
+
+
+def response_framing(method, status, fields):
+    """How this response's body is delimited, by RFC 9112 section 6.3.
+
+    ("none", length) for HEAD, 204 and 304 -- no body, whatever the fields
+    say; LENGTH is a valid Content-Length to repeat to a HEAD, or None.
+    ("length", n), ("chunked", None), or ("close", None).
+
+    AMBIGUITY IS REFUSED, not resolved: Content-Length together with
+    Transfer-Encoding, more than one Content-Length, a length that is not
+    digits, a transfer coding other than exactly "chunked". RFC 9112 lets a
+    recipient pick Transfer-Encoding in the first case; this one does not,
+    because the router then writes its own framing and a desktop that sent
+    both was not writing HTTP for anybody's benefit but its own."""
+    lengths = [v for n, v in fields if n == b"content-length"]
+    codings = [v for n, v in fields if n == b"transfer-encoding"]
+    if lengths and codings:
+        raise Unrelayable("both Content-Length and Transfer-Encoding")
+    if len(lengths) > 1:
+        raise Unrelayable("%d Content-Length fields" % len(lengths))
+    if len(codings) > 1:
+        raise Unrelayable("%d Transfer-Encoding fields" % len(codings))
+    length = None
+    if lengths:
+        if not re.fullmatch(rb"[0-9]{1,15}", lengths[0]):
+            raise Unrelayable("a Content-Length that is not a number")
+        length = int(lengths[0])
+    if codings and codings[0].lower() != b"chunked":
+        raise Unrelayable("a transfer coding other than chunked")
+    if method == b"HEAD" or status in (204, 304):
+        return "none", (length if method == b"HEAD" else None)
+    if codings:
+        return "chunked", None
+    if length is not None:
+        return "length", length
+    return "close", None
+
+
+# WHAT A DESKTOP'S RESPONSE MAY CARRY TO THE BROWSER: fields whose effect ends
+# with the response or the document it delivers. Everything else is dropped.
+# The list is what upstream Selkies sends (2.0.0rc1, read in stream_server.py
+# and aiohttp's file and WebSocket responses), plus the page-scoped security
+# policies a later Selkies might plausibly add. Deliberately NOT here, each with
+# its reason:
+#
+#   Set-Cookie             a cookie on this origin has one reader, the router:
+#                          the Cookie header is stripped on the way up, so a
+#                          desktop's cookie never reaches a desktop. Every
+#                          name-based filter on it was one more parser to agree
+#                          with the browser's, and the first one did not.
+#   Service-Worker-Allowed widens a worker's scope over the whole origin.
+#   Clear-Site-Data        deletes the router's cookies and storage.
+#   Strict-Transport-Security, Alt-Svc, NEL, Report-To, Reporting-Endpoints,
+#   Accept-CH, Critical-CH, Set-Login, Origin-Agent-Cluster
+#                          state the browser keeps for the ORIGIN.
+#   WWW-Authenticate       authentication on this origin is the router's; a
+#                          desktop's prompt would leave credentials the browser
+#                          then sends to every page of it.
+#   Link, Refresh          fetches and navigations the router never asked for.
+#   Access-Control-*       nothing of Selkies is read cross-origin.
+#   Content-Length, Transfer-Encoding, Connection, Keep-Alive, Trailer, Upgrade
+#                          framing and hop-by-hop: the router writes its own.
+RESPONSE_FIELDS = frozenset((
+    b"content-type", b"content-encoding", b"content-language",
+    b"content-disposition", b"content-range", b"accept-ranges",
+    b"cache-control", b"expires", b"pragma", b"etag", b"last-modified",
+    b"vary", b"age", b"date", b"server", b"location", b"retry-after",
+    b"sec-websocket-accept", b"sec-websocket-protocol",
+    b"sec-websocket-extensions",
+    b"content-security-policy", b"content-security-policy-report-only",
+    b"x-content-type-options", b"x-frame-options", b"referrer-policy",
+    b"permissions-policy", b"cross-origin-opener-policy",
+    b"cross-origin-embedder-policy", b"cross-origin-resource-policy",
+))
+
+# Consumed by the router rather than dropped: it writes its own of each.
+_FRAMING_FIELDS = frozenset((
+    b"content-length", b"transfer-encoding", b"connection", b"keep-alive",
+    b"trailer", b"upgrade", b"proxy-connection",
+))
+
+_REASONS = (
+    (101, "Switching Protocols"), (200, "OK"), (201, "Created"),
+    (202, "Accepted"), (204, "No Content"), (206, "Partial Content"),
+    (301, "Moved Permanently"), (302, "Found"), (303, "See Other"),
+    (304, "Not Modified"), (307, "Temporary Redirect"),
+    (308, "Permanent Redirect"), (400, "Bad Request"), (401, "Unauthorized"),
+    (403, "Forbidden"), (404, "Not Found"), (405, "Method Not Allowed"),
+    (409, "Conflict"), (413, "Content Too Large"),
+    (416, "Range Not Satisfiable"), (429, "Too Many Requests"),
+    (500, "Internal Server Error"), (502, "Bad Gateway"),
+    (503, "Service Unavailable"), (504, "Gateway Timeout"),
+)
+
+
+def response_head(instance, status, fields, framing, extra, upgrade=None):
+    """The head the ROUTER writes for a desktop's response, as bytes.
+
+    Built from parsed parts only: a status code (three digits, already
+    matched), a reason phrase of our own, the fields on RESPONSE_FIELDS with
+    their names re-spelled in lower case, and framing the router chose.
+    Every field dropped is said once per slot and name, so a field that a
+    future Selkies starts to rely on is visible in the log rather than lost
+    silently -- and a desktop sending a thousand made-up names is bounded by
+    say_once()'s own limit."""
+    out = [b"HTTP/1.1 %d %s\r\n"
+           % (status, dict(_REASONS).get(status, "Status").encode())]
+    for name, value in fields:
+        if name in RESPONSE_FIELDS:
+            out.append(b"%s: %s\r\n" % (name, value))
+        elif name not in _FRAMING_FIELDS:
+            say_once(("dropped-field", instance, name),
+                     "did not relay the field %s in a response from %s: it "
+                     "is not on RESPONSE_FIELDS, the fields whose effect ends "
+                     "with the response. Said once per slot and name."
+                     % (_loggable(name), instance))
+    kind, length = framing
+    if upgrade is not None:
+        out.append(b"Connection: Upgrade\r\nUpgrade: %s\r\n" % upgrade)
+    elif kind == "length" or (kind == "none" and length is not None):
+        out.append(b"Content-Length: %d\r\n" % length)
+    elif kind == "chunked":
+        out.append(b"Transfer-Encoding: chunked\r\n")
+    elif kind == "close":
+        out.append(b"Connection: close\r\n")
+    # Ours goes on last, so the sliding window is wound on by every exchange a
+    # long-lived tab has with its own desktop, not only by a visit to the front
+    # door. Before this, a tab that stayed at /s/<sid>/ aged out in place.
+    for k, v in extra:
+        out.append(b"%s: %s\r\n" % (k.encode(), v.encode()))
+    out.append(b"\r\n")
+    return b"".join(out)
+
+
+def relay_chunked(upf, wf, rechunk):
+    """Decode a chunked body strictly and write it again, chunked by us or,
+    for a downstream that speaks HTTP/1.0, bare until close.
+
+    Chunk extensions and trailer fields are read, checked and dropped: the
+    browser gets sizes this router wrote. True when the body ended properly."""
+    while True:
+        m = re.fullmatch(_CHUNK_SIZE, read_head_line(upf))
+        if m is None:
+            raise Unrelayable("a chunk size line that is not hex")
+        n = int(m.group(1), 16)
+        if n == 0:
+            break
+        left = n
+        if rechunk:
+            wf.write(b"%x\r\n" % n)
+        while left > 0:
+            data = upf.read(min(left, 65536))
+            if not data:
+                return False
+            wf.write(data)
+            left -= len(data)
+        if read_head_line(upf) != b"":
+            raise Unrelayable("chunk data longer than its size")
+        if rechunk:
+            wf.write(b"\r\n")
+    for _ in range(HEAD_FIELDS_MAX + 1):
+        body = read_head_line(upf)
+        if not body:
+            if rechunk:
+                wf.write(b"0\r\n\r\n")
+            wf.flush()
+            return True
+        parse_field(body)
+    raise Unrelayable("more than %d trailer fields" % HEAD_FIELDS_MAX)
 
 
 def registers_a_service_worker(headers):
@@ -5389,7 +5634,8 @@ def registers_a_service_worker(headers):
 
 
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
-                    extra=(), navigation=False, hung_up=None):
+                    extra=(), navigation=False, hung_up=None,
+                    version=b"HTTP/1.1"):
     """One upstream connection for ONE request. Never one per downstream
     connection -- that is the pooling defect this component exists to avoid.
 
@@ -5505,51 +5751,66 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                     [("Cache-Control", "no-store")] + list(extra))
             return STARTING
 
-    # Response.
-    status_line = upf.readline()
-    if not status_line:
+    # Response. See read_response_head() and response_head(): nothing of the
+    # desktop's head is written as it came, only what was parsed out of it.
+    try:
+        answered = upf.peek(1)
+    except OSError:
+        answered = None
+    if answered is None:
+        up.close()
+        log("%s did not answer a request within %d s"
+            % (instance, up.gettimeout()))
+        respond(wf, 502, page("That desktop is not answering",
+                              "Try again."), extra)
+        return False
+    if not answered:
         up.close()
         if hung_up is not None:
             hung_up()
         respond(wf, 502, page("That desktop closed the connection",
                               "Try again."), extra)
         return False
-    resp_headers = read_headers(upf)
-    bad = unsafe_header_line([status_line] + resp_headers)
-    if bad is not None:
-        # NOTHING OF THIS RESPONSE IS FORWARDED, not even its status line: the
-        # filter below judges lines as THIS parser splits them, and a line a
-        # browser would split differently is one the filter never saw.
+    asked_upgrade = header_value(headers, "Upgrade") is not None
+    try:
+        status, fields = read_final_head(upf, asked_upgrade)
+        framing = response_framing(method, status, fields)
+        upgrade = None
+        if status == 101:
+            upgrade = dict(fields).get(b"upgrade")
+            if not upgrade or not all(c in _TOKEN or c == 0x2f
+                                      for c in upgrade):
+                raise Unrelayable("a 101 that names no protocol")
+    except (Unrelayable, Closed, OSError) as e:
+        # NOTHING OF THIS RESPONSE IS FORWARDED, not even its status line.
         up.close()
+        why = str(e) if isinstance(e, Unrelayable) else \
+            "the connection ended or failed inside the head (%s)" \
+            % (type(e).__name__)
         say_once(("unsafe-header", instance),
                  "refused a response from %s: %s. Nothing of it was sent to "
                  "the browser, which was answered 502. Said once per slot."
-                 % (instance, bad))
+                 % (instance, why))
         respond(wf, 502, page("That desktop sent something unreadable",
                               "Try again."), extra)
         return False
 
-    wf.write(status_line)
-    for h in resp_headers:
-        # A session must not be able to set OUR cookie. It cannot read one --
-        # the Cookie header is stripped on the way up -- and it must not be able
-        # to write one either, or a compromised desktop rewrites the identity of
-        # every browser it answers. See session_may_set_cookie().
-        if not session_may_send(h):
-            continue
-        wf.write(h)
-    # Ours goes on last, so the sliding window is wound on by every exchange a
-    # long-lived tab has with its own desktop, not only by a visit to the front
-    # door. Before this, a tab that stayed at /s/<sid>/ aged out in place.
-    for k, v in extra:
-        wf.write(b"%s: %s\r\n" % (k.encode(), v.encode()))
-    wf.write(b"\r\n")
+    # A downstream that asked in HTTP/1.0 cannot read chunks: it is sent the
+    # decoded body and the end of the connection instead.
+    rechunk = version != b"HTTP/1.0"
+    if framing[0] == "chunked" and not rechunk:
+        framing = ("close", None)
+        dechunk = True
+    else:
+        dechunk = framing[0] == "chunked"
+    wf.write(response_head(instance, status, fields, framing, extra, upgrade))
     wf.flush()
 
-    if status_line.split()[1:2] == [b"101"]:
+    if status == 101:
         # The upgrade succeeded, so this pair is now dedicated. That is correct:
         # after a 101 the connection belongs to that WebSocket and carries no
-        # further requests to route.
+        # further requests to route. What follows is WebSocket frames, which a
+        # browser reads as frames and never as a head.
         pending = upf.peek(0)
         if pending:
             wf.write(upf.read(len(pending)))
@@ -5565,41 +5826,45 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         t.join(5)
         return False
 
-    rlen = header_value(resp_headers, "Content-Length")
-    if rlen is not None:
-        left = int(rlen)
-        while left > 0:
-            chunk = upf.read(min(left, 65536))
-            if not chunk:
-                break
-            wf.write(chunk)
-            left -= len(chunk)
+    # THE BODY. The head is already written, so a desktop that breaks its own
+    # framing from here on cannot be answered 502: the connection to the
+    # browser is closed instead, which ends the response short and carries no
+    # further request -- nothing the desktop sends after the break is read.
+    kind, length = framing
+    try:
+        if kind == "none":
+            ended = True
+        elif dechunk:
+            ended = relay_chunked(upf, wf, rechunk)
+        elif kind == "length":
+            left = length
+            while left > 0:
+                chunk = upf.read(min(left, 65536))
+                if not chunk:
+                    break
+                wf.write(chunk)
+                left -= len(chunk)
+            ended = left == 0
+        else:
+            # No length and no chunks: the body runs to the end of the
+            # connection, so this downstream connection cannot carry another
+            # request either.
+            while True:
+                chunk = upf.read(65536)
+                if not chunk:
+                    break
+                wf.write(chunk)
+            ended = False
         wf.flush()
-    elif (header_value(resp_headers, "Transfer-Encoding") or b"").lower() == b"chunked":
-        while True:
-            size_line = upf.readline()
-            wf.write(size_line)
-            n = int(size_line.strip().split(b";")[0], 16)
-            if n == 0:
-                wf.write(upf.readline())
-                wf.flush()
-                break
-            wf.write(upf.read(n + 2))
-        wf.flush()
-    else:
-        # No length and no chunking: the body runs to end of connection, so this
-        # downstream connection cannot carry another request either.
-        while True:
-            chunk = upf.read(65536)
-            if not chunk:
-                break
-            wf.write(chunk)
-        wf.flush()
-        up.close()
-        return False
-
+    except (Unrelayable, Closed, OSError) as e:
+        say_once(("unsafe-body", instance),
+                 "cut short a response from %s: %s. The browser's connection "
+                 "was closed. Said once per slot."
+                 % (instance, e if isinstance(e, Unrelayable)
+                    else type(e).__name__))
+        ended = False
     up.close()
-    return True
+    return ended and kind != "close"
 
 
 # --------------------------------------------------------------------------
@@ -5620,17 +5885,17 @@ def serve(sock, own, expected_b64):
             if len(bits) != 3:
                 respond(wf, 400, page("Bad request", "That was not HTTP."))
                 return
-            method, target, _ = bits
+            method, target, version = bits
             try:
                 headers = read_headers(rf)
             except (Closed, OSError):
                 return
-            # THE SAME RULE AS FOR A DESKTOP'S RESPONSE (unsafe_header_line()),
-            # and for the same reason: the Cookie stripped on the way up and
-            # every Sec-Fetch-* judged here are found line by line as THIS
-            # parser splits them. No browser can send a line another parser
-            # would split differently, so this refuses nobody's browser; it
-            # keeps this router's reading of a request the only one there is.
+            # REFUSED WHOLE, NOT JUDGED (unsafe_header_line()), because the
+            # Cookie stripped on the way up and every Sec-Fetch-* judged here
+            # are found line by line as THIS parser splits them. No browser
+            # can send a line another parser would split differently, so this
+            # refuses nobody's browser; it keeps this router's reading of a
+            # request the only one there is.
             if unsafe_header_line([line] + headers) is not None:
                 respond(wf, 400, page("Bad request", "That was not HTTP."))
                 return
@@ -5809,7 +6074,8 @@ def serve(sock, own, expected_b64):
                                      refresh_headers(own, identity,
                                                      new_identity),
                                      is_page_navigation(method, rest, headers),
-                                     hung_up=lambda: own.hung_up(sid))
+                                     hung_up=lambda: own.hung_up(sid),
+                                     version=version)
             if served is STARTING:
                 # NOT AN ATTACHMENT. The desktop has not answered, so the
                 # slot's published token may still be the LAST occupant's (it
