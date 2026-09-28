@@ -1083,6 +1083,12 @@ class Ownership:
 
     def __init__(self, path=None):
         self._lock = threading.Lock()
+        # HELD ACROSS "WHICH SLOT IS FREE" AND "IT IS NOW LET", by let_slot()
+        # and by reclaim_slot(), and by nothing else. Not self._lock, which
+        # guards the table for the length of one method and is taken INSIDE
+        # the pick (pending_mints()); this one is always taken first and
+        # never while self._lock is held, so the two cannot deadlock.
+        self.letting = threading.Lock()
         # sid -> {"identity", "instance", "minted"}
         self._by_sid = {}
         # identity -> [sid, ...] in mint order
@@ -3388,6 +3394,19 @@ def reclaim_slot(own, sid, rec, why, request=None, rundir=None, webroot=None):
     them whether or not the slot ever comes back; the slot returns to the pool a
     second or two later, for whoever arrives next.
     """
+    # UNDER THE LETTING LOCK, for the race let_slot() closes, seen from the
+    # other side. reclaimable() says "a desktop is running here and nobody
+    # else has been let this slot"; between that answer and the request below,
+    # the desktop can stop and the slot be let to a new visitor, whose fresh
+    # desktop the request would then end. Held here, a letting lands either
+    # before the question (holders_of() sees it, and this declines) or after
+    # the request (teardown_requested() makes the slot taken, and it is not
+    # offered).
+    with own.letting:
+        return _reclaim_slot(own, sid, rec, why, request, rundir, webroot)
+
+
+def _reclaim_slot(own, sid, rec, why, request, rundir, webroot):
     no = reclaimable(own, sid, rec, rundir=rundir, webroot=webroot)
     if no is not None:
         log("did not reclaim a slot: %s" % no)
@@ -3682,6 +3701,48 @@ def pick_slot(own):
             if slot_unreachable(name, listening) is None:
                 return name
     return free[0]
+
+
+def let_slot(own, identity):
+    """(instance, sid) for a slot now let to IDENTITY, or (None, None) if none is free.
+
+    THE PICK AND THE RECORD ARE ONE ACT, and they were two. Every connection is
+    served on its own thread, and pick_slot() decides "free" from what the
+    table and the reservations say; the mint and the reservation were written
+    only after it returned. So every arrival that picked before the first one
+    recorded saw the SAME slot free. Measured on a development container
+    2026-09-27: nine new visitors at one instant, nine mints, TWO slots -- six
+    on one, three on the other -- inside a second. Against stand-in slots a
+    slot let twice gates the EARLIER letting as superseded, so a burst's
+    visitors were told their brand-new desktop had ended; a visitor whose first
+    request reached the desktop before the second mint would instead share it
+    with a stranger, and an ephemeral desktop runs untrusted code with full
+    input. Whether that happened on the box was not established.
+
+    A LOCK, NOT A RE-CHECK AFTER THE FACT. Minting, then asking whether anybody
+    else minted the same slot and backing out, has a loser who must be told
+    something and a window in which both are recorded; holding one lock across
+    the question and the answer has neither. What it costs is that mints are
+    served one at a time, and a mint is a stat or two and one small write to a
+    tmpfs -- nothing here waits on a desktop.
+
+    THE LOCK IS THE TABLE'S, not the module's, so a start-up self-check that
+    builds its own table cannot contend with a live one. Its reach ends at this
+    process: two routers against one state directory would race exactly as
+    before, which reserve_slot() already names as a dependency (one socket
+    unit, Accept=no, one service instance).
+    """
+    with own.letting:
+        instance = pick_slot(own)
+        if instance is None:
+            return None, None
+        sid = own.mint_session(identity, instance)
+        # WRITTEN DOWN BEFORE THE REDIRECT, and the order is the point. The
+        # redirect is what starts the desktop, so a reservation recorded after
+        # it would leave the slot unheld across exactly the window where this
+        # process can die and forget it.
+        reserve_slot(instance)
+    return instance, sid
 
 
 # --------------------------------------------------------------------------
@@ -4130,7 +4191,7 @@ def arrival(own, wf, identity, query, new_identity):
         # is a QUESTION rather than an instruction -- a browser restoring twenty
         # tabs presents twenty dead addresses and must not be handed twenty
         # desktops.
-        instance = pick_slot(own)
+        instance, sid = let_slot(own, identity)
         if instance is None:
             # Logged BEFORE the response, and with the cookie still attached:
             # refusing a visitor is not a reason to let their identity lapse --
@@ -4142,12 +4203,6 @@ def arrival(own, wf, identity, query, new_identity):
                 "This machine has no free slot right now. Close a tab you are "
                 "finished with, or try again shortly."), extra)
             return
-        sid = own.mint_session(identity, instance)
-        # WRITTEN DOWN BEFORE THE REDIRECT, and the order is the point. The
-        # redirect is what starts the desktop, so a reservation recorded after
-        # it would leave the slot unheld across exactly the window where this
-        # process can die and forget it.
-        reserve_slot(instance)
         # AFTER the mint and before the redirect, so the line exists even if the
         # visitor never comes back for it. A record written only once a request
         # reached the session would miss exactly the mint that went nowhere,
@@ -4783,7 +4838,7 @@ def console(own, wf, identity, new_identity, what, sid, method):
             respond(wf, 200, console_page(rows()), extra)
             return
 
-        instance = pick_slot(own)
+        instance, new_sid = let_slot(own, identity)
         if instance is None:
             # THE REFUSAL RENDERS WHERE CREATE LIVES. Logged first and with the
             # cookie still attached, for the same reason the front door's
@@ -4805,13 +4860,8 @@ def console(own, wf, identity, new_identity, what, sid, method):
         # tab, a stale id or a restored window reaches this line, because
         # nothing but a POST does.
         #
-        # THE ORDER IS THE ONE arrival() ARGUES FOR and is copied on purpose:
-        # the reservation is on disk BEFORE the redirect, because the redirect
-        # is what starts the desktop and a reservation written after it would
-        # leave the slot unheld across exactly the window in which this process
-        # can die and forget the slot was let.
-        new_sid = own.mint_session(identity, instance)
-        reserve_slot(instance)
+        # THE LETTING IS arrival()'S, the same call: one lock across the pick
+        # and the record, and the reservation on disk before the redirect.
         log_arrival("minted a session on request", identity, instance, new_sid,
                     "asked for from the directory, %d slot(s) now let"
                     % len(own.instances_in_use()))

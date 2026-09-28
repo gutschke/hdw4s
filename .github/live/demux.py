@@ -4527,6 +4527,267 @@ def red_reclaim_on_mismatch_alone():
         _remove_scratch_demuxes()
 
 
+# --- concurrent arrivals: ONE slot is ONE letting ------------------------
+#
+# MEASURED ON A DEVELOPMENT CONTAINER, 2026-09-27: nine new visitors, each
+# with its own cookie jar, sent to the front door at one instant, were logged
+# as nine mints with nine visitor tags onto TWO slots within a second -- six on
+# ephemeral0, three on ephemeral1 (private/evidence/concurrent-mint-race-1.txt).
+# Every connection is served on its own thread, and the pick of a free slot was
+# computed from the table and the reservations BEFORE either of them recorded
+# the mint that pick led to. So every thread that picked before the first one
+# recorded saw the same slot free. Nothing here saw it, because every test
+# above arrives one visitor at a time.
+
+
+def load_demux_from(path):
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader(
+        "demux_mod_%d" % id(path), path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def concurrent_lettings(path, entry, nslots, nvisitors):
+    """NVISITORS new browsers ask for a desktop at one instant, through ENTRY.
+
+    Returns (instances let, statuses). Runs the router's own arrival() or its
+    directory's create, IN THIS PROCESS, against an in-memory table.
+
+    THE WINDOW IS WIDENED, AND THAT IS THE WHOLE TECHNIQUE. On a workstation
+    the pick and the record are microseconds apart, so a burst reproduces the
+    race some of the time -- a red that comes and goes is not a red anybody can
+    rely on. So every visitor is held, just after it has read what is taken and
+    before it acts on that, until all of them have read it. A router that makes
+    the read and the record ONE act cannot be held there by more than one
+    visitor at a time: the barrier times out, is broken, and the rest go through
+    one by one. What is stood in for is timing, never the decision: pick_slot(),
+    slots_in_use(), the table and the reservation are the router's own.
+
+    Stood in for: the pool table (a list), occupancy (unreadable, so only the
+    router's own mints count -- the half this defect is about), the socket
+    listing (none, so the first free slot is offered), and the log.
+    """
+    import io
+    m = load_demux_from(path)
+    tmp = tempfile.mkdtemp(prefix="demux-concurrent-")
+    pool = ["ephemeral%d" % i for i in range(nslots)]
+    m.ephemeral_slots = lambda table=None: list(pool)
+    m.occupancy_readable = lambda rundir=None: False
+    m.listening_paths = lambda *a, **kw: None
+    m.RESERVE_DIR = os.path.join(tmp, "reserved")
+    m.TEARDOWN_DIR = os.path.join(tmp, "teardown")
+    os.makedirs(m.TEARDOWN_DIR)
+    m.log = lambda msg: None
+    m.log_refusal = lambda *a, **kw: None
+    barrier = threading.Barrier(nvisitors, timeout=1.5)
+    read_taken = m.slots_in_use
+
+    def held(own, slots=None):
+        taken = read_taken(own, slots)
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        return taken
+    m.slots_in_use = held
+
+    own = m.Ownership()
+    statuses = []
+    lock = threading.Lock()
+
+    def visitor():
+        wf = io.BytesIO()
+        identity = own.mint_identity()
+        if entry == "front door":
+            m.arrival(own, wf, identity, b"", True)
+        else:
+            m.console(own, wf, identity, True, "create", None, b"POST")
+        with lock:
+            statuses.append(int(wf.getvalue().split()[1]))
+
+    threads = [threading.Thread(target=visitor) for _ in range(nvisitors)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+    lettings = [r["instance"] for r in own._by_sid.values()]
+    return lettings, sorted(statuses)
+
+
+def assert_one_letting_per_slot(path, entry, nslots, nvisitors):
+    lettings, statuses = concurrent_lettings(path, entry, nslots, nvisitors)
+    twice = sorted({n for n in lettings if lettings.count(n) > 1})
+    assert not twice, (
+        "%d visitors arriving at once through the %s were let %d desktop(s) "
+        "on %d slot(s): %s let to more than one of them -- two strangers "
+        "handed ONE desktop" % (nvisitors, entry, len(lettings),
+                                len(set(lettings)), ", ".join(twice)))
+    want = min(nslots, nvisitors)
+    assert len(lettings) == want, (
+        "%d visitors at once on a %d-slot pool were let %d desktop(s), not %d"
+        % (nvisitors, nslots, len(lettings), want))
+    ok = 302 if entry == "front door" else 303
+    want_statuses = sorted([ok] * want + [503] * (nvisitors - want))
+    assert statuses == want_statuses, (
+        "the %s answered %s; wanted %s -- every visitor past the pool must be "
+        "REFUSED, and every one inside it let" % (entry, statuses,
+                                                   want_statuses))
+
+
+def test_concurrent_arrivals_are_let_distinct_slots(rig=None):
+    """Nine at once on nine slots: nine slots. Through BOTH minting sites."""
+    for entry in ("front door", "directory's New desktop"):
+        assert_one_letting_per_slot(DEMUX, entry, 9, 9)
+
+
+def test_concurrent_arrivals_past_the_pool_are_refused(rig=None):
+    """Twelve at once on nine slots: nine lettings, three refusals, no twins.
+
+    THE OTHER HALF, and without it the repair above is satisfied by a router
+    that serialises the pick and then refuses everybody after the first -- or
+    by one that lets the twelfth visitor share a slot because a count said
+    there was room."""
+    for entry in ("front door", "directory's New desktop"):
+        assert_one_letting_per_slot(DEMUX, entry, 9, 12)
+
+
+def test_a_burst_through_the_real_front_door_is_let_distinct_slots(rig):
+    """The same question with nothing stood in for but the desktops.
+
+    The real router process, real threads, real TCP: twelve cookieless
+    browsers released together at a nine-slot pool. NOT the red half of this
+    defect -- whether the unwidened race is hit here depends on the machine,
+    and concurrent_lettings() above is what makes it certain. This is what
+    says the repair is on the path a real request takes, and that it has not
+    turned a full pool into a hang."""
+    n = 12
+    go = threading.Barrier(n, timeout=10)
+    got = []
+    lock = threading.Lock()
+
+    def one():
+        # RECORDED, NEVER ASSERTED, in the thread: an assertion here would die
+        # with the thread and the test would report a count instead of a cause.
+        c = rig.client()
+        go.wait()
+        st, h, _ = c.get("/")
+        where = None
+        if st == 302:
+            c.learn_cookie(h)
+            st2, _, body = c.get(h["location"][0])
+            # 410 HERE IS THE DEFECT'S OTHER FACE. A slot let twice gates the
+            # EARLIER letting as superseded, so a visitor who was just handed a
+            # desktop is told it has ended before they ever saw it.
+            where = body.decode().split("SLOT=")[1].split()[0] \
+                if st2 == 200 else "answered %d" % st2
+        with lock:
+            got.append((st, where))
+
+    threads = [threading.Thread(target=one) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert len(got) == n, "only %d of %d arrivals came back" % (len(got), n)
+    slots = [w for st, w in got if st == 302]
+    refused = [st for st, _ in got if st != 302]
+    lost = [w for w in slots if w.startswith("answered")]
+    assert not lost, (
+        "%d visitor(s) handed a desktop in a burst were refused it on arrival "
+        "(%s): their slot had been let AGAIN, to somebody else"
+        % (len(lost), ", ".join(lost)))
+    assert len(slots) == len(set(slots)), \
+        "a burst of arrivals put two visitors on one slot: %s" % sorted(slots)
+    assert len(slots) == len(rig.slots), \
+        "a burst of %d on %d slots let %d" % (n, len(rig.slots), len(slots))
+    assert refused == [503] * (n - len(rig.slots)), \
+        "the arrivals past the pool were answered %s, not refused" % refused
+
+
+def reclaim_holds_the_letting(path):
+    """True when reclaim_slot() decides AND acts with no letting able to land
+    in between. Asked of the lock at the instant of the act, because the
+    interleaving itself -- a desktop stopping between the question and the
+    request -- cannot be produced on demand without widening a window that
+    the router gives no seam for."""
+    m = load_demux_from(path)
+    m.log = lambda msg: None
+    m.reclaimable = lambda *a, **kw: None
+    m.teardown_requested = lambda *a, **kw: False
+    own = m.Ownership()
+    seen = []
+
+    def request(instance):
+        seen.append(own.letting.locked())
+        return None
+    m.reclaim_slot(own, "0" * 32, {"instance": "ephemeral0"}, "a test",
+                   request=request)
+    assert seen, "reclaim_slot() never asked for a teardown, so nothing was tested"
+    return seen[0]
+
+
+def test_a_reclaim_cannot_interleave_with_a_letting(rig=None):
+    """A reclaim that decided on an old desktop must not end a new visitor's.
+
+    reclaimable() answers "a desktop is running here and nobody else holds
+    the slot"; if a letting can land between that answer and the teardown
+    request, the request ends the NEW visitor's desktop as it starts."""
+    assert reclaim_holds_the_letting(DEMUX), (
+        "a teardown was requested while a letting could land on the same slot "
+        "-- a visitor let it in between loses their fresh desktop")
+
+
+RECLAIM_WITHOUT_THE_LETTING = """
+
+# Appended by the red arm: the reclaim decides and acts without the lock.
+def reclaim_slot(own, sid, rec, why, request=None, rundir=None, webroot=None):
+    return _reclaim_slot(own, sid, rec, why, request, rundir, webroot)
+"""
+
+
+def red_a_reclaim_interleaves_with_a_letting():
+    path = scratch_demux("-reclaim-unlocked.py", RECLAIM_WITHOUT_THE_LETTING)
+    try:
+        assert reclaim_holds_the_letting(path), \
+            "a teardown was requested while a letting could land"
+    finally:
+        _remove_scratch_demuxes()
+
+
+LETTING_NOT_ATOMIC = """
+
+# Appended by the red arm: the pick and the record are two acts again.
+def let_slot(own, identity):
+    instance = pick_slot(own)
+    if instance is None:
+        return None, None
+    sid = own.mint_session(identity, instance)
+    reserve_slot(instance)
+    return instance, sid
+"""
+
+
+def red_concurrent_arrivals_share_a_slot():
+    """RED ARM: the letting with its lock taken away. Must put twins on a slot."""
+    path = scratch_demux("-letting.py", LETTING_NOT_ATOMIC)
+    try:
+        try:
+            assert_one_letting_per_slot(path, "front door", 9, 9)
+        except AssertionError as e:
+            if "two strangers handed ONE desktop" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        _remove_scratch_demuxes()
+
+
 def main():
     print("== hdw4s-demux, stand-in slots, no browser ==")
     print("Real: the demultiplexer, TCP, HTTP, cookies, UNIX upstreams.")
@@ -4642,6 +4903,10 @@ def main():
         (test_a_slot_re_let_to_somebody_else_is_not_reclaimed, dict(nslots=1)),
         (test_a_letting_that_never_came_back_cannot_reach_the_next_one,
          dict(nslots=1)),
+        # NINE slots, as on the container where the burst was measured, and
+        # twelve arrivals, so the refusal past the pool is exercised too.
+        (test_a_burst_through_the_real_front_door_is_let_distinct_slots,
+         dict(nslots=9)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -4649,7 +4914,12 @@ def main():
     for fn in (test_shipped_default_resumes_a_returning_browser,
                test_a_slot_that_is_never_reaped_is_reported_at_start,
                test_a_duration_already_in_seconds_is_refused,
-               test_the_records_the_refusal_log_is_read_from_survive_a_restart):
+               test_the_records_the_refusal_log_is_read_from_survive_a_restart,
+               # In-process, with the window between the pick and the record
+               # held open; see concurrent_lettings().
+               test_concurrent_arrivals_are_let_distinct_slots,
+               test_concurrent_arrivals_past_the_pool_are_refused,
+               test_a_reclaim_cannot_interleave_with_a_letting):
         try:
             fn()
             check(fn.__name__, True)
@@ -4718,7 +4988,9 @@ def main():
                red_every_redirect_marked_as_a_fresh_mint,
                red_resume_on_a_GET,
                red_resume_of_a_desktop_that_is_not_yours,
-               red_startup_guard_notices_a_console_address_that_moved):
+               red_startup_guard_notices_a_console_address_that_moved,
+               red_concurrent_arrivals_share_a_slot,
+               red_a_reclaim_interleaves_with_a_letting):
         expect_red(fn.__name__, fn)
 
     print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
