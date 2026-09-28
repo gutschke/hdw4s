@@ -3800,6 +3800,18 @@ FRAME_HEADERS = (("Content-Security-Policy", "frame-ancestors 'none'"),
                  ("X-Frame-Options", "DENY"))
 
 
+def carries_our_cookie(extra):
+    """Does this response carry a Set-Cookie of the router's?
+
+    If it does, NO SHARED CACHE MAY KEEP IT: a cache between the browser and
+    here that stored it would hand one browser's identity to the next one
+    that asked for the same address. So such a response is always marked
+    private -- the router's own pages here, and a desktop's in
+    response_head(), where the desktop's own Cache-Control (a "public" rode
+    along before, noted by the Round D threat review) is replaced."""
+    return any(k.lower() == "set-cookie" for k, _ in extra)
+
+
 def respond(wf, status, body=b"", extra=()):
     reason = {
         200: "OK", 302: "Found", 400: "Bad Request", 401: "Unauthorized",
@@ -3810,6 +3822,9 @@ def respond(wf, status, body=b"", extra=()):
     out = [b"HTTP/1.1 %d %s\r\n" % (status, reason.encode())]
     out.append(b"Content-Length: %d\r\n" % len(body))
     out.append(b"Content-Type: text/html; charset=utf-8\r\n")
+    if carries_our_cookie(extra) and \
+            not any(k.lower() == "cache-control" for k, _ in extra):
+        extra = tuple(extra) + (("Cache-Control", "private"),)
     for k, v in tuple(FRAME_HEADERS) + tuple(extra):
         out.append(b"%s: %s\r\n" % (k.encode(), v.encode()))
     out.append(b"\r\n")
@@ -5632,7 +5647,16 @@ def response_head(instance, status, fields, framing, extra, upgrade=None):
     say_once()'s own limit."""
     out = [b"HTTP/1.1 %d %s\r\n"
            % (status, dict(_REASONS).get(status, "Status").encode())]
+    # Carrying our cookie, the response is private whatever the desktop said;
+    # a desktop's "no-store" is kept, because nothing makes it weaker.
+    private = carries_our_cookie(extra)
+    if private:
+        said = b",".join(v for n, v in fields if n == b"cache-control")
+        out.append(b"Cache-Control: private%s\r\n"
+                   % (b", no-store" if b"no-store" in said.lower() else b""))
     for name, value in fields:
+        if private and name == b"cache-control":
+            continue
         if name in RESPONSE_FIELDS:
             out.append(b"%s: %s\r\n" % (name, value))
         elif name not in _FRAMING_FIELDS:

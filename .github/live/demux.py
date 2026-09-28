@@ -5746,6 +5746,71 @@ def red_a_planted_identity_is_believed():
         _remove_scratch_demuxes()
 
 
+def test_a_response_carrying_our_cookie_is_never_shared(rig):
+    """Any response with the router's Set-Cookie says Cache-Control: private.
+
+    A shared cache that kept one would hand one browser's identity to the next
+    browser asking for the same address. The router's own answers get it;
+    a desktop's response that the router adds its cookie to has the desktop's
+    Cache-Control replaced -- a "public" rode along before (Round D threat
+    review) -- and a desktop's no-store is kept, not weakened."""
+    a = rig.client()
+    st, h, _ = a.get("/")
+    a.learn_cookie(h)
+    assert "set-cookie" in h and \
+        any("private" in v or "no-store" in v
+            for v in h.get("cache-control", [])), \
+        "the front door's answer with our cookie is shareable: %r" \
+        % h.get("cache-control")
+    # The first request on the session path after arrival carries the
+    # refreshed cookie (test_cookie_slides_beyond_the_front_door); the next
+    # does not. Each case is a new visitor, so each gets that first request.
+    for said, want in (("public, max-age=3600", ["private"]),
+                       ("no-store", ["private, no-store"])):
+        c = rig.client()
+        st, h, _ = c.get("/")
+        c.learn_cookie(h)
+        loc = h["location"][0]
+        for s in rig.slots:
+            s.extra_headers = ("Cache-Control: " + said,)
+        st, h, body = c.get(loc)
+        st2, h2, _ = c.get(loc)
+        for s in rig.slots:
+            s.extra_headers = ()
+        assert "set-cookie" in h, "the rig did not provoke a refresh"
+        assert h.get("cache-control") == want, \
+            "a desktop's %r rode along with our cookie as %r" \
+            % (said, h.get("cache-control"))
+        # PERMIT ARM: without our cookie, the desktop's own word stands.
+        assert "set-cookie" not in h2 and h2.get("cache-control") == [said], \
+            "a response without our cookie lost its Cache-Control: %r" \
+            % h2.get("cache-control")
+
+
+SHAREABLE_AGAIN = """
+
+# Appended by the red arm: nothing is private because of our cookie.
+def carries_our_cookie(extra):
+    return False
+"""
+
+
+def red_our_cookie_rides_a_shareable_response():
+    path = scratch_demux("-shareable.py", SHAREABLE_AGAIN)
+    rig = Rig(demux=path, gate=None)
+    try:
+        try:
+            test_a_response_carrying_our_cookie_is_never_shared(rig)
+        except AssertionError as e:
+            if "shareable" not in str(e) and "rode along" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def test_a_request_a_parser_splits_differently_is_refused(rig):
     """The request side of the same rule: refused whole, never judged."""
     a = rig.client()
@@ -6179,6 +6244,8 @@ def main():
          dict(gate=None)),
         (test_a_request_body_is_never_read_as_a_request, dict(gate=None)),
         (test_a_planted_identity_is_never_believed, dict(gate=None)),
+        (test_a_response_carrying_our_cookie_is_never_shared,
+         dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -6277,6 +6344,7 @@ def main():
                red_a_101_is_taken_from_anyone,
                red_a_request_body_is_read_as_a_request,
                red_a_planted_identity_is_believed,
+               red_our_cookie_rides_a_shareable_response,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)
