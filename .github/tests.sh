@@ -3251,6 +3251,32 @@ echo '== the session says, in one word, how the startup hold ended =='
   fi
 )
 
+echo '== a logout ends an ephemeral desktop cleanly, and anything else is still a failure =='
+# THE DEFECT, measured twice on 2026-09-27: after a GNOME logout the ephemeral unit
+# stayed "failed", so "hdw4s check" exited 1 until somebody ran reset-failed. The
+# session script answered every exit of GNOME with status 1.
+#
+# Real: hdw4s-run-session's own gnome_exited, cut out of the script. Stood in for:
+# GNOME, by a child that exits with a chosen status. Nothing here shows what status
+# a real gnome-session returns on logout, nor what systemd then records.
+( set +e
+  fn="$(sed -n '/^gnome_exited() {/,/^}/p' "${ROOT}/hdw4s-run-session")"
+  has 'the exit decision is where this test looks for it' "${fn}" 'gnome_exited() {'
+  # $1 the kind, $2 what the stand-in GNOME does. Prints the exit status.
+  ended() {
+    HDW4S_SESSION_TYPE="$1" bash -c "set -eu; ${fn}
+      $2 & session_pid=\$!; sleep 0.2; gnome_exited" >/dev/null 2>&1
+    echo "$?"
+  }
+  is 'an ephemeral desktop logged out of ends with success'  "$(ended ephemeral 'exit 0')" '0'
+  is 'an ephemeral desktop whose GNOME failed still fails'   "$(ended ephemeral 'exit 1')" '1'
+  # shellcheck disable=SC2016 # expanded by the stand-in's own shell, on purpose
+  is 'an ephemeral desktop whose GNOME was killed still fails' \
+     "$(ended ephemeral 'kill -KILL $BASHPID')" '1'
+  is 'a named desktop logged out of still exits 1, so its unit restarts it' \
+     "$(ended '' 'exit 0')" '1'
+)
+
 echo '== the teardown ends a desktop that is still starting =='
 # THE DEFECT, measured on production 2026-09-27: a GNOME logout with the tab open,
 # the tab's reconnect socket-activated a fresh desktop in the slot, the router asked
@@ -3357,7 +3383,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=525   # update when tests are added; a wrong number is the point
+EXPECTED=530   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
