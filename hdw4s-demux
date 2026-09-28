@@ -1271,6 +1271,17 @@ class Ownership:
                 self._save()
             return rec is not None
 
+    def hung_up(self, sid, now=None):
+        """Record that the desktop behind SID just closed a connection on us.
+
+        NOT WRITTEN DOWN, because it is about this process's own connections:
+        after a restart none of them exist. See settle_after_hang_up().
+        """
+        with self._lock:
+            rec = self._by_sid.get(sid)
+            if rec is not None:
+                rec["hung_up"] = time.time() if now is None else now
+
     def pending_mints(self, since):
         """[(instance, minted)] for slots handed out whose desktop has not
         answered yet, and only while that is still plausible.
@@ -2853,6 +2864,63 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
         return "%s is running a different desktop than the one minted here" \
             % instance
     return None
+
+
+# HOW LONG A DESKTOP THAT HUNG UP ON US IS GIVEN TO SAY WHETHER IT HAS GONE.
+#
+# THE DEFECT, measured on production and reproduced on a development box
+# 2026-09-27: a GNOME logout with the tab still open. The session stops, BindsTo=
+# stops the relay, the relay's connections close, and the browser's client
+# reconnects -- 9 ms later, measured with systemd's debug log. At that instant
+# the runtime directory is still there, the published token still matches and the
+# session's port is still listening, so session_replaced() reads HEALTHY and the
+# request is proxied. The proxy's connect() is an instruction to systemd, not a
+# question: "Incoming traffic" on the slot socket, and a start job for a fresh
+# desktop queued behind the dying one, which runs the moment it has gone -- a new
+# GNOME session in a slot nobody owns.
+#
+# WHAT SEPARATES THAT FROM A WANTED START, and only this router holds it: the
+# letting has ALREADY HAD A DESKTOP (rec["live"]), and that desktop has just hung
+# up on us. systemd sees only a unit that is deactivating, and a socket cannot tell
+# a first connect from a repeat. So a request for a live letting whose desktop
+# hung up in the last HANGUP_SETTLE seconds is not proxied until the world has
+# caught up: it waits while the instruments say "healthy", and is gated the moment
+# one says otherwise. A desktop that hung up and is STILL THERE after the wait --
+# the stream closed for some other reason -- is proxied as before, so the
+# instruments decide, never the clock; the clock only bounds how long they are
+# given.
+#
+# THE NUMBER IS DERIVED FROM WHAT WAS MEASURED, NOT CHOSEN. The session's port
+# shut 0.24 s after its relay went (2026-09-25, the table above slot_door_open());
+# the runtime directory went 0.77 s after it on that run and 2.6 s after the
+# logout on the 2026-09-27 run, where the unit sat in final-sigterm. Three seconds
+# covers the slower instrument's slowest sighting. The cost falls only on a tab
+# whose healthy desktop closed its stream, which waits up to that long once.
+#
+# WHAT IS STILL OPEN, said so it is not read as closed: a request that is NOT
+# preceded by a hang-up -- a tab with no stream open, polling -- and lands inside
+# the 0.24 s before the port shuts is proxied as before. The reclaim and
+# hdw4s-teardown end what that starts.
+HANGUP_SETTLE = 3.0
+
+
+def settle_after_hang_up(rec, instance, replaced=session_replaced,
+                         clock=time.time, sleep=time.sleep):
+    """session_replaced(), asked until the world has caught up with a hang-up.
+
+    For a record whose desktop has not hung up on us -- or never answered us,
+    so there is no desktop yet for this letting to have had -- this is exactly
+    one call of session_replaced(). See HANGUP_SETTLE for the rest.
+    """
+    since = rec.get("hung_up")
+    while True:
+        why = replaced(rec, instance)
+        if why is not None or not since or not rec.get("live"):
+            return why
+        left = since + HANGUP_SETTLE - clock()
+        if left <= 0:
+            return None
+        sleep(min(0.05, left))
 
 
 def slots_in_use(own, slots=None):
@@ -4820,16 +4888,48 @@ def assert_console_shows_only_your_own(target=None):
 # Proxying
 # --------------------------------------------------------------------------
 
-def splice(a, b):
+def splice(a, b, names=("", ""), first=None, hung_up=None):
+    """Copy A to B until either end goes. Then close both.
+
+    FIRST, when given, is a shared [lock, name] that the direction which ends
+    FIRST writes its answer into: the name of the end that went -- names[0] for
+    A, names[1] for B -- or "idle" for a read that timed out. Only the first
+    answer counts, because the second direction always ends BECAUSE of the
+    first one's shutdown and would blame whichever end that closed.
+
+    HUNG_UP is called when the first end to go was the one named "desktop",
+    and it is called BEFORE either socket is shut. That order is the point: the
+    browser learns its stream ended from this shutdown, and reconnects at once
+    (measured 9 ms on a development box), so a record written after the close
+    could be read after the reconnect it exists to hold.
+    """
+    who = None
     try:
         while True:
-            chunk = a.recv(65536)
-            if not chunk:
+            try:
+                chunk = a.recv(65536)
+            except socket.timeout:
+                who = "idle"
                 break
-            b.sendall(chunk)
-    except OSError:
-        pass
+            except OSError:
+                who = names[0]
+                break
+            if not chunk:
+                who = names[0]
+                break
+            try:
+                b.sendall(chunk)
+            except OSError:
+                who = names[1]
+                break
     finally:
+        if first is not None:
+            with first[0]:
+                mine = first[1] is None
+                if mine:
+                    first[1] = who
+            if mine and who == "desktop" and hung_up is not None:
+                hung_up()
         for s in (a, b):
             try:
                 s.shutdown(socket.SHUT_RDWR)
@@ -4838,14 +4938,18 @@ def splice(a, b):
 
 
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
-                    extra=(), navigation=False):
+                    extra=(), navigation=False, hung_up=None):
     """One upstream connection for ONE request. Never one per downstream
     connection -- that is the pooling defect this component exists to avoid.
 
     Returns whether the downstream connection can carry another request, or
     STARTING when a page navigation was answered with starting_page() because
     the desktop had not answered it in time -- which is NOT the desktop
-    answering, and the caller must not treat it as one."""
+    answering, and the caller must not treat it as one.
+
+    HUNG_UP, when given, is called if the DESKTOP ends the exchange -- closes a
+    stream it had accepted, or closes the request without answering it -- and
+    before the browser is told. See settle_after_hang_up()."""
     path = socket_path(instance)
     up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     up.settimeout(30)
@@ -4954,6 +5058,8 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
     status_line = upf.readline()
     if not status_line:
         up.close()
+        if hung_up is not None:
+            hung_up()
         respond(wf, 502, page("That desktop closed the connection",
                               "Try again."), extra)
         return False
@@ -4985,9 +5091,14 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         if pending:
             wf.write(upf.read(len(pending)))
             wf.flush()
-        t = threading.Thread(target=splice, args=(sock, up), daemon=True)
+        first = [threading.Lock(), None]
+        t = threading.Thread(target=splice, args=(sock, up),
+                             kwargs=dict(names=("browser", "desktop"),
+                                         first=first, hung_up=hung_up),
+                             daemon=True)
         t.start()
-        splice(up, sock)
+        splice(up, sock, names=("desktop", "browser"), first=first,
+               hung_up=hung_up)
         t.join(5)
         return False
 
@@ -5124,7 +5235,7 @@ def serve(sock, own, expected_b64):
                 # So the person the 410 page was written for was the only person
                 # who could never see it, while it was shown to strangers whose
                 # ids had simply expired.
-                why = session_replaced(rec, rec["instance"])
+                why = settle_after_hang_up(rec, rec["instance"])
                 if why is not None:
                     own.forget(sid)
                     log("gated a returning visitor at %s: %s"
@@ -5188,7 +5299,8 @@ def serve(sock, own, expected_b64):
                                      headers, rf, wf, sock,
                                      refresh_headers(own, identity,
                                                      new_identity),
-                                     is_page_navigation(method, rest, headers))
+                                     is_page_navigation(method, rest, headers),
+                                     hung_up=lambda: own.hung_up(sid))
             if served is STARTING:
                 # NOT AN ATTACHMENT. The desktop has not answered, so the
                 # slot's published token may still be the LAST occupant's (it

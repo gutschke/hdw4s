@@ -191,6 +191,49 @@ class Slot(threading.Thread):
         # Zero, the default, is every other test in this file.
         self.delay = 0.0
         self.ready_at = 0.0
+        # THE STREAMS this slot has accepted -- a request that asked for an
+        # upgrade is answered 101 and held open, as the streaming server holds
+        # a browser's WebSocket. Until this existed the rig could not express
+        # the desktop CLOSING A CONNECTION ON THE ROUTER, which is how a GNOME
+        # logout reaches a tab: the relay dies and takes its connections with it.
+        self.streams = []
+        self.streams_lock = threading.Lock()
+
+    def hang_up_streams(self):
+        """Close every stream this slot is holding, from the desktop's end."""
+        with self.streams_lock:
+            held, self.streams = self.streams, []
+        for c in held:
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def log_out_under_a_stream(self, door_after, rundir_after):
+        """A GNOME logout with the tab's stream open, in the measured ORDER.
+
+        The relay goes first and its connections with it -- the tab's stream
+        ends at once -- while the session's port stays open for a moment and its
+        runtime directory for longer: 0.24 s and 0.77 s after the relay on the
+        2026-09-25 run. In between, a connection to the slot socket STARTS A
+        FRESH DESKTOP, which this stand-in does by publishing a new incarnation
+        on the next request, exactly as serve() already does for a slot with no
+        session. The published token in the web root is left as it was, as the
+        real one is until a new start replaces it.
+        """
+        assert self.incarnation is not None, \
+            "%s had no session to log out of" % self.name
+        self.incarnation = None
+        self.hang_up_streams()
+
+        def later():
+            time.sleep(door_after)
+            if self.port is not None:
+                self.shut_door()
+            time.sleep(max(0.0, rundir_after - door_after))
+            import shutil
+            shutil.rmtree(self.rundir, ignore_errors=True)
+        threading.Thread(target=later, daemon=True).start()
 
     def publish(self):
         """Mint this session's incarnation token, where hdw4s-webroot puts it."""
@@ -432,10 +475,25 @@ class Slot(threading.Thread):
                     # door of its own.
                     if self.port is not None:
                         self.open_door()
+                upgrade = False
                 while True:
                     h = f.readline()
                     if h in (b"\r\n", b"\n", b""):
                         break
+                    if h.lower().startswith(b"upgrade:") and \
+                            b"websocket" in h.lower():
+                        upgrade = True
+                if upgrade:
+                    c.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
+                              b"Upgrade: websocket\r\n"
+                              b"Connection: Upgrade\r\n\r\n")
+                    with self.streams_lock:
+                        self.streams.append(c)
+                    # Held until one end closes it. What arrives is discarded:
+                    # the frames are not the subject, the connection is.
+                    while f.read1(65536):
+                        pass
+                    return
                 wait = self.ready_at - time.time()
                 if wait > 0:
                     time.sleep(wait)
@@ -3921,6 +3979,123 @@ def four_correct_logouts(rig, asked=None):
     return used
 
 
+def open_stream(rig, client, sid):
+    """The tab's stream: an upgrade through the router, answered 101 and held."""
+    s = socket.create_connection(("127.0.0.1", rig.port), 10)
+    s.settimeout(10)
+    req = ["GET /s/%s/websocket HTTP/1.1" % sid, "Host: demux.test",
+           "Authorization: Basic " + client.auth,
+           "Cookie: hdw4s_id=" + client.cookie,
+           "Upgrade: websocket", "Connection: Upgrade",
+           "Sec-WebSocket-Version: 13",
+           "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="]
+    s.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        chunk = s.recv(4096)
+        assert chunk, "the router closed the stream before answering it"
+        head += chunk
+    status = int(head.split(b" ", 2)[1])
+    assert status == 101, "the stream was not opened through the router: %d" \
+        % status
+    return s
+
+
+def stream_until_dropped(rig, client, sid, slot, drop):
+    """Open the tab's stream, let DROP end it from the desktop's side, and
+    return once the TAB has seen it end -- the moment its client reconnects."""
+    ws = open_stream(rig, client, sid)
+    for _ in range(100):
+        if slot.streams:
+            break
+        time.sleep(0.01)
+    assert slot.streams, "%s never received the stream" % slot.name
+    drop()
+    ws.settimeout(5)
+    try:
+        rest = ws.recv(1)
+    except OSError:
+        rest = b""
+    ws.close()
+    assert rest == b"", "the tab's stream carried data after the desktop left"
+
+
+def test_a_logout_with_the_tab_open_starts_no_desktop(rig):
+    """THE RESURRECTION, as production showed it: log out with the tab open.
+
+    Measured 2026-09-27 on production and on a development box: the logout
+    stops the session, the relay goes with it and closes the tab's stream, and
+    the client reconnects 9 ms later -- inside the moment in which the session's
+    port is still listening and its runtime directory still exists. The
+    reconnect was proxied, and the proxy's connect() started a fresh desktop in
+    the slot for nobody.
+
+    The oracle is the SLOT: whether a new start of it was published. The
+    visitor must get the ended page (410), and nothing may be asked to be torn
+    down, because nothing should have been started to need it.
+    """
+    c = rig.client()
+    sid, name = arrive_on_slot(rig, c)
+    slot = slot_named(rig, name)
+    stream_until_dropped(rig, c, sid, slot, lambda: slot.log_out_under_a_stream(
+        door_after=0.4, rundir_after=1.0))
+    st, _, _ = c.get("/s/%s/" % sid)
+    assert slot.incarnation is None, (
+        "the tab's reconnect after a logout started a fresh desktop in %s, "
+        "owned by nobody" % name)
+    assert st == 410, "the visitor was not shown the ended page: %d" % st
+    assert rig.teardown_requests() == [], (
+        "a teardown was requested, so a desktop had been started for nobody: "
+        "%r" % (rig.teardown_requests(),))
+
+
+def test_a_desktop_that_closes_a_stream_and_stays_is_still_reached(rig):
+    """THE PERMIT ARM: a stream closed by a desktop that is NOT going away.
+
+    The streaming server closes a tab's stream for reasons of its own -- a
+    second viewer taking over is one -- and the desktop stays. A router that
+    treated every hang-up as the end would take that desktop from its owner,
+    which is the more expensive of the two mistakes. So the same drop, with
+    nothing else changing, must still reach the SAME start of the same slot.
+    """
+    c = rig.client()
+    sid, name = arrive_on_slot(rig, c)
+    slot = slot_named(rig, name)
+    token = slot.incarnation
+    stream_until_dropped(rig, c, sid, slot, slot.hang_up_streams)
+    st, _, body = c.get("/s/%s/" % sid)
+    assert st == 200, "a desktop that is still there was gated: %d" % st
+    assert ("SLOT=%s" % name) in body.decode() and slot.incarnation == token, \
+        "the visitor did not reach the desktop they had"
+
+
+NO_SETTLE_AFTER_A_HANG_UP = """
+
+# Appended by the red arm: a hang-up is not waited out. The reconnect is judged
+# at once, by instruments that have not caught up with the logout yet.
+def settle_after_hang_up(rec, instance, replaced=session_replaced,
+                         clock=time.time, sleep=time.sleep):
+    return replaced(rec, instance)
+"""
+
+
+def red_a_logout_with_the_tab_open_resurrects_again():
+    """RED ARM: without the wait, the tab's reconnect starts a desktop."""
+    path = scratch_demux("-nosettle.py", NO_SETTLE_AFTER_A_HANG_UP)
+    rig = Rig(nslots=2, demux=path)
+    try:
+        try:
+            test_a_logout_with_the_tab_open_starts_no_desktop(rig)
+        except AssertionError as e:
+            if "started a fresh desktop" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def test_a_correct_logout_does_not_consume_the_slot(rig):
     """FOUR IN A ROW, on a pool of two. The leak, reproduced and then not.
 
@@ -4329,6 +4504,9 @@ def main():
         # TWO slots and FOUR rounds, so the pool cannot absorb the leak. With
         # the default three it would pass against the defect.
         (test_a_correct_logout_does_not_consume_the_slot, dict(nslots=2)),
+        (test_a_logout_with_the_tab_open_starts_no_desktop, dict(nslots=2)),
+        (test_a_desktop_that_closes_a_stream_and_stays_is_still_reached,
+         dict(nslots=2)),
         (test_a_slot_this_router_did_not_let_is_not_reclaimed, dict(nslots=2)),
         # ONE slot, so the second visitor has exactly one place to go and a
         # re-let is the only thing that can have happened.
@@ -4394,6 +4572,7 @@ def main():
                red_a_logout_still_consumes_the_slot,
                red_reclaim_on_mismatch_alone,
                red_the_table_is_forgotten_at_a_restart,
+               red_a_logout_with_the_tab_open_resurrects_again,
                red_scope_checked_by_the_page,
                red_a_console_address_that_stops_being_claimed,
                red_every_path_is_the_front_door,
