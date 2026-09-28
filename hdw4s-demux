@@ -3779,6 +3779,18 @@ def header_value(headers, name):
     return None
 
 
+# NO PAGE OF THE ROUTER'S MAY BE FRAMED. The directory's Discard, Resume and
+# New desktop are presses on this origin, so a page elsewhere that framed
+# /sessions/ under something that looks clickable would get a SAME-ORIGIN press
+# out of the visitor, which the cross-site refusal passes by design. Nothing of
+# ours frames these pages. Both headers, because frame-ancestors is the
+# standard and X-Frame-Options is what a browser that predates it reads.
+# On every response this router writes itself; a desktop's own responses are
+# forwarded as the desktop wrote them.
+FRAME_HEADERS = (("Content-Security-Policy", "frame-ancestors 'none'"),
+                 ("X-Frame-Options", "DENY"))
+
+
 def respond(wf, status, body=b"", extra=()):
     reason = {
         200: "OK", 302: "Found", 400: "Bad Request", 401: "Unauthorized",
@@ -3789,7 +3801,7 @@ def respond(wf, status, body=b"", extra=()):
     out = [b"HTTP/1.1 %d %s\r\n" % (status, reason.encode())]
     out.append(b"Content-Length: %d\r\n" % len(body))
     out.append(b"Content-Type: text/html; charset=utf-8\r\n")
-    for k, v in extra:
+    for k, v in tuple(FRAME_HEADERS) + tuple(extra):
         out.append(b"%s: %s\r\n" % (k.encode(), v.encode()))
     out.append(b"\r\n")
     wf.write(b"".join(out))

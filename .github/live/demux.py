@@ -4943,6 +4943,54 @@ def assert_cross_site_posts_are_refused(judge=None):
 """
 
 
+def test_no_page_of_the_routers_can_be_framed(rig):
+    """Every page the router writes itself refuses to be framed.
+
+    A page elsewhere that framed /sessions/ could get a SAME-ORIGIN press on
+    Discard out of the visitor -- which the cross-site refusal passes, because
+    it is one. Asked of each kind of page the router renders, and of the
+    refusal and the redirect, because a header added to one code path is the
+    shape that misses the next."""
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    asked = [("the directory", a.get("/sessions/")),
+             ("a discard confirmation", a.get("/sessions/%s/discard" % sid)),
+             ("the ended page", a.get("/s/%s/" % secrets_hex())),
+             ("a 404", a.get("/nothing-here")),
+             ("the front door's redirect", rig.client().get("/")),
+             ("a cross-site refusal",
+              a.post("/sessions/new", headers=("Sec-Fetch-Site: cross-site",)))]
+    for what, (st, h, _) in asked:
+        csp = " ".join(h.get("content-security-policy", []))
+        xfo = h.get("x-frame-options", [])
+        assert "frame-ancestors 'none'" in csp and xfo == ["DENY"], (
+            "%s (%d) can be framed by another page: CSP %r, X-Frame-Options %r"
+            % (what, st, csp, xfo))
+
+
+FRAMEABLE_AGAIN = """
+
+# Appended by the red arm: the router's pages as they were, frameable.
+FRAME_HEADERS = ()
+"""
+
+
+def red_the_directory_can_be_framed():
+    path = scratch_demux("-frameable.py", FRAMEABLE_AGAIN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_no_page_of_the_routers_can_be_framed(rig)
+        except AssertionError as e:
+            if "can be framed by another page" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 PREFIX_FILTER_AGAIN = """
 
 # Appended by the red arm: the filter as it shipped, matching a prefix of the
@@ -5115,6 +5163,7 @@ def main():
         # neither can be removed alone.
         (test_a_press_from_another_page_is_refused, dict(gate=None)),
         (test_a_press_on_this_machines_own_page_still_acts, dict(gate=None)),
+        (test_no_page_of_the_routers_can_be_framed, dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -5201,6 +5250,7 @@ def main():
                red_a_reclaim_interleaves_with_a_letting,
                red_a_press_from_another_page_acts,
                red_a_padded_name_sets_our_cookie,
+               red_the_directory_can_be_framed,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)
