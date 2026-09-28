@@ -23,6 +23,7 @@ down ONE connection.
 
 import atexit
 import base64
+import json
 import os
 import socket
 import subprocess
@@ -2360,6 +2361,54 @@ def test_a_visitor_keeps_their_desktop_across_a_router_restart(rig):
         "reaches and must be readable by the router alone" % mode)
 
 
+def test_a_letting_that_never_came_back_cannot_reach_the_next_one(rig):
+    """ISOLATION: a visitor who was minted a slot and never used it must not,
+    returning later, be proxied into the desktop of whoever it was let to next.
+
+    Found by the threat review at function level: a letting whose desktop had
+    never answered was permitted for as long as its slot was OCCUPIED, with no
+    time bound. After MINT_GRACE the slot leaves the pool's taken set and is
+    re-let; the next visitor's desktop comes up in it; and the first visitor's
+    address then reached that desktop with full input.
+
+    ONE slot, so the second visitor can only land on the first one's. The
+    first visitor's mint is aged past MINT_GRACE by editing the router's own
+    written-down state -- the ownership row and the reservation file -- and
+    restarting it, rather than by waiting three minutes. The oracle is the
+    BACKEND: the first visitor must not be answered by the slot at all.
+    """
+    grace = load_demux().MINT_GRACE
+    a = rig.client()
+    st, h, _ = a.get("/")
+    assert st == 302, "arrival did not redirect: %d" % st
+    a.learn_cookie(h)
+    sid_a = h["location"][0].split("/")[2]
+
+    table = os.path.join(rig.statedir, "ownership.json")
+    data = json.load(open(table))
+    data["sessions"][sid_a]["minted"] -= grace + 5
+    with open(table, "w") as f:
+        json.dump(data, f)
+    old = time.time() - grace - 5
+    for name in os.listdir(os.path.join(rig.statedir, "reserved")):
+        os.utime(os.path.join(rig.statedir, "reserved", name), (old, old))
+    rig.restart()
+
+    b = rig.client()
+    sid_b, name_b = arrive_on_slot(rig, b)
+    assert name_b == rig.slots[0].name, "the second visitor had nowhere else"
+
+    st, _, body = a.get("/s/%s/" % sid_a)
+    assert b"SLOT=" not in body, (
+        "a visitor whose letting never came back was proxied into the desktop "
+        "the slot was let to next (%d): a stranger's desktop, with full input"
+        % st)
+    assert st == 410, "the stale letting was not shown the ended page: %d" % st
+    st, _, body = b.get("/s/%s/" % sid_b)
+    assert st == 200 and ("SLOT=%s" % name_b) in body.decode(), \
+        "the second visitor lost their own desktop: %d" % st
+
+
 def test_a_reaped_slot_returns_to_the_pool_without_a_restart(rig):
     """DEFECT 2. The pool exhausts permanently, and no crash is involved.
 
@@ -4591,6 +4640,8 @@ def main():
         # ONE slot, so the second visitor has exactly one place to go and a
         # re-let is the only thing that can have happened.
         (test_a_slot_re_let_to_somebody_else_is_not_reclaimed, dict(nslots=1)),
+        (test_a_letting_that_never_came_back_cannot_reach_the_next_one,
+         dict(nslots=1)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode

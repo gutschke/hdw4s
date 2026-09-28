@@ -1358,6 +1358,24 @@ class Ownership:
                     # it hid behind a refusal that reads like the guard working.
                     and not r.get("ended")]
 
+    def superseded(self, sid):
+        """True when the slot SID names has been let AGAIN since SID was minted.
+
+        A letting whose slot was re-let is never the current one, whatever the
+        slot shows: the desktop in it, if any, belongs to the later letting. The
+        pool holds a slot for a pending letting for MINT_GRACE, so this should
+        be unreachable while the time bound in session_replaced() holds; it is
+        asked anyway, because the damage if it is reached is a stranger's
+        desktop with full input.
+        """
+        with self._lock:
+            rec = self._by_sid.get(sid)
+            if rec is None:
+                return False
+            return any(r["instance"] == rec["instance"] and
+                       r["minted"] > rec["minted"]
+                       for s, r in self._by_sid.items() if s != sid)
+
     def forget(self, sid):
         """Drop a sid whose session is gone. Its slot is NOT reassigned here."""
         with self._lock:
@@ -2836,11 +2854,22 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
     ended = rec.get("ended")
     if ended:
         return ended
+    here = time.time() if at is None else at
+    # A LETTING THAT NEVER HAD A DESKTOP IS GOOD FOR MINT_GRACE AND NO LONGER,
+    # whatever the slot shows -- also asked before any instrument, because it
+    # needs none. This used to be permitted for as long as the slot was OCCUPIED,
+    # with no bound, and after MINT_GRACE the slot leaves slots_in_use() and is
+    # re-let: so a visitor minted onto a slot who never came back could return
+    # later and be proxied, with full input, into the desktop of whoever the slot
+    # was let to next -- and attach() would then record that stranger's start
+    # against their letting. Found by the threat review at function level, and it
+    # survived a restart once the table was written down.
+    if not rec.get("live") and here - rec["minted"] >= MINT_GRACE:
+        return "no desktop ever came up on %s for this letting" % instance
     if not occupancy_readable(rundir):
         # The instrument is missing. It may not answer, in either direction --
         # "I could not look" must not be spent as either a permit or a refusal.
         return None
-    here = time.time() if at is None else at
     occupied = slot_occupied(instance, rundir)
 
     if not rec.get("live"):
@@ -2851,15 +2880,12 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
         # has no runtime directory. Gating there refuses every visitor at the
         # exact instant they arrive, which is what the first version of this
         # did to all thirty-one tests at once.
-        if occupied:
-            return None
-        if here - rec["minted"] < MINT_GRACE:
-            return None
-        # Past the window and still nothing. The slot was handed out and no
-        # desktop ever came up on it -- which is a dead address either way, and
-        # saying so releases the slot instead of holding it for the life of the
-        # process.
-        return "no desktop ever came up on %s" % instance
+        #
+        # Inside MINT_GRACE, so the only desktop that can be in the slot is the
+        # one this letting's own first request is starting: the slot is held
+        # out of the pool (slots_in_use) for exactly that long. Past it, see the
+        # refusal above.
+        return None
 
     if not occupied:
         return "the desktop behind %s has stopped" % instance
@@ -5269,7 +5295,9 @@ def serve(sock, own, expected_b64):
                 # So the person the 410 page was written for was the only person
                 # who could never see it, while it was shown to strangers whose
                 # ids had simply expired.
-                why = settle_after_hang_up(rec, rec["instance"])
+                why = ("%s has been let again since this letting"
+                       % rec["instance"]) if own.superseded(sid) else \
+                    settle_after_hang_up(rec, rec["instance"])
                 if why is not None:
                     own.forget(sid)
                     log("gated a returning visitor at %s: %s"
