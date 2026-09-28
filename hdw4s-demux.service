@@ -55,8 +55,12 @@ RuntimeDirectoryMode=0700
 # WITHOUT THIS, EVERYTHING THIS DIRECTORY HOLDS IS DELETED AT THE MOMENT IT IS
 # NEEDED, and the default is the deleting one. RuntimeDirectory= removes the
 # tree when the unit stops unless told otherwise, and a restart is a stop --
-# so the two things kept here are both erased by the event they exist for:
+# so the three things kept here are all erased by the event they exist for:
 #
+#   ownership.json       which browser owns which desktop. Lost, every visitor
+#                        is cut off from a desktop that goes on running, and it
+#                        runs unowned until the idle window ends -- measured on
+#                        production when a deploy restarted this service.
 #   last-request/<slot>  the router's record of a connection it ACCEPTED, which
 #                        the reaper takes as a second witness to idleness. Lost,
 #                        every slot reads "no record", which is the same thing a

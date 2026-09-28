@@ -83,6 +83,7 @@ import select
 import re
 import hmac
 import http.cookies
+import json
 import os
 import secrets
 import hashlib
@@ -1044,15 +1045,43 @@ def assert_cookie_outlives_idle(derive=derive_cookie_lifetime):
 # Ownership
 # --------------------------------------------------------------------------
 
+OWNERSHIP_FILE = os.path.join(STATE_DIR, "ownership.json")
+
+# The fields of a letting that are written down. Everything else a record may
+# carry is about this process's own connections and means nothing to the next one.
+OWNERSHIP_FIELDS = ("identity", "instance", "minted", "live", "incarnation",
+                    "ended", "ended_at")
+
+
 class Ownership:
     """identity -> the sessions it owns, and sid -> the slot behind it.
 
     Append-only by construction, because the ruling is that sharing is additive
     and nothing is ever revoked. The only pruning is of sids whose session is
     gone, and pruning one NEVER hands its slot to the sid's old owner.
+
+    WRITTEN DOWN, SO THAT IT OUTLIVES THIS PROCESS AND NOT THE BOOT. It used to
+    live in memory alone, and every restart of this service -- a deploy, a
+    package upgrade, Restart=on-failure -- cut every visitor off from a desktop
+    that went on running. Measured on production 2026-09-27: after a deploy
+    restarted the router at 16:02:50, the owner's own running desktop answered
+    410 to every request its tab made, and would have run unowned for the full
+    seven-day idle window. PATH is a file under this service's RuntimeDirectory=,
+    which hdw4s-demux.service preserves across a restart and /run loses at a
+    reboot -- the same two lifetimes the reservation needs, and for the same
+    reason: after a reboot no desktop is running, so a table describing them
+    would describe nothing.
+
+    WHAT A STALE ROW COSTS is the gate, not a desktop. A row whose desktop ended
+    while the router was down resolves, is judged by session_replaced() against
+    the authority on its first request, and is forgotten there -- which is what
+    happens to a row whose desktop is reaped while the router is up.
+
+    PATH None is a table that lives in this process only, which is what every
+    start-up self-check builds.
     """
 
-    def __init__(self):
+    def __init__(self, path=None):
         self._lock = threading.Lock()
         # sid -> {"identity", "instance", "minted"}
         self._by_sid = {}
@@ -1063,6 +1092,72 @@ class Ownership:
         # restart costs one extra header per identity and nothing else, which is
         # why it is allowed to live here rather than on disk.
         self._refreshed = {}
+        self._path = path
+        if path is not None:
+            self._load()
+
+    def _load(self):
+        """Take back the lettings a previous run of this router wrote down.
+
+        A table that cannot be read is an EMPTY one, said out loud: that is the
+        state every restart used to produce, and the cost is the gate for every
+        tab that was open -- the designed damage, never a desktop handed to the
+        wrong browser. A row that is not the shape this file writes is dropped
+        for the same reason, and counted.
+        """
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as e:
+            log("WARNING: the ownership table at %s could not be read (%s); "
+                "starting without it. Every tab that was open meets the "
+                "ended page." % (self._path, e))
+            return
+        rows = data.get("sessions") if isinstance(data, dict) else None
+        if not isinstance(rows, dict):
+            log("WARNING: the ownership table at %s is not one this router "
+                "wrote; starting without it." % self._path)
+            return
+        dropped = 0
+        for sid, rec in sorted(rows.items(), key=lambda kv: (
+                kv[1].get("minted", 0) if isinstance(kv[1], dict) else 0)):
+            if not _letting_is_well_formed(sid, rec):
+                dropped += 1
+                continue
+            row = {k: rec.get(k) for k in OWNERSHIP_FIELDS}
+            self._by_sid[sid] = row
+            self._by_identity.setdefault(row["identity"], []).append(sid)
+        log("took back %d letting(s) from %s%s"
+            % (len(self._by_sid), self._path,
+               "" if not dropped else "; %d malformed row(s) dropped" % dropped))
+
+    def _save(self):
+        """Write the table down. Called with self._lock HELD, after a change.
+
+        Written beside the file and renamed over it, so a reader -- the next run
+        of this router -- sees the old table or the new one and never half of
+        either. Opening the real file for writing would truncate it first, and a
+        crash in between would lose every letting at once.
+
+        A failure is logged and changes nothing else: the table in memory is
+        still right, and what is lost is only what a restart would have kept.
+        """
+        if self._path is None:
+            return
+        rows = {sid: {k: rec.get(k) for k in OWNERSHIP_FIELDS}
+                for sid, rec in self._by_sid.items()}
+        tmp = self._path + ".new"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "sessions": rows}, f)
+            os.replace(tmp, self._path)
+        except OSError as e:
+            log("WARNING: could not write the ownership table to %s: %s. A "
+                "restart of this router now would cut visitors off from their "
+                "desktops." % (self._path, e))
 
     def due_for_refresh(self, identity, now=None, every=COOKIE_REFRESH_EVERY):
         """True when the next response to this identity should carry a cookie.
@@ -1113,6 +1208,7 @@ class Ownership:
             "ended_at": None,
             }
             self._by_identity.setdefault(identity, []).append(sid)
+            self._save()
         return sid
 
     def attach(self, sid, incarnation):
@@ -1136,6 +1232,7 @@ class Ownership:
                 return
             rec["live"] = True
             rec["incarnation"] = incarnation
+            self._save()
 
     def end_session(self, sid, why):
         """Record that this letting is OVER, from here on, whatever the box says.
@@ -1171,6 +1268,7 @@ class Ownership:
                 # was still listed as discarding twenty-one minutes later, with
                 # its teardown long complete and the marker directory empty.
                 rec["ended_at"] = time.time()
+                self._save()
             return rec is not None
 
     def pending_mints(self, since):
@@ -1257,7 +1355,42 @@ class Ownership:
                 owned = self._by_identity.get(rec["identity"])
                 if owned and sid in owned:
                     owned.remove(sid)
+                self._save()
             return rec
+
+
+_SID_SHAPE = r"^[0-9a-f]{32}$"
+_SLOT_SHAPE = r"^[A-Za-z0-9._-]+$"
+
+
+def _letting_is_well_formed(sid, rec):
+    """True when a row read back from disk is one this file could have written.
+
+    Checked because the row decides whose desktop a request reaches, and a row
+    that is not the shape mint_session() makes is not evidence of anything --
+    it is dropped, which sends its tab to the gate.
+    """
+    if not isinstance(sid, str) or not re.match(_SID_SHAPE, sid):
+        return False
+    if not isinstance(rec, dict):
+        return False
+    if not isinstance(rec.get("identity"), str) or not rec["identity"]:
+        return False
+    if not isinstance(rec.get("instance"), str) or \
+            not re.match(_SLOT_SHAPE, rec["instance"]):
+        return False
+    if not isinstance(rec.get("minted"), (int, float)) or \
+            isinstance(rec.get("minted"), bool):
+        return False
+    if not isinstance(rec.get("live"), bool):
+        return False
+    for k in ("incarnation", "ended"):
+        if rec.get(k) is not None and not isinstance(rec.get(k), str):
+            return False
+    if rec.get("ended_at") is not None and \
+            not isinstance(rec.get("ended_at"), (int, float)):
+        return False
+    return True
 
 
 def assert_ownership_keying(factory=Ownership):
@@ -1696,11 +1829,13 @@ def touch_slot(instance, now=None):
 # --------------------------------------------------------------------------
 #
 # THE ONE FACT THIS PROCESS HOLDS WHOSE LOSS CAN PERMIT SOMETHING, and that is
-# why it is the only one written down.
+# why it was the first one written down.
 #
 # Everything else the router remembers fails toward a refusal. Lose the
 # ownership table and a returning visitor reaches the gate, which is the
-# arrival rule's designed damage. Lose the cookie-refresh timestamps and
+# arrival rule's designed damage -- and which a deploy made the common case,
+# cutting every visitor off from a running desktop, so the table is written
+# down too now (see Ownership); losing it is still only a refusal. Lose the cookie-refresh timestamps and
 # somebody gets one redundant header. But a MINT is a claim on a slot made
 # BEFORE the session behind it exists -- the redirect is what sends the browser
 # at the slot, and that first request is what socket-activates the desktop --
@@ -2044,7 +2179,9 @@ def log_refusal(reason, now=None):
 def visitor_tag(identity):
     """A short, stable, non-reversible name for one browser, for the log.
 
-    The identity cookie itself is never written anywhere. It is what decides
+    The identity cookie itself is never written to the log. The one place it is
+    written is the router's own ownership table, mode 0600 in a directory only
+    root and the router can read. It is what decides
     whose desktop a request reaches, so a log line carrying it is a log line
     that hands somebody else's session to whoever can read the journal -- and on
     this box the journal has already been read across occupants once.
@@ -2073,8 +2210,9 @@ def log_arrival(what, identity, instance, sid, why=None):
 
       * the pool filling up. log_refusal() says the pool is full; nothing said
         how it got that way, so the idle window was being judged from one end.
-      * A SLOT LET TWICE. The router's table is in memory, so a restart forgets
-        who holds what. Two mints on one instance, with two different visitor
+      * A SLOT LET TWICE. The router's table is lost when its file is -- at a
+        reboot, or if it cannot be read -- and then nothing here knows who
+        holds what. Two mints on one instance, with two different visitor
         tags and no reap between them, is one person being handed the desktop
         another person is sitting in -- and there is no other way for an
         operator to find that out, because to both visitors it looks fine.
@@ -2569,10 +2707,11 @@ def slot_occupied(instance, rundir=None):
     every other candidate because each of those is wrong in a way that is
     invisible:
 
-      * OUR OWN TABLE is in memory. A restart forgets who holds what while every
-        session it was routing to goes on running, so the pool it believes empty
-        is in fact full. Persisting it instead trades a defect a restart clears
-        for one that nothing clears.
+      * OUR OWN TABLE says who was LET a slot, not whether anything is running
+        there. It survives a restart of this service now (see Ownership), but a
+        desktop can stop, be reaped or be torn down without this router being
+        told, so a row is a claim about the past. Read as occupancy, a stale row
+        would hold a free slot out of the pool for as long as the row lives.
       * SYSTEMD UNIT STATE reads "active" for every slot moments after any
         restart, because the thing that asked is what started them.
       * A connect() PROBE is not an observation at all. These slots are
@@ -3045,10 +3184,11 @@ def reclaimable(own, sid, rec, rundir=None, webroot=None):
     against nothing but the machine it was already running on.
     """
     if rec is None:
-        # A RESTART LANDS HERE, and it is the case the qualifier was written
-        # for. The table is in memory; after a restart every returning tab
-        # presents a letting this router cannot produce, while the desktops it
-        # was routing to go on running. "I do not know this session" must never
+        # A LOST TABLE LANDS HERE, and it is the case the qualifier was written
+        # for. The table survives a restart of this service, but not a file
+        # that cannot be read, and not a row forgotten at the gate; a tab then
+        # presents a letting this router cannot produce while the desktop it
+        # names may go on running. "I do not know this session" must never
         # become "so I will destroy what is in its slot".
         return "there is no letting on record for that session"
     instance = rec.get("instance")
@@ -4417,8 +4557,8 @@ def ended_page(rows, gone):
     ephemeral desktop's home and /tmp live and die with its unit, so there it
     is simply true, and it is the reassurance the visitor was looking for. When
     the address is merely UNKNOWN to this router, the desktop may still be
-    running -- a restarted router forgets every letting it made -- so that
-    branch says only that the tab's desktop is no longer running here.
+    running -- a router whose table could not be read knows none of the
+    lettings it made -- so that branch says only that the tab's desktop is no longer running here.
 
     THE ONE FILLED BUTTON IS THE DIRECTORY'S OWN CREATE, POST /sessions/new,
     and never a link to the front door. It was once a link to "/", which
@@ -5252,7 +5392,7 @@ def main():
     assert_an_ended_letting_is_never_proxied(Ownership, session_replaced,
                                             slots_in_use, teardown_requested)
     # And the fifth: the only fact this process holds whose LOSS can permit
-    # something, and therefore the only one written to disk. That it holds,
+    # something, which is why it was written to disk first. That it holds,
     # that it expires, and that it has no way to say yes to anybody.
     assert_reservation_only_refuses(reserve_slot, reserved_slots, release_slot,
                                     reservation_fresh)
@@ -5294,7 +5434,11 @@ def main():
         % (len(examined), len(unclassified)))
 
     expected_b64 = load_credential()
-    own = Ownership()
+    # Made before the table is read, because the table lives in it. Normally
+    # systemd has made it already (RuntimeDirectory=); this is for a router run
+    # by hand or by the test rig.
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    own = Ownership(OWNERSHIP_FILE)
 
     # DERIVED AT START, from the pool as it stands. Said out loud with both
     # halves, because the whole reason this is not a knob is the relationship
@@ -5458,7 +5602,6 @@ def main():
                     " 'hdw4s noauth %s'." % name)
 
     srv = listening_socket()
-    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
 
     while True:
         try:

@@ -147,9 +147,11 @@ class Slot(threading.Thread):
         # no session runtime tree anywhere -- so the only thing a router could
         # have consulted to tell them apart was its own memory, and the only
         # implementation that could pass the restart arm was a table persisted
-        # under HDW4S_DEMUX_STATE. That table survives restart() here and is
-        # deleted by RuntimeDirectory= on the box, which is green in CI and
-        # broken in the field, and arm 4 of this very file documents the wipe.
+        # under HDW4S_DEMUX_STATE. The router does persist its table there now
+        # (the unit preserves that directory across a restart), so the
+        # occupancy arm WIPES the state on purpose: its subject is a router
+        # that has lost the table, which a reboot or an unreadable file still
+        # produces, and only the authority can pass it.
         #
         # Derived the way the CLI derives it -- HDW4S_RUNDIR, default /run,
         # then hdw4s/<instance> -- rather than spelled out again, because two
@@ -696,7 +698,7 @@ class Rig:
                          daemon=True).start()
         self.wait_up()
 
-    def restart(self, wipe_state=True):
+    def restart(self, wipe_state=False):
         """Stop the router and start another one against the SAME slots.
 
         The port is kept, so a client built before the restart still addresses
@@ -712,17 +714,15 @@ class Rig:
         kept its ExecMainPID and its start timestamp across a restart of the
         router. The run is quoted above arm 5.
 
-        wipe_state DEFAULTS TO TRUE, and the default was the other way round
-        until the wipe was measured. STATE_DIR lives under the router's own
-        RuntimeDirectory= on the box, so systemd removes it on EVERY stop --
-        a clean restart and a kill -9 alike, both watched on a development container and quoted
-        above arm 5. A rig that carried the state across a restart was
-        therefore modelling a world that does not exist, and it was not a
-        harmless simplification: it made a table persisted under
-        HDW4S_DEMUX_STATE sufficient to pass the restart arm, which is the one
-        implementation that is green here and broken in the field. Preserving
-        it is still available for the arm that needs it, and arm 5 asks for it
-        by name.
+        wipe_state DEFAULTS TO FALSE, because that is what the shipped unit
+        does: hdw4s-demux.service carries RuntimeDirectoryPreserve=, so
+        STATE_DIR -- the reservations, the last-request records and the
+        ownership table -- survives a restart of the service and is lost at a
+        reboot. It defaulted to TRUE while the unit had no Preserve= line and
+        the wipe had been watched on a development container; a rig that went
+        on wiping would now be modelling a configuration this package does not
+        ship. wipe_state=True is kept for the arms whose subject is a router
+        that has LOST its state, and each of them asks for it by name.
         """
         self.proc.terminate()
         try:
@@ -2144,8 +2144,10 @@ def test_control_two_visitors_without_a_restart_land_on_different_slots(rig):
 def test_a_restart_does_not_re_let_an_occupied_slot(rig):
     """DEFECT 1. A restart hands a stranger a desktop that is still running.
 
-    The ownership table lives in process memory and nothing writes it down, so
-    a router that comes back has no idea which slots it let. systemd restarts
+    The ownership table is written down now and survives a restart, so this arm
+    WIPES it: its subject is a router that has lost the table -- a reboot's
+    worth of state, or a file it could not read -- and has no idea which slots
+    it let. systemd restarts
     it on failure and the sessions it was routing to are separate units that
     never noticed, so the pool it sees as empty is in fact fully occupied. The
     "never noticed" half is measured rather than reasoned: on a development container the
@@ -2163,7 +2165,7 @@ def test_a_restart_does_not_re_let_an_occupied_slot(rig):
     a = rig.client()
     _, slot_a = arrive_on_slot(rig, a)
 
-    rig.restart()
+    rig.restart(wipe_state=True)
 
     # A fresh cookie jar. Not a returning tab, not a resumed session: a
     # different person, who has never been here.
@@ -2192,8 +2194,13 @@ def test_a_restart_does_not_re_let_a_slot_whose_desktop_is_still_starting(rig):
     and the word is gone while the visitor is still walking to their desktop.
     The next arrival is handed the same slot. That is the double-booking that
     was confirmed at the pixels, reached by a timer instead of a forgotten
-    table, and the in-memory pending_mints() half cannot prevent it by
-    construction: it dies with the process it is protecting against.
+    table.
+
+    TWO RECORDS NOW HOLD THE SLOT ACROSS THE RESTART, and this arm cannot tell
+    which one did: the reservation file, and pending_mints(), which reads the
+    ownership table -- written down since the table stopped living in memory
+    alone. It passes if either survives. assert_reservation_only_refuses()
+    proves the reservation on its own at every start of the router.
 
     THE VISITOR HERE DELIBERATELY DOES NOT FOLLOW THE REDIRECT. That is not a
     contrived client, it is the ordinary state of every visitor for the moment
@@ -2246,6 +2253,53 @@ def test_a_restart_does_not_re_let_a_slot_whose_desktop_is_still_starting(rig):
         "the pool let %d of %d slots after a restart, so the slot held by a "
         "mint that had not yet started its desktop was re-let to a stranger "
         "(%r)" % (len(landed), len(rig.slots), landed))
+
+
+def test_a_visitor_keeps_their_desktop_across_a_router_restart(rig):
+    """A RESTART OF THE ROUTER MUST NOT CUT A VISITOR OFF FROM THEIR DESKTOP.
+
+    Measured on production 2026-09-27: a deploy restarted hdw4s-demux at
+    16:02:50, and from then on every request the owner's tab made for his own
+    running desktop was answered 410 -- the table saying whose it was lived in
+    the process that had just gone -- while the desktop itself ran on, owned by
+    nobody, for the seven-day idle window.
+
+    NOT WIPED, because the shipped unit preserves the router's state directory
+    across a restart; see Rig.restart(). The oracle is the BACKEND: the same
+    slot answers, and it is the same start of it (no new incarnation), so the
+    visitor reached the desktop they had and nothing was started for them.
+    Ownership must survive in BOTH directions -- a stranger presenting the
+    same address after the restart is still refused -- or "survives" would
+    have been bought by forgetting who owns what.
+    """
+    a = rig.client()
+    sid, name = arrive_on_slot(rig, a)
+    slot = slot_named(rig, name)
+    token = slot.incarnation
+    assert token is not None, "%s never started, so nothing here is about " \
+        "keeping a desktop" % name
+
+    rig.restart()
+
+    st, _, body = a.get("/s/%s/" % sid)
+    assert st == 200, (
+        "after a restart of the router the visitor's own running desktop "
+        "answered %d -- they are cut off from it and it runs on for nobody"
+        % st)
+    assert ("SLOT=%s" % name) in body.decode(), \
+        "the visitor was routed somewhere other than their own slot"
+    assert slot.incarnation == token, \
+        "the visitor's request started a NEW desktop instead of reaching theirs"
+
+    st, _, _ = rig.client().get("/s/%s/" % sid)
+    assert st == 403, \
+        "a stranger reached this visitor's desktop after the restart: %d" % st
+
+    table = os.path.join(rig.statedir, "ownership.json")
+    mode = os.stat(table).st_mode & 0o777
+    assert mode == 0o600, (
+        "the ownership table is mode %o; it decides whose desktop a request "
+        "reaches and must be readable by the router alone" % mode)
 
 
 def test_a_reaped_slot_returns_to_the_pool_without_a_restart(rig):
@@ -3891,11 +3945,11 @@ def test_a_correct_logout_does_not_consume_the_slot(rig):
 def test_a_slot_this_router_did_not_let_is_not_reclaimed(rig):
     """THE REFUSAL. A returning tab whose letting we no longer hold.
 
-    This is what a restart of the router leaves behind for every tab on the
-    box: the table is in memory by design, so the lettings are gone while every
-    desktop it was routing to goes on running. The tab presents a session id
-    that resolves to nothing, and "I do not know this session" must never
-    become "so I will destroy what is in its slot".
+    The tab's letting was forgotten at the gate, and a restart in between
+    must not bring it back: the table the router writes down holds only what
+    it has not forgotten. The tab presents a session id that resolves to
+    nothing, and "I do not know this session" must never become "so I will
+    destroy what is in its slot".
 
     ENFORCED BY STRUCTURE AS WELL AS BY THE CHECK, and that is worth saying
     rather than leaving to be noticed: reclaim_slot() is reachable only from
@@ -3910,8 +3964,8 @@ def test_a_slot_this_router_did_not_let_is_not_reclaimed(rig):
     st = recycled_underneath(rig, c, sid, slot)
     assert st == 410, "the visitor was not gated at a recycled slot: %d" % st
     rig.run_teardowns()
-    # And now a SECOND replacement, with the router restarted in between so it
-    # holds no letting for this session at all.
+    # And now a SECOND replacement, with the router restarted in between: the
+    # letting was forgotten at the gate above, so it must still be unknown.
     slot.resurrect()
     rig.restart()
     st, _, _ = c.get("/s/%s/" % sid)
@@ -4116,6 +4170,30 @@ def red_a_logout_still_consumes_the_slot():
         _remove_scratch_demuxes()
 
 
+TABLE_IN_MEMORY_AGAIN = """
+
+# Appended by the red arm: the table goes back to living in this process only.
+Ownership._save = lambda self: None
+"""
+
+
+def red_the_table_is_forgotten_at_a_restart():
+    """RED ARM: a router that does not write its table down loses the visitor."""
+    path = scratch_demux("-inmemory.py", TABLE_IN_MEMORY_AGAIN)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_visitor_keeps_their_desktop_across_a_router_restart(rig)
+        except AssertionError as e:
+            if "cut off from it" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def red_reclaim_on_mismatch_alone():
     """RED ARM: a router that reclaims without asking whose slot it is.
 
@@ -4170,6 +4248,7 @@ def main():
              test_control_two_visitors_without_a_restart_land_on_different_slots,
              test_a_restart_does_not_re_let_an_occupied_slot,
              test_a_restart_does_not_re_let_a_slot_whose_desktop_is_still_starting,
+             test_a_visitor_keeps_their_desktop_across_a_router_restart,
              test_a_reaped_slot_returns_to_the_pool_without_a_restart,
              test_a_reaped_visitor_reaches_the_gate_rather_than_a_dead_end,
              test_a_visited_slot_is_not_indistinguishable_from_a_never_visited_one,
@@ -4314,6 +4393,7 @@ def main():
                red_the_window_is_open_again,
                red_a_logout_still_consumes_the_slot,
                red_reclaim_on_mismatch_alone,
+               red_the_table_is_forgotten_at_a_restart,
                red_scope_checked_by_the_page,
                red_a_console_address_that_stops_being_claimed,
                red_every_path_is_the_front_door,
