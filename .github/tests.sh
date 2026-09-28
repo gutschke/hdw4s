@@ -1859,6 +1859,82 @@ echo '== the starting veil keeps every way out it claims to have =='
        'could not be found'
 )
 
+echo '== a page whose own session is gone leaves for the ended page =='
+# THE DEFECT, measured on production 2026-09-27 after a restart of the router: every
+# path under the owner's session was answered 410, this page read the 410 on its own
+# identity as "nothing published", showed the card, and on the click loaded a client
+# script that was answered 410 too -- so the starting veil said "Your desktop is
+# starting" for ever. The console showed the 410s; nothing on the page acted on them.
+#
+# WHAT IS REAL AND WHAT IS STOOD IN FOR. Real: the two functions the page runs, cut
+# out of the page the generator WRITES rather than out of its template. Stood in for:
+# the browser -- fetch() is a promise that answers one status, location is an object
+# that records replace(). Nothing here shows a browser navigating; the ended page
+# itself is the router's, and the router suite asserts what it answers.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+  if ! command -v node >/dev/null; then
+    bad 'the page-script tests can run' 'node is needed to run the page script'
+    exit 0
+  fi
+  # Runs the page's fetchIncarnation() against one answer. Prints what the page
+  # was handed and where, if anywhere, it went.
+  page_meets() {
+    rm -f "${d}/out.html"
+    python3 "${2:-${ROOT}/hdw4s-gate-index}" "${d}/in.html" "${d}/out.html" >/dev/null 2>&1 \
+      || { echo 'the generator refused the page'; return; }
+    python3 - "${d}/out.html" > "${d}/fns.js" <<'PY'
+import re, sys
+html = open(sys.argv[1], encoding="utf-8").read()
+out = []
+for name in ("ended", "fetchIncarnation"):
+    m = re.search(r"\n  function %s\(.*?\n  \}\n" % name, html, re.S)
+    if m:
+        out.append(m.group(0))
+m = re.search(r"\n  var endedGoing = false;\n", html)
+if m:
+    out.insert(0, m.group(0))
+print("".join(out))
+PY
+    node - "${d}/fns.js" "$1" <<'JS'
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const status = Number(process.argv[3]);
+let went = 'nowhere';
+const location = {pathname: '/s/abc/', replace: u => { went = u; }};
+const fetch = () => Promise.resolve({status, ok: status >= 200 && status < 300,
+                                     text: () => Promise.resolve('tok')});
+const setTimeout = () => 0;
+const console = {log: () => {}};
+if (!/function fetchIncarnation/.test(src)) { console.log(); process.stdout.write('no fetchIncarnation in the page'); process.exit(0); }
+const f = new Function('fetch', 'location', 'setTimeout', 'console',
+                       src + '\nreturn fetchIncarnation;')(fetch, location, setTimeout, console);
+f(v => setImmediate(() => process.stdout.write('got=' + v + ' went=' + went)));
+JS
+  }
+
+  # THE CONTROL FIRST: a published identity is read and nothing navigates, so the
+  # stand-in can be seen handing the page an answer.
+  is 'a published identity is read, and the page stays' "$(page_meets 200)" 'got=tok went=nowhere'
+  # THE DEFECT.
+  is 'a 410 on its own session sends the page to the ended page' \
+    "$(page_meets 410)" 'got=null went=/s/abc/?hdw4s_ended=1'
+  # THE PERMIT ARM: any other failure is still only "no identity", which gates.
+  is 'a 404 is still only a missing identity' "$(page_meets 404)" 'got=null went=nowhere'
+
+  # RED ARM: the page as it was, reading a 410 as a missing file, must stay put.
+  sed 's/if (r.status === 410) { ended(); return once(null); }//' \
+    "${ROOT}/hdw4s-gate-index" > "${d}/red"
+  if cmp -s "${ROOT}/hdw4s-gate-index" "${d}/red"; then
+    bad 'the red arm mutates the page' 'the sed matched nothing'
+  else
+    is 'a page that ignores the 410 stays on a dead desktop' \
+      "$(page_meets 410 "${d}/red")" 'got=null went=nowhere'
+  fi
+)
+
 echo '== the boot card offers the session directory only where a door serves one =='
 # THE DEFECT, reported by the owner 2026-09-25: "named sessions now have a link to where
 # the user can see all their sessions ... and that link doesn't work."
@@ -3063,7 +3139,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=479   # update when tests are added; a wrong number is the point
+EXPECTED=483   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

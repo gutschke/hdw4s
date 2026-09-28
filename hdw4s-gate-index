@@ -372,6 +372,20 @@ __ACT__
     + 'device, gets a different desktop.</p>';
   var MINT_GO = 'Start a fresh desktop';
 
+  // THE ENDED PAGE, reached by asking the router for it. A query string makes the
+  // address one this browser has never been served a page at, so the answer comes
+  // from the router and never from a cached copy of this page; it is a replace()
+  // so the back button does not return to a page whose desktop is gone. Nothing on
+  // that address can mint: an unknown session is answered with the ended page.
+  var endedGoing = false;
+  function ended(){
+    if (endedGoing) return;
+    endedGoing = true;
+    try { console.log('[hdw4s gate] this desktop has ended: the router answered '
+                      + '410 for its own session; showing the ended page'); } catch(e){}
+    try { location.replace(location.pathname + '?hdw4s_ended=1'); } catch(e){}
+  }
+
   // The desktop's published identity, read from the tree that is serving THIS page
   // rather than from anything the tab remembers about the world. A session start
   // republishes it, so two desktops behind one address never share a value.
@@ -379,6 +393,16 @@ __ACT__
   // refusal everywhere it is used. A resume that cannot establish which desktop it is
   // resuming must not happen: that is the logged-out row collapsing into the resume
   // row, which is the one outcome the arrival design exists to prevent.
+  //
+  // ONE ANSWER IS NOT A REFUSAL BUT A VERDICT: 410. The pool's router answers every
+  // path under a session it no longer holds with 410 and its ended page, so a 410
+  // here means THIS page's desktop is gone -- not that the file is missing. Measured
+  // on production 2026-09-27, after a restart of the router: this page read the 410
+  // as "no identity published", showed the card, and on the click loaded a client
+  // script that was also answered 410, so the starting veil said "Your desktop is
+  // starting" for ever. So a 410 leaves for the ended page at once. A named
+  // desktop's door is the streaming server's own, which answers a missing file 404,
+  // so this changes nothing there.
   function fetchIncarnation(cb){
     var done = false;
     function once(v){ if (!done) { done = true; cb(v); } }
@@ -387,6 +411,7 @@ __ACT__
     setTimeout(function(){ once(null); }, 5000);
     try {
       fetch('hdw4s-incarnation', {cache: 'no-store'}).then(function(r){
+        if (r.status === 410) { ended(); return once(null); }
         if (!r.ok) return once(null);
         return r.text().then(function(t){ once((t || '').trim() || null); },
                              function(){ once(null); });
