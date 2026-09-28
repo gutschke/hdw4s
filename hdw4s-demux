@@ -5625,6 +5625,15 @@ def serve(sock, own, expected_b64):
                 headers = read_headers(rf)
             except (Closed, OSError):
                 return
+            # THE SAME RULE AS FOR A DESKTOP'S RESPONSE (unsafe_header_line()),
+            # and for the same reason: the Cookie stripped on the way up and
+            # every Sec-Fetch-* judged here are found line by line as THIS
+            # parser splits them. No browser can send a line another parser
+            # would split differently, so this refuses nobody's browser; it
+            # keeps this router's reading of a request the only one there is.
+            if unsafe_header_line([line] + headers) is not None:
+                respond(wf, 400, page("Bad request", "That was not HTTP."))
+                return
 
             if not authorized(headers, expected_b64):
                 respond(wf, 401, page(

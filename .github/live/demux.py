@@ -5068,6 +5068,58 @@ def test_a_header_block_a_browser_splits_differently_is_refused(rig):
         % len(lines)
 
 
+def test_a_request_a_parser_splits_differently_is_refused(rig):
+    """The request side of the same rule: refused whole, never judged."""
+    a = rig.client()
+    sid, _ = arrive(rig, a)
+    mints = mint_lines(rig)
+    for line in ("X-Ordinary: 1\rCookie: hdw4s_id=" + "0" * 32,
+                 "X-Ordinary: 1\0",
+                 " folded: 1"):
+        st, _, body = a.get("/s/%s/" % sid, headers=("X-Before: 1", line))
+        assert st == 400 and b"SLOT=" not in body, (
+            "a request carrying %r was answered %d%s" % (
+                line, st, " by the desktop" if b"SLOT=" in body else ""))
+        st, _, _ = a.get("/", headers=(line,))
+        assert st == 400, "a front-door request carrying %r was answered %d" \
+            % (line, st)
+    assert mint_lines(rig) == mints, "a refused request minted a desktop"
+    st, _, body = a.get("/s/%s/" % sid)
+    assert st == 200 and b"SLOT=" in body, \
+        "an ordinary request was refused: %d" % st
+
+
+REQUESTS_BY_LF_ONLY = """
+
+# Appended by the red arm: requests judged line by line again. The response
+# side keeps its own check, which is why this is a wrapper and not a stub.
+_shipped_unsafe_header_line = unsafe_header_line
+
+
+def unsafe_header_line(lines):
+    if lines and lines[0].split(b" ", 1)[0] in (b"GET", b"POST"):
+        return None
+    return _shipped_unsafe_header_line(lines)
+"""
+
+
+def red_a_request_with_a_lone_cr_is_judged():
+    path = scratch_demux("-requestcr.py", REQUESTS_BY_LF_ONLY)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_request_a_parser_splits_differently_is_refused(rig)
+        except AssertionError as e:
+            if "was answered 200" not in str(e) and \
+                    "was answered 302" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 SPLIT_BY_LF_ONLY = """
 
 # Appended by the red arm: every header block judged line by line, as it was.
@@ -5439,6 +5491,8 @@ def main():
         (test_only_a_page_request_mints_at_the_front_door, dict(gate=None)),
         (test_a_header_block_a_browser_splits_differently_is_refused,
          dict(gate=None)),
+        (test_a_request_a_parser_splits_differently_is_refused,
+         dict(gate=None)),
     ]
 
     # Runs WITHOUT a rig from here, because it builds its own with the gate mode
@@ -5531,6 +5585,7 @@ def main():
                red_an_image_mints_at_the_front_door,
                red_a_lone_cr_carries_a_forged_cookie,
                red_a_prefetch_mints_at_the_front_door,
+               red_a_request_with_a_lone_cr_is_judged,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)
