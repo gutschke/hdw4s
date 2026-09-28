@@ -2356,6 +2356,47 @@ echo '== the installed app is never named upstream, on either kind of desktop ==
   is 'RED ARM: a page linking a manifest outside its tree is refused' "${rc}" '1'
 )
 
+echo '== our own pages carry the session page'"'"'s icon, and ask for nothing =='
+# The owner, 2026-09-27: one icon in the tab strip and the installed app, never two.
+# The session page shows upstream's; these pages had none, so the browser asked for
+# /favicon.ico (a request that once minted a desktop) and drew a blank globe. The
+# icon is DERIVED from a built slot's gated page and inlined, so the assertion is on
+# the bytes: the fixture's icon file must be the one every page carries, and the
+# page's apple-touch-icon (a different file) must not be the one taken.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  mkdir -p "${d}/web/ephemeral0"
+  printf '<html><head><link rel="apple-touch-icon" href="big.png"><link rel="icon" type="image/png" href="icon.png" /></head></html>' \
+    > "${d}/web/ephemeral0/index.html"
+  printf 'the-small-icon' > "${d}/web/ephemeral0/icon.png"
+  printf 'the-big-icon' > "${d}/web/ephemeral0/big.png"
+  want="<link rel=\"icon\" href=\"data:image/png;base64,$(printf 'the-small-icon' | base64 -w0)\">"
+  pages() {
+    HDW4S_WEBROOT_DIR="$1" python3 - "${ROOT}/hdw4s-demux" <<'PY'
+import importlib.machinery, importlib.util, sys
+sys.dont_write_bytecode = True
+l = importlib.machinery.SourceFileLoader("demux", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("demux", l))
+l.exec_module(m)
+row = dict(sid="ab" * 16, name=None, age=60, memory_mb=10, pids=3, started=True,
+           discarding=False, idle_window=3600)
+for name, body in (("dir", m.console_page([row])), ("ended", m.ended_page([row], True)),
+                   ("full", m.create_refused_page([row], 4)),
+                   ("starting", m.starting_page()),
+                   ("plain", m.page("Nothing here", "x"))):
+    print("%s\t%s" % (name, body.decode().replace("\n", " ")))
+PY
+  }
+  got="$(pages "${d}/web")"
+  for p in dir ended full starting plain; do
+    has "the ${p} page carries the session page's icon" \
+      "$(printf '%s\n' "${got}" | sed -n "s/^${p}\t//p")" "${want}"
+  done
+  hasnt 'and names no icon URL a browser would fetch' "${got}" 'rel="icon" href="/'
+  got="$(pages "${d}/nothing-built-yet")"
+  hasnt 'with no slot built, the pages are as they were' "${got}" 'rel="icon"'
+)
+
 echo '== BOTH session kinds publish an identity, or the gate refuses forever =='
 # THE ARM THAT WAS MISSING, AND WHY IT WAS MISSING. The gate's resume path
 # compares the identity a tab connected to against the one published in the web
@@ -3506,7 +3547,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=546   # update when tests are added; a wrong number is the point
+EXPECTED=553   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

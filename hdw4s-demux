@@ -3881,13 +3881,81 @@ PAGE_CSS = (
 )
 
 
+def load_icon_link(root=None):
+    """The icon in the tab of every page of ours: the SESSION PAGE'S, as a
+    data: URL, or "" when there is none to copy.
+
+    ONE ICON, and it is upstream's. The owner, 2026-09-27: people do not know
+    there are two products here, so the tab strip and an installed app must
+    never show two icons -- ours everywhere or upstream's everywhere, either
+    is fine. The session page already shows upstream's, in the tab and in the
+    installed app, on named desktops as well as these; these pages were the
+    only ones with none, and a browser that finds no icon link asks for
+    /favicon.ico and draws a blank globe beside our own title.
+
+    DERIVED FROM A BUILT SLOT, not from a path into the streaming client's
+    package: the gated page is ours (hdw4s-webroot builds it before this
+    starts), it names the icon it shows, and the file it names is in the same
+    tree. So whichever icon upstream ships next, these pages show the same.
+
+    INLINED, NOT LINKED, for the reason the router answers 404 to every path
+    but the front door: an icon URL here is one more request that must never
+    reach arrival(). A data: URL makes no request at all.
+
+    Read once, at start, like the names script. Nothing to copy -- no slot
+    built yet, a page with no icon link, a file too big to inline -- leaves
+    the pages as they were, with no link, which is what they have always
+    been."""
+    base = WEBROOT_DIR if root is None else root
+    try:
+        slots = sorted(os.listdir(base))
+    except OSError:
+        return ""
+    for inst in slots:
+        tree = os.path.join(base, inst)
+        try:
+            with open(os.path.join(tree, "index.html"), "r", encoding="utf-8") as f:
+                page = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for tag in re.findall(r"<link\b[^>]*>", page, re.I):
+            if not re.search(r"""\brel=["']?(?:shortcut\s+)?icon\b""", tag, re.I):
+                continue
+            m = re.search(r"""\bhref=["']?([^"'\s>]+)""", tag, re.I)
+            if not m or re.match(r"^([a-z]+:|//|/)", m.group(1), re.I):
+                continue
+            path = os.path.normpath(os.path.join(tree, m.group(1).split("?")[0]))
+            if not path.startswith(os.path.normpath(tree) + os.sep):
+                continue
+            try:
+                with open(path, "rb") as f:
+                    data = f.read(65537)
+            except OSError:
+                continue
+            if not data or len(data) > 65536:
+                continue
+            kind = {".png": "image/png", ".ico": "image/x-icon",
+                    ".svg": "image/svg+xml", ".webp": "image/webp",
+                    ".gif": "image/gif", ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg"}.get(os.path.splitext(path)[1].lower())
+            if kind is None:
+                continue
+            return '<link rel="icon" href="data:%s;base64,%s">' % (
+                kind, base64.b64encode(data).decode("ascii"))
+    return ""
+
+
+ICON_LINK = load_icon_link()
+
+
 def card(title, inner, tail="", head=""):
     """A page: TITLE as its heading, INNER (markup) under it, on the card.
     TAIL goes after the card (a script, for the pages that have one); HEAD
-    goes before the body (the starting page's no-script refresh)."""
-    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s"
+    goes before the body (the starting page's no-script refresh). Every one
+    carries the session page's icon (load_icon_link())."""
+    return ("<!doctype html><meta charset=utf-8><title>%s</title>%s%s"
             "<style>%s</style><body><div class=\"card\"><h1>%s</h1>%s</div>%s"
-            % (title, head, PAGE_CSS, title, inner, tail)).encode()
+            % (title, ICON_LINK, head, PAGE_CSS, title, inner, tail)).encode()
 
 
 def load_names_js():
