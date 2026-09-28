@@ -5164,6 +5164,16 @@ def test_only_a_page_request_mints_at_the_front_door(rig):
             % (dest, st, " to %s" % h["location"][0] if "location" in h else ""))
         assert "set-cookie" not in h, \
             "a front-door request for an %s handed out an identity" % dest
+    # A PREFETCH OR PRERENDER calls itself a document; nobody has opened it.
+    for purpose in ("Sec-Purpose: prefetch", "Sec-Purpose: prefetch;prerender",
+                    "Purpose: prefetch"):
+        c = rig.client()
+        st, h, _ = c.get("/", headers=("Sec-Fetch-Dest: document", purpose))
+        assert st == 403 and "location" not in h, (
+            "a front-door %s was answered %d -- an unopened speculation can "
+            "hold a slot" % (purpose, st))
+        assert "set-cookie" not in h, \
+            "a front-door %s handed out an identity" % purpose
     assert mint_lines(rig) == 0, \
         "a request that was not for a page minted a desktop"
     # THE PERMIT ARMS: a tab opening the address, and a client that sends no
@@ -5187,6 +5197,30 @@ _shipped_arrival_dest = arrival
 def arrival(own, wf, identity, query, new_identity, dest=None):
     return _shipped_arrival_dest(own, wf, identity, query, new_identity, None)
 """
+
+
+PREFETCH_IS_A_PAGE = """
+
+# Appended by the red arm: a speculation is judged by Sec-Fetch-Dest alone.
+def arrival_dest(headers):
+    return header_value(headers, "Sec-Fetch-Dest")
+"""
+
+
+def red_a_prefetch_mints_at_the_front_door():
+    path = scratch_demux("-prefetch.py", PREFETCH_IS_A_PAGE)
+    rig = Rig(gate=None, demux=path)
+    try:
+        try:
+            test_only_a_page_request_mints_at_the_front_door(rig)
+        except AssertionError as e:
+            if "unopened speculation can hold a slot" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
 
 
 def red_an_image_mints_at_the_front_door():
@@ -5496,6 +5530,7 @@ def main():
                red_a_service_workers_script_is_served,
                red_an_image_mints_at_the_front_door,
                red_a_lone_cr_carries_a_forged_cookie,
+               red_a_prefetch_mints_at_the_front_door,
                red_startup_guard_notices_a_lax_judge,
                red_startup_guard_notices_a_judge_that_refuses_everything):
         expect_red(fn.__name__, fn)

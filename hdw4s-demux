@@ -4196,6 +4196,22 @@ def refresh_headers(own, identity, new_identity):
     return []
 
 
+def arrival_dest(headers):
+    """What the browser says it is fetching at the front door, for arrival().
+
+    Its Sec-Fetch-Dest, EXCEPT that a prefetch or prerender is not a page
+    anybody opened, whatever it calls itself. Chrome sends those as a
+    "document" and marks them with Sec-Purpose (older ones: Purpose), so an
+    unopened speculation would otherwise hold a slot for the whole grace
+    window for a visitor who may never come.
+    """
+    purpose = header_value(headers, "Sec-Purpose") or \
+        header_value(headers, "Purpose") or b""
+    if purpose.strip().lower().startswith(b"prefetch"):
+        return b"prefetch"
+    return header_value(headers, "Sec-Fetch-Dest")
+
+
 def arrival(own, wf, identity, query, new_identity, dest=None):
     """Decide where this tab goes, and send it there. One place, per §13.
 
@@ -5685,7 +5701,7 @@ def serve(sock, own, expected_b64):
                         refresh_headers(own, identity, new_identity))
                     continue
                 arrival(own, wf, identity, query, new_identity,
-                        header_value(headers, "Sec-Fetch-Dest"))
+                        arrival_dest(headers))
                 continue
 
             gone = False
