@@ -1379,7 +1379,7 @@ def test_the_ended_pages_button_starts_a_NEW_desktop(rig):
     # its Resume and its Discard, at the addresses the directory uses -- and
     # nothing else a person could press. No new target, no new mint site.
     assert [(m, t) for m, t, _ in buttons] == [
-        ("GET", "/s/%s/" % y), ("GET", "/sessions/%s/discard" % y),
+        ("POST", "/sessions/%s/resume" % y), ("GET", "/sessions/%s/discard" % y),
         ("POST", "/sessions/new")], \
         "the ended page's pressables are %r" % (buttons,)
 
@@ -1549,7 +1549,7 @@ def test_the_bare_address_shows_your_desktops(rig):
     st, _, body = c.get("/sessions/")
     assert st == 200, "the directory did not serve: %d" % st
     targets = [(m, t) for m, t, _ in pressables(body)]
-    assert ("GET", "/s/%s/" % sid) in targets and \
+    assert ("POST", "/sessions/%s/resume" % sid) in targets and \
         ("POST", "/sessions/new") in targets, \
         "the directory does not offer this desktop and a new one: %r" % targets
 
@@ -1612,7 +1612,7 @@ def test_the_ended_page_lists_what_is_still_running(rig):
     assert "Still running in this browser" in text, \
         "the ended page does not list what is still running"
     assert [(m, t) for m, t, _ in pressables(body)] == [
-        ("GET", "/s/%s/" % y), ("GET", "/sessions/%s/discard" % y),
+        ("POST", "/sessions/%s/resume" % y), ("GET", "/sessions/%s/discard" % y),
         ("POST", "/sessions/new")], \
         "the ended page's pressables are %r" % (pressables(body),)
     assert "Nothing has been started for you" not in text
@@ -1622,12 +1622,12 @@ def test_the_ended_page_lists_what_is_still_running(rig):
     text = body.decode()
     assert st == 410 and "is gone" not in text, \
         "an id this router merely does not know was said to be gone"
-    assert "no longer running" in text and "/s/%s/" % y in text
+    assert "no longer running" in text and "/sessions/%s/resume" % y in text
 
     # A stranger presenting a dead id sees THEIR list, never a's.
     st, _, body = b.get("/s/%s/" % x)
     text = body.decode()
-    assert st == 410 and y not in text and "/s/%s/" % w in text, \
+    assert st == 410 and y not in text and "/sessions/%s/resume" % w in text, \
         "the ended page listed somebody else's desktop, or not the viewer's own"
     assert mint_lines(rig) == minted, "the ended page minted"
 
@@ -1643,8 +1643,8 @@ def test_every_pressable_keeps_its_target(rig):
     c.get("/s/%s/" % y)
     st, _, body = c.get("/sessions/")
     assert [(m, t) for m, t, _ in pressables(body)] == [
-        ("GET", "/s/%s/" % x), ("GET", "/sessions/%s/discard" % x),
-        ("GET", "/s/%s/" % y), ("GET", "/sessions/%s/discard" % y),
+        ("POST", "/sessions/%s/resume" % x), ("GET", "/sessions/%s/discard" % x),
+        ("POST", "/sessions/%s/resume" % y), ("GET", "/sessions/%s/discard" % y),
         ("POST", "/sessions/new")], \
         "the directory's pressables are %r" % (pressables(body),)
     st, _, body = c.get("/sessions/%s/discard" % x)
@@ -1876,6 +1876,89 @@ def test_a_desktop_just_MINTED_is_marked_and_a_resumed_one_is_not(rig):
     # leave a standing permission behind.
     assert "max-age=" in raw[0].lower(), \
         "the marker has no expiry: %r" % raw[0]
+
+
+def test_resume_from_the_directory_connects_and_nothing_else_does(rig):
+    """THE OWNER, 2026-09-27: "i created a new session, entered the bare url to
+    get back to the session card, renamed the session, and clicked resume. i
+    would have expected to get to my session, but instead i had to click
+    connect on another card."
+
+    Resume was a GET link to /s/<sid>/, which is byte for byte what a restored
+    tab, a reload or a bookmark presents -- so the page could not tell a press
+    from any of them, and asked. It is now a POST that is answered with the
+    one-shot marker a mint carries. Everything that makes that safe is a
+    refusal, so most of this test is refusals, each checked in the same rig
+    as the press that is let through:
+
+      * the press: POST from the browser that owns it -> 303 to /s/<sid>/,
+        marked for THAT sid, no query string, no mint;
+      * the addresses that look like it and must not be it: a GET of the
+        session address (reload, restored tab), a GET of the resume address
+        (a replayed URL, a prefetch), a second GET after the press -> no marker;
+      * a desktop this browser does not own, and one that does not exist ->
+        refused, no marker, no redirect;
+      * the mint counter, seen moving once before its zero is believed.
+    """
+    a, b = rig.client(), rig.client()
+    x, _ = arrive(rig, a)
+    st, h, _ = a.post("/sessions/new")
+    assert st == 303, "could not set up a second desktop: %d" % st
+    y = h["location"][0].split("/")[2]
+    assert a.get("/s/%s/" % y)[0] == 200
+    w, _ = arrive(rig, b)
+
+    # THE COUNTER MOVES, so the zeros below are readings and not a dead gauge.
+    moved = mint_lines(rig)
+    assert moved >= 3, "the mint counter did not count the three mints above"
+    minted = moved
+
+    # 1. The directory offers Resume as a POST to its own address, per row.
+    st, _, body = a.get("/sessions/")
+    assert st == 200
+    targets = [(m, t) for m, t, _ in pressables(body)]
+    for sid in (x, y):
+        assert ("POST", "/sessions/%s/resume" % sid) in targets, \
+            "the directory's Resume for %s is not a POST: %r" % (sid, targets)
+        assert ("GET", "/s/%s/" % sid) not in targets, \
+            "the directory still links %s's session address" % sid
+
+    # 2. THE PRESS. Marked for exactly this desktop; the URL carries nothing.
+    st, h, _ = a.post("/sessions/%s/resume" % x)
+    assert st == 303, "Resume was not answered with a redirect: %d" % st
+    assert h["location"] == ["/s/%s/" % x], \
+        "Resume sent the browser to %r" % h["location"]
+    assert fresh_markers(h) == [x], (
+        "A PRESSED RESUME WAS NOT MARKED (markers %r), so the visitor meets "
+        "the Connect card on the desktop they just chose" % fresh_markers(h))
+
+    # 3. RELOAD / RESTORED TAB / BOOKMARK: the session address itself.
+    st, h, _ = a.get("/s/%s/" % x)
+    assert st == 200, "the resumed desktop did not serve: %d" % st
+    assert fresh_markers(h) == [], \
+        "A GET OF THE SESSION ADDRESS WAS MARKED (%r)" % fresh_markers(h)
+
+    # 4. A REPLAYED URL: the resume address fetched, prefetched or restored.
+    for n in range(2):
+        st, h, _ = a.get("/sessions/%s/resume" % x)
+        assert fresh_markers(h) == [], (
+            "A GET OF THE RESUME ADDRESS WAS MARKED (%r): a prefetch, a "
+            "restored tab or a pasted link now connects without asking"
+            % fresh_markers(h))
+        assert "location" not in h, \
+            "a GET of the resume address redirected: %r" % h.get("location")
+
+    # 5. NOT THIS BROWSER'S, and NOT ANYBODY'S: refused alike, unmarked.
+    for who, sid in ((b, x), (a, w), (a, secrets_hex())):
+        st, h, _ = who.post("/sessions/%s/resume" % sid)
+        assert fresh_markers(h) == [] and "location" not in h, (
+            "A FOREIGN DESKTOP WAS RESUMED: %s answered %d, location %r, "
+            "markers %r" % (sid, st, h.get("location"), fresh_markers(h)))
+        assert st == 403, "a resume of %s was answered %d, not 403" % (sid, st)
+
+    # 6. And nothing on this path started a desktop.
+    assert mint_lines(rig) == minted, \
+        "Resume minted (%d -> %d)" % (minted, mint_lines(rig))
 
 
 def test_a_second_desktop_is_a_second_desktop(rig):
@@ -3339,7 +3422,7 @@ def respond(wf, status, body=b"", extra=()):
             for k, v in extra):
         for k, v in list(extra):
             if k == "Location" and v.startswith("/s/"):
-                extra.append(fresh_mint_header(v.split("/")[2]))
+                extra.append(asked_marker_header(v.split("/")[2]))
                 break
     return _shipped_respond(wf, status, body, extra)
 """
@@ -3374,6 +3457,64 @@ def red_every_redirect_marked_as_a_fresh_mint():
     finally:
         rig.stop()
         os.unlink(path)
+
+
+RESUME_WITHOUT_ITS_CHECKS = """
+
+# Appended by the red arm: Resume as the one-liner it looks like -- "redirect
+# to the session and say it was asked for" -- with neither the method nor the
+# ownership check. A press still lands on the desktop, so the owner's report
+# stays fixed; a prefetch or a stranger's form now connects without asking.
+_shipped_console = console
+
+
+def console(own, wf, identity, new_identity, what, sid, method):
+    if what == "resume":
+        return respond(wf, 303, b"", [("Location", "/s/%s/" % sid),
+                                      asked_marker_header(sid)])
+    return _shipped_console(own, wf, identity, new_identity, what, sid, method)
+"""
+
+RESUME_WITHOUT_OWNERSHIP = """
+
+# Appended by the red arm: the method is checked, ownership is not.
+_shipped_console = console
+
+
+def console(own, wf, identity, new_identity, what, sid, method):
+    if what == "resume" and method == b"POST":
+        return respond(wf, 303, b"", [("Location", "/s/%s/" % sid),
+                                      asked_marker_header(sid)])
+    return _shipped_console(own, wf, identity, new_identity, what, sid, method)
+"""
+
+
+def _red_resume(suffix, patch, must_say):
+    path = scratch_demux(suffix, patch)
+    rig = Rig(gate=None, demux=path)
+    try:
+        test_resume_from_the_directory_connects_and_nothing_else_does(rig)
+    except AssertionError as e:
+        # NAMED: red for the reason this arm exists, not for another one.
+        if must_say not in str(e):
+            raise RuntimeError("the red arm failed, but not on %r: %s"
+                               % (must_say, e))
+        raise
+    finally:
+        rig.stop()
+        os.unlink(path)
+
+
+def red_resume_on_a_GET():
+    """The marker handed to a GET: every replayed URL connects silently."""
+    _red_resume("-resume-get", RESUME_WITHOUT_ITS_CHECKS,
+                "A GET OF THE RESUME ADDRESS WAS MARKED")
+
+
+def red_resume_of_a_desktop_that_is_not_yours():
+    """THE NEW GUARD, seen refusing: without it a stranger's press connects."""
+    _red_resume("-resume-foreign", RESUME_WITHOUT_OWNERSHIP,
+                "A FOREIGN DESKTOP WAS RESUMED")
 
 
 def red_a_console_address_that_stops_being_claimed():
@@ -4088,6 +4229,9 @@ def main():
         # against a router that marked everything.
         (test_a_desktop_just_MINTED_is_marked_and_a_resumed_one_is_not,
          dict(gate=None)),
+        # UNPINNED: the shipped arm, whose directory is where Resume lives.
+        (test_resume_from_the_directory_connects_and_nothing_else_does,
+         dict(gate=None)),
         (test_a_second_desktop_is_a_second_desktop, dict(gate=None)),
         # BUG 2, on the SHIPPED arm, with a slot per entry point and one spare
         # for the ended page's second desktop.
@@ -4181,6 +4325,8 @@ def main():
                red_our_page_in_front_of_a_fast_desktop,
                red_our_page_waits_for_itself,
                red_every_redirect_marked_as_a_fresh_mint,
+               red_resume_on_a_GET,
+               red_resume_of_a_desktop_that_is_not_yours,
                red_startup_guard_notices_a_console_address_that_moved):
         expect_red(fn.__name__, fn)
 

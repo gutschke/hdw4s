@@ -271,6 +271,21 @@ COOKIE_LIFETIME = COOKIE_FLOOR_SECONDS
 # NOT HttpOnly, and it is the only cookie here that is not: its reader is the
 # page-side gate in hdw4s-gate-index, which is script. It carries a session id
 # the browser is being redirected to in the same response and nothing else.
+#
+# AND A PRESSED RESUME, since 2026-09-27. The owner: "i ... renamed the
+# session, and clicked resume. i would have expected to get to my session, but
+# instead i had to click connect on another card." Resume was a GET link to
+# /s/<sid>/, indistinguishable from a reload or a restored tab, so the page
+# asked. It is now a POST from the directory, and the answer carries this same
+# marker. That IS a desktop somebody may be watching -- another tab of this
+# browser -- and that is the point: pressing Resume on a named row is the
+# "informed intentional decision" the card exists to collect, made one page
+# earlier. What keeps it from reaching anything else is console()'s "resume"
+# branch: POST only, this browser's own live desktop only, and never a mint.
+# So the marker now means "this browser ASKED for this desktop in the request
+# that sent it here" -- a mint or a Resume, nothing else. The cookie keeps its
+# old name because the page-side reader already knows it; the name is wire
+# format, not a claim about which of the two it was.
 FRESH_COOKIE = "hdw4s_fresh"
 # Long enough to survive a redirect and a page load on an unwell box, short
 # enough that it is gone before anybody could restore a tab. The page deletes it
@@ -278,12 +293,14 @@ FRESH_COOKIE = "hdw4s_fresh"
 FRESH_COOKIE_SECONDS = 120
 
 
-def fresh_mint_header(sid):
-    """The marker for a session THIS request minted, for the redirect to carry.
+def asked_marker_header(sid):
+    """The marker for a session THIS request minted or was pressed to resume,
+    for the redirect to carry.
 
-    A function rather than a line at each site, because the two minting sites
-    must not drift into two spellings -- and the page-side reader is in a third
-    file, which is why the name is asserted across all three by tests.sh.
+    A function rather than a line at each site, because the three sites (two
+    mints and the directory's Resume) must not drift into three spellings --
+    and the page-side reader is in another file, which is why the name is
+    asserted across them by tests.sh.
     """
     return ("Set-Cookie",
             "%s=%s; Path=/; SameSite=Lax; Secure; Max-Age=%d"
@@ -3865,8 +3882,8 @@ def arrival(own, wf, identity, query, new_identity):
 
     if to_directory:
         # Nothing is resumed and nothing is marked: the directory is a GET that
-        # never mints, and each of its rows is the same /s/<sid>/ address the
-        # resume would have sent this tab to, meeting the same card.
+        # never mints. Its rows' Resume is a POST (console(), "resume"), so the
+        # only way from here to a desktop without its card is a press.
         extra.append(("Location", "/sessions/"))
         respond(wf, 302, b"", extra)
         return
@@ -3878,7 +3895,7 @@ def arrival(own, wf, identity, query, new_identity):
     # ONLY WHERE THIS REQUEST MINTED. A RESUMED session (an arrival carrying a
     # query) -- which may well have a viewer on it -- meets the card.
     if minted_here:
-        extra.append(fresh_mint_header(sid))
+        extra.append(asked_marker_header(sid))
     respond(wf, 302, b"", extra)
 
 
@@ -3949,6 +3966,15 @@ def console_target(path):
     # itself does, and this address does nothing until a POST arrives.
     if path in (b"/sessions/new", b"/sessions/new/"):
         return "create", None
+    # /sessions/<sid>/resume -- GO BACK TO ONE OF MINE, AND MEAN IT.
+    #
+    # A separate address from /s/<sid>/ for the same reason create is separate
+    # from the front door: that address is what a reload, a restored tab and a
+    # bookmark present, so a page served there cannot tell a press from any of
+    # them and has to ask. This one is only ever reached by pressing Resume,
+    # because only a POST here does anything (console()).
+    if len(parts) == 4 and parts[1] == b"sessions" and parts[2] and parts[3] == b"resume":
+        return "resume", parts[2].decode("ascii", "replace")
     return None, None
 
 
@@ -4273,8 +4299,14 @@ def row_html(r):
     button on the name's line, and Discard is a small bordered button at the
     start of the line below, beside the sentence saying the desktop also ends
     by itself -- the two endings read as one decision, away from the press
-    that continues. The targets are unchanged: Resume is GET /s/<sid>/ (the
-    card), Discard is GET of the confirmation page.
+    that continues. Discard is a GET of the confirmation page.
+
+    RESUME IS A POST, since 2026-09-27, to /sessions/<sid>/resume. It was a
+    link to /s/<sid>/, which is what a reload or a restored tab presents, so
+    the desktop's page could not tell the press from them and showed the
+    Connect card after it: the owner renamed a desktop, pressed Resume, and
+    "had to click connect on another card". The POST is answered with the
+    one-shot marker (console(), "resume"), so the press lands on the desktop.
 
     THE ROW NAMES ITS DESKTOP, and it did not until a visitor could have two.
     With one row there was nothing to tell apart and "Resume" was enough; the
@@ -4321,7 +4353,8 @@ def row_html(r):
     return ("<div class=\"row\"><div class=\"top\"><div>"
             "<div class=\"name\" data-hdw4s-sid=\"%s\">%s</div>"
             "<div class=\"facts\">%s</div></div>"
-            "<a href=\"/s/%s/\" class=\"btn secondary\">Resume</a></div>"
+            "<form method=\"post\" action=\"/sessions/%s/resume\">"
+            "<button class=\"btn secondary\">Resume</button></form></div>"
             "<div class=\"ends\">%s</div></div>"
             % (r["sid"], r["name"] or "Desktop", ", ".join(facts), r["sid"],
                ends))
@@ -4510,7 +4543,48 @@ def console(own, wf, identity, new_identity, what, sid, method):
         # repeating THIS one costs a slot.
         respond(wf, 303, b"",
                 [("Location", "/s/%s/" % new_sid),
-                 fresh_mint_header(new_sid)] + extra)
+                 asked_marker_header(new_sid)] + extra)
+        return
+
+    if what == "resume":
+        rec = own.lookup(sid)
+        if rec is None or rec["identity"] != identity:
+            # REFUSED EXACTLY AS A DISCARD IS, and for the same reasons: one
+            # answer for "no such session" and "not yours", on the GET as well
+            # as the POST. What this refusal protects is sharper than the
+            # discard's: a resume that let a stranger through would hand them
+            # the marker below, which connects without asking -- on top of
+            # whoever is watching.
+            log("refused a resume of %s: it is not this visitor's session"
+                % sid)
+            respond(wf, 403, page(
+                "Not your desktop",
+                "This address belongs to a different browser."), extra)
+            return
+        if method != b"POST":
+            # A GET IS NOT A PRESS. A prefetch, a restored tab or a pasted
+            # link reaches this address too, and a marker handed to any of them
+            # is a silent connect nobody chose. The directory is what a GET
+            # gets, as it is for /sessions/new: its Resume is on it.
+            respond(wf, 200, console_page(rows()), extra)
+            return
+        # NOTHING IS MINTED AND NOTHING IS RESERVED: the desktop is the one the
+        # table already holds for this browser. A desktop that has since ended
+        # is sent to its address unmarked, where the ended page explains; the
+        # marker could not act there anyway, and not writing it keeps "marked"
+        # meaning "live, and asked for".
+        #
+        # 303 for the reason create uses one, and the marker is a cookie, not a
+        # query string, for the reason given at FRESH_COOKIE: a URL goes
+        # into history, and a reload, a back button or a restored tab carrying
+        # it would connect without asking. The page consumes the marker on
+        # first read, and it expires on its own.
+        out = [("Location", "/s/%s/" % sid)]
+        if not rec.get("ended"):
+            out.append(asked_marker_header(sid))
+            log("resumed a session on request: slot %s, session %s"
+                % (rec["instance"], sid))
+        respond(wf, 303, b"", out + extra)
         return
 
     if what == "discard":
@@ -4581,13 +4655,19 @@ def assert_console_shows_only_your_own(target=None):
     # mints on a GET, which is the one thing the whole surface may not do.
     assert target(b"/sessions/new") == ("create", None), \
         "the create address moved"
+    # AND RESUME, whose loss would turn every row's Resume into a 404 -- and
+    # which must not swallow the session address a restored tab presents.
+    assert target(b"/sessions/abc/resume") == ("resume", "abc"), \
+        "the resume action moved"
     # Things that must NOT be read as the console, because each of them would
     # otherwise be routed somewhere that acts.
     for path in (b"/", b"/s/abc/", b"/sessions/abc", b"/sessions/abc/",
                  b"/sessions/abc/discard/more", b"/sessionsabc/discard",
-                 b"/sessions//discard"):
+                 b"/sessions//discard", b"/sessions/abc/resume/more",
+                 b"/sessions//resume", b"/s/abc/resume"):
         what, _ = target(path)
-        assert what != "discard", "%r was read as a DISCARD action" % path
+        assert what not in ("discard", "resume"), \
+            "%r was read as a %s action" % (path, what)
     # A SESSION WHOSE ID IS THE WORD "new" MUST NOT BE THE CREATE ADDRESS, and
     # it cannot be, because ids are 32 hex characters -- but the collision is
     # written down here rather than assumed, since the day somebody makes ids
@@ -4948,8 +5028,10 @@ def serve(sock, own, expected_b64):
                 #
                 # The page lists THIS browser's other desktops, from its own
                 # identity, so a stranger presenting a dead id sees only their
-                # own list. Every pressable on it is a GET that gates or asks,
-                # or the directory's POST create: still no mint without a press.
+                # own list. Every pressable on it is a GET that asks (Discard),
+                # a POST Resume of one of those desktops, or the directory's
+                # POST create: still no mint, and no silent connect, without a
+                # press.
                 respond(wf, 410, ended_page(owned_rows(own, identity), gone),
                         refresh_headers(own, identity, new_identity))
                 continue

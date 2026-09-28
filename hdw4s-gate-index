@@ -1072,8 +1072,9 @@ __ACT__
   // which is defined after the branch that needs this one.
   var announceFresh = function(){
     try {
-      console.log('[hdw4s gate] connected without asking: this desktop was ' +
-                  'minted for this browser in the request that sent us here',
+      console.log('[hdw4s gate] connected without asking: this browser asked ' +
+                  'for this desktop (a mint, or Resume pressed in the directory) ' +
+                  'in the request that sent us here',
                   {loadedHidden: LOADED_HIDDEN});
     } catch(e){}
   };
@@ -1094,8 +1095,14 @@ __ACT__
   // viewer this page cannot see, and a session nobody has ever been served cannot
   // have one.
   //
-  // The marker is written by hdw4s-demux beside the redirect and NOWHERE ELSE, so
-  // it exists only where a mint just happened. Three things make it unable to
+  // AND NEITHER IS A RESUME PRESSED IN THE DIRECTORY (2026-09-27): the owner
+  // renamed a desktop, pressed Resume, and "had to click connect on another card".
+  // A press there is the informed decision this card collects, made one page
+  // earlier, so the router answers that POST with the same marker.
+  //
+  // The marker is written by hdw4s-demux beside those two redirects and NOWHERE
+  // ELSE -- never on a GET, never for a desktop this browser does not own -- so
+  // it exists only where this browser just asked. Three things make it unable to
   // become a standing permission to connect:
   //
   //   1. IT NAMES THE DESKTOP. Compared against the address this page is being

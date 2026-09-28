@@ -1593,13 +1593,14 @@ echo '== the fresh-mint marker is spelled the same in the router and the page ==
     *)  ok  'the router names the marker' ;;
   esac
 
-  # BOTH MINTING SITES, counted rather than eyeballed. There are exactly two --
-  # the front door and the directory's create -- and a marker attached at only
-  # one of them brings the second click back on whichever path was missed, with
-  # nothing going red.
-  sites="$(grep -c 'fresh_mint_header(' "${ROOT}/hdw4s-demux")"
-  is 'the router attaches it at both minting sites (and defines it once)' \
-    "${sites}" '3'
+  # EVERY SITE, counted rather than eyeballed. There are exactly three -- the front
+  # door's mint, the directory's create, and the directory's Resume -- and a marker
+  # attached at fewer brings the second click back on whichever path was missed,
+  # with nothing going red; one attached at MORE is a silent connect somewhere
+  # nobody asked for.
+  sites="$(grep -c 'asked_marker_header(' "${ROOT}/hdw4s-demux")"
+  is 'the router attaches it at its three sites (and defines it once)' \
+    "${sites}" '4'
   has 'the page reads the same name' "$(cat "${d}/out.html")" "'${name}'"
   # And it is read from the address the page is serving rather than taken on trust, so
   # it cannot authorise an arrival at a desktop somebody else may be watching.
@@ -1611,7 +1612,7 @@ echo '== the fresh-mint marker is spelled the same in the router and the page ==
   # NOT HttpOnly, because its only reader is script. Asserted on the router, where the
   # header is composed: a marker the page cannot read brings the card back silently.
   hasnt 'the marker is not hidden from the page' \
-    "$(sed -n '/^def fresh_mint_header/,/^$/p' "${ROOT}/hdw4s-demux")" 'HttpOnly'
+    "$(sed -n '/^def asked_marker_header/,/^$/p' "${ROOT}/hdw4s-demux")" 'HttpOnly'
 )
 
 echo '== the fresh-desktop card tells the truth about how long the desktop lasts =='
