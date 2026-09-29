@@ -5492,6 +5492,32 @@ def assert_cross_site_posts_are_refused(judge=None):
 # Proxying
 # --------------------------------------------------------------------------
 
+def buffered_now(f, sock):
+    """What F has ALREADY read from SOCK and not yet handed out. Never waits.
+
+    peek(0) on a buffered reader returns its buffer when there is one -- and
+    when there is none, it READS, blocking until the peer sends. After a 101
+    that is the wrong question: WebRTC signalling is a WebSocket on which the
+    SERVER waits for the client's HELLO, so the peer sends nothing, the peek
+    sat until the socket timeout, the handler died, and the browser's HELLO
+    never reached the desktop -- which logged "Invalid hello message type" and
+    dropped it. Measured 2026-09-29, a real Chrome switched to WebRTC through
+    the pool's front door. The websockets stream never showed it, because that
+    server speaks first.
+
+    So the socket is made non-blocking for this one look: the buffer if there
+    is one, and whatever the kernel already holds, and nothing that is not here.
+    """
+    prev = sock.gettimeout()
+    sock.settimeout(0)
+    try:
+        return f.peek(0)
+    except (BlockingIOError, InterruptedError):
+        return b""
+    finally:
+        sock.settimeout(prev)
+
+
 def splice(a, b):
     """Copy A to B until either end goes. Then close both."""
     try:
@@ -6096,7 +6122,7 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         # after a 101 the connection belongs to that WebSocket and carries no
         # further requests to route. What follows is WebSocket frames, which a
         # browser reads as frames and never as a head.
-        pending = upf.peek(0)
+        pending = buffered_now(upf, up)
         if pending:
             wf.write(upf.read(len(pending)))
             wf.flush()

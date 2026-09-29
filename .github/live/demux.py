@@ -582,10 +582,16 @@ class Slot(threading.Thread):
                               b"Connection: Upgrade\r\n\r\n")
                     with self.streams_lock:
                         self.streams.append(c)
-                    # Held until one end closes it. What arrives is discarded:
-                    # the frames are not the subject, the connection is.
-                    while f.read1(65536):
-                        pass
+                    # Held until one end closes it, and what arrives is sent
+                    # back. The DESKTOP SPEAKS SECOND here, as Selkies'
+                    # WebRTC signalling does (it waits for the client's
+                    # HELLO): a router that waited for the desktop to speak
+                    # first would carry nothing either way.
+                    while True:
+                        got_ws = f.read1(65536)
+                        if not got_ws:
+                            break
+                        c.sendall(got_ws)
                     return
                 wait = self.ready_at - time.time()
                 if wait > 0:
@@ -5407,6 +5413,60 @@ def test_a_101_nobody_asked_for_is_refused(rig):
     ws.close()
 
 
+def test_a_stream_where_the_client_speaks_first(rig):
+    """After a 101 the desktop may wait for the browser: WebRTC signalling does.
+
+    The router used to peek for data the desktop had already sent, and a peek on
+    an empty buffer READS -- so it sat until its timeout, the handler died, and
+    the browser's first frame never arrived. Measured with a real Chrome switched
+    to WebRTC. The stand-in echoes, and says nothing until spoken to.
+    """
+    a = rig.client()
+    sid, slot = serving_slot(rig, a)
+    ws = open_stream(rig, a, sid)
+    try:
+        ws.settimeout(3)
+        ws.sendall(b"HELLO client")
+        got = b""
+        try:
+            while len(got) < len(b"HELLO client"):
+                chunk = ws.recv(64)
+                if not chunk:
+                    break
+                got += chunk
+        except OSError:
+            pass
+        assert got == b"HELLO client", \
+            "the browser's first frame on a stream never reached the desktop " \
+            "(echo %r within 3 s)" % got
+    finally:
+        ws.close()
+
+
+BLOCKING_PEEK = """
+
+# Appended by the red arm: the post-101 look that waits for the desktop.
+def buffered_now(f, sock):
+    return f.peek(0)
+"""
+
+
+def red_a_stream_waits_for_the_desktop_to_speak():
+    path = scratch_demux("-peek.py", BLOCKING_PEEK)
+    rig = Rig(demux=path)
+    try:
+        try:
+            test_a_stream_where_the_client_speaks_first(rig)
+        except AssertionError as e:
+            if "first frame on a stream never reached" not in str(e):
+                raise RuntimeError(
+                    "the red arm went red for the wrong reason: %s" % e)
+            raise
+    finally:
+        rig.stop()
+        _remove_scratch_demuxes()
+
+
 def test_every_framing_a_desktop_uses_still_reaches_the_browser(rig):
     """The permit arm of the two above: every ordinary shape still arrives
     whole, and a connection that should carry another request still does.
@@ -6619,6 +6679,7 @@ def main():
         (test_framing_two_parsers_could_read_differently_is_refused,
          dict(gate=None)),
         (test_a_101_nobody_asked_for_is_refused, dict(gate=None)),
+        (test_a_stream_where_the_client_speaks_first, dict(gate=None)),
         (test_every_framing_a_desktop_uses_still_reaches_the_browser,
          dict(gate=None)),
         (test_a_request_body_is_never_read_as_a_request, dict(gate=None)),
@@ -6726,6 +6787,7 @@ def main():
                red_an_interim_head_is_relayed,
                red_ambiguous_framing_is_resolved,
                red_a_101_is_taken_from_anyone,
+               red_a_stream_waits_for_the_desktop_to_speak,
                red_a_request_body_is_read_as_a_request,
                red_a_planted_identity_is_believed,
                red_our_cookie_rides_a_shareable_response,

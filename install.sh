@@ -27,6 +27,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration}
          hdw4s-start hdw4s-start@.service hdw4s-start@.path
          hdw4s-incarnation hdw4s-incarnation@.service
          hdw4s-stream-dir hdw4s-stream@.service hdw4s-sysusers.conf
+         hdw4s-selkies-webrtc
          hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-demux hdw4s-demux.socket hdw4s-demux.service
          hdw4s-firewall.service
@@ -173,8 +174,9 @@ chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wa
            "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse \
            "${dst}"/hdw4s-incarnation "${dst}"/hdw4s-stream-dir \
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*
-# Imported, not executed.
-chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
+# Imported, not executed: the systemd units, and the WebRTC signalling adapter
+# that /opt/selkies/bin/python loads.
+chmod 0644 "${dst}"/hdw4s-selkies-webrtc "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
            "${dst}"/*.conf "${dst}"/hdw4s.8* "${dst}"/hdw4s-names.js \
            "${dst}"/hdw4s-title.js
 

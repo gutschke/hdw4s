@@ -855,6 +855,17 @@ export SELKIES_RTC_CONFIG_JSON=''
 # subclass to stand up. Everything this package wants from the server is asked
 # for on the command line below.
 stream=(/opt/selkies/bin/selkies)
+# EXCEPT WITH WebRTC. Selkies' WebRTC mode connects to its own signalling endpoint
+# as a client, over TCP to localhost whatever the listener is, carrying the
+# session's credential and the server's master token -- and nothing of ours
+# listens on that port any more, so whoever binds it first would be answering.
+# hdw4s-selkies-webrtc sends that one connection through the stream's unix socket
+# instead, and refuses to start rather than fall back if it no longer recognises
+# the code it adapts. Only here: a websockets-only session keeps nothing of ours
+# between the unit and the server.
+if [ "${HDW4S_WEBRTC}" = 'yes' ]; then
+  stream=(/opt/selkies/bin/python /usr/lib/hdw4s/hdw4s-selkies-webrtc)
+fi
 
 # HDW4S_FRAMERATE is a range: where a session starts, and how far a client may
 # move it from the video settings panel.
@@ -1004,22 +1015,6 @@ esac
 # branch has no ICE today, and a pin that only holds while a second setting
 # happens to be off is not a pin.
 rtc_config_none='/usr/lib/hdw4s/rtc-config.disabled'
-
-if [ "${HDW4S_WEBRTC}" = 'yes' ]; then
-  # REFUSED, AND NOT FOR A REASON OF OURS. The stream listens on a filesystem
-  # socket (HDW4S_STREAM_SOCKET, below), but Selkies' WebRTC mode opens its own
-  # signalling connection to "ws://localhost:<port>" -- TCP, whatever the
-  # listener is -- and hands that connection the server's own token. Nothing of
-  # ours listens on that port any more, so the first process on this machine to
-  # bind it, which may be another desktop's occupant, would be the one it talks
-  # to. Read in Selkies' webrtc_mode.create_signaling_client; not measured. Lift
-  # this when that connection follows the configured unix socket.
-  echo 'hdw4s: HDW4S_WEBRTC=yes is refused on this build. Selkies'"'"' WebRTC' \
-       'signalling connects to its own server over TCP on localhost, which no' \
-       'longer listens there, so another process could answer in its place.' \
-       'Set HDW4S_WEBRTC=no.' >&2
-  exit 1
-fi
 
 case "${HDW4S_WEBRTC}" in
   yes)

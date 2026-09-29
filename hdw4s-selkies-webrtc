@@ -1,0 +1,105 @@
+"""Start Selkies with WebRTC signalling carried over the stream's unix socket.
+
+Run as "/opt/selkies/bin/python /usr/lib/hdw4s/hdw4s-selkies-webrtc <selkies args>"
+by hdw4s-run-session, and ONLY for a session with HDW4S_WEBRTC=yes. A session on
+websockets alone runs upstream's own entry point with nothing of ours in between.
+
+WHY THIS EXISTS. A session's streaming server listens on a unix socket
+(--unix-socket; hdw4s-stream-dir says why never a port). Selkies' WebRTC mode then
+reaches its own signalling endpoint as a CLIENT, and that client ignores the unix
+socket: webrtc_mode.WebRTCService.create_signaling_client builds
+"ws://localhost:<port>/api/ws" and webrtc_signaling_client.connect_and_listen opens
+it with a plain aiohttp.ClientSession -- TCP. It sends, on that connection, the
+session's Basic credential (when the session has one) and the server's master
+token in its HELLO. Nothing of ours listens on that port, so the first process on
+the machine to bind it -- another desktop's occupant among them -- would be the
+signalling server this desktop trusts. Read in Selkies 2.0.0rc1 and a later dev
+build; the connection is measured by .github/live and the box tier, not assumed.
+
+WHAT IT DOES. Before handing over to upstream's main(), it replaces the aiohttp
+that the signalling client module sees with one whose ClientSession connects
+through the stream's unix socket (aiohttp.UnixConnector). The URL is untouched:
+over a UnixConnector host and port name nothing, so there is no TCP connection at
+all and no port to squat.
+
+THREE OUTCOMES, per the project's rule for changes it would offer upstream:
+  * upstream grows the support (WebRTCSignalingClient.SUPPORTS_UNIX_SOCKET): stand
+    down and run stock;
+  * the code is still the code this was written against: apply;
+  * anything else: REFUSE TO START, loudly. Running stock here is not a safe
+    degradation -- it is the squattable TCP connection with the token on it.
+"""
+
+import sys
+
+MARKER = "SUPPORTS_UNIX_SOCKET"
+
+
+def refuse(why):
+    print("hdw4s-selkies-webrtc: %s -- refusing to start WebRTC signalling over TCP. "
+          "Set HDW4S_WEBRTC=no, or update hdw4s." % why, file=sys.stderr)
+    sys.exit(1)
+
+
+def unix_socket_from_argv(argv):
+    for i, a in enumerate(argv):
+        if a.startswith("--unix-socket="):
+            return a.split("=", 1)[1]
+        if a == "--unix-socket" and i + 1 < len(argv):
+            return argv[i + 1]
+    return ""
+
+
+def adapt(path):
+    import inspect
+    import types
+    import aiohttp
+    from selkies import webrtc_signaling_client as sc
+    from selkies import webrtc_mode as wm
+
+    if getattr(sc.WebRTCSignalingClient, MARKER, False):
+        return "upstream carries unix-socket signalling; standing down"
+
+    try:
+        client_src = inspect.getsource(sc.WebRTCSignalingClient.connect_and_listen)
+        make_src = inspect.getsource(wm.WebRTCService.create_signaling_client)
+    except (AttributeError, OSError, TypeError) as e:
+        refuse("cannot read the signalling code this adapts (%s)" % e)
+    # The anchors: the client opens exactly one plain session through the module's
+    # own "aiohttp" name, and the URL it is given is the loopback one. If either
+    # has moved, this adapter no longer knows what it would be changing.
+    if client_src.count("aiohttp.ClientSession()") != 1 or "ws_connect(" not in client_src:
+        refuse("Selkies' signalling client is not the code this adapts")
+    if "localhost:{self.args.port}" not in make_src:
+        refuse("Selkies' signalling URL is not the one this adapts")
+    if getattr(sc, "aiohttp", None) is not aiohttp:
+        refuse("the signalling client does not reach aiohttp by that name")
+
+    def unix_session(*args, **kwargs):
+        if "connector" in kwargs:
+            raise RuntimeError("hdw4s-selkies-webrtc: the signalling client now "
+                               "chooses its own connector; not overriding it")
+        kwargs["connector"] = aiohttp.UnixConnector(path=path)
+        return aiohttp.ClientSession(*args, **kwargs)
+
+    # A namespace that is aiohttp in every respect but one. Only the signalling
+    # client module is given it; every other caller keeps the real module.
+    shim = types.SimpleNamespace(**{k: getattr(aiohttp, k) for k in dir(aiohttp)
+                                    if not k.startswith("__")})
+    shim.ClientSession = unix_session
+    sc.aiohttp = shim
+    return "WebRTC signalling goes through %s" % path
+
+
+def main():
+    path = unix_socket_from_argv(sys.argv[1:])
+    if not path:
+        refuse("no --unix-socket was given")
+    print("hdw4s-selkies-webrtc: %s" % adapt(path), file=sys.stderr)
+    sys.argv[0] = "selkies"
+    from selkies.__main__ import main as selkies_main
+    sys.exit(selkies_main())
+
+
+if __name__ == "__main__":
+    main()
