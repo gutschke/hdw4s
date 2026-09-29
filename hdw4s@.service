@@ -32,6 +32,13 @@ Requires=hdw4s-firewall.service
 # a live desktop down with it. After= is what actually orders it.
 Wants=hdw4s-incarnation@%i.service
 After=hdw4s-incarnation@%i.service
+
+# WHERE THE STREAMING SERVER LISTENS: a directory only this session's account may
+# create in and only it and the relay's group may enter -- hdw4s-stream-dir says
+# why a directory and not a port. Requires=, not Wants=: a session with no stream
+# directory can be reached by nobody, and starting it anyway only hides why.
+Requires=hdw4s-stream@%i.service
+After=hdw4s-stream@%i.service
 # A home directory that arrives over the network has to be there before a
 # desktop tries to read settings out of it.
 
@@ -274,6 +281,12 @@ ProtectSystem=strict
 # unit cannot name it: there is no specifier for the home of the account in
 # User=, and %h is the manager's home, which here is /root.
 ReadWritePaths=/var/lib/hdw4s
+# The one place in /run this session may create anything, and only because the
+# directory beneath it is its own: ProtectSystem=strict makes the rest of /run
+# read-only here, and <instance> itself is root's and 0711, so this lifts the
+# read-only MOUNT and leaves the permissions to decide. No "-": hdw4s-stream@ has
+# made it by now, and a session that cannot listen should fail naming the path.
+ReadWritePaths=/run/hdw4s-stream/%i
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

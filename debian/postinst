@@ -2,6 +2,12 @@
 set -e
 
 if [ "$1" = 'configure' ]; then
+  # The relay's system group, before anything below (or debhelper's own start of
+  # the slot minter) hands the stream root to it. Idempotent.
+  systemd-sysusers hdw4s-sysusers.conf || {
+    echo 'hdw4s: could not create the hdw4s-relay group; no desktop can be' >&2
+    echo '       reached until "systemd-sysusers" succeeds.' >&2
+  }
   # Created here rather than shipped into /etc, because "hdw4s set" edits it.
   # A file dpkg owns and a tool rewrites means an interactive conffile prompt on
   # every upgrade after the first change -- which, in a non-interactive install,
@@ -67,6 +73,17 @@ if [ "$1" = 'configure' ]; then
       case "${idx}" in ''|\#*) continue;; esac
       d="${UNITDIR}/hdw4s-proxy@${inst}.service.d"
       [ -d "${d}" ] || continue
+      # THE STREAM IS A PATH NOW, NOT A PORT (hdw4s-stream-dir), and the relay
+      # template names it. An earlier "hdw4s enable" wrote the port as a drop-in
+      # that REPLACES the relay's ExecStart=, so one left in place would put this
+      # relay back on TCP -- the squattable shape the move exists to end, with
+      # nothing to show it. Removed wherever it names a loopback port; the
+      # instance file's HDW4S_PORT line, which nothing reads any more, goes too.
+      if grep -qs '^ExecStart=.*systemd-socket-proxyd 127\.0\.0\.1:' "${d}/50-port.conf"; then
+        rm -f -- "${d}/50-port.conf"
+      fi
+      [ ! -f "${ETCDIR}/${inst}.conf" ] ||
+        sed -i '/^[[:space:]]*HDW4S_PORT=/d' "${ETCDIR}/${inst}.conf"
       # Both ephemeral-shaped types take the ephemeral unit. The CLI decides this
       # in ephemeral_shaped(); an installer cannot call it -- it may be repairing
       # a tree that has no working hdw4s yet -- so the list is spelled out, and

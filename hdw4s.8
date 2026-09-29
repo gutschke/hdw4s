@@ -157,11 +157,9 @@ Most settings work per session for free, because a session reads the shared file
 .IP "\[ci]" 4
 \fBHDW4S_BASE_PORT\fR, \fBHDW4S_BLOCK_SIZE\fR: The block of TCP ports sessions are allocated from\. Defaults to 7300 and
 .IP "1." 4
-Two consecutive blocks are actually reserved: the first is what the reverse proxy connects to, and the second, immediately above it, is where each session's streaming server listens on loopback behind its relay\. So the defaults reserve 7300\-7427, and only 7300\-7363 are ever reachable from off the machine\.
+Two consecutive blocks are actually reserved: the first is what the reverse proxy connects to, and the second, immediately above it, is kept out of the kernel's ephemeral range and closed to connections from any desktop\. Nothing listens in the second block: each session's streaming server listens on a filesystem socket instead (see FILES)\. So the defaults reserve 7300\-7427, and only 7300\-7363 are ever reachable from off the machine\.
 .IP "" 0
 
-.IP "\[ci]" 4
-\fBHDW4S_ADDR\fR: The address the streaming server binds\. Defaults to \fB127\.0\.0\.1\fR\. Leave it alone unless you know why you are changing it: the socket unit in front is the only way in, and the firewall decides who may reach that\. Binding anything wider publishes the streaming server directly, at a port in the second block, which nothing authenticates and which the firewall does not cover for connections arriving from off the machine\. It does cover it in the other direction: a desktop may not open a connection to a session port on this machine at all, whichever address it is bound to\.
 .IP "\[ci]" 4
 \fBHDW4S_ALLOW_SYSTEM_USER\fR: Set to \fByes\fR to permit a session for an account below UID 1000\.
 .IP "\[ci]" 4
@@ -401,7 +399,7 @@ The table is also checked periodically, not just applied once at session start\.
 .P
 Each session's X server is given its own authority cookie in its runtime directory\. Without one, every account on the machine could read the session's screen and type into it\.
 .P
-\fBHDW4S_PORT\fR appears in an instance's file but is not a setting: \fBenable\fR writes it, and the relay in front of the session is configured from the same allocation at the same moment\. Changing it moves where the session listens without moving where the relay connects, so the desktop starts and is unreachable, and nothing reports it\.
+A session's streaming server never listens on a port\. Every desktop on a machine shares one network namespace, so a port is a name any of them could take first and be connected to in place of the desktop it belongs to\. It listens at \fB/run/hdw4s\-stream/<instance>/s/stream\.sock\fR instead, in a directory made afresh for each start that only the session's own account may create in and only it and the relay's group, \fBhdw4s\-relay\fR, may enter\. An account in that group could therefore open every desktop on the machine, so a session refuses to start as one\.
 .SH "FILES"
 .TP
 \fB/etc/hdw4s/hdw4s\.conf\fR
@@ -430,6 +428,9 @@ Drop\-ins written by \fBhdw4s enable\fR: the account the session runs as, the ho
 .TP
 \fB/etc/systemd/system/hdw4s\-proxy@<instance>\.socket\.d/\fR
 The address the front door listens on, written by \fBhdw4s transport\fR\.
+.TP
+\fB/run/hdw4s\-stream/<instance>/s/\fR
+Where the session's streaming server listens\. Made by \fBhdw4s\-stream@<instance>\.service\fR when the session starts, removed when it stops\.
 .TP
 \fB/usr/lib/hdw4s/hdw4s\.xorg\.conf\fR
 X server configuration for the \fBdummy\fR driver\. Deliberately not \fB/etc/X11/xorg\.conf\fR, which belongs to the machine's own display\.
@@ -473,7 +474,7 @@ It is run every fifteen minutes by \fBhdw4s\-check\.timer\fR, which marks \fBhdw
 .P
 The X server's log is kept in the session's runtime directory rather than the home directory, so it disappears with the session instead of accumulating\.
 .SH "LIMITATIONS"
-There is no way to configure STUN or TURN, and nothing left for one to configure\. A session serves a single WebSocket: dual mode is locked off, so the WebRTC stack never starts, no UDP socket is opened, no connection candidates are gathered and no STUN server is contacted\. Checked rather than assumed \-\- the streaming server's process owns one TCP listener on loopback and no UDP socket at all\.
+There is no way to configure STUN or TURN, and nothing left for one to configure\. A session serves a single WebSocket: dual mode is locked off, so the WebRTC stack never starts, no UDP socket is opened, no connection candidates are gathered and no STUN server is contacted\. Checked rather than assumed \-\- the streaming server's process owns one listener, a filesystem socket, and no UDP socket at all\.
 .P
 Under 1\.6 this was not true, and the reasons it mattered are worth keeping: the server appended its own default STUN server unless one was named exactly, so a setting could only ever add a second and never replace the first, and every session told a third party the machine's address and when it started\. TURN was disabled outright because the server otherwise used a relay belonging to a third party with a shared secret published in its own source, which would have carried the desktop's video, keystrokes and clipboard\. Enabling a relay you run yourself needs somewhere to keep its credentials that a session cannot read, which does not exist yet: the configuration files are read by the session as the desktop user, so a secret in them is readable by every account with a desktop on that machine\.
 .P

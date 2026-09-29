@@ -86,70 +86,48 @@ REFUSE_RESPONSE = _shipped_refusal()
 class Slot(threading.Thread):
     """A backend that says which slot it is, so a mis-route is visible."""
 
-    # THE DOOR. One file stands in for /proc/net/tcp and every slot's door is a
-    # row in it, guarded by a lock because the slots are threads. The router
-    # reads it through HDW4S_PROC_NET_TCP exactly as it reads the real one --
-    # same parser, same st=0A requirement -- so what is stood in for here is the
-    # KERNEL, not the check.
-    doors = {}
-    doors_lock = threading.Lock()
-    doors_file = None
-
-    @classmethod
-    def write_doors(cls):
-        if cls.doors_file is None:
-            return
-        # THE WHOLE WRITE IS UNDER THE LOCK, not only the read of the dict. It
-        # used to take the lock for the read and then write one shared ".new"
-        # file outside it, so two slots opening their doors at the same instant
-        # -- which is what a burst of arrivals does -- truncated each other's
-        # temporary file, and the loser's os.replace() found it already moved:
-        # FileNotFoundError, swallowed by serve(), which closed the connection
-        # unanswered. The router then correctly answered that visitor 502, and
-        # the burst test read it as a slot let twice. Measured: 4 failures in
-        # 80 runs, each one exactly a run in which this raised, and in none of
-        # them did the router's log show a second mint on any slot.
-        with cls.doors_lock:
-            cls._write_doors_locked()
-
-    @classmethod
-    def _write_doors_locked(cls):
-        rows = ["  sl  local_address rem_address   st tx_queue rx_queue tr"
-                " tm->when retrnsmt   uid  timeout inode\n"]
-        open_ports = sorted(p for p, up in cls.doors.items() if up)
-        shut_ports = sorted(p for p, up in cls.doors.items() if not up)
-        i = 0
-        for port in open_ports:
-            rows.append("%4d: 0100007F:%04X 00000000:0000 0A 00000000:00000000"
-                        " 00:00000000 00000000     0        0 0 1 0 100 0 0 10"
-                        " 0\n" % (i, port))
-            i += 1
-        # A SHUT DOOR LEAVES A TIME_WAIT BEHIND, because that is what the
-        # connection the session was serving turns into when the session dies.
-        # Written on purpose: a router that looked for the port anywhere in this
-        # file rather than for state 0A would read every one of these as OPEN
-        # and the whole repair would be green and inert.
-        for port in shut_ports:
-            rows.append("%4d: 0100007F:%04X 0100007F:D431 06 00000000:00000000"
-                        " 00:00000000 00000000     0        0 0 1 0 100 0 0 10"
-                        " 0\n" % (i, port))
-            i += 1
-        tmp = cls.doors_file + ".new"
-        with open(tmp, "w") as f:
-            f.write("".join(rows))
-        os.replace(tmp, cls.doors_file)
-
+    # THE DOOR. A REAL unix socket at the slot's stream path, listening while
+    # the stand-in session is up -- so the router reads it out of the real
+    # /proc/net/unix with its real parser, and what is stood in for here is the
+    # SESSION, not the kernel and not the check. HDW4S_STREAM_DIR points the
+    # router at this rig's directory.
+    #
+    # A SHUT DOOR LEAVES A SOCKET BOUND AT THE PATH AND NOT LISTENING, on
+    # purpose: that is what a dying server leaves for an instant, and a router
+    # that looked for the path anywhere in the table rather than for a LISTENING
+    # one would read every shut door as OPEN and the whole repair would be green
+    # and inert.
     def open_door(self):
-        with Slot.doors_lock:
-            Slot.doors[self.port] = True
-        Slot.write_doors()
+        with self._door_lock:
+            if self._door is not None:
+                return
+            if self._ghost is not None:
+                self._ghost.close()
+                self._ghost = None
+            try:
+                os.unlink(self.stream)
+            except FileNotFoundError:
+                pass
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.bind(self.stream)
+            s.listen(8)
+            self._door = s
 
     def shut_door(self):
-        with Slot.doors_lock:
-            Slot.doors[self.port] = False
-        Slot.write_doors()
+        with self._door_lock:
+            if self._door is not None:
+                self._door.close()
+                self._door = None
+            try:
+                os.unlink(self.stream)
+            except FileNotFoundError:
+                pass
+            if self._ghost is None:
+                g = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                g.bind(self.stream)
+                self._ghost = g
 
-    def __init__(self, path, name, rundir, webroot=None, port=None):
+    def __init__(self, path, name, rundir, webroot=None, stream=None):
         super().__init__(daemon=True)
         self.name = name
         self.path = path
@@ -166,9 +144,12 @@ class Slot(threading.Thread):
         # "no slot publishes an incarnation ... what it cannot see is a slot
         # reaped and re-let to somebody else between two visits."
         self.webroot = webroot
-        # The port this slot's session listens on, which is what the router
-        # reads out of the instance config and then asks the kernel about.
-        self.port = port
+        # The path this slot's session listens at, which the router derives
+        # from the instance name and then asks the kernel about.
+        self.stream = stream
+        self._door = None
+        self._ghost = None
+        self._door_lock = threading.Lock()
         # None means "no session is running here". A token appears when one
         # starts, which in this product is when something CONNECTS: these slots
         # are socket-activated, so the first request is what brings a desktop
@@ -292,7 +273,7 @@ class Slot(threading.Thread):
 
         def later():
             time.sleep(door_after)
-            if self.port is not None:
+            if self.stream is not None:
                 self.shut_door()
             time.sleep(max(0.0, rundir_after - door_after))
             import shutil
@@ -321,7 +302,7 @@ class Slot(threading.Thread):
         self.ready_at = time.time() + self.delay
         self.publish()
         os.makedirs(self.rundir, mode=0o700, exist_ok=True)
-        if self.port is None:
+        if self.stream is None:
             return
         if self.delay <= 0:
             self.open_door()
@@ -376,7 +357,7 @@ class Slot(threading.Thread):
         # at t=4.45, door shut at 4.69, runtime directory still there until
         # 5.22. Reproducing them in the other order would test a world where
         # there is nothing to repair.
-        if self.port is not None:
+        if self.stream is not None:
             self.shut_door()
         if not leave_rundir:
             import shutil
@@ -412,7 +393,7 @@ class Slot(threading.Thread):
         """
         os.makedirs(self.rundir, mode=0o700, exist_ok=True)
         self.publish()
-        if self.port is not None:
+        if self.stream is not None:
             self.open_door()
 
     def torn_down(self):
@@ -429,7 +410,7 @@ class Slot(threading.Thread):
         leaves things, because it stops the session unit and not the socket.
         """
         self.incarnation = None
-        if self.port is not None:
+        if self.stream is not None:
             self.shut_door()
         import shutil
         shutil.rmtree(self.rundir, ignore_errors=True)
@@ -761,22 +742,16 @@ class Rig:
         with open(self.instances, "w") as f:
             for i, name in enumerate(names):
                 f.write("%d %s ephemeral\n" % (i, name))
-        # EVERY SLOT GETS A PORT IN ITS OWN CONFIG, because every real one has
-        # one: "hdw4s enable" writes HDW4S_PORT into the instance file AND into
-        # the relay's drop-in. Until this existed the rig could not express the
-        # door instrument at all -- instance_port() would have read None for
-        # every slot and slot_door_open() would have answered "cannot ask" for
-        # the whole pool, which is a silence the router correctly refuses to
-        # spend. Every arm about the door would have been green and empty.
-        self.ports = {}
-        for i, name in enumerate(names + list(strays)):
-            self.ports[name] = 7300 + i
-        Slot.doors = {}
-        Slot.doors_file = os.path.join(self.tmp, "proc-net-tcp")
-        Slot.write_doors()
+        # EVERY SLOT GETS A STREAM PATH, where every real one listens: the
+        # router derives /<stream dir>/<instance>/s/stream.sock from the name
+        # and asks the kernel whether it is listening. Until the rig could
+        # express a door, every arm about the door was green and empty.
+        self.streamdir = os.path.join(self.tmp, "stream")
+        self.streams = {}
         for name in names + list(strays):
-            with open(os.path.join(self.etc, name + ".conf"), "a") as f:
-                f.write("HDW4S_PORT=%d\n" % self.ports[name])
+            d = os.path.join(self.streamdir, name, "s")
+            os.makedirs(d)
+            self.streams[name] = os.path.join(d, "stream.sock")
         if windows is not None:
             # "%s", NOT "%d", and this is the fixture that let the defect ship.
             # An integer format specifier cannot put "30d", "12h" or "90m" in
@@ -817,7 +792,7 @@ class Rig:
             name = "ephemeral%d" % i
             s = Slot(os.path.join(self.rundir, name + ".sock"), name,
                      os.path.join(self.hdw4s_rundir, "hdw4s", name),
-                     webroot=self.webroot, port=self.ports.get(name))
+                     webroot=self.webroot, stream=self.streams.get(name))
             s.start()
             self.slots.append(s)
         # NAMES IN THE SOCKET DIRECTORY THAT ARE IN NO TABLE ROW, which is the
@@ -840,7 +815,7 @@ class Rig:
         for name in strays:
             s = Slot(os.path.join(self.rundir, name + ".sock"), name,
                      os.path.join(self.hdw4s_rundir, "hdw4s", name),
-                     webroot=self.webroot, port=self.ports.get(name))
+                     webroot=self.webroot, stream=self.streams.get(name))
             s.start()
             self.strays.append(s)
         self.port = self.free_port()
@@ -854,7 +829,7 @@ class Rig:
                    HDW4S_WEBROOT_DIR=self.webroot,
                    HDW4S_TEARDOWN_DIR=self.teardowndir,
                    HDW4S_START_DIR=self.startdir,
-                   HDW4S_PROC_NET_TCP=Slot.doors_file,
+                   HDW4S_STREAM_DIR=self.streamdir,
                    HDW4S_DEMUX_BIND="127.0.0.1",
                    HDW4S_DEMUX_PORT=str(self.port),
                    **({"HDW4S_GATE_MODE": gate} if gate is not None else {}))
@@ -4482,14 +4457,14 @@ def reclaimable(own, sid, rec, rundir=None, webroot=None):
 
 
 NO_DOOR_CHECK = """
-def assert_door_only_refuses_what_it_measured(ports=None, door=None,
+def assert_door_only_refuses_what_it_measured(paths=None, door=None,
                                               replaced=None, factory=None):
     # Stubbed so the arm can REACH the rig. Run either mutation below without
     # this and the router refuses to start, which is the startup guard catching
     # it unaided -- the first place each of these was watched go red.
     return None
 
-def slot_door_open(instance, ports=None, etc=None):
+def slot_door_open(instance, listening=None, root=None):
     # THE WINDOW, REOPENED: the router goes back to deciding on the runtime
     # directory alone, which outlives the session it describes. "None" is the
     # honest shape of the old behaviour -- the question was never asked.
@@ -4498,14 +4473,14 @@ def slot_door_open(instance, ports=None, etc=None):
 
 
 NO_DOOR_AND_NO_RECLAIM = """
-def assert_door_only_refuses_what_it_measured(ports=None, door=None,
+def assert_door_only_refuses_what_it_measured(paths=None, door=None,
                                               replaced=None, factory=None):
     # Stubbed so the arm can REACH the rig. Run either mutation below without
     # this and the router refuses to start, which is the startup guard catching
     # it unaided -- the first place each of these was watched go red.
     return None
 
-def slot_door_open(instance, ports=None, etc=None):
+def slot_door_open(instance, listening=None, root=None):
     return None
 
 

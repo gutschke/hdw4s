@@ -226,20 +226,12 @@ belongs to the copy of the streaming server, of which there is one.
   * `HDW4S_BASE_PORT`, `HDW4S_BLOCK_SIZE`:
     The block of TCP ports sessions are allocated from. Defaults to 7300 and
     64. Two consecutive blocks are actually reserved: the first is what the
-    reverse proxy connects to, and the second, immediately above it, is where
-    each session's streaming server listens on loopback behind its relay. So
-    the defaults reserve 7300-7427, and only 7300-7363 are ever reachable from
-    off the machine.
-
-  * `HDW4S_ADDR`:
-    The address the streaming server binds. Defaults to `127.0.0.1`. Leave it
-    alone unless you know why you are changing it: the socket unit in front is
-    the only way in, and the firewall decides who may reach that. Binding
-    anything wider publishes the streaming server directly, at a port in the
-    second block, which nothing authenticates and which the firewall does not
-    cover for connections arriving from off the machine. It does cover it in
-    the other direction: a desktop may not open a connection to a session port
-    on this machine at all, whichever address it is bound to.
+    reverse proxy connects to, and the second, immediately above it, is kept
+    out of the kernel's ephemeral range and closed to connections from any
+    desktop. Nothing listens in the second block: each session's streaming
+    server listens on a filesystem socket instead (see FILES). So the defaults
+    reserve 7300-7427, and only 7300-7363 are ever reachable from off the
+    machine.
 
   * `HDW4S_ALLOW_SYSTEM_USER`:
     Set to `yes` to permit a session for an account below UID 1000.
@@ -825,11 +817,13 @@ Each session's X server is given its own authority cookie in its runtime
 directory. Without one, every account on the machine could read the session's
 screen and type into it.
 
-`HDW4S_PORT` appears in an instance's file but is not a setting: `enable`
-writes it, and the relay in front of the session is configured from the same
-allocation at the same moment. Changing it moves where the session listens
-without moving where the relay connects, so the desktop starts and is
-unreachable, and nothing reports it.
+A session's streaming server never listens on a port. Every desktop on a
+machine shares one network namespace, so a port is a name any of them could take
+first and be connected to in place of the desktop it belongs to. It listens at
+`/run/hdw4s-stream/<instance>/s/stream.sock` instead, in a directory made afresh
+for each start that only the session's own account may create in and only it and
+the relay's group, `hdw4s-relay`, may enter. An account in that group could
+therefore open every desktop on the machine, so a session refuses to start as one.
 
 ## FILES
 
@@ -869,6 +863,11 @@ unreachable, and nothing reports it.
 
   * `/etc/systemd/system/hdw4s-proxy@<instance>.socket.d/`:
     The address the front door listens on, written by `hdw4s transport`.
+
+  * `/run/hdw4s-stream/<instance>/s/`:
+    Where the session's streaming server listens. Made by
+    `hdw4s-stream@<instance>.service` when the session starts, removed when it
+    stops.
 
   * `/usr/lib/hdw4s/hdw4s.xorg.conf`:
     X server configuration for the `dummy` driver. Deliberately not
@@ -975,8 +974,8 @@ There is no way to configure STUN or TURN, and nothing left for one to
 configure. A session serves a single WebSocket: dual mode is locked off, so the
 WebRTC stack never starts, no UDP socket is opened, no connection candidates
 are gathered and no STUN server is contacted. Checked rather than assumed --
-the streaming server's process owns one TCP listener on loopback and no UDP
-socket at all.
+the streaming server's process owns one listener, a filesystem socket, and no
+UDP socket at all.
 
 Under 1.6 this was not true, and the reasons it mattered are worth keeping: the
 server appended its own default STUN server unless one was named exactly, so a

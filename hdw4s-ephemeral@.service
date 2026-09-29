@@ -37,6 +37,13 @@ After=hdw4s-ephemeral-slots.service
 # streaming server can serve a page that asks for it.
 Wants=hdw4s-incarnation@%i.service
 After=hdw4s-incarnation@%i.service
+
+# WHERE THE STREAMING SERVER LISTENS: a directory only this session's account may
+# create in and only it and the relay's group may enter -- hdw4s-stream-dir says
+# why a directory and not a port. Requires=, not Wants=: a session with no stream
+# directory can be reached by nobody, and starting it anyway only hides why.
+Requires=hdw4s-stream@%i.service
+After=hdw4s-stream@%i.service
 # NOT StopWhenUnneeded=, which this unit carried while the relay's BindsTo= was
 # what kept it needed. A desktop is now started on purpose -- by the router's
 # start request, through hdw4s-start@ -- and nothing else holds it: the relay is
@@ -445,6 +452,12 @@ ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate %i
 # mount point there and the rebuild -- and the start -- would fail. A named desktop
 # publishes nothing and its page does not resize.
 ReadWritePaths=-/usr/share/hdw4s/webroot/%i/hdw4s-startup
+# The one place in /run this session may create anything, and only because the
+# directory beneath it is its own: ProtectSystem=strict makes the rest of /run
+# read-only here, and <instance> itself is root's and 0711, so this lifts the
+# read-only MOUNT and leaves the permissions to decide. No "-": hdw4s-stream@ has
+# made it by now, and a session that cannot listen should fail naming the path.
+ReadWritePaths=/run/hdw4s-stream/%i
 
 [Install]
 WantedBy=multi-user.target

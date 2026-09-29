@@ -46,10 +46,12 @@ fi
 
 first="${HDW4S_BASE_PORT}"
 last=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE - 1 ))
-# A second block immediately above holds the loopback ports the sessions
-# themselves listen on. The firewall has no need to cover those -- nothing off
-# this machine can reach 127.0.0.1 -- but the kernel must still be told not to
-# hand them out as ephemeral ports.
+# A second block immediately above held the loopback ports the sessions
+# themselves listened on, until the stream moved to a filesystem socket that
+# only its relay can open (hdw4s-stream-dir). Nothing of ours listens there now.
+# It stays reserved, and stays what sessions_out refuses a desktop to connect
+# to, so that the day this block is released is a decision rather than a side
+# effect -- a desktop listening there is exactly the squatter the move was for.
 internal_last=$(( HDW4S_BASE_PORT + 2 * HDW4S_BLOCK_SIZE - 1 ))
 
 # The rules cover the whole port block, not the ports that happen to be in use.

@@ -14,6 +14,7 @@ set -o nounset -o pipefail
 cd "$(dirname "$0")/.."
 
 SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s-wait
+         hdw4s-stream-dir
          hdw4s-ephemeral-slots hdw4s-incarnation hdw4s-webroot
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
          debian/postinst debian/prerm debian/postrm
@@ -1258,10 +1259,10 @@ begin
 for setting in HDW4S_BASE_PORT:7300 HDW4S_BLOCK_SIZE:64; do
   key="${setting%%:*}"; want="${setting#*:}"
   # Every script that carries its own copy, in either form it is written in.
-  # hdw4s-wait was missing here, and it is the one whose drift is invisible:
-  # ExecStartPre would poll the wrong port and every session start would time
-  # out with nothing to say why.
-  for f in hdw4s hdw4s-firewall hdw4s-wait hdw4s-session; do
+  # hdw4s-wait and hdw4s-session carried one until the stream moved to a unix
+  # socket (hdw4s-stream-dir); neither derives a port any more, so a copy
+  # reappearing in either is itself worth a look.
+  for f in hdw4s hdw4s-firewall; do
     got="$(sed -n "s/^${key}=\([0-9]*\)\$/\1/p;s/^ *: \"\${${key}:=\([0-9]*\)}\"\$/\1/p" \
            "${f}" | head -n1)"
     [ -n "${got}" ] ||

@@ -8,8 +8,7 @@ set -o nounset -o pipefail
 
 instance="${1:?usage: hdw4s-run-session <instance>}"
 
-: "${DISPLAY:?}" "${XDG_RUNTIME_DIR:?}" "${HDW4S_PORT:?}"
-: "${HDW4S_ADDR:=127.0.0.1}"
+: "${DISPLAY:?}" "${XDG_RUNTIME_DIR:?}" "${HDW4S_STREAM_SOCKET:?}"
 
 # The desktop to run. This is the one line that has to change to outlive GNOME
 # on X11: GNOME 50 removes the X11 session that the streaming server needs,
@@ -1006,6 +1005,22 @@ esac
 # happens to be off is not a pin.
 rtc_config_none='/usr/lib/hdw4s/rtc-config.disabled'
 
+if [ "${HDW4S_WEBRTC}" = 'yes' ]; then
+  # REFUSED, AND NOT FOR A REASON OF OURS. The stream listens on a filesystem
+  # socket (HDW4S_STREAM_SOCKET, below), but Selkies' WebRTC mode opens its own
+  # signalling connection to "ws://localhost:<port>" -- TCP, whatever the
+  # listener is -- and hands that connection the server's own token. Nothing of
+  # ours listens on that port any more, so the first process on this machine to
+  # bind it, which may be another desktop's occupant, would be the one it talks
+  # to. Read in Selkies' webrtc_mode.create_signaling_client; not measured. Lift
+  # this when that connection follows the configured unix socket.
+  echo 'hdw4s: HDW4S_WEBRTC=yes is refused on this build. Selkies'"'"' WebRTC' \
+       'signalling connects to its own server over TCP on localhost, which no' \
+       'longer listens there, so another process could answer in its place.' \
+       'Set HDW4S_WEBRTC=no.' >&2
+  exit 1
+fi
+
 case "${HDW4S_WEBRTC}" in
   yes)
     webrtc=(--enable-dual-mode='true|locked' --webrtc-ice-lite='true|locked'
@@ -1386,8 +1401,7 @@ if ! kill -0 "${session_pid}" 2>/dev/null; then
 fi
 
 "${stream[@]}" \
-  --addr="${HDW4S_ADDR}" \
-  --port="${HDW4S_PORT}" \
+  --unix-socket="${HDW4S_STREAM_SOCKET}" \
   "${auth}" \
   --enable-resize="${HDW4S_RESIZE}" \
   --encoder="${HDW4S_ENCODER}" \
@@ -1444,17 +1458,32 @@ stream_pid="$!"
 # Report ready only once the stream is actually accepting connections, so that
 # "systemctl start" blocks until the session can be reached and a dependent
 # unit or a provisioning script has something real to wait on.
+#
+# LISTENING is asked of the kernel (ss), not of the filesystem: a socket file is
+# not a listener, and the one this server will bind can exist before it listens.
+#
+# And the socket is then opened to the relay's group, which is the whole of who
+# may connect: the unit's UMask=0077 creates it 0700, and the directory it is in
+# (setgid, group hdw4s-relay, 2750) already decides who can reach it at all. Done
+# here, by this account, which owns it -- and before READY, because the relay is
+# ordered after this session and connects the moment it is told it may.
 (
   for _ in $(seq 1 60); do
-    if [ -n "$(ss -Hltn "sport = :${HDW4S_PORT}" 2>/dev/null)" ]; then
+    if [ -n "$(ss -Hlx src "${HDW4S_STREAM_SOCKET}" 2>/dev/null)" ]; then
+      if [ -L "${HDW4S_STREAM_SOCKET}" ] || [ ! -S "${HDW4S_STREAM_SOCKET}" ] ||
+         ! chmod 0660 -- "${HDW4S_STREAM_SOCKET}"; then
+        NOTIFY_SOCKET="${HDW4S_NOTIFY_SOCKET}" systemd-notify \
+          --status="stream socket ${HDW4S_STREAM_SOCKET} is not a socket we can open"
+        exit 1
+      fi
       NOTIFY_SOCKET="${HDW4S_NOTIFY_SOCKET}" systemd-notify --ready \
-        --status="display ${DISPLAY}, port ${HDW4S_PORT}, instance ${instance}"
+        --status="display ${DISPLAY}, stream ${HDW4S_STREAM_SOCKET}, instance ${instance}"
       exit 0
     fi
     sleep 1
   done
   NOTIFY_SOCKET="${HDW4S_NOTIFY_SOCKET}" \
-    systemd-notify --status="stream did not bind port ${HDW4S_PORT}"
+    systemd-notify --status="stream did not listen on ${HDW4S_STREAM_SOCKET}"
 ) &
 children+=($!)
 

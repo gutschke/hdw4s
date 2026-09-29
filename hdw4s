@@ -495,15 +495,6 @@ port_of() {
   echo $(( HDW4S_BASE_PORT + idx ))
 }
 
-# Where the streaming server itself listens, on loopback only. The socket unit
-# owns the port the outside world connects to and forwards to this one, so the
-# two cannot be the same. A second block immediately above the first keeps the
-# arithmetic obvious and both blocks reservable in one range.
-internal_port_of() {
-  local idx="$1"
-  echo $(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE + idx ))
-}
-
 # --- commands ---------------------------------------------------------------
 
 # The effective value of a setting for one session: its own file if it says
@@ -1303,8 +1294,9 @@ cmd_enable() {
   #
   # The relay then outlives its session, which is what the table above warns
   # about -- and it is harmless now, because the next desktop in the slot is
-  # started on purpose and binds the same port, and the router waits for that
-  # port before it connects. A NAMED desktop keeps BindsTo=: it is reached at
+  # started on purpose and listens at the same path (the relay sees the slot's
+  # stream directory, which outlives each session; see hdw4s-proxy@.service),
+  # and the router waits for that listener before it connects. A NAMED desktop keeps BindsTo=: it is reached at
   # its own hostname and coming back on connect is its whole design.
   local sdep='BindsTo'
   ! ephemeral_shaped "${type}" || sdep='Requisite'
@@ -1314,19 +1306,13 @@ cmd_enable() {
     "${sdep}=$(unit_of "${inst}")" \
     "After=$(unit_of "${inst}")" \
     > "${DROPIN}/hdw4s-proxy@${inst}.service.d/30-session.conf"
-  # Only the port. The wait that goes with it lives in the unit, because a
-  # multi-line ExecStartPre= is parsed as several directives and quietly
-  # discarded -- systemd is not a shell and embedding one in a unit file goes
-  # wrong in ways that only show up at runtime.
-  printf '%s\n' \
-    '# Written by "hdw4s enable".' \
-    '[Service]' \
-    'ExecStart=' \
-    "ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:$(internal_port_of "${idx}")" \
-    > "${DROPIN}/hdw4s-proxy@${inst}.service.d/50-port.conf"
-
-  # And the session is told which loopback port to bind.
-  config_write "${ETCDIR}/${inst}.conf" 'HDW4S_PORT' "$(internal_port_of "${idx}")"
+  # NO PORT. The relay's upstream is a path the template names for every
+  # instance (hdw4s-proxy@.service), because a loopback port is a name any
+  # desktop on the machine may take first; see hdw4s-stream-dir. An earlier
+  # version wrote the port here, as a drop-in that REPLACES ExecStart=, so one
+  # left behind would silently put this relay back on TCP -- removed on sight,
+  # as the installer does for every existing instance.
+  rm -f -- "${DROPIN}/hdw4s-proxy@${inst}.service.d/50-port.conf"
 
   # THE AUTHORING SLOT IS NOT REAPED BY DEFAULT, and this is a correction to an
   # inherited default rather than a new policy. cmd_reap walks EVERY row of the
@@ -1532,7 +1518,6 @@ SESSION_SETTINGS=(
   'HDW4S_WEBRTC:no'
   'HDW4S_TURN_PORT:3478'
   'HDW4S_SESSION:gnome-session'
-  'HDW4S_ADDR:127.0.0.1'
   'HDW4S_ENCODER:h264enc'
   'HDW4S_FRAMERATE:30,8-60'
   'HDW4S_RESIZE:true'
@@ -1559,7 +1544,6 @@ declare -A SETTABLE=(
   [HDW4S_PROXY_GROUP]='any'
   [HDW4S_ALLOW_SYSTEM_USER]='yes|no'
   [HDW4S_PROFILE_DIR]='path'
-  [HDW4S_ADDR]='any'
   [HDW4S_BASE_PORT]='number'
   [HDW4S_BLOCK_SIZE]='number'
   [HDW4S_EPHEMERAL_SLOTS]='number'
@@ -2310,30 +2294,41 @@ router_last_request() {
 # the reaper had never once fired, and why the updater never restarted a
 # session to check that an upgrade actually worked.
 #
-# What marks a real client is the socket proxy: it holds one loopback
-# connection to the session for each connection it is relaying, whichever
+# What marks a real client is the socket proxy: it holds one connection to the
+# session's stream socket for each connection it is relaying, whichever
 # transport its own front door uses. So count the connections that belong to
 # the proxy, and nothing else.
+#
+# The stream is a UNIX socket now (hdw4s-stream-dir says why), and a unix
+# connection has no port to filter on: the proxy's end is unnamed. So the two
+# ends are joined by inode -- the session's end is named by the path, and its
+# PEER inode is the proxy's end, which ss attributes to the proxy's pid. Kept in
+# step with the same function in hdw4s-update, which answers this for the
+# updater.
 clients_of() {
-  local inst="$1" port="$2" pid out
+  local inst="$1" pid
   pid="$(systemctl show "hdw4s-proxy@${inst}.service" -p MainPID --value 2>/dev/null || echo 0)"
   # No proxy, no clients: nothing can reach the session without going through
   # it.
   case "${pid}" in ''|0|*[!0-9]*) echo 0; return 0;; esac
-  out="$(ss -Htnp state established "dport = :${port}" 2>/dev/null || :)"
   # ss names the owning process only for sockets we have the privilege to see.
   # Counting nothing because we cannot look is not the same as counting nothing
   # because nobody is there, and the difference decides whether a desktop in
-  # use gets stopped. Say so rather than guess.
-  # Not "printf | grep -q": grep exits on the first match, the producer takes
-  # SIGPIPE, and pipefail adopts that as the pipeline's status -- so a match
-  # reads as a miss once the output outgrows the pipe buffer. It never does
-  # here, but the failure is silent and the test is free.
-  if [ -n "${out}" ] && [ "${out#*pid=}" = "${out}" ]; then
-    echo 'unknown'
-    return 0
-  fi
-  printf '%s\n' "${out}" | grep -c "pid=${pid}," || :
+  # use gets stopped: connections to the stream with no owner visible anywhere
+  # are 'unknown', never 0.
+  ss -Hxp state established 2>/dev/null |
+    awk -v path="/run/hdw4s-stream/${inst}/s/stream.sock" -v who="pid=${pid}," '
+      # Netid Recv-Q Send-Q Local Inode Peer PeerInode [users:(...)]
+      /users:/ { owners = 1 }
+      $4 == path { peer[$7] = 1; served++ }
+      index($0, who) { mine[$5] = 1 }
+      END {
+        if (served && !owners) { print "unknown" } else {
+          n = 0
+          for (i in mine) if (i in peer) n++
+          print n
+        }
+      }' || echo 'unknown'
 }
 
 # Stop desktops nobody has connected to for a long time.
@@ -2359,7 +2354,7 @@ clients_of() {
 # browser client reconnects by itself, so an open tab counts as connected even
 # across a laptop lid being shut.
 cmd_reap() {
-  local idx inst stype port established last now age raw window stopped=0
+  local idx inst stype established last now age raw window stopped=0
   now="$(date +%s)"
   [ -r "${SLOTS}" ] || return 0
 
@@ -2396,11 +2391,10 @@ cmd_reap() {
         reap_say "hdw4s: ${inst} has HDW4S_IDLE_DAYS=0, so this slot will never be freed."
       continue
     fi
-    # The internal port, not the one the socket unit binds: the external port
-    # has no connections at all when the session is on a filesystem socket,
-    # which once made the reaper stop desktops that were in constant use.
-    port="$(internal_port_of "${idx}")"
-    established="$(clients_of "${inst}" "${port}")"
+    # The stream socket, not the front door: the front door has no connections
+    # of its own to count when it is a filesystem socket, which once made the
+    # reaper stop desktops that were in constant use.
+    established="$(clients_of "${inst}")"
 
     # /run is a tmpfs, so noticing a connection costs a one-line write to
     # memory and nothing to the disk -- which is what makes it reasonable to

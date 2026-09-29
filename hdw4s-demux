@@ -98,6 +98,9 @@ import urllib.parse
 NAME = "hdw4s-demux"
 
 PROXY_RUNDIR = os.environ.get("HDW4S_PROXY_RUNDIR", "/run/hdw4s-proxy")
+# Where each session's streaming server listens, one directory per instance;
+# see stream_socket_path() and hdw4s-stream-dir.
+STREAM_DIR = os.environ.get("HDW4S_STREAM_DIR", "/run/hdw4s-stream")
 STATE_DIR = os.environ.get("HDW4S_DEMUX_STATE", "/run/hdw4s-demux")
 
 def credential_dir():
@@ -1660,6 +1663,10 @@ STATE_INVENTORY = {
     # None precisely so that it cannot collide with a real answer -- which is
     # the defect it was introduced to fix.
     "_READ_IT": "not state",
+    # The same for slot_door_open(): "ask the kernel" as distinct from a table
+    # the caller passed in, which may be None -- the answer for "could not be
+    # read" -- and must not be mistaken for "go and read it".
+    "_ASK_KERNEL": "not state",
 }
 
 
@@ -2729,11 +2736,16 @@ def assert_probe_does_not_activate(probe=slot_unreachable,
 # listening_paths() already asks about, and it opens nothing: a socket-activated
 # slot treats a connection as an instruction, never as a question.
 #
-# WHY THE PORT AND NOT SOMETHING OF SYSTEMD'S. HDW4S_PORT is written by
-# "hdw4s enable" into the instance's own config AND into the relay's drop-in,
-# and this router already reads that file for the idle window. So the identifier
-# is derived from the thing being examined. The candidate that was rejected --
-# the relay unit's cgroup directory -- would have required constructing
+# WHAT IS ASKED: whether the session's stream socket is LISTENING, in the
+# kernel's own table of unix sockets -- the table listening_paths() already reads
+# for the slot sockets. The path is not configured anywhere, and that is the
+# point: it is /run/hdw4s-stream/<instance>/s/stream.sock for every session, the
+# one the relay's ExecStart= names and the one hdw4s-session hands the server, so
+# there is no per-instance setting for this router to read and get wrong. (It
+# used to be a TCP port read out of the instance's config file. A port is a name
+# any desktop on the machine may take first, which is why the stream moved; see
+# hdw4s-stream-dir.) The candidate that was rejected -- the relay unit's cgroup
+# directory -- would have required constructing
 # /sys/fs/cgroup/system.slice/system-hdw4s\x2dproxy.slice/hdw4s-proxy@<slot>.service,
 # carrying systemd's own escaping and its per-prefix slice grouping, which this
 # service cannot ask systemd for because it has no bus.
@@ -2767,89 +2779,32 @@ def assert_probe_does_not_activate(probe=slot_unreachable,
 # visitor, which is the expensive direction; that is why it may only speak for a
 # record whose desktop ALREADY ANSWERED us, below.
 
-PROC_NET_TCP = tuple(os.environ.get(
-    "HDW4S_PROC_NET_TCP", "/proc/net/tcp /proc/net/tcp6").split())
+def stream_socket_path(instance, root=None):
+    """Where INSTANCE's streaming server listens. Spelled once, here."""
+    return os.path.join(STREAM_DIR if root is None else root, instance, "s",
+                        "stream.sock")
 
 
-def instance_port(instance, etc=None):
-    """The TCP port this slot's session listens on, or None.
-
-    Read exactly the way read_idle_window() reads its setting -- the instance's
-    own file, then the site file -- because two readers that parse the same
-    files differently are two configurations.
-    """
-    base = ETC_DIR if etc is None else etc
-    v = conf_value(os.path.join(base, instance + ".conf"), "HDW4S_PORT")
-    if v is None:
-        v = conf_value(os.path.join(base, "hdw4s.conf"), "HDW4S_PORT")
-    if v is None:
-        return None
-    try:
-        port = int(v)
-    except ValueError:
-        return None
-    return port if 0 < port < 65536 else None
+_ASK_KERNEL = object()
 
 
-def listening_tcp_ports(paths=None):
-    """Every local port the kernel has a LISTENING socket on, or None.
-
-    THE SAME QUESTION listening_paths() ASKS OF AF_UNIX, one family over, and
-    with the same two disciplines because the same two mistakes are available.
-
-      * STATE 0A AND NOTHING ELSE. Column 4 of /proc/net/tcp is the socket
-        state and 0A is TCP_LISTEN. A check that merely looked for the port
-        anywhere in the file would count a lingering TIME_WAIT from the
-        connection that just died -- reporting the door OPEN for a session that
-        has gone. That is a FALSE OPEN, which keeps the leak rather than gating
-        a visitor, so it is the quiet direction and the one to guard.
-      * A FAILURE TO READ IS NOT AN EMPTY SET. Returning one would say "nothing
-        is listening anywhere", which would gate every visitor on the box. The
-        caller is handed None and says so.
-
-    Both files are read because a listener on :: appears only in tcp6 and one
-    on 127.0.0.1 only in tcp. Getting ONE of them is enough to answer; getting
-    neither is the None above.
-    """
-    ports = set()
-    read_any = False
-    for path in (PROC_NET_TCP if paths is None else paths):
-        try:
-            with open(path, "r", errors="replace") as f:
-                lines = f.readlines()
-        except OSError:
-            continue
-        read_any = True
-        for line in lines[1:]:
-            f_ = line.split()
-            if len(f_) < 4 or f_[3] != "0A":
-                continue
-            local = f_[1].rsplit(":", 1)
-            if len(local) != 2:
-                continue
-            try:
-                ports.add(int(local[1], 16))
-            except ValueError:
-                continue
-    return ports if read_any else None
-
-
-def slot_door_open(instance, ports=None, etc=None):
+def slot_door_open(instance, listening=_ASK_KERNEL, root=None):
     """True, False, or None when the question could not be asked.
 
     THREE-VALUED ON PURPOSE. False is "this desktop has stopped answering" and
     it costs a visitor their session, so it may only be returned when the
-    instrument actually ran: no port configured, or no /proc/net/tcp, is None
-    and not False. An empty result is not a negative, and here the empty result
-    is what a missing instrument produces.
+    instrument actually ran: an unreadable /proc/net/unix is None and not
+    False. An empty result is not a negative, and here the empty result is what
+    a missing instrument produces.
+
+    LISTENING AND NOTHING ELSE, which listening_paths() already enforces: a
+    socket that is bound but not accepting -- what a dying server leaves for an
+    instant, and what a file left at the path looks like -- is not an open door.
     """
-    port = instance_port(instance, etc)
-    if port is None:
-        return None
-    live = listening_tcp_ports() if ports is None else ports
+    live = listening_paths() if listening is _ASK_KERNEL else listening
     if live is None:
         return None
-    return port in live
+    return stream_socket_path(instance, root) in live
 
 
 def occupancy_readable(rundir=None):
@@ -3003,7 +2958,7 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
     # pending record would gate every visitor at the instant they arrive, which
     # is what an earlier version of the check two lines down did to thirty-one
     # tests at once. rec["live"] means a desktop answered a request of ours
-    # through that very port, so the door has been seen open for this letting.
+    # through that very socket, so the door has been seen open for this letting.
     #
     # WHAT ACTUALLY PROTECTS THE PENDING CASE IS ITS EARLY RETURN ABOVE, not
     # this conjunct, and saying so is the point: a pending record never reaches
@@ -3014,7 +2969,7 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
     # gating the whole pool.
     ask_door = slot_door_open if door is None else door
     if rec.get("live") and ask_door(instance) is False:
-        return "the desktop behind %s has stopped answering on its own port" \
+        return "the desktop behind %s has stopped answering on its own stream socket" \
             % instance
     was = rec.get("incarnation")
     now = slot_incarnation(instance, webroot)
@@ -3560,16 +3515,16 @@ def assert_reclaim_needs_a_letting(judge=None, factory=None):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def assert_door_only_refuses_what_it_measured(ports=None, door=None,
+def assert_door_only_refuses_what_it_measured(paths=None, door=None,
                                               replaced=None, factory=None):
     """Prove the door instrument, in both directions, at every start.
 
-    THE ONE IT EXISTS FOR IS THE FALSE OPEN. A check that looked for the port
-    anywhere in /proc/net/tcp would find the TIME_WAIT left by the connection
-    that died with the session and report the door open -- keeping the leak
-    while looking like a working repair. That is the quiet direction, so it is
-    the first case below and it is built from a real fixture rather than
-    reasoned about.
+    THE ONE IT EXISTS FOR IS THE FALSE OPEN. A check that looked for the stream
+    socket's path anywhere in /proc/net/unix would find a socket that is bound
+    there and not accepting -- what a dying server leaves for an instant -- and
+    report the door open, keeping the leak while looking like a working repair.
+    That is the quiet direction, so it is the first case below and it is built
+    from a real fixture rather than reasoned about.
 
     The loud direction is guarded too, because it costs a person their desktop:
     a missing instrument must answer None and never False, and a session that
@@ -3578,86 +3533,58 @@ def assert_door_only_refuses_what_it_measured(ports=None, door=None,
     import shutil
     import tempfile
 
-    ports = listening_tcp_ports if ports is None else ports
+    paths = listening_paths if paths is None else paths
     door = slot_door_open if door is None else door
     replaced = session_replaced if replaced is None else replaced
     factory = Ownership if factory is None else factory
 
     d = tempfile.mkdtemp(prefix="hdw4s-door-")
     try:
-        etc = os.path.join(d, "etc")
-        os.makedirs(etc)
-        with open(os.path.join(etc, "ephemeral0.conf"), "w") as f:
-            f.write("HDW4S_PORT=7372\n")
-        # A slot whose port is not written down anywhere.
-        with open(os.path.join(etc, "ephemeral9.conf"), "w") as f:
-            f.write("# nothing here\n")
-        with open(os.path.join(etc, "hdw4s.conf"), "w") as f:
-            f.write("# and no site-wide port either\n")
+        root = os.path.join(d, "stream")
+        mine = stream_socket_path("ephemeral0", root)
+        other = stream_socket_path("ephemeral1", root)
 
-        head = ("  sl  local_address rem_address   st tx_queue rx_queue tr"
-                " tm->when retrnsmt   uid  timeout inode\n")
+        head = "Num       RefCount Protocol Flags    Type St Inode Path\n"
+        LISTENING, BOUND = "00010000", "00000000"
 
         def netfile(name, rows):
             path = os.path.join(d, name)
             with open(path, "w") as f:
                 f.write(head)
-                for i, row in enumerate(rows):
-                    local, st = row[0], row[1]
-                    rem = row[2] if len(row) > 2 else "00000000:0000"
-                    f.write("%4d: %s %s %s 00000000:00000000"
-                            " 00:00000000 00000000     0        0 0 1 0 100"
-                            " 0 0 10 0\n" % (i, local, rem, st))
+                for i, (sock, flags) in enumerate(rows):
+                    f.write("0000000000000000: 00000002 00000000 %s 0001 01"
+                            " %d %s\n" % (flags, 1000 + i, sock))
             return path
 
-        # DERIVED FROM THE HEX THIS FILE ACTUALLY WRITES, never spelled twice.
-        # The first version wrote "7316" beside 1C90 and the guard refused it:
-        # 0x1C90 is 7312. A constant restating a value that is already in the
-        # fixture is a second source for one fact.
-        def port_of(hexpair):
-            return int(hexpair.split(":")[1], 16)
-
-        LISTEN, TIME_WAIT, ESTABLISHED = "0A", "06", "01"
-
-        # 1. THE FALSE OPEN. 1CCC is 7372. Present twice and LISTENING neither
-        #    time: once as the TIME_WAIT the dead session left behind, once as
-        #    a live connection FROM somewhere else to a different port. A check
-        #    that grepped for the port would call this door open.
-        f1 = netfile("tcp-timewait", [("0100007F:1CCC", TIME_WAIT),
-                                      ("0100007F:1C90", LISTEN)])
-        got = ports([f1])
-        assert 7372 not in got, \
-            "a TIME_WAIT socket was counted as a listening door -- the door " \
-            "would read OPEN for a session that has gone, and the leak stays"
-        assert port_of("0100007F:1C90") in got, \
-            "a genuinely listening port was missed, so this parser cannot " \
+        # 1. THE FALSE OPEN. The session's own path is present, and NOT
+        #    listening; a different path is. A check that matched the path
+        #    anywhere in the table would call this door open.
+        f1 = netfile("unix-bound", [(mine, BOUND), (other, LISTENING)])
+        got = paths(f1)
+        assert mine not in got, \
+            "a socket that was bound and not listening was counted as an open " \
+            "door -- the door would read OPEN for a session that has gone"
+        assert other in got, \
+            "a genuinely listening socket was missed, so this parser cannot " \
             "find a positive and none of its negatives mean anything"
 
-        # 2. THE PERMIT ARM. The same port, actually listening.
-        f2 = netfile("tcp-listen", [("0100007F:1CCC", LISTEN)])
-        assert 7372 in ports([f2]), "a listening port was not found"
-        # And the REMOTE column must not be read as a local one. Here 7372 is
-        # where an outgoing connection went, not something we are listening on;
-        # a parser splitting the wrong field reports the door open for it.
-        f3 = netfile("tcp-remote", [("0100007F:9001", ESTABLISHED,
-                                     "0100007F:1CCC")])
-        assert 7372 not in ports([f3]), \
-            "a REMOTE port was read as a local listener, so the door would " \
-            "read open for a session we merely connected to"
+        # 2. THE PERMIT ARM. The same path, actually listening.
+        f2 = netfile("unix-listen", [(mine, LISTENING)])
+        assert mine in paths(f2), "a listening stream socket was not found"
 
         # 3. A FAILURE TO READ IS NOT AN EMPTY SET.
-        assert ports([os.path.join(d, "no-such-file")]) is None, \
-            "an unreadable /proc/net/tcp was reported as 'nothing is " \
+        assert paths(os.path.join(d, "no-such-file")) is None, \
+            "an unreadable /proc/net/unix was reported as 'nothing is " \
             "listening', which would gate every visitor on the box"
-        # But reading ONE of the two is enough to answer.
-        assert ports([os.path.join(d, "no-such-file"), f2]) == {7372}, \
-            "one unreadable file suppressed an answer the other one had"
 
-        # 4. THE DOOR ITSELF, three-valued.
-        assert door("ephemeral0", ports=ports([f2]), etc=etc) is True
-        assert door("ephemeral0", ports=ports([f1]), etc=etc) is False
-        assert door("ephemeral9", ports=ports([f2]), etc=etc) is None, \
-            "a slot with no port configured answered a question nobody could " \
+        # 4. THE DOOR ITSELF, three-valued, and about THIS slot only: another
+        #    slot listening does not open this one's door.
+        assert door("ephemeral0", listening=paths(f2), root=root) is True
+        assert door("ephemeral0", listening=paths(f1), root=root) is False, \
+            "another slot's listener, or this slot's bound-but-shut socket, " \
+            "opened this slot's door"
+        assert door("ephemeral0", listening=None, root=root) is None, \
+            "a table that could not be read answered a question nobody could " \
             "ask -- a missing instrument must never refuse"
         # 5. AND IN session_replaced, WHERE IT COSTS SOMETHING. The door may
         #    only speak for a record whose desktop already answered us.
@@ -3673,7 +3600,7 @@ def assert_door_only_refuses_what_it_measured(ports=None, door=None,
         SHUT, OPEN, CANNOT = (lambda i: False), (lambda i: True), (lambda i: None)
 
         why = replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web, door=SHUT)
-        assert why and "own port" in why, \
+        assert why and "own stream socket" in why, \
             "a session that had stopped answering was routed to anyway, which " \
             "is a wasted connection the relay refuses: %r" % why
         assert replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web,
@@ -3860,21 +3787,21 @@ def await_desktop(instance, navigation, door=None, clock=time.monotonic,
     connection that arrives before the start request has become a running unit
     is refused -- and the first request after a mint is always that early,
     because the redirect is milliseconds and a start is seconds. So the first
-    connection is made only once the desktop's own port is listening, which is
-    the moment it can answer. The port is read from the kernel's table
+    connection is made only once the desktop's own stream socket is listening,
+    which is the moment it can answer. That is read from the kernel's table
     (slot_door_open()), which opens nothing.
 
-    WHEN THE PORT CANNOT BE READ -- no port configured, or the kernel's table
-    unreadable -- the session's runtime directory stands in for it: it exists
+    WHEN THE TABLE CANNOT BE READ the session's runtime directory stands in
+    for it: it exists
     from the moment the unit starts activating, and the relay's After= then
     holds the connection until the session is active. Connecting before even
     that is the race a refusal loses: measured in the stand-in, a slot whose
-    port line was missing had its first request refused about half the time.
+    door could not be read had its first request refused about half the time.
 
     Returns "up", "starting" (a page navigation that has waited
     STARTING_PAGE_AFTER: it gets the starting page, exactly when it used to),
     "late" (anything else, after FIRST_ANSWER_WAIT: the answer a desktop that
-    never answered always got), or "unknown" when neither the port nor the
+    never answered always got), or "unknown" when neither the door nor the
     runtime directory can be read -- then the request is forwarded as before.
     """
     ask = slot_door_open if door is None else door
@@ -6692,7 +6619,7 @@ def main():
     # dangerous direction is the quiet one -- a false OPEN keeps the leak while
     # looking like a working repair -- so the TIME_WAIT case is built from a
     # real fixture rather than reasoned about.
-    assert_door_only_refuses_what_it_measured(listening_tcp_ports,
+    assert_door_only_refuses_what_it_measured(listening_paths,
                                               slot_door_open, session_replaced,
                                               Ownership)
     # And the fifth, which is WHICH SLOTS EXIST at all -- the question the four

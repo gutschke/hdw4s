@@ -26,6 +26,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration}
          hdw4s-teardown hdw4s-teardown@.service hdw4s-teardown@.path
          hdw4s-start hdw4s-start@.service hdw4s-start@.path
          hdw4s-incarnation hdw4s-incarnation@.service
+         hdw4s-stream-dir hdw4s-stream@.service hdw4s-sysusers.conf
          hdw4s-proxy@.socket hdw4s-proxy@.service
          hdw4s-demux hdw4s-demux.socket hdw4s-demux.service
          hdw4s-firewall.service
@@ -170,7 +171,7 @@ chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wa
            "${dst}"/hdw4s-duration \
            "${dst}"/hdw4s-ephemeral-slots "${dst}"/hdw4s-webroot \
            "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse \
-           "${dst}"/hdw4s-incarnation \
+           "${dst}"/hdw4s-incarnation "${dst}"/hdw4s-stream-dir \
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*
 # Imported, not executed.
 chmod 0644 "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
@@ -304,6 +305,17 @@ if [ -r "${ETCDIR}/instances" ]; then
     case "${idx}" in ''|\#*) continue;; esac
     d="${UNITDIR}/hdw4s-proxy@${inst}.service.d"
     [ -d "${d}" ] || continue
+    # THE STREAM IS A PATH NOW, NOT A PORT (hdw4s-stream-dir), and the relay
+    # template names it. An earlier "hdw4s enable" wrote the port as a drop-in
+    # that REPLACES the relay's ExecStart=, so one left in place would put this
+    # relay back on TCP -- the squattable shape the move exists to end, with
+    # nothing to show it. Removed wherever it names a loopback port; the
+    # instance file's HDW4S_PORT line, which nothing reads any more, goes too.
+    if grep -qs '^ExecStart=.*systemd-socket-proxyd 127\.0\.0\.1:' "${d}/50-port.conf"; then
+      rm -f -- "${d}/50-port.conf"
+    fi
+    [ ! -f "${ETCDIR}/${inst}.conf" ] ||
+      sed -i '/^[[:space:]]*HDW4S_PORT=/d' "${ETCDIR}/${inst}.conf"
     # Both ephemeral-shaped types take the ephemeral unit. The CLI decides this
     # in ephemeral_shaped(); an installer cannot call it -- it may be repairing
     # a tree that has no working hdw4s yet -- so the list is spelled out, and
@@ -363,6 +375,13 @@ systemctl enable --now hdw4s-check.timer
 #
 # Not one of the templates above it: those cannot be enabled without an instance
 # name, and "hdw4s enable <account>" is what turns those on.
+# The relay's group, before the minter that hands the stream root to it. Copied
+# into the ADMINISTRATOR's sysusers directory because this is not a package: the
+# packaged copy goes to /usr/lib/sysusers.d. systemd-sysusers also runs at every
+# boot, so the group is there before anything that needs it.
+install -d -m0755 /etc/sysusers.d
+install -m0644 "${dst}/hdw4s-sysusers.conf" /etc/sysusers.d/hdw4s-sysusers.conf
+systemd-sysusers /etc/sysusers.d/hdw4s-sysusers.conf
 systemctl enable --now hdw4s-ephemeral-slots.service
 # The front door, enabled as a SOCKET only. The router behind it is started by
 # the first connection and must not also be enabled, or a second copy races for

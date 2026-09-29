@@ -114,11 +114,65 @@ echo '== instance names =='
 
 echo '== port arithmetic =='
 ( set +e; sandbox; . "${SB}/setup.sh"
-  # The relay binds the first block; the streaming server listens on the second.
-  # Deriving one where the other was meant made the reaper stop busy sessions.
+  # The front door's port, for a session on the tcp transport. The streaming
+  # server has no port at all: it listens on a path (hdw4s-stream-dir).
   is 'external port'  "$(port_of 0)"          '7300'
-  is 'internal port'  "$(internal_port_of 0)" '7364'
-  is 'blocks do not overlap' "$(( $(internal_port_of 0) - $(port_of 63) ))" '1'
+)
+
+echo '== the stream listens on a path, never a port =='
+( set +e; sandbox; TMP="${SB}"
+  # A loopback port is a name any desktop on the machine may take first, and on a
+  # systemd without its BPF framework nothing can stop that bind -- so the stream
+  # is a unix socket in a directory only its session and its relay may enter
+  # (hdw4s-stream-dir). What this guards is the regression: a port coming back.
+  # Only the lines that START the streaming server are read, from the invocation
+  # to the backgrounding "&", because the file is full of prose about ports.
+  # shellcheck disable=SC2016  # matching the literal source text, not expanding it
+  stream_argv() { sed -n '/^"\${stream\[@\]}" \\$/,/&$/p' "$1"; }
+  # A pattern on the captured text, not "| grep -q": under pipefail an early
+  # exit of grep reads as a miss.
+  gives_no_port() {
+    local argv
+    argv="$(stream_argv "$1")"
+    [ -n "${argv}" ] || return 1
+    case "${argv}" in *--port=*|*--addr=*) return 1;; esac
+  }
+  # shellcheck disable=SC2016  # likewise: the literal argument in the script
+  case "$(stream_argv "${ROOT}/hdw4s-run-session")" in
+    *'--unix-socket="${HDW4S_STREAM_SOCKET}"'*) ok 'the streaming server is given its socket path';;
+    *) bad 'the streaming server is given its socket path' 'no --unix-socket in its argv';;
+  esac
+  if gives_no_port "${ROOT}/hdw4s-run-session"; then
+    ok 'and no port or address'
+  else
+    bad 'and no port or address' 'a --port= or --addr= is back in its argv'
+  fi
+  # RED ARM: the same check, against a copy with the port put back.
+  # shellcheck disable=SC2016  # the literal line to insert, not an expansion
+  sed 's|^  --unix-socket=.*|&\n  --port="${HDW4S_PORT}" \\|' \
+    "${ROOT}/hdw4s-run-session" > "${TMP}/run-session-with-port"
+  if gives_no_port "${TMP}/run-session-with-port"; then
+    bad 'RED ARM: a port put back is caught' 'the check passed it'
+  else
+    ok 'RED ARM: a port put back is caught'
+  fi
+  # The relay names the path for every instance, and nothing writes a port over it.
+  case "$(grep '^ExecStart=' "${ROOT}/hdw4s-proxy@.service")" in
+    *'systemd-socket-proxyd /run/hdw4s-stream/%i/s/stream.sock') ok 'the relay connects to the path';;
+    *) bad 'the relay connects to the path' 'its ExecStart= names something else';;
+  esac
+  is 'nothing in the CLI writes a loopback upstream' \
+     "$(grep -c 'socket-proxyd 127\.0\.0\.1' "${ROOT}/hdw4s")" '0'
+  # The helper runs as root and removes a directory by name, so a name that is
+  # a path is refused before anything is touched.
+  for name in '../x' '.' 'a/b'; do
+    if HDW4S_STREAM_DIR="${TMP}/no-such" "${ROOT}/hdw4s-stream-dir" remove "${name}" \
+         2>/dev/null; then
+      bad "the stream helper refuses the name '${name}'" 'accepted'
+    else
+      ok "the stream helper refuses the name '${name}'"
+    fi
+  done
 )
 
 echo '== a session counts as protected only when both halves are there =='
@@ -1098,11 +1152,37 @@ echo '== the relay names no session unit, and enable supplies one =='
   # installation with a relay that outlives its session.
   printf '%s\n' '[Unit]' 'Requires=hdw4s@eve.service' 'After=hdw4s@eve.service' \
     > "${SB}/units/hdw4s-proxy@eve.service.d/30-session.conf"
+  # THE PORT DROP-IN AN EARLIER "hdw4s enable" WROTE. It replaces the relay's
+  # ExecStart= with a loopback port, so an upgrade that left it would put the
+  # relay back on the squattable shape with nothing to show it. One that is NOT
+  # ours -- an upstream that is not a loopback port -- is somebody's decision and
+  # stays. The instance file's HDW4S_PORT goes; its other lines do not.
+  printf '%s\n' '# Written by "hdw4s enable".' '[Service]' 'ExecStart=' \
+                 'ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:7364' \
+    > "${SB}/units/hdw4s-proxy@alice.service.d/50-port.conf"
+  printf '%s\n' '[Service]' 'ExecStart=' \
+                 'ExecStart=/usr/lib/systemd/systemd-socket-proxyd /srv/elsewhere.sock' \
+    > "${SB}/units/hdw4s-proxy@gwen.service.d/50-port.conf"
+  printf '%s\n' 'HDW4S_IDLE_DAYS=3' 'HDW4S_PORT=7364' > "${SB}/etc/hdw4s/alice.conf"
   blk="$(pick "${ROOT}/debian/postinst")"
   # Stubbed because the shipped block calls it; reached only through the eval.
   # shellcheck disable=SC2317
   systemctl() { :; }
   ( ETCDIR="${SB}/etc/hdw4s" UNITDIR="${SB}/units"; eval "${blk}" )
+  if [ ! -e "${SB}/units/hdw4s-proxy@alice.service.d/50-port.conf" ]; then
+    ok 'a relay drop-in naming a loopback port is removed'
+  else
+    bad 'a relay drop-in naming a loopback port is removed' 'still there'
+  fi
+  if [ -e "${SB}/units/hdw4s-proxy@gwen.service.d/50-port.conf" ]; then
+    ok 'one naming anything else is left alone'
+  else
+    bad 'one naming anything else is left alone' 'removed'
+  fi
+  is 'the instance file loses HDW4S_PORT' \
+     "$(grep -c '^HDW4S_PORT=' "${SB}/etc/hdw4s/alice.conf")" '0'
+  is 'and keeps its other settings' \
+     "$(grep -c '^HDW4S_IDLE_DAYS=3$' "${SB}/etc/hdw4s/alice.conf")" '1'
   case "$(cat "${SB}/units/hdw4s-proxy@alice.service.d/30-session.conf" 2>/dev/null)" in
     *'BindsTo=hdw4s@alice.service'*) ok 'an instance with no drop-in gets one';;
     *) bad 'an instance with no drop-in gets one' 'missing or wrong';;
@@ -3567,7 +3647,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=555   # update when tests are added; a wrong number is the point
+EXPECTED=565   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

@@ -16,73 +16,27 @@ set -o nounset -o pipefail
 instance="${1:?usage: hdw4s-wait <instance> [seconds]}"
 deadline="${2:-120}"
 
-CONF='/etc/hdw4s/hdw4s.conf'
-SLOTS='/etc/hdw4s/instances'
-HDW4S_BASE_PORT=7300
-HDW4S_BLOCK_SIZE=64
-# shellcheck source=/dev/null
-if [ -r "${CONF}" ]; then
-  f="${CONF}"
-  # Checked before it is run. Sourcing a file with a syntax error
-  # applies every assignment before the error and none after, and
-  # the "|| :" below would hide that -- leaving the program running
-  # on a configuration that is half the administrator's and half
-  # the defaults, with nothing said.
-  bash -n "${CONF}" || {
-    echo "hdw4s: ${f} has a syntax error (above); refusing to run on a" >&2
-    echo '  configuration that would be applied only as far as the error.' >&2
-    echo '  Edit it by hand -- "hdw4s set" and "hdw4s unset" read the same' >&2
-    echo '  file and are unavailable until it parses.' >&2
-    exit 1
-  }
-  # A valid file may still end in a conditional that happens to be
-  # false, which is not an error worth dying over.
-  . "${CONF}" || :
-fi
-# shellcheck source=/dev/null
-if [ -r "/etc/hdw4s/${instance}.conf" ]; then
-  f="/etc/hdw4s/${instance}.conf"
-  # Checked before it is run. Sourcing a file with a syntax error
-  # applies every assignment before the error and none after, and
-  # the "|| :" below would hide that -- leaving the program running
-  # on a configuration that is half the administrator's and half
-  # the defaults, with nothing said.
-  bash -n "/etc/hdw4s/${instance}.conf" || {
-    echo "hdw4s: ${f} has a syntax error (above); refusing to run on a" >&2
-    echo '  configuration that would be applied only as far as the error.' >&2
-    echo '  Edit it by hand -- "hdw4s set" and "hdw4s unset" read the same' >&2
-    echo '  file and are unavailable until it parses.' >&2
-    exit 1
-  }
-  # A valid file may still end in a conditional that happens to be
-  # false, which is not an error worth dying over.
-  . "/etc/hdw4s/${instance}.conf" || :
-fi
+# The path the relay's own ExecStart= names; see hdw4s-proxy@.service. Inside the
+# relay's namespace this is the only stream directory that exists.
+sock="/run/hdw4s-stream/${instance}/s/stream.sock"
 
-if [ -n "${HDW4S_PORT:-}" ]; then
-  port="${HDW4S_PORT}"
-else
-  # awk exits non-zero when the file is not there, and the assignment carries
-  # that status out, so under errexit the script died here and the diagnostic
-  # below -- the one that says what to do about it -- never printed.
-  slot=''
-  if [ -r "${SLOTS}" ]; then
-    slot="$(awk -v i="${instance}" \
-            '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}")" || :
-  fi
-  [ -n "${slot}" ] || {
-    echo "hdw4s: ${instance} has no slot; nothing to wait for." >&2
-    exit 1
-  }
-  port=$(( HDW4S_BASE_PORT + HDW4S_BLOCK_SIZE + slot ))
-fi
-
+# A CONNECT, the question the relay will ask, rather than a look at the file: a
+# socket file is not a listener. python3 because bash's /dev/tcp has no AF_UNIX
+# counterpart, and it is already a dependency.
+#
+# The symlink test is a sanity check and NOT a defence: the directory belongs to
+# the session's occupant, who can swap the file between this test and the relay's
+# connect. What stops a swapped-in symlink reaching anything is the relay's mount
+# namespace, which contains no other stream directory to point at.
 for _ in $(seq 1 "${deadline}"); do
-  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+  if [ ! -L "${sock}" ] &&
+     python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sys.argv[1])' "${sock}" 2>/dev/null; then
     exit 0
   fi
   sleep 1
 done
 
-echo "hdw4s: ${instance} never began listening on port ${port}" >&2
+echo "hdw4s: ${instance} never began listening on ${sock}" >&2
 exit 1
