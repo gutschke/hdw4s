@@ -72,10 +72,11 @@ the gap between minting it and its session coming up, because there is nothing
 else to speak for it yet, and we stop the moment there is.
 
 And the authority may only ever be OBSERVED, never opened. These slots are
-socket-activated, so anything that connects to one starts a desktop: a probe
-that asked whether the pool was reachable started a session on every free slot,
-every time this service restarted, and read correctly afterwards because it had
-made itself true. os.path.isdir, and nothing else, for that reason and no other.
+socket-activated, so anything that connects to one starts its relay -- and until
+only this router could start a pool desktop (see "Starting a desktop"), the relay
+started the desktop too: a probe that asked whether the pool was reachable
+started a session on every free slot, every time this service restarted, and
+read correctly afterwards because it had made itself true. os.path.isdir, and nothing else, for that reason and no other.
 """
 
 import base64
@@ -338,8 +339,8 @@ WEBROOT_DIR = os.environ.get("HDW4S_WEBROOT_DIR", "/usr/share/hdw4s/webroot")
 
 # How long a minted slot is held on our word alone, before the authority above
 # has to agree. A mint happens BEFORE the session starts -- the redirect is what
-# sends the browser at it, and the session is socket-activated by that first
-# request -- so for a few seconds a slot is legitimately ours and not yet
+# sends the browser at it, and that first request is what asks for the session
+# (start_for_first_request()) -- so for a few seconds a slot is legitimately ours and not yet
 # occupied. Without this window two arrivals in that gap would be handed the
 # same slot, which is the double-booking this whole change exists to stop.
 #
@@ -632,8 +633,8 @@ def ephemeral_slots(table=_READ_IT):
     pick_slot()'s reap-window reasoning, which is correct and predates this. A
     slot the sweep has just reaped has no desktop behind it and is momentarily
     unreachable, and it is precisely the capacity we want to hand out: its
-    socket unit is still listening and the next connection starts a fresh
-    desktop. Refusing a visitor while such a slot stood free is the exhaustion
+    socket unit is still listening and the next letting's first request starts
+    a fresh desktop. Refusing a visitor while such a slot stood free is the exhaustion
     defect wearing a reachability check. So reachability stays where it already
     was -- a PREFERENCE ORDER inside pick_slot() and a warning in the banner --
     and the table is the only thing that decides membership.
@@ -1287,8 +1288,8 @@ class Ownership:
 
         NOT DONE AT MINT, and the first version did it there and gated every
         visitor in the pool. A mint precedes its session: the redirect is what
-        sends the browser at the slot, and the session is socket-activated by
-        that first request. So at mint time the token on disk belongs to the
+        sends the browser at the slot, and the session is started at that first
+        request. So at mint time the token on disk belongs to the
         PREVIOUS occupant -- it survives a reap, measured -- and the session
         that is about to start will publish a different one. Comparing against
         the value read at mint therefore refused every brand-new session as
@@ -1315,9 +1316,11 @@ class Ownership:
         see request_teardown() -- so for a second or three the slot's runtime
         directory is still there, its port is still listening and its published
         token still matches. Every guard in session_replaced() therefore reads
-        HEALTHY, the request is proxied, and the proxy's connect() is an
-        INSTRUCTION to systemd rather than a question: BindsTo= starts a whole
-        new GNOME session for nobody. On production, where nothing sets
+        HEALTHY, the request is proxied, and under the relay's old BindsTo= the
+        proxy's connect() was an INSTRUCTION to systemd rather than a question:
+        it started a whole new GNOME session for nobody. (A connection can no
+        longer start one; the record still gates the tab at once, with the
+        ended page rather than a refused round trip.) On production, where nothing sets
         HDW4S_IDLE_DAYS and the shipped default is seven days, that desktop
         then holds a slot for a week with the reaper correctly saying nothing.
 
@@ -1341,17 +1344,6 @@ class Ownership:
                 rec["ended_at"] = time.time()
                 self._save()
             return rec is not None
-
-    def hung_up(self, sid, now=None):
-        """Record that the desktop behind SID just closed a connection on us.
-
-        NOT WRITTEN DOWN, because it is about this process's own connections:
-        after a restart none of them exist. See settle_after_hang_up().
-        """
-        with self._lock:
-            rec = self._by_sid.get(sid)
-            if rec is not None:
-                rec["hung_up"] = time.monotonic() if now is None else now
 
     def pending_mints(self, since):
         """[(instance, minted)] for slots handed out whose desktop has not
@@ -1952,7 +1944,7 @@ def touch_slot(instance, now=None):
 # down too now (see Ownership); losing it is still only a refusal. Lose the cookie-refresh timestamps and
 # somebody gets one redundant header. But a MINT is a claim on a slot made
 # BEFORE the session behind it exists -- the redirect is what sends the browser
-# at the slot, and that first request is what socket-activates the desktop --
+# at the slot, and that first request is what asks for the desktop --
 # so for a few seconds the slot is held on this process's word alone, and
 # losing that word lets a second visitor be handed a slot the first is still
 # walking to. That is the double-booking confirmed at the pixels, arriving by
@@ -2700,8 +2692,9 @@ def assert_probe_does_not_activate(probe=slot_unreachable,
 # but its RuntimeDirectory survives for another half second or more, and
 # slot_occupied() reads that directory. So for that interval this router still
 # believes the letting is healthy and PROXIES, and the proxy connection lands in
-# a socket unit that is still listening, whose BindsTo= then starts a FRESH
-# desktop in the slot. The disconnected client reloads every five seconds by
+# a socket unit that is still listening, whose BindsTo= then started a FRESH
+# desktop in the slot -- under the relay's old shape. Now the relay refuses it
+# (Requisite=) and the refusal gates the visitor; this check gates them first. The disconnected client reloads every five seconds by
 # design, so something lands in that window essentially every time: four slots
 # consumed in seven minutes by one person behaving correctly four times.
 #
@@ -2722,8 +2715,10 @@ def assert_probe_does_not_activate(probe=slot_unreachable,
 #
 # THE RESIDUAL, AND IT IS 0.25 SECONDS WIDE. Read the table again: the relay is
 # already gone at 4.45 while the door is still open, and it shuts at 4.69. A
-# request landing in that quarter second passes this check, is proxied, and
-# STILL RESURRECTS THE SLOT. The cgroup instrument closes that quarter second
+# request landing in that quarter second passes this check and is proxied --
+# and, since a connection can no longer start a pool desktop, the relay refuses
+# it and the visitor is gated on that refusal (REFUSED). What the quarter second
+# still costs is a round trip, not a desktop. The cgroup instrument closes it
 # because it goes in the same sample as the relay; asking both -- gate if EITHER
 # says the session is going -- would close it while degrading to this 0.25 s
 # when the cgroup could not be found.
@@ -2929,7 +2924,7 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
     # below reads the world, and the world is LATE: for seconds after a teardown
     # has been asked for, the runtime directory is still there, the port is still
     # listening and the published token still matches. A request landing in that
-    # interval is proxied, and proxying is what resurrects the slot -- see
+    # interval is proxied, only to be refused by the relay -- see
     # Ownership.end_session(). This needs no instrument, so it cannot be gated on
     # one being readable, which is why it is above the early return rather than
     # beside the other reasons.
@@ -2973,8 +2968,9 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
         return "the desktop behind %s has stopped" % instance
     # THE WINDOW, CLOSED. Occupancy says something is there; this says whether
     # it is still SERVING. The runtime directory outlives the session by half a
-    # second or more, and proxying into that gap is what resurrects the slot --
-    # see the table above slot_door_open().
+    # second or more, and proxying into that gap reaches only a relay that
+    # refuses -- this answers the visitor at once instead. See the table above
+    # slot_door_open().
     #
     # ONLY FOR A RECORD WHOSE DESKTOP ALREADY ANSWERED US. A session that is
     # STARTING has a runtime directory and no listener yet -- hdw4s-wait exists
@@ -3006,63 +3002,6 @@ def session_replaced(rec, instance, at=None, rundir=None, webroot=None,
         return "%s is running a different desktop than the one minted here" \
             % instance
     return None
-
-
-# HOW LONG A DESKTOP THAT HUNG UP ON US IS GIVEN TO SAY WHETHER IT HAS GONE.
-#
-# THE DEFECT, measured on production and reproduced on a development box
-# 2026-09-27: a GNOME logout with the tab still open. The session stops, BindsTo=
-# stops the relay, the relay's connections close, and the browser's client
-# reconnects -- 9 ms later, measured with systemd's debug log. At that instant
-# the runtime directory is still there, the published token still matches and the
-# session's port is still listening, so session_replaced() reads HEALTHY and the
-# request is proxied. The proxy's connect() is an instruction to systemd, not a
-# question: "Incoming traffic" on the slot socket, and a start job for a fresh
-# desktop queued behind the dying one, which runs the moment it has gone -- a new
-# GNOME session in a slot nobody owns.
-#
-# WHAT SEPARATES THAT FROM A WANTED START, and only this router holds it: the
-# letting has ALREADY HAD A DESKTOP (rec["live"]), and that desktop has just hung
-# up on us. systemd sees only a unit that is deactivating, and a socket cannot tell
-# a first connect from a repeat. So a request for a live letting whose desktop
-# hung up in the last HANGUP_SETTLE seconds is not proxied until the world has
-# caught up: it waits while the instruments say "healthy", and is gated the moment
-# one says otherwise. A desktop that hung up and is STILL THERE after the wait --
-# the stream closed for some other reason -- is proxied as before, so the
-# instruments decide, never the clock; the clock only bounds how long they are
-# given.
-#
-# THE NUMBER IS DERIVED FROM WHAT WAS MEASURED, NOT CHOSEN. The session's port
-# shut 0.24 s after its relay went (2026-09-25, the table above slot_door_open());
-# the runtime directory went 0.77 s after it on that run and 2.6 s after the
-# logout on the 2026-09-27 run, where the unit sat in final-sigterm. Three seconds
-# covers the slower instrument's slowest sighting. The cost falls only on a tab
-# whose healthy desktop closed its stream, which waits up to that long once.
-#
-# WHAT IS STILL OPEN, said so it is not read as closed: a request that is NOT
-# preceded by a hang-up -- a tab with no stream open, polling -- and lands inside
-# the 0.24 s before the port shuts is proxied as before. The reclaim and
-# hdw4s-teardown end what that starts.
-HANGUP_SETTLE = 3.0
-
-
-def settle_after_hang_up(rec, instance, replaced=session_replaced,
-                         clock=time.monotonic, sleep=time.sleep):
-    """session_replaced(), asked until the world has caught up with a hang-up.
-
-    For a record whose desktop has not hung up on us -- or never answered us,
-    so there is no desktop yet for this letting to have had -- this is exactly
-    one call of session_replaced(). See HANGUP_SETTLE for the rest.
-    """
-    since = rec.get("hung_up")
-    while True:
-        why = replaced(rec, instance)
-        if why is not None or not since or not rec.get("live"):
-            return why
-        left = since + HANGUP_SETTLE - clock()
-        if left <= 0:
-            return None
-        sleep(min(0.05, left))
 
 
 def slots_in_use(own, slots=None):
@@ -3711,7 +3650,7 @@ def assert_door_only_refuses_what_it_measured(ports=None, door=None,
         why = replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web, door=SHUT)
         assert why and "own port" in why, \
             "a session that had stopped answering was routed to anyway, which " \
-            "is the proxy connection that resurrects the slot: %r" % why
+            "is a wasted connection the relay refuses: %r" % why
         assert replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web,
                         door=OPEN) is None, \
             "a healthy session was gated by the door check"
@@ -3739,7 +3678,8 @@ def pick_slot(own):
     REACHABLE SLOTS FIRST, but an unreachable one is still offered rather than
     withheld. A slot the sweep has just reaped is momentarily unreachable and is
     exactly the capacity we want to hand out -- its socket unit is still
-    listening and the next connection starts a fresh desktop. Refusing a visitor
+    listening and the next letting's first request starts a fresh desktop.
+    Refusing a visitor
     while such a slot stood free would be the exhaustion defect wearing a
     reachability check.
 
@@ -3822,8 +3762,9 @@ def let_slot(own, identity):
 # the session -- and that made every connection a start instruction: a stale tab
 # reconnecting after a logout, a request landing in the seconds a dying desktop
 # still listened, a prefetch, anything that could reach the socket. Four rounds
-# of guards (a three-second wait after a hang-up, a port check, two records of a
-# desktop's end) each narrowed that race and none closed it; measured on a
+# of guards (a three-second wait after a hang-up, a port check, and on an
+# unmerged branch two records of a desktop's end) each narrowed that race and
+# none closed it; measured on a
 # development box 2026-09-28, a reconnect was still proxied 29 ms before the last
 # of those records existed. So the race is removed instead of won: the relay of
 # an ephemeral slot is Requisite= on its session (a connection to a slot with no
@@ -5379,7 +5320,8 @@ def console(own, wf, identity, new_identity, what, sid, method):
         # discarded desktop retries on its own clock -- so from the moment that
         # response leaves, a request for this letting may arrive at any time. If
         # it arrives before this line has run it is proxied into a slot that is
-        # still dying and starts a fresh desktop there for nobody.
+        # still dying -- which under the relay's old BindsTo= started a fresh
+        # desktop there for nobody, and now is refused by the relay.
         own.end_session(sid, "the desktop behind %s was discarded by the "
                              "visitor who held it" % rec["instance"])
         log("a visitor discarded their own session: slot %s, session %s"
@@ -5555,48 +5497,21 @@ def assert_cross_site_posts_are_refused(judge=None):
 # Proxying
 # --------------------------------------------------------------------------
 
-def splice(a, b, names=("", ""), first=None, hung_up=None):
-    """Copy A to B until either end goes. Then close both.
-
-    FIRST, when given, is a shared [lock, name] that the direction which ends
-    FIRST writes its answer into: the name of the end that went -- names[0] for
-    A, names[1] for B -- or "idle" for a read that timed out. Only the first
-    answer counts, because the second direction always ends BECAUSE of the
-    first one's shutdown and would blame whichever end that closed.
-
-    HUNG_UP is called when the first end to go was the one named "desktop",
-    and it is called BEFORE either socket is shut. That order is the point: the
-    browser learns its stream ended from this shutdown, and reconnects at once
-    (measured 9 ms on a development box), so a record written after the close
-    could be read after the reconnect it exists to hold.
-    """
-    who = None
+def splice(a, b):
+    """Copy A to B until either end goes. Then close both."""
     try:
         while True:
             try:
                 chunk = a.recv(65536)
-            except socket.timeout:
-                who = "idle"
-                break
             except OSError:
-                who = names[0]
                 break
             if not chunk:
-                who = names[0]
                 break
             try:
                 b.sendall(chunk)
             except OSError:
-                who = names[1]
                 break
     finally:
-        if first is not None:
-            with first[0]:
-                mine = first[1] is None
-                if mine:
-                    first[1] = who
-            if mine and who == "desktop" and hung_up is not None:
-                hung_up()
         for s in (a, b):
             try:
                 s.shutdown(socket.SHUT_RDWR)
@@ -5994,7 +5909,7 @@ def registers_a_service_worker(headers):
 
 
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
-                    extra=(), navigation=False, hung_up=None,
+                    extra=(), navigation=False,
                     version=b"HTTP/1.1", body=("none", None),
                     refusal_ends=False):
     """One upstream connection for ONE request. Never one per downstream
@@ -6003,11 +5918,7 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
     Returns whether the downstream connection can carry another request, or
     STARTING when a page navigation was answered with starting_page() because
     the desktop had not answered it in time -- which is NOT the desktop
-    answering, and the caller must not treat it as one.
-
-    HUNG_UP, when given, is called if the DESKTOP ends the exchange -- closes a
-    stream it had accepted, or closes the request without answering it -- and
-    before the browser is told. See settle_after_hang_up()."""
+    answering, and the caller must not treat it as one."""
     path = socket_path(instance)
     up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     up.settimeout(30)
@@ -6129,8 +6040,6 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         return False
     if not answered:
         up.close()
-        if hung_up is not None:
-            hung_up()
         respond(wf, 502, page("That desktop closed the connection",
                               "Try again."), extra)
         return False
@@ -6196,14 +6105,9 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         if pending:
             wf.write(upf.read(len(pending)))
             wf.flush()
-        first = [threading.Lock(), None]
-        t = threading.Thread(target=splice, args=(sock, up),
-                             kwargs=dict(names=("browser", "desktop"),
-                                         first=first, hung_up=hung_up),
-                             daemon=True)
+        t = threading.Thread(target=splice, args=(sock, up), daemon=True)
         t.start()
-        splice(up, sock, names=("desktop", "browser"), first=first,
-               hung_up=hung_up)
+        splice(up, sock)
         t.join(5)
         return False
 
@@ -6384,9 +6288,10 @@ def serve(sock, own, expected_b64):
                 # The table knows nothing about reaping. A visitor whose desktop
                 # the sweep stopped presents a sid that resolves PERFECTLY, so
                 # they fell straight past the gate to the proxy -- and the slot
-                # socket is still listening and socket-activated, so the connect
-                # succeeded and started a brand-new empty desktop under their
-                # old address, in about two seconds. Not a 502, not a stall:
+                # socket is still listening and socket-activated, so -- under the
+                # relay's old BindsTo= -- the connect succeeded and started a
+                # brand-new empty desktop under their old address, in about two
+                # seconds. Not a 502, not a stall:
                 # their in-memory home was gone and the screen looked fine.
                 #
                 # So the person the 410 page was written for was the only person
@@ -6394,7 +6299,7 @@ def serve(sock, own, expected_b64):
                 # ids had simply expired.
                 why = ("%s has been let again since this letting"
                        % rec["instance"]) if own.superseded(sid) else \
-                    settle_after_hang_up(rec, rec["instance"])
+                    session_replaced(rec, rec["instance"])
                 if why is not None:
                     own.forget(sid)
                     log("gated a returning visitor at %s: %s"
@@ -6496,7 +6401,6 @@ def serve(sock, own, expected_b64):
                                      refresh_headers(own, identity,
                                                      new_identity),
                                      is_page_navigation(method, rest, headers),
-                                     hung_up=lambda: own.hung_up(sid),
                                      version=version, body=body,
                                      refusal_ends=bool(rec.get("live")))
             if served is REFUSED:
@@ -6566,8 +6470,8 @@ def assert_an_ended_letting_is_never_proxied(factory=Ownership,
 
     Runs at every start beside the others. WHAT IT CATCHES IS INVISIBLE FROM THE
     OUTPUT, which is why it is here and not only in a test file: a request
-    proxied into a slot whose desktop is stopping starts a FRESH desktop in that
-    slot, and the visitor sees a perfectly ordinary screen while a production
+    proxied into a slot whose desktop is stopping started a FRESH desktop in
+    that slot under the relay's old BindsTo= (now it is refused), and the visitor sees a perfectly ordinary screen while a production
     slot is consumed for the length of the idle window -- seven days on the
     shipped default. Nothing fails, nothing logs, and the reaper is right to say
     nothing.
@@ -6617,8 +6521,8 @@ def assert_an_ended_letting_is_never_proxied(factory=Ownership,
                        rundir=rundir, webroot=web, door=open_door)
         assert why is not None, \
             "a DISCARDED letting was permitted to proxy. The next request for" \
-            " it socket-activates a fresh desktop in that slot, for nobody, for" \
-            " the length of the idle window"
+            " it reaches a relay that refuses it -- under the relay's old" \
+            " BindsTo=, a fresh desktop in that slot, for nobody"
 
         # AND IT MUST NOT NEED AN INSTRUMENT TO SAY SO. The whole point is that
         # this answer precedes the world: with the occupancy authority absent --

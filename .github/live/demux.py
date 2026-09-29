@@ -4348,37 +4348,6 @@ def test_a_desktop_that_closes_a_stream_and_stays_is_still_reached(rig):
         "the visitor did not reach the desktop they had"
 
 
-NO_SETTLE_AFTER_A_HANG_UP = """
-
-# Appended by the red arm: a hang-up is not waited out. The reconnect is judged
-# at once, by instruments that have not caught up with the logout yet.
-def settle_after_hang_up(rec, instance, replaced=session_replaced,
-                         clock=time.time, sleep=time.sleep):
-    return replaced(rec, instance)
-"""
-
-
-def red_a_logout_with_the_tab_open_resurrects_again():
-    """RED ARM: without the wait, the tab's reconnect starts a desktop."""
-    path = scratch_demux("-nosettle.py", NO_SETTLE_AFTER_A_HANG_UP)
-    rig = Rig(nslots=2, demux=path)
-    # ON THE OLD RELAY, which started a desktop on connect: the world this wait
-    # was written for. Under Requisite= no connection starts one at all.
-    for sl in rig.slots:
-        sl.starts_on_connect = True
-    try:
-        try:
-            test_a_logout_with_the_tab_open_starts_no_desktop(rig)
-        except AssertionError as e:
-            if "started a fresh desktop" not in str(e):
-                raise RuntimeError(
-                    "the red arm went red for the wrong reason: %s" % e)
-            raise
-    finally:
-        rig.stop()
-        _remove_scratch_demuxes()
-
-
 def test_a_correct_logout_does_not_consume_the_slot(rig):
     """FOUR IN A ROW, on a pool of two. The leak, reproduced and then not.
 
@@ -6673,7 +6642,6 @@ def main():
                red_a_connection_starts_a_desktop_again,
                red_the_first_request_is_refused,
                red_the_table_is_forgotten_at_a_restart,
-               red_a_logout_with_the_tab_open_resurrects_again,
                red_a_refusal_is_logged_per_request,
                red_scope_checked_by_the_page,
                red_a_console_address_that_stops_being_claimed,
