@@ -1,0 +1,13 @@
+{
+  "_comment_scope": "Read only by the template-authoring desktop (hdw4s template edit), bound over hdw4s-author.json in the managed policy directory. Merged with hdw4s-ephemeral.json, which sets none of these keys.",
+
+  "_comment_signin": "Whatever the author signs in to is harvested into every visitor's desktop. Refusing sign-in here makes that accident impossible rather than something the harvest has to catch.",
+  "BrowserSignin": 0,
+  "SyncDisabled": true,
+
+  "_comment_history": "Not created, so not harvested: the cheapest filter is the trace that never existed.",
+  "SavingBrowserHistoryDisabled": true,
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false
+}

@@ -1,0 +1,3 @@
+{
+  "_comment": "A placeholder, and deliberately empty of policy. The template-authoring desktop binds /etc/hdw4s/chrome-author-policy.json over this file; every other ephemeral desktop reads it as it is, which sets nothing. It exists so that bind has a file to land on inside the read-only policy directory."
+}

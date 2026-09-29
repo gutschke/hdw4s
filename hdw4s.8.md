@@ -18,7 +18,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `seed` <instance> [`--only` <path>]...<br>
 `hdw4s` `keyring` <instance><br>
 `hdw4s` `reap`<br>
-`hdw4s` `template` `edit` [<instance>] [`--yes`]|`reset`|`show`<br>
+`hdw4s` `template` `edit` [<instance>] [`--yes`]|`keep` [<path>...]|`forget` <path>...|`reset`|`show`<br>
 `hdw4s` `firewall` `--apply`|`--check`|`--print`|`--restore`<br>
 `hdw4s` `--version`
 
@@ -157,27 +157,54 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Change what every new ephemeral desktop starts from. Starts the
     template-authoring desktop -- the slot table's row typed `template`, made
     by `enable --template` -- and prints a link that works **once, within five
-    minutes**. Open it in a private browser window, change what you like, and
-    **log out** of that desktop when done: the command then asks whether to
-    publish the changes. Interrupting the command stops the desktop and keeps
-    nothing. It is for editing, not for working in: nothing but this command
-    starts that desktop.
+    minutes**. Open it, change what you like, and **log out** of that desktop
+    when done: the command then asks whether to publish the changes.
+    Interrupting the command stops the desktop and keeps nothing. It is for
+    editing, not for working in: nothing but this command starts that desktop,
+    and one left running by a command that was killed is stopped, unpublished,
+    by the next `template edit`.
 
     What is published is an allow-list, so a setting nobody thought of is left
-    out rather than handed to every visitor. Carried: GNOME settings (the
-    background, the dock, extensions' settings; not notifications, recent
-    folders, command history or weather location), pictures added as
-    backgrounds, GNOME Shell extensions, fonts, icons and themes installed for
-    the user, and Chrome's extensions, bookmarks and preferences. **Not
-    carried**: Chrome's cookies, history, saved logins, autofill, open tabs,
-    site storage, or any extension's own stored data -- extensions arrive
-    installed, with their defaults. Signing in to a Google account in the
-    authoring desktop is refused by the managed Chrome policy. Anything in the
-    home directory is not carried. A setting that names a file only the
-    authoring desktop had is left out and reported.
+    out rather than handed to every visitor. Carried: GNOME settings,
+    including everything GNOME Tweaks sets (the background, the dock, focus
+    mode, desktop icons, fonts, window buttons, extensions' settings; not
+    notifications, recent folders, command histories, or weather and
+    world-clock locations), pictures added as backgrounds, startup
+    applications, default applications, GNOME Shell extensions, fonts, icons
+    and themes installed for the user, and Chrome's extensions, bookmarks and
+    preferences. **Not carried**: Chrome's cookies, history, saved logins,
+    autofill, open tabs, site storage, or any extension's own stored data --
+    extensions arrive installed, with their defaults. Signing in to a Google
+    account in the authoring desktop is refused by the managed Chrome policy;
+    visitors' own desktops allow it. Nothing else from the home directory is
+    carried unless `template keep` names it. A setting that names a file only
+    the authoring desktop had is left out and reported, and the publish lists
+    every command the template makes a visitor's desktop run.
 
     Set `HDW4S_EPHEMERAL_URL` to have the full link printed. Running desktops
     keep what they started with.
+
+  * `template keep` [<path>...]:
+    Also carry a program's own settings, which the built-in list leaves out --
+    say the preconfigured printers of a slicer, or an IDE's board URLs. Name
+    the path as it is in a home directory:
+
+        hdw4s template keep ~/.config/PrusaSlicer ~/.config/OpenSCAD
+        hdw4s template keep ~/.arduinoIDE
+
+    Where a program following XDG actually keeps it inside the desktop is
+    worked out for you. The next published `template edit` carries it whole,
+    minus anything in it named like browser storage, a history or a
+    credential, and it reports, by name only, files that look as though they
+    hold a password or token, and anything large: every new desktop copies
+    the template into memory as it starts, so install big content (board
+    cores, libraries) system-wide rather than keeping it. Refused outright:
+    Chrome's profile, keys and keyrings, caches, and anything as broad as
+    `~/.config`. The program itself must be installed on the machine. With no
+    path, lists what is kept.
+
+  * `template forget` <path>...:
+    Stop carrying a kept path, from the next publish on.
 
   * `template reset`:
     Remove the template: new ephemeral desktops start from the stock desktop.

@@ -2,6 +2,8 @@
 """The template every new ephemeral desktop starts from.
 
     hdw4s template edit [<instance>] [--yes]
+    hdw4s template keep [<path>...]
+    hdw4s template forget <path>...
     hdw4s template reset
     hdw4s template show
 
@@ -22,6 +24,12 @@ Chrome keeps its extensions, bookmarks and preferences and nothing that is
 browsing: no cookies, history, logins, site storage or open tabs. Signing in to
 a Google account is refused by the managed policy the desktop runs under, so
 the accident this guards against cannot happen in the first place.
+
+"keep" adds paths the next publish carries whole, on top of the built-in
+list -- a program's settings, say ~/.config/PrusaSlicer or ~/.arduino15 -- and
+lists them with no argument; "forget" takes one off again. Paths are written
+as they are in a home directory; where a program's XDG settings actually live
+is worked out here.
 
 "reset" returns every NEW session to the stock desktop. Running sessions keep
 what they started with.
@@ -78,12 +86,17 @@ LOCK = "/run/hdw4s-template.lock"
 INVITE_SECONDS = 300
 PROFILE_ROOT = "/run/hdw4s-profile"
 
+KEEP_LIST = os.path.join(ETC, "template-keep")
+
 # --- what a template may carry ----------------------------------------------
 
 # Profile-relative paths copied whole. Everything else in the profile -- state,
 # cache, recently-used lists, keyrings, online accounts, the indexer -- is left
 # behind by not being named here.
 KEEP_FILES = [
+    "config/autostart",                 # Tweaks' startup applications
+    "config/fontconfig",
+    "config/mimeapps.list",             # default applications
     "config/gtk-3.0/settings.ini",
     "config/gtk-4.0/settings.ini",
     "data/gnome-shell/extensions",
@@ -140,6 +153,8 @@ DCONF_DENY = [
     "org/gnome/settings-daemon/plugins/color/night-light-last-coordinates",
     "org/gnome/desktop/input-sources/mru-sources",
     "org/gnome/shell/weather",                  # where the author is
+    "org/gnome/shell/world-clocks",             # likewise
+    "org/gnome/shell/looking-glass-history",    # verbatim JavaScript typed
     "org/gnome/shell/extensions/gsconnect",     # a paired phone's identity
 ]
 
@@ -252,6 +267,34 @@ def inside(path, top):
         real.startswith(os.path.realpath(top) + os.sep)
 
 
+def copy_kept(src, dst, notes, shown):
+    """copy_entry for a path the admin asked to keep, minus anything inside it
+    that is browser storage, a history or a credential by its name -- an
+    Electron program's settings directory holds its Cookies and Local Storage,
+    and its own sign-in with them."""
+    skipped = []
+
+    def ignore(d, names):
+        out = []
+        for n in names:
+            full = os.path.join(d, n)
+            if KEEP_REFUSED_NAMES.search("/" + n) or not (
+                    os.path.islink(full) or os.path.isdir(full) or
+                    os.path.isfile(full)):
+                out.append(n)
+                if KEEP_REFUSED_NAMES.search("/" + n):
+                    skipped.append(n)
+        return out
+    if os.path.isdir(src) and not os.path.islink(src):
+        shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True,
+                        ignore_dangling_symlinks=True, ignore=ignore)
+    else:
+        copy_entry(src, dst)
+    if skipped:
+        notes.append("left out of %s: %s" % (shown, ", ".join(
+            sorted(set(skipped))[:8])))
+
+
 def copy_entry(src, dst):
     """Copy a file or tree without following symlinks and without special
     files: the source is a desktop's profile, and root is doing the reading.
@@ -338,11 +381,20 @@ def filter_dconf(entries, inst, notes):
                 or under(path, DCONF_DENY) or path in owned:
             continue
         value = value.replace(author_bg, published_bg)
+        # /home/user is every visitor's home, so a value naming it is fine
+        # (and names a file only if "keep" carried it). Any other home, and
+        # either profile root, names something no visitor has.
         if PROFILE_ROOT + "/" in value or AUTHOR_ROOT + "/" in value or \
-                "/home/" in value:
+                re.search(r"/home/(?!user/)", value):
             notes.append("left out %s: it names a file only the authoring "
                          "desktop had (%s)" % (path, value[:80]))
             continue
+        if path.startswith("org/gnome/settings-daemon/plugins/media-keys/") \
+                and key == "command" or \
+                path.startswith("org/gnome/terminal/") and \
+                key == "custom-command":
+            notes.append("carried a command every visitor's desktop may run: "
+                         "%s = %s" % (path, value[:80]))
         kept.append((section, key, value))
     return kept
 
@@ -403,33 +455,280 @@ def harvest_chrome(src, dst, notes):
 
 # --- the three commands -----------------------------------------------------
 
-def seed(author, uid, gid):
+# Where a home-relative path's contents live INSIDE A SESSION. Programs that
+# follow XDG write under the redirected profile (config/, data/, state/);
+# programs that hardcode ~/.something write into the home itself. A path under
+# ~/.config is looked for in BOTH, since plenty of programs build it by hand.
+XDG_MAP = [(".config/", "config/"), (".local/share/", "data/"),
+           (".local/state/", "state/")]
+
+# Refused by "keep", with the reason given. Chrome has a filter of its own that
+# keeping it whole would bypass; the rest are credentials, caches, or so broad
+# that they would carry everything the allow-list exists to leave out.
+KEEP_REFUSED = [
+    (".config/google-chrome", "Chrome is carried by its own filter already; "
+     "keeping it whole would carry its cookies, history and logins"),
+    (".local/share/keyrings", "it holds saved passwords"),
+    (".ssh", "it holds keys"), (".gnupg", "it holds keys"),
+    (".config/goa-1.0", "it holds online accounts"),
+    (".mozilla", "a browser profile holds cookies, history and logins"),
+    (".cache", "it is a cache; it is rebuilt"),
+    (".local/share/recently-used.xbel", "it is a list of files opened"),
+    (".bash_history", "it is a history"),
+    (".pki", "it holds certificates and keys"),
+    (".netrc", "it holds passwords"), (".git-credentials", "it holds passwords"),
+    (".local/share/keyrings", "it holds saved passwords"),
+]
+# Refused wherever they appear in the path: browser and Electron storage
+# (cookies, logins, site data -- an app's own sign-in lives there), histories
+# and recent-file lists, and names that say they hold a credential.
+KEEP_REFUSED_NAMES = re.compile(
+    r"(^|/)(Cookies|Login Data|Local Storage|IndexedDB|Session Storage|"
+    r"Web Data|[^/]*history[^/]*|[^/]*recent[^/]*|[^/]*token[^/]*|"
+    r"[^/]*credential[^/]*|[^/]*\.(key|pem))(/|$)", re.I)
+# Said by name, never by value, when a kept file seems to hold one.
+SECRETISH = re.compile(
+    rb"^\s*[\"']?([\w.-]*(password|passwd|apikey|api_key|token|secret|"
+    rb"bearer)[\w.-]*)[\"']?\s*[=:]\s*\S", re.I | re.M)
+KEEP_TOO_BROAD = {"", ".config", ".local", ".local/share", ".local/state"}
+
+
+def home_prefixes():
+    """How the admin may spell "a home directory". Their shell expands ~
+    before this sees it, so ~/.config/X arrives as /root/.config/X -- or as
+    the sudo caller's home. Both mean the same place in a visitor's desktop."""
+    pres = ["~/", "/home/user/", "$HOME/"]
+    for h in (os.path.expanduser("~"), os.environ.get("HOME", "")):
+        if h and h != "/":
+            pres.append(h.rstrip("/") + "/")
+    if os.environ.get("SUDO_USER"):
+        try:
+            pres.append(pwd.getpwnam(os.environ["SUDO_USER"]).pw_dir
+                        .rstrip("/") + "/")
+        except KeyError:
+            pass
+    return pres
+
+
+def normalise_keep(arg):
+    """ARG as a clean home-relative path, or die saying why not."""
+    p = arg.strip()
+    for pre in home_prefixes():
+        if p.startswith(pre):
+            p = p[len(pre):]
+            break
+    else:
+        if p.startswith("/") or p.startswith("~"):
+            die("%s is not in the home directory; a template carries only "
+                "what is under ~ (programs installed system-wide are already "
+                "there for everyone)." % arg)
+    p = os.path.normpath(p) if p else ""
+    if p in (".",) or p.startswith("..") or "/../" in "/" + p + "/":
+        die("%s is not a path inside the home directory." % arg)
+    if p.startswith(".local/state") or p.startswith(".cache"):
+        die("refusing ~/%s: state and caches are per-person and are rebuilt."
+            % p)
+    m = KEEP_REFUSED_NAMES.search(p)
+    if m:
+        die("refusing ~/%s: '%s' is browser storage, a history, or a "
+            "credential by its name." % (p, m.group(2)))
+    if p in KEEP_TOO_BROAD:
+        die("~/%s is too broad: it would carry everything the built-in list "
+            "leaves out on purpose. Name the program's own directory, e.g. "
+            "~/.config/PrusaSlicer." % p)
+    for bad, why in KEEP_REFUSED:
+        if p == bad or p.startswith(bad + "/") or bad.startswith(p + "/"):
+            die("refusing ~/%s: %s." % (p, why))
+    return p
+
+
+def locations(rel):
+    """[(tree, path-in-tree)] where REL's contents may live in a session."""
+    out = []
+    for home_pre, prof_pre in XDG_MAP:
+        if rel.startswith(home_pre):
+            out.append(("profile", prof_pre + rel[len(home_pre):]))
+    out.append(("home", rel))
+    return out
+
+
+def read_keep_list():
+    try:
+        with open(KEEP_LIST) as f:
+            return [l.strip() for l in f
+                    if l.strip() and not l.lstrip().startswith("#")]
+    except OSError:
+        return []
+
+
+def write_keep_list(paths):
+    tmp = KEEP_LIST + ".new"
+    with open(tmp, "w") as f:
+        f.write("# Paths \"hdw4s template edit\" carries whole, on top of its "
+                "built-in list.\n# Edit with \"hdw4s template keep\" and "
+                "\"hdw4s template forget\".\n")
+        for p in paths:
+            f.write(p + "\n")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, KEEP_LIST)
+
+
+def cmd_keep(args):
+    paths = read_keep_list()
+    if not args:
+        if not paths:
+            say("Nothing kept beyond the built-in list. Add a program's "
+                "settings with e.g.\n  hdw4s template keep ~/.config/"
+                "PrusaSlicer")
+        for p in paths:
+            say("~/" + p)
+        return 0
+    lockfd = take_lock()
+    for a in args:
+        p = normalise_keep(a)
+        if p in paths:
+            say("~/%s is already kept." % p)
+            continue
+        paths.append(p)
+        say("Kept ~/%s. The next 'hdw4s template edit' you publish carries "
+            "it." % p)
+    write_keep_list(paths)
+    os.close(lockfd)
+    return 0
+
+
+def cmd_forget(args):
+    if not args:
+        die("usage: hdw4s template forget <path>...", 2)
+    lockfd = take_lock()
+    paths = read_keep_list()
+    for a in args:
+        p = a.strip()
+        for pre in home_prefixes():
+            if p.startswith(pre):
+                p = p[len(pre):]
+                break
+        p = os.path.normpath(p)
+        if p in paths:
+            paths.remove(p)
+            say("Forgot ~/%s. The template still carries it until the next "
+                "publish." % p)
+        else:
+            say("~/%s was not kept." % p)
+    write_keep_list(paths)
+    os.close(lockfd)
+    return 0
+
+
+def wipe(inst):
+    """Remove the authoring desktop's profile and home, whatever left them."""
+    for d in (os.path.join(AUTHOR_ROOT, inst),
+              os.path.join(AUTHOR_ROOT, inst + ".home")):
+        if os.path.lexists(d):
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def seed(author, home, uid, gid):
     """The authoring profile starts as a visitor's would, with the template's
     settings in the USER database so that resetting one removes it."""
-    if os.path.lexists(author):
-        shutil.rmtree(author)
     os.makedirs(AUTHOR_ROOT, mode=0o711, exist_ok=True)
     os.chmod(AUTHOR_ROOT, 0o711)
     os.mkdir(author, 0o700)
+    os.mkdir(home, 0o700)
     if os.path.isdir(os.path.join(CURRENT, "profile")):
         copy_entry(os.path.join(CURRENT, "profile"), author)
+    if os.path.isdir(os.path.join(CURRENT, "home")):
+        copy_entry(os.path.join(CURRENT, "home"), home)
     keydir = os.path.join(CURRENT, "dconf")
     if os.path.isfile(os.path.join(keydir, KEYFILE)):
         os.makedirs(os.path.join(author, "config", "dconf"), exist_ok=True)
         subprocess.run(["dconf", "compile",
                         os.path.join(author, "config", "dconf", "user"),
                         keydir], check=True)
-    for dirpath, dirs, files in os.walk(author):
-        os.lchown(dirpath, uid, gid)
-        for n in dirs + files:
-            os.lchown(os.path.join(dirpath, n), uid, gid)
+    for top in (author, home):
+        for dirpath, dirs, files in os.walk(top):
+            os.lchown(dirpath, uid, gid)
+            for n in dirs + files:
+                os.lchown(os.path.join(dirpath, n), uid, gid)
 
 
-def harvest(author, inst):
-    """Build the next template from AUTHOR in a new generation directory."""
+def scan_kept(gen, rel, notes):
+    """Say, by file and key name only, what in a kept path looks like a
+    secret, a path no visitor has, or a lot of data. Nothing is removed:
+    the admin asked for this path; they are told what it carries."""
+    total = 0
+    for tree, sub_ in locations(rel):
+        top = os.path.join(gen, tree, sub_)
+        walk = [(os.path.dirname(top), [], [os.path.basename(top)])] \
+            if os.path.isfile(top) else os.walk(top)
+        for dirpath, _, files in walk:
+            for n in files:
+                f = os.path.join(dirpath, n)
+                if os.path.islink(f) or not os.path.isfile(f):
+                    continue
+                size = os.path.getsize(f)
+                total += size
+                if size > 1024 * 1024:
+                    continue
+                with open(f, "rb") as fh:
+                    data = fh.read()
+                shown = "~/" + os.path.relpath(f, os.path.join(gen, tree)) \
+                    if tree == "home" else os.path.relpath(f, gen)
+                keys = sorted({m.group(1).decode("latin-1")
+                               for m in SECRETISH.finditer(data)})
+                if keys:
+                    notes.append("%s has %s -- check it holds no secret"
+                                 % (shown, ", ".join(keys[:5])))
+                if AUTHOR_ROOT.encode() in data or \
+                        re.search(rb"/home/(?!user/)[\w.-]+/", data):
+                    notes.append("%s names a path no visitor has" % shown)
+    if total > 50 * 1024 * 1024:
+        notes.append("~/%s is %s, copied into every new desktop; install large "
+                     "content system-wide or let it download instead"
+                     % (rel, human(total)))
+
+
+def autostart_notes(gen, notes):
+    d = os.path.join(gen, "profile", "config", "autostart")
+    if not os.path.isdir(d):
+        return
+    for n in sorted(os.listdir(d)):
+        try:
+            with open(os.path.join(d, n), errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if re.search(r"^Hidden\s*=\s*true", text, re.M):
+            continue
+        m = re.search(r"^Exec\s*=\s*(.*)$", text, re.M)
+        if m:
+            notes.append("every visitor's desktop starts: %s (%s)"
+                         % (m.group(1)[:80], n))
+
+
+def harvest(author, home, inst):
+    """Build the next template from AUTHOR (the profile) and HOME in a new
+    generation directory."""
     notes = []
     gen = os.path.join(ROOT, "gen-%d" % time.time_ns())
     os.makedirs(gen, mode=0o755)
+    for rel in read_keep_list():
+        found = False
+        for tree, sub_ in locations(rel):
+            top = author if tree == "profile" else home
+            src = os.path.join(top, sub_)
+            if not os.path.lexists(src):
+                continue
+            found = True
+            if not inside(src, top):
+                notes.append("left out ~/%s: it is, or is reached through, a "
+                             "symbolic link" % rel)
+                continue
+            copy_kept(src, os.path.join(gen, tree, sub_), notes, "~/" + rel)
+        if not found:
+            notes.append("kept ~/%s is not there; nothing carried for it" % rel)
+        else:
+            scan_kept(gen, rel, notes)
     for rel in KEEP_FILES:
         src = os.path.join(author, rel)
         if os.path.lexists(src) and not inside(src, author):
@@ -473,7 +772,12 @@ def harvest(author, inst):
         if CURRENT + "/backgrounds/" + n not in named:
             os.unlink(os.path.join(bg, n))
 
+    autostart_notes(gen, notes)
     normalise(gen)
+    size = du(gen)
+    if size > 200 * 1024 * 1024:
+        notes.append("the template is %s; every new desktop copies all of it "
+                     "into memory as it starts" % human(size))
     return gen, entries, notes
 
 
@@ -510,15 +814,30 @@ def install_keyfile(src):
 def cmd_edit(asked, yes):
     inst = pick_instance(asked)
     lockfd = take_lock()
+    # WE HOLD THE LOCK, so no other "template" command is running: anything of
+    # an edit still here was left by one that was killed outright (SIGKILL, a
+    # lost machine). It is cleaned up rather than refused, because the admin can
+    # do nothing about it that this cannot, and it is never published.
     if unit_state(inst) in ("active", "activating", "deactivating", "reloading"):
-        die("the template desktop %s is already running. Stop it first:\n"
-            "  systemctl stop %s" % (inst, unit_of(inst)))
+        say("The template desktop was still running from an edit whose command "
+            "did not finish.\nStopping it; nothing from it is published.")
+        subprocess.run(["systemctl", "stop", unit_of(inst)],
+                       capture_output=True)
+    wipe(inst)
+    for n in os.listdir(INVITE_DIR) if os.path.isdir(INVITE_DIR) else []:
+        try:
+            with open(os.path.join(INVITE_DIR, n)) as f:
+                if f.read(256).split()[:1] == [inst]:
+                    os.unlink(os.path.join(INVITE_DIR, n))
+        except (OSError, IndexError):
+            pass
     try:
         pw = pwd.getpwnam(inst)
     except KeyError:
         die("%s has no account yet. It is made at boot, or by:\n"
             "  hdw4s enable --template %s" % (inst, inst))
     author = os.path.join(AUTHOR_ROOT, inst)
+    home = os.path.join(AUTHOR_ROOT, inst + ".home")
     token = secrets.token_hex(16)
     invite = os.path.join(INVITE_DIR,
                           hashlib.sha256(token.encode("ascii")).hexdigest())
@@ -538,7 +857,7 @@ def cmd_edit(asked, yes):
 
     committed = False
     try:
-        seed(author, pw.pw_uid, pw.pw_gid)
+        seed(author, home, pw.pw_uid, pw.pw_gid)
         say("Starting the template desktop...")
         r = subprocess.run(["systemctl", "start", unit_of(inst)],
                            capture_output=True, text=True)
@@ -566,9 +885,6 @@ def cmd_edit(asked, yes):
         if not door:
             say("(Set HDW4S_EPHEMERAL_URL in %s/hdw4s.conf to have the "
                 "address printed.)" % ETC)
-        say("Open it in a PRIVATE window: the desktop you get belongs to that "
-            "browser, and\nyour other desktops there must not be able to "
-            "reach it.")
         say("Change anything you like: settings, the background, Chrome "
             "extensions and\nbookmarks. When you are done, LOG OUT of that "
             "desktop, and this command will\nask whether to keep the changes. "
@@ -608,7 +924,7 @@ def cmd_edit(asked, yes):
             say("Nothing was published.")
             return 1
 
-        gen, entries, notes = harvest(author, inst)
+        gen, entries, notes = harvest(author, home, inst)
         publish(gen)
         committed = True
         for n in notes:
@@ -629,8 +945,7 @@ def cmd_edit(asked, yes):
             except OSError:
                 pass
         stop()
-        if os.path.lexists(author):
-            shutil.rmtree(author, ignore_errors=True)
+        wipe(inst)
         os.close(lockfd)
         _ = committed
 
@@ -675,6 +990,14 @@ def cmd_show():
     say("\nSettings (%d):" % len(entries))
     for s, k, v in entries:
         say("  %s/%s = %s" % (s, k, v if len(v) < 70 else v[:67] + "..."))
+    kept = read_keep_list()
+    if kept:
+        say("\nKept on request (hdw4s template keep):")
+        for rel in kept:
+            carried = [t for t, sub_ in locations(rel)
+                       if os.path.lexists(os.path.join(CURRENT, t, sub_))]
+            say("  ~/%-38s %s" % (rel, "carried" if carried else
+                                  "not in this template"))
     say("\nFiles:")
     for rel in KEEP_FILES + [CHROME, "../backgrounds"]:
         p = os.path.normpath(os.path.join(CURRENT, "profile", rel))
@@ -696,11 +1019,16 @@ def main(argv):
         if len(rest) > 1 or any(a.startswith("-") for a in rest):
             die("usage: hdw4s template edit [<instance>] [--yes]", 2)
         return cmd_edit(rest[0] if rest else None, yes)
+    if cmd == "keep":
+        return cmd_keep(rest)
+    if cmd == "forget":
+        return cmd_forget(rest)
     if cmd == "reset" and not rest:
         return cmd_reset()
     if cmd == "show" and not rest:
         return cmd_show()
-    die("usage: hdw4s template edit [<instance>] [--yes] | reset | show", 2)
+    die("usage: hdw4s template edit [<instance>] [--yes] | keep [<path>...] | "
+        "forget <path>... | reset | show", 2)
 
 
 if __name__ == "__main__":

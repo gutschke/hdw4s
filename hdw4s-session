@@ -205,13 +205,17 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   # profile, so the session's own markers (first-run sentinels, the indexer's
   # shadows) win over anything the template carried. --update=none: a file that
   # is already there is the session's, never the template's to overwrite.
+  # The home half is what "hdw4s template keep" asked for from programs that
+  # ignore XDG and write ~/.something directly.
   if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
-    tmpl="${HDW4S_TEMPLATE_DIR:-/var/lib/hdw4s-template}/current/profile"
-    if [ -d "${tmpl}" ]; then
-      cp -R --update=none "${tmpl}/." "${profile}/" ||
-        echo "hdw4s-session: could not copy the template from ${tmpl}; this" \
+    tmpl="${HDW4S_TEMPLATE_DIR:-/var/lib/hdw4s-template}/current"
+    for half in "profile:${profile}" "home:${HOME}"; do
+      src="${tmpl}/${half%%:*}"
+      [ -d "${src}" ] || continue
+      cp -R --update=none "${src}/." "${half#*:}/" ||
+        echo "hdw4s-session: could not copy the template from ${src}; this" \
              'session starts without it.' >&2
-    fi
+    done
   fi
 
   install -d -m0700 "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" \

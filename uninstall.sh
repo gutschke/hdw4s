@@ -174,7 +174,8 @@ rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.se
 rm -rf /etc/dconf/db/hdw4s-ephemeral.d /etc/dconf/db/hdw4s-ephemeral \
        /etc/dconf/db/hdw4s-template.d /etc/dconf/db/hdw4s-template \
        /etc/dconf/profile/hdw4s-author \
-       /etc/dconf/profile/hdw4s-ephemeral /etc/hdw4s/chrome-policies
+       /etc/dconf/profile/hdw4s-ephemeral /etc/hdw4s/chrome-policies \
+       /etc/hdw4s/chrome-author-policy.json
 rmdir --ignore-fail-on-non-empty /etc/opt/chrome/policies/managed \
       /etc/opt/chrome/policies 2>/dev/null || :
 if command -v dconf >/dev/null 2>&1; then dconf update 2>/dev/null || :; fi

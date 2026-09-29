@@ -33,7 +33,8 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-templat
          hdw4s-firewall.service
          hdw4s-firewall-check.service hdw4s-firewall.timer
          dconf/profile dconf/profile-author dconf/10-policy dconf/locks/10-policy
-         chrome-policies/hdw4s-ephemeral.json
+         chrome-policies/hdw4s-ephemeral.json chrome-policies/hdw4s-author.json
+         chrome-author-policy.json
          hdw4s-updater.{service,timer} hdw4s-reaper.{service,timer}
          hdw4s-check.{service,timer}
          install.sh uninstall.sh LICENSE)
@@ -195,6 +196,10 @@ install -m0644 "${dst}/dconf/10-policy"       /etc/dconf/db/hdw4s-ephemeral.d/10
 install -m0644 "${dst}/dconf/locks/10-policy" /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
 install -m0644 "${dst}/chrome-policies/hdw4s-ephemeral.json" \
                /etc/hdw4s/chrome-policies/hdw4s-ephemeral.json
+install -m0644 "${dst}/chrome-policies/hdw4s-author.json" \
+               /etc/hdw4s/chrome-policies/hdw4s-author.json
+install -m0644 "${dst}/chrome-author-policy.json" \
+               /etc/hdw4s/chrome-author-policy.json
 
 # The mount point the unit binds over. It must exist on the host or the
 # namespace fails to build, and it must stay EMPTY: a policy file left here

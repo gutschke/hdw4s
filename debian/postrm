@@ -49,7 +49,7 @@ fi
 if [ "$1" = 'purge' ]; then
   # The Chrome policy, whose one file is a conffile: dpkg removes the file
   # itself on purge, and this takes the directory the package created for it.
-  rm -rf /etc/hdw4s/chrome-policies
+  rm -rf /etc/hdw4s/chrome-policies /etc/hdw4s/chrome-author-policy.json
   rm -f /etc/hdw4s/nftables.conf
   # Session slots, per-session overrides and the desktop profiles are the
   # administrator's configuration and the users' state. Purge removes ours.

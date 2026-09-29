@@ -199,6 +199,9 @@ Usage: hdw4s <command> [arguments]
   template edit           change what every new ephemeral desktop starts from:
                           prints a one-time link to the authoring desktop, and
                           asks whether to publish the changes when you log out
+  template keep [<path>]  also carry a program's settings, e.g.
+                          ~/.config/PrusaSlicer; with no path, list them
+  template forget <path>  stop carrying one
   template reset          new ephemeral desktops start from the stock desktop
   template show           list what the template carries
   --version               print the version

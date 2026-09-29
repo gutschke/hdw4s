@@ -34,7 +34,7 @@
 .br
 \fBhdw4s\fR \fBreap\fR
 .br
-\fBhdw4s\fR \fBtemplate\fR \fBedit\fR [\fIinstance\fR] [\fB\-\-yes\fR]|\fBreset\fR|\fBshow\fR
+\fBhdw4s\fR \fBtemplate\fR \fBedit\fR [\fIinstance\fR] [\fB\-\-yes\fR]|\fBkeep\fR [\fIpath\fR\|\.\|\.\|\.]|\fBforget\fR \fIpath\fR\|\.\|\.\|\.|\fBreset\fR|\fBshow\fR
 .br
 \fBhdw4s\fR \fBfirewall\fR \fB\-\-apply\fR|\fB\-\-check\fR|\fB\-\-print\fR|\fB\-\-restore\fR
 .br
@@ -108,11 +108,25 @@ The session must be stopped, or the copy captures half\-written state\.
 Give a session its own keyring with a generated password, sealed to this machine with systemd\-creds and handed to the session at start time, so it is unlocked without anyone typing anything\. The session's keyring is separate from the account's login keyring: passwords saved in one are not visible in the other\. Requires root and a restart of the session\.
 .TP
 \fBtemplate edit\fR [\fIinstance\fR] [\fB\-\-yes\fR]
-Change what every new ephemeral desktop starts from\. Starts the template\-authoring desktop \-\- the slot table's row typed \fBtemplate\fR, made by \fBenable \-\-template\fR \-\- and prints a link that works \fBonce, within five minutes\fR\. Open it in a private browser window, change what you like, and \fBlog out\fR of that desktop when done: the command then asks whether to publish the changes\. Interrupting the command stops the desktop and keeps nothing\. It is for editing, not for working in: nothing but this command starts that desktop\.
+Change what every new ephemeral desktop starts from\. Starts the template\-authoring desktop \-\- the slot table's row typed \fBtemplate\fR, made by \fBenable \-\-template\fR \-\- and prints a link that works \fBonce, within five minutes\fR\. Open it, change what you like, and \fBlog out\fR of that desktop when done: the command then asks whether to publish the changes\. Interrupting the command stops the desktop and keeps nothing\. It is for editing, not for working in: nothing but this command starts that desktop, and one left running by a command that was killed is stopped, unpublished, by the next \fBtemplate edit\fR\.
 .IP
-What is published is an allow\-list, so a setting nobody thought of is left out rather than handed to every visitor\. Carried: GNOME settings (the background, the dock, extensions' settings; not notifications, recent folders, command history or weather location), pictures added as backgrounds, GNOME Shell extensions, fonts, icons and themes installed for the user, and Chrome's extensions, bookmarks and preferences\. \fBNot carried\fR: Chrome's cookies, history, saved logins, autofill, open tabs, site storage, or any extension's own stored data \-\- extensions arrive installed, with their defaults\. Signing in to a Google account in the authoring desktop is refused by the managed Chrome policy\. Anything in the home directory is not carried\. A setting that names a file only the authoring desktop had is left out and reported\.
+What is published is an allow\-list, so a setting nobody thought of is left out rather than handed to every visitor\. Carried: GNOME settings, including everything GNOME Tweaks sets (the background, the dock, focus mode, desktop icons, fonts, window buttons, extensions' settings; not notifications, recent folders, command histories, or weather and world\-clock locations), pictures added as backgrounds, startup applications, default applications, GNOME Shell extensions, fonts, icons and themes installed for the user, and Chrome's extensions, bookmarks and preferences\. \fBNot carried\fR: Chrome's cookies, history, saved logins, autofill, open tabs, site storage, or any extension's own stored data \-\- extensions arrive installed, with their defaults\. Signing in to a Google account in the authoring desktop is refused by the managed Chrome policy; visitors' own desktops allow it\. Nothing else from the home directory is carried unless \fBtemplate keep\fR names it\. A setting that names a file only the authoring desktop had is left out and reported, and the publish lists every command the template makes a visitor's desktop run\.
 .IP
 Set \fBHDW4S_EPHEMERAL_URL\fR to have the full link printed\. Running desktops keep what they started with\.
+.TP
+\fBtemplate keep\fR [\fIpath\fR\|\.\|\.\|\.]
+Also carry a program's own settings, which the built\-in list leaves out \-\- say the preconfigured printers of a slicer, or an IDE's board URLs\. Name the path as it is in a home directory:
+.IP "" 4
+.nf
+hdw4s template keep ~/\.config/PrusaSlicer ~/\.config/OpenSCAD
+hdw4s template keep ~/\.arduinoIDE
+.fi
+.IP "" 0
+.IP
+Where a program following XDG actually keeps it inside the desktop is worked out for you\. The next published \fBtemplate edit\fR carries it whole, minus anything in it named like browser storage, a history or a credential, and it reports, by name only, files that look as though they hold a password or token, and anything large: every new desktop copies the template into memory as it starts, so install big content (board cores, libraries) system\-wide rather than keeping it\. Refused outright: Chrome's profile, keys and keyrings, caches, and anything as broad as \fB~/\.config\fR\. The program itself must be installed on the machine\. With no path, lists what is kept\.
+.TP
+\fBtemplate forget\fR \fIpath\fR\|\.\|\.\|\.
+Stop carrying a kept path, from the next publish on\.
 .TP
 \fBtemplate reset\fR
 Remove the template: new ephemeral desktops start from the stock desktop\. The way back when a published template has broken something\.

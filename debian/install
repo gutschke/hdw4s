@@ -35,6 +35,8 @@ dconf/profile-author     usr/share/hdw4s/dconf
 dconf/10-policy          usr/share/hdw4s/dconf
 dconf/locks/10-policy    usr/share/hdw4s/dconf/locks
 chrome-policies/hdw4s-ephemeral.json  etc/hdw4s/chrome-policies
+chrome-policies/hdw4s-author.json     etc/hdw4s/chrome-policies
+chrome-author-policy.json etc/hdw4s
 # Every unit file, by glob. The list this replaces was one of four places that
 # each named a subset of the units by hand, and the four disagreed. A glob
 # cannot: adding a unit file to the tree is the whole of shipping it.

@@ -8,8 +8,6 @@
   "PromotionalTabsEnabled": false,
   "DefaultBrowserSettingEnabled": false,
 
-  "_comment_signin": "Signing in would tie an account to a session that is about to be destroyed, and would leave the account's own history holding what was done in it.",
-  "BrowserSignin": 0,
-  "SyncDisabled": true,
+  "_comment_signin": "Signing in to a Google account is ALLOWED here: a visitor may want their own bookmarks and extensions, and the account is theirs. It is refused only in the template-authoring desktop, by hdw4s-author.json, where an account would be carried to every visitor.",
   "MetricsReportingEnabled": false
 }
