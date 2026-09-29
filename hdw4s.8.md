@@ -18,6 +18,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `seed` <instance> [`--only` <path>]...<br>
 `hdw4s` `keyring` <instance><br>
 `hdw4s` `reap`<br>
+`hdw4s` `template` `edit` [<instance>] [`--yes`]|`reset`|`show`<br>
 `hdw4s` `firewall` `--apply`|`--check`|`--print`|`--restore`<br>
 `hdw4s` `--version`
 
@@ -151,6 +152,39 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     is unlocked without anyone typing anything. The session's keyring is
     separate from the account's login keyring: passwords saved in one are not
     visible in the other. Requires root and a restart of the session.
+
+  * `template edit` [<instance>] [`--yes`]:
+    Change what every new ephemeral desktop starts from. Starts the
+    template-authoring desktop -- the slot table's row typed `template`, made
+    by `enable --template` -- and prints a link that works **once, within five
+    minutes**. Open it in a private browser window, change what you like, and
+    **log out** of that desktop when done: the command then asks whether to
+    publish the changes. Interrupting the command stops the desktop and keeps
+    nothing. It is for editing, not for working in: nothing but this command
+    starts that desktop.
+
+    What is published is an allow-list, so a setting nobody thought of is left
+    out rather than handed to every visitor. Carried: GNOME settings (the
+    background, the dock, extensions' settings; not notifications, recent
+    folders, command history or weather location), pictures added as
+    backgrounds, GNOME Shell extensions, fonts, icons and themes installed for
+    the user, and Chrome's extensions, bookmarks and preferences. **Not
+    carried**: Chrome's cookies, history, saved logins, autofill, open tabs,
+    site storage, or any extension's own stored data -- extensions arrive
+    installed, with their defaults. Signing in to a Google account in the
+    authoring desktop is refused by the managed Chrome policy. Anything in the
+    home directory is not carried. A setting that names a file only the
+    authoring desktop had is left out and reported.
+
+    Set `HDW4S_EPHEMERAL_URL` to have the full link printed. Running desktops
+    keep what they started with.
+
+  * `template reset`:
+    Remove the template: new ephemeral desktops start from the stock desktop.
+    The way back when a published template has broken something.
+
+  * `template show`:
+    List the settings and files the template carries.
 
   * `firewall --apply`:
     Rewrite the package's nftables table and the kernel's reserved-port list

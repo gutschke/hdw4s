@@ -1,0 +1,9 @@
+# The dconf profile of the template-AUTHORING desktop ("hdw4s template edit").
+#
+# The ephemeral profile without the template's own database. The command seeds
+# this session's user database from the template instead, so what the author
+# sees is what a visitor would see, and a key the author resets is removed from
+# the user database -- and so from the next template -- rather than falling back
+# to the old template's value, which would make un-clicking a setting do nothing.
+user-db:user
+system-db:hdw4s-ephemeral

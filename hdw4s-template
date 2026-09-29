@@ -1,0 +1,707 @@
+#!/usr/bin/python3
+"""The template every new ephemeral desktop starts from.
+
+    hdw4s template edit [<instance>] [--yes]
+    hdw4s template reset
+    hdw4s template show
+
+"edit" starts the template-authoring desktop (the slot table's row typed
+"template"), prints a link that works once, for five minutes, and waits. Log
+out of that desktop when done and this asks whether to publish what you
+changed; interrupting it (Ctrl-C) stops the desktop and keeps nothing.
+
+WHAT IS PUBLISHED IS FILTERED, and the filter is an ALLOW-list on purpose: a
+path nobody thought of is left out, which the author notices and can ask for,
+rather than carried to every visitor, which nobody notices. Settings go through
+dconf and become a system database of their own (hdw4s-template) that every
+ephemeral session reads beneath its own; files go to /var/lib/hdw4s-template,
+world-readable because every visitor receives them anyway, and each new
+session copies them into its fresh profile.
+
+Chrome keeps its extensions, bookmarks and preferences and nothing that is
+browsing: no cookies, history, logins, site storage or open tabs. Signing in to
+a Google account is refused by the managed policy the desktop runs under, so
+the accident this guards against cannot happen in the first place.
+
+"reset" returns every NEW session to the stock desktop. Running sessions keep
+what they started with.
+"""
+
+import fcntl
+import json
+import os
+import pwd
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import hashlib
+import re
+
+os.environ["LC_ALL"] = "C"
+os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+ETC = os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s")
+
+
+def conf(key, default):
+    """A setting from hdw4s.conf, the last assignment winning, or DEFAULT."""
+    val = None
+    try:
+        with open(os.path.join(ETC, "hdw4s.conf")) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(key + "="):
+                    val = line[len(key) + 1:].strip().strip("'\"")
+    except OSError:
+        pass
+    return val if val else default
+
+
+ROOT = conf("HDW4S_TEMPLATE_DIR", "/var/lib/hdw4s-template")
+CURRENT = os.path.join(ROOT, "current")
+# In /run, so an authoring profile a crash left behind -- it holds whatever the
+# author browsed -- is gone at the next boot and is never in a snapshot. The
+# parent is root's and 0711 (entered by name, never listed); the slot's own
+# directory is its uid's and 0700. The authoring session uses it AS its profile
+# root, by the drop-in hdw4s-ephemeral-slots writes for the template row.
+AUTHOR_ROOT = conf("HDW4S_AUTHOR_DIR", "/run/hdw4s-author")
+INVITE_DIR = conf("HDW4S_INVITE_DIR", "/run/hdw4s-invite")
+# Where the router records that an invite was used. Read only.
+SPENT_DIR = "/run/hdw4s-demux/spent-invites"
+DCONF_DIR = "/etc/dconf/db/hdw4s-template.d"
+KEYFILE = "50-template"
+LOCK = "/run/hdw4s-template.lock"
+INVITE_SECONDS = 300
+PROFILE_ROOT = "/run/hdw4s-profile"
+
+# --- what a template may carry ----------------------------------------------
+
+# Profile-relative paths copied whole. Everything else in the profile -- state,
+# cache, recently-used lists, keyrings, online accounts, the indexer -- is left
+# behind by not being named here.
+KEEP_FILES = [
+    "config/gtk-3.0/settings.ini",
+    "config/gtk-4.0/settings.ini",
+    "data/gnome-shell/extensions",
+    "data/applications",
+    "data/icons",
+    "data/themes",
+    "data/fonts",
+]
+
+# Inside Chrome's profile: what makes a browser configured, and nothing that
+# makes it someone's. Cookies, History, Login Data, Web Data (autofill), site
+# storage, Sessions and Local State are all left out by not being listed -- and
+# so is every extension's OWN storage (Local Extension Settings, Extension State,
+# Rules, Scripts): an extension the author signed in to keeps its token there,
+# and would hand it to every visitor. Extensions arrive installed, with their
+# defaults.
+CHROME = "config/google-chrome"
+CHROME_KEEP = [
+    "Bookmarks",
+    "Extensions",
+    "Managed Extension Settings",
+    "Preferences",
+    "Secure Preferences",
+]
+# Personal subtrees of Preferences. Secure Preferences is NEVER edited: its
+# entries carry a MAC and Chrome silently resets whatever fails validation,
+# which would quietly undo the extensions the template exists to carry.
+CHROME_PREF_DROP = [
+    "account_info", "account_tracker_service_last_update", "gaia_cookie",
+    "google.services", "signin", "sync", "sessions",
+    "profile.content_settings.exceptions", "media.engagement",
+    "translate_site_blocklist_with_time", "zerosuggest",
+    "optimization_guide", "browser.window_placement", "custom_links",
+    "segmentation_platform", "media.device_id_salt", "profile.name",
+    "profile.gaia_info_picture_url", "download.directory_upgrade",
+    "savefile", "selectfile", "ntp.num_personal_suggestions",
+]
+
+# dconf: only these subtrees are considered at all ...
+DCONF_ALLOW = [
+    "org/gnome/desktop", "org/gnome/shell", "org/gnome/mutter",
+    "org/gnome/settings-daemon/plugins", "org/gnome/nautilus",
+    "org/gnome/system/locale", "org/gnome/terminal", "org/gnome/TextEditor",
+    "org/gtk/settings", "org/gtk/gtk4/settings",
+]
+# ... and within them, per-person state that reads like a setting.
+DCONF_DENY = [
+    "org/gnome/desktop/notifications",          # bodies and per-app history
+    "org/gtk/settings/file-chooser",            # last folder visited
+    "org/gtk/gtk4/settings/file-chooser",
+    "org/gnome/nautilus/window-state",
+    "org/gnome/shell/command-history",          # verbatim Alt-F2 commands
+    "org/gnome/shell/app-picker-layout",
+    "org/gnome/settings-daemon/plugins/color/night-light-last-coordinates",
+    "org/gnome/desktop/input-sources/mru-sources",
+    "org/gnome/shell/weather",                  # where the author is
+    "org/gnome/shell/extensions/gsconnect",     # a paired phone's identity
+]
+
+
+RUN_SESSION = "/usr/lib/hdw4s/hdw4s-run-session"
+
+
+def session_owned_keys(source=RUN_SESSION):
+    """The keys the SESSION writes or resets at every start, as dconf paths.
+
+    DERIVED FROM THE SCRIPT THAT WRITES THEM, never listed here: they are
+    policy the session re-asserts from the configuration each time, and a
+    template carrying one would outrank it the moment the session RESETS it --
+    HDW4S_THUMBNAILS=on resets show-image-thumbnails, and a harvested 'never'
+    underneath would quietly win. A copied list would drift the first time
+    somebody added a line there."""
+    try:
+        with open(source) as f:
+            text = f.read().replace("\\\n", " ")
+    except OSError:
+        return []
+    keys = []
+    for schema, key in re.findall(
+            r"\b(?:re)?set_if_present\s+([a-z][\w.-]+)\s+([a-z][\w-]+)", text):
+        keys.append(schema.replace(".", "/") + "/" + key)
+    return keys
+
+
+def under(path, prefixes):
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
+
+
+# --- plumbing ---------------------------------------------------------------
+
+def die(msg, rc=1):
+    print("hdw4s template: " + msg, file=sys.stderr)
+    sys.exit(rc)
+
+
+def say(msg):
+    print(msg, flush=True)
+
+
+def template_rows():
+    rows = []
+    try:
+        with open(os.path.join(ETC, "instances")) as f:
+            for line in f:
+                bits = line.split()
+                if len(bits) >= 3 and not bits[0].startswith("#") \
+                        and bits[2] == "template":
+                    rows.append(bits[1])
+    except OSError:
+        pass
+    return rows
+
+
+def pick_instance(asked):
+    rows = template_rows()
+    if asked:
+        if asked not in rows:
+            die("%s is not a template slot. The slot table types these as "
+                "template: %s" % (asked, ", ".join(rows) or "none"))
+        return asked
+    if not rows:
+        die("this machine has no template slot. Make one with:\n"
+            "  hdw4s enable --template <name>")
+    return rows[0]
+
+
+def unit_of(inst):
+    return "hdw4s-ephemeral@%s.service" % inst
+
+
+def unit_state(inst):
+    r = subprocess.run(["systemctl", "is-active", unit_of(inst)],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def take_lock():
+    fd = os.open(LOCK, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        die("another 'hdw4s template' command is running on this machine.")
+    return fd
+
+
+def normalise(tree):
+    """Root-owned and world-readable: every visitor receives this."""
+    for dirpath, dirs, files in os.walk(tree):
+        os.chown(dirpath, 0, 0)
+        os.chmod(dirpath, 0o755)
+        for name in files + [d for d in dirs
+                             if os.path.islink(os.path.join(dirpath, d))]:
+            p = os.path.join(dirpath, name)
+            os.lchown(p, 0, 0)
+            if not os.path.islink(p):
+                os.chmod(p, 0o755 if os.stat(p).st_mode & 0o111 else 0o644)
+
+
+def inside(path, top):
+    """True only if PATH is under TOP with no symlink anywhere on the way. The
+    profile was written by a desktop and root is reading it: a link planted at
+    "data/gnome-shell" or at "config" itself would otherwise point this copy at
+    any file on the machine and publish it world-readable."""
+    real = os.path.realpath(path)
+    return real == os.path.abspath(path) and \
+        real.startswith(os.path.realpath(top) + os.sep)
+
+
+def copy_entry(src, dst):
+    """Copy a file or tree without following symlinks and without special
+    files: the source is a desktop's profile, and root is doing the reading.
+    Symlinks INSIDE a copied tree are copied as links; a visitor's session
+    follows them with its own uid, which reaches nothing it could not already."""
+    if os.path.islink(src):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.symlink(os.readlink(src), dst)
+    elif os.path.isdir(src):
+        shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True,
+                        ignore_dangling_symlinks=True,
+                        copy_function=shutil.copy2,
+                        ignore=lambda d, names: [
+                            n for n in names
+                            if not (os.path.islink(os.path.join(d, n)) or
+                                    os.path.isdir(os.path.join(d, n)) or
+                                    os.path.isfile(os.path.join(d, n)))])
+    elif os.path.isfile(src):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+
+
+def du(path):
+    total = 0
+    for dirpath, _, files in os.walk(path):
+        for n in files:
+            try:
+                total += os.lstat(os.path.join(dirpath, n)).st_size
+            except OSError:
+                pass
+    return total
+
+
+# --- dconf ------------------------------------------------------------------
+
+def parse_keyfile(text):
+    """[(section, key, value)] in order, from dconf's keyfile dump."""
+    out, section = [], None
+    for line in text.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+        elif "=" in line and section is not None:
+            k, v = line.split("=", 1)
+            out.append((section, k, v))
+    return out
+
+
+def dump_user_db(config_home):
+    """The author's user database, and ONLY it: a profile of one line."""
+    db = os.path.join(config_home, "dconf", "user")
+    if not os.path.exists(db):
+        return ""
+    with tempfile.NamedTemporaryFile("w", suffix=".profile") as prof:
+        prof.write("user-db:user\n")
+        prof.flush()
+        env = dict(os.environ, XDG_CONFIG_HOME=config_home,
+                   DCONF_PROFILE=prof.name)
+        r = subprocess.run(["dconf", "dump", "/"], env=env,
+                           capture_output=True, text=True)
+    if r.returncode != 0:
+        die("could not read the authoring desktop's settings: %s"
+            % r.stderr.strip())
+    return r.stdout
+
+
+def filter_dconf(entries, inst, notes):
+    """Keep what the allow-list admits and the deny-list does not; point the
+    author's own backgrounds at their published copy; drop any other value
+    that names a path a visitor's session will not have."""
+    author_bg = "%s/%s/data/backgrounds/" % (AUTHOR_ROOT, inst)
+    published_bg = CURRENT + "/backgrounds/"
+    owned = set(session_owned_keys())
+    if not owned:
+        # Empty means the parse found nothing, not that there is nothing: the
+        # script always sets some. Said, so a rename there cannot quietly let
+        # the session's policy keys into every template.
+        notes.append("could not read which settings the session writes itself "
+                     "from %s; session policy keys may have been carried"
+                     % RUN_SESSION)
+    kept = []
+    for section, key, value in entries:
+        path = section + "/" + key
+        if not under(section, DCONF_ALLOW) or under(section, DCONF_DENY) \
+                or under(path, DCONF_DENY) or path in owned:
+            continue
+        value = value.replace(author_bg, published_bg)
+        if PROFILE_ROOT + "/" in value or AUTHOR_ROOT + "/" in value or \
+                "/home/" in value:
+            notes.append("left out %s: it names a file only the authoring "
+                         "desktop had (%s)" % (path, value[:80]))
+            continue
+        kept.append((section, key, value))
+    return kept
+
+
+def write_keyfile(entries, path):
+    lines, last = [], None
+    for section, key, value in entries:
+        if section != last:
+            if lines:
+                lines.append("")
+            lines.append("[%s]" % section)
+            last = section
+        lines.append("%s=%s" % (key, value))
+    with open(path, "w") as f:
+        f.write("# Written by 'hdw4s template edit'. Replaced whole on the "
+                "next publish;\n# edit the template there, not here.\n\n")
+        f.write("\n".join(lines) + ("\n" if lines else ""))
+
+
+# --- the Chrome profile -----------------------------------------------------
+
+def drop_dotted(obj, dotted):
+    bits = dotted.split(".")
+    for b in bits[:-1]:
+        if not isinstance(obj, dict) or b not in obj:
+            return
+        obj = obj[b]
+    if isinstance(obj, dict):
+        obj.pop(bits[-1], None)
+
+
+def harvest_chrome(src, dst, notes):
+    default = os.path.join(src, "Default")
+    if not os.path.isdir(default):
+        return
+    for name in CHROME_KEEP:
+        if os.path.islink(os.path.join(default, name)):
+            continue
+        copy_entry(os.path.join(default, name),
+                   os.path.join(dst, "Default", name))
+    prefs = os.path.join(dst, "Default", "Preferences")
+    if os.path.isfile(prefs):
+        try:
+            with open(prefs) as f:
+                p = json.load(f)
+        except (OSError, ValueError):
+            os.unlink(prefs)
+            notes.append("left out Chrome's Preferences: it could not be read")
+            return
+        for k in CHROME_PREF_DROP:
+            drop_dotted(p, k)
+        prof = p.setdefault("profile", {})
+        prof["exit_type"] = "Normal"
+        prof["exited_cleanly"] = True
+        with open(prefs, "w") as f:
+            json.dump(p, f, separators=(",", ":"))
+
+
+# --- the three commands -----------------------------------------------------
+
+def seed(author, uid, gid):
+    """The authoring profile starts as a visitor's would, with the template's
+    settings in the USER database so that resetting one removes it."""
+    if os.path.lexists(author):
+        shutil.rmtree(author)
+    os.makedirs(AUTHOR_ROOT, mode=0o711, exist_ok=True)
+    os.chmod(AUTHOR_ROOT, 0o711)
+    os.mkdir(author, 0o700)
+    if os.path.isdir(os.path.join(CURRENT, "profile")):
+        copy_entry(os.path.join(CURRENT, "profile"), author)
+    keydir = os.path.join(CURRENT, "dconf")
+    if os.path.isfile(os.path.join(keydir, KEYFILE)):
+        os.makedirs(os.path.join(author, "config", "dconf"), exist_ok=True)
+        subprocess.run(["dconf", "compile",
+                        os.path.join(author, "config", "dconf", "user"),
+                        keydir], check=True)
+    for dirpath, dirs, files in os.walk(author):
+        os.lchown(dirpath, uid, gid)
+        for n in dirs + files:
+            os.lchown(os.path.join(dirpath, n), uid, gid)
+
+
+def harvest(author, inst):
+    """Build the next template from AUTHOR in a new generation directory."""
+    notes = []
+    gen = os.path.join(ROOT, "gen-%d" % time.time_ns())
+    os.makedirs(gen, mode=0o755)
+    for rel in KEEP_FILES:
+        src = os.path.join(author, rel)
+        if os.path.lexists(src) and not inside(src, author):
+            notes.append("left out %s: it is, or is reached through, a "
+                         "symbolic link" % rel)
+            continue
+        copy_entry(src, os.path.join(gen, "profile", rel))
+    chrome = os.path.join(author, CHROME, "Default")
+    if os.path.lexists(chrome) and not inside(chrome, author):
+        notes.append("left out Chrome: its profile is reached through a "
+                     "symbolic link")
+    else:
+        harvest_chrome(os.path.join(author, CHROME),
+                       os.path.join(gen, "profile", CHROME), notes)
+
+    config = os.path.join(author, "config")
+    db = os.path.join(config, "dconf", "user")
+    if os.path.lexists(db) and not inside(db, author):
+        notes.append("left out every setting: the settings database is "
+                     "reached through a symbolic link")
+        entries = []
+    else:
+        entries = filter_dconf(parse_keyfile(dump_user_db(config)), inst,
+                               notes)
+    os.makedirs(os.path.join(gen, "dconf"))
+    write_keyfile(entries, os.path.join(gen, "dconf", KEYFILE))
+
+    # Backgrounds: the author's new ones, and the published ones still named.
+    bg = os.path.join(gen, "backgrounds")
+    os.makedirs(bg)
+    for src in (os.path.join(CURRENT, "backgrounds"),
+                os.path.join(author, "data", "backgrounds")):
+        if os.path.isdir(src) and (src.startswith(CURRENT) or
+                                   inside(src, author)):
+            for n in os.listdir(src):
+                if os.path.isfile(os.path.join(src, n)) and \
+                        not os.path.islink(os.path.join(src, n)):
+                    shutil.copy2(os.path.join(src, n), os.path.join(bg, n))
+    named = "\n".join(v for _, _, v in entries)
+    for n in os.listdir(bg):
+        if CURRENT + "/backgrounds/" + n not in named:
+            os.unlink(os.path.join(bg, n))
+
+    normalise(gen)
+    return gen, entries, notes
+
+
+def publish(gen):
+    """Swap CURRENT to GEN in one rename, then install its settings."""
+    link = os.path.join(ROOT, ".current.new")
+    if os.path.lexists(link):
+        os.unlink(link)
+    os.symlink(os.path.basename(gen), link)
+    os.replace(link, CURRENT)
+    install_keyfile(os.path.join(gen, "dconf", KEYFILE))
+    for n in os.listdir(ROOT):
+        if n.startswith("gen-") and os.path.join(ROOT, n) != gen:
+            shutil.rmtree(os.path.join(ROOT, n), ignore_errors=True)
+
+
+def install_keyfile(src):
+    os.makedirs(DCONF_DIR, mode=0o755, exist_ok=True)
+    dst = os.path.join(DCONF_DIR, KEYFILE)
+    if src is None:
+        if os.path.exists(dst):
+            os.unlink(dst)
+    else:
+        tmp = dst + ".new"
+        shutil.copyfile(src, tmp)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dst)
+    r = subprocess.run(["dconf", "update"], capture_output=True, text=True)
+    if r.returncode != 0:
+        die("'dconf update' failed, so new desktops do not have these "
+            "settings yet: %s" % r.stderr.strip())
+
+
+def cmd_edit(asked, yes):
+    inst = pick_instance(asked)
+    lockfd = take_lock()
+    if unit_state(inst) in ("active", "activating", "deactivating", "reloading"):
+        die("the template desktop %s is already running. Stop it first:\n"
+            "  systemctl stop %s" % (inst, unit_of(inst)))
+    try:
+        pw = pwd.getpwnam(inst)
+    except KeyError:
+        die("%s has no account yet. It is made at boot, or by:\n"
+            "  hdw4s enable --template %s" % (inst, inst))
+    author = os.path.join(AUTHOR_ROOT, inst)
+    token = secrets.token_hex(16)
+    invite = os.path.join(INVITE_DIR,
+                          hashlib.sha256(token.encode("ascii")).hexdigest())
+
+    interrupted = []
+
+    def on_signal(signum, _frame):
+        interrupted.append(signum)
+        raise KeyboardInterrupt
+
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, on_signal)
+
+    def stop():
+        subprocess.run(["systemctl", "stop", unit_of(inst)],
+                       capture_output=True)
+
+    committed = False
+    try:
+        seed(author, pw.pw_uid, pw.pw_gid)
+        say("Starting the template desktop...")
+        r = subprocess.run(["systemctl", "start", unit_of(inst)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            die("the template desktop did not start:\n  %s\n"
+                "  journalctl -u %s says why." % (r.stderr.strip(),
+                                                  unit_of(inst)))
+        expires = time.time() + INVITE_SECONDS
+        os.makedirs(INVITE_DIR, mode=0o711, exist_ok=True)
+        fd = os.open(invite + ".new", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                     0o644)
+        with os.fdopen(fd, "w") as f:
+            f.write("%s %d\n" % (inst, expires))
+        os.replace(invite + ".new", invite)
+        spent = os.path.join(SPENT_DIR, os.path.basename(invite))
+
+        door = conf("HDW4S_EPHEMERAL_URL", "")
+        base = door.rstrip("/") if door else "https://<your ephemeral hostname>"
+        say("")
+        say("Open this link in a browser. It works once, within %d minutes:"
+            % (INVITE_SECONDS // 60))
+        say("")
+        say("  %s/template/%s" % (base, token))
+        say("")
+        if not door:
+            say("(Set HDW4S_EPHEMERAL_URL in %s/hdw4s.conf to have the "
+                "address printed.)" % ETC)
+        say("Open it in a PRIVATE window: the desktop you get belongs to that "
+            "browser, and\nyour other desktops there must not be able to "
+            "reach it.")
+        say("Change anything you like: settings, the background, Chrome "
+            "extensions and\nbookmarks. When you are done, LOG OUT of that "
+            "desktop, and this command will\nask whether to keep the changes. "
+            "Ctrl-C here ends it and keeps nothing.")
+
+        opened = False
+        while True:
+            state = unit_state(inst)
+            if state not in ("active", "activating", "reloading"):
+                break
+            if not opened and os.path.exists(spent):
+                opened = True
+                say("\nThe link has been used. Waiting for you to log out...")
+            if not opened and time.time() > expires:
+                say("\nThe link was not used within %d minutes. Stopping the "
+                    "template desktop; nothing was changed."
+                    % (INVITE_SECONDS // 60))
+                return 1
+            time.sleep(1)
+
+        say("\nThe template desktop has ended.")
+        if not opened:
+            say("It ended before the link was used; nothing was changed.")
+            return 1
+        if yes:
+            answer = "y"
+        elif sys.stdin.isatty():
+            try:
+                answer = input("Publish these changes as the template for new "
+                               "desktops? [y/N] ")
+            except EOFError:
+                answer = ""
+        else:
+            say("Not a terminal and no --yes, so nothing is published.")
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            say("Nothing was published.")
+            return 1
+
+        gen, entries, notes = harvest(author, inst)
+        publish(gen)
+        committed = True
+        for n in notes:
+            say("  note: " + n)
+        say("Published: %d setting(s), %s of files. New desktops start from "
+            "it;\nrunning ones keep what they started with. 'hdw4s template "
+            "reset' undoes it." % (len(entries), human(du(gen))))
+        return 0
+    except KeyboardInterrupt:
+        say("\nInterrupted: stopping the template desktop. Nothing was "
+            "published.")
+        return 130
+    finally:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        for p in (invite, invite + ".new"):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        stop()
+        if os.path.lexists(author):
+            shutil.rmtree(author, ignore_errors=True)
+        os.close(lockfd)
+        _ = committed
+
+
+def cmd_reset():
+    lockfd = take_lock()
+    had = os.path.lexists(CURRENT)
+    if had:
+        os.unlink(CURRENT)
+    for n in os.listdir(ROOT) if os.path.isdir(ROOT) else []:
+        if n.startswith("gen-"):
+            shutil.rmtree(os.path.join(ROOT, n), ignore_errors=True)
+    install_keyfile(None)
+    os.close(lockfd)
+    say("The template is empty: new desktops start from the stock desktop."
+        if had else "There was no template; new desktops already start from "
+        "the stock desktop.")
+    return 0
+
+
+def human(n):
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "bytes" else \
+                ("%.1f %s" % (n, unit))
+        n /= 1024.0
+
+
+def cmd_show():
+    if not os.path.isdir(CURRENT):
+        say("No template: new desktops start from the stock desktop.")
+        return 0
+    real = os.path.realpath(CURRENT)
+    say("Template published %s, %s of files."
+        % (time.strftime("%Y-%m-%d %H:%M", time.localtime(
+            os.stat(real).st_mtime)), human(du(real))))
+    try:
+        with open(os.path.join(CURRENT, "dconf", KEYFILE)) as f:
+            entries = parse_keyfile(f.read())
+    except OSError:
+        entries = []
+    say("\nSettings (%d):" % len(entries))
+    for s, k, v in entries:
+        say("  %s/%s = %s" % (s, k, v if len(v) < 70 else v[:67] + "..."))
+    say("\nFiles:")
+    for rel in KEEP_FILES + [CHROME, "../backgrounds"]:
+        p = os.path.normpath(os.path.join(CURRENT, "profile", rel))
+        if os.path.exists(p):
+            say("  %-40s %s" % (os.path.relpath(p, CURRENT), human(du(p))))
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.split("\n\n")[1] if argv else __doc__)
+        return 0 if argv else 2
+    if os.geteuid() != 0:
+        die("this needs root.")
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "edit":
+        yes = "--yes" in rest
+        rest = [a for a in rest if a != "--yes"]
+        if len(rest) > 1 or any(a.startswith("-") for a in rest):
+            die("usage: hdw4s template edit [<instance>] [--yes]", 2)
+        return cmd_edit(rest[0] if rest else None, yes)
+    if cmd == "reset" and not rest:
+        return cmd_reset()
+    if cmd == "show" and not rest:
+        return cmd_show()
+    die("usage: hdw4s template edit [<instance>] [--yes] | reset | show", 2)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

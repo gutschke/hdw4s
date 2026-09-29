@@ -197,6 +197,23 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   export XDG_DATA_HOME="${profile}/data"
   export XDG_STATE_HOME="${profile}/state"
   export XDG_CACHE_HOME="${profile}/cache"
+
+  # THE ADMINISTRATOR'S TEMPLATE, copied into a profile that starts empty.
+  # "hdw4s template edit" publishes it already filtered, world-readable on
+  # purpose -- every visitor receives it -- and its settings half is a dconf
+  # layer, not a file here. Copied before anything below writes into the
+  # profile, so the session's own markers (first-run sentinels, the indexer's
+  # shadows) win over anything the template carried. --update=none: a file that
+  # is already there is the session's, never the template's to overwrite.
+  if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+    tmpl="${HDW4S_TEMPLATE_DIR:-/var/lib/hdw4s-template}/current/profile"
+    if [ -d "${tmpl}" ]; then
+      cp -R --update=none "${tmpl}/." "${profile}/" ||
+        echo "hdw4s-session: could not copy the template from ${tmpl}; this" \
+             'session starts without it.' >&2
+    fi
+  fi
+
   install -d -m0700 "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" \
                     "${XDG_STATE_HOME}" "${XDG_CACHE_HOME}"
 

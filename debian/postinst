@@ -137,13 +137,23 @@ if [ "$1" = 'configure' ]; then
 
   # The settings layer every ephemeral session starts from. Package-owned and
   # rewritten on every install: the administrator's own additions belong in the
-  # 50-template layer above these, and an upgrade that left a stale lockdown
-  # behind would be the kind of difference nobody thinks to look for.
-  mkdir -p /etc/dconf/profile /etc/dconf/db/hdw4s-ephemeral.d/locks
+  # hdw4s-template database above these ("hdw4s template edit"), and an upgrade
+  # that left a stale lockdown behind would be the kind of difference nobody
+  # thinks to look for.
+  mkdir -p /etc/dconf/profile /etc/dconf/db/hdw4s-ephemeral.d/locks \
+           /etc/dconf/db/hdw4s-template.d
   cp /usr/share/hdw4s/dconf/profile         /etc/dconf/profile/hdw4s-ephemeral
+  cp /usr/share/hdw4s/dconf/profile-author  /etc/dconf/profile/hdw4s-author
   cp /usr/share/hdw4s/dconf/10-policy       /etc/dconf/db/hdw4s-ephemeral.d/10-policy
   cp /usr/share/hdw4s/dconf/locks/10-policy /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
-  chmod 0644 /etc/dconf/profile/hdw4s-ephemeral \
+  # The template's settings half is the ADMINISTRATOR'S, kept with the rest of
+  # the template in /var/lib/hdw4s-template; removing the package takes the
+  # compiled copy, so reinstalling puts it back.
+  if [ -f /var/lib/hdw4s-template/current/dconf/50-template ]; then
+    cp /var/lib/hdw4s-template/current/dconf/50-template \
+       /etc/dconf/db/hdw4s-template.d/50-template
+  fi
+  chmod 0644 /etc/dconf/profile/hdw4s-ephemeral /etc/dconf/profile/hdw4s-author \
              /etc/dconf/db/hdw4s-ephemeral.d/10-policy \
              /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
 

@@ -3770,6 +3770,132 @@ def let_slot(own, identity):
 
 START_DIR = os.environ.get("HDW4S_START_DIR", "/run/hdw4s-start")
 
+# THE ONE WAY INTO THE TEMPLATE-AUTHORING DESKTOP. "hdw4s template edit" (root)
+# writes one file here named by the SHA-256 of a random token and prints the
+# token, once, inside a URL. The directory is root's, 0711, and the router may
+# only READ it: knowing a file's name already takes the token, and nothing else
+# on the machine (a web server sharing the router's group, say) can plant one.
+# That the invite has been SPENT is recorded in the router's own state
+# directory, where "hdw4s template edit" looks for it -- the invite itself is
+# never written by the router.
+INVITE_DIR = os.environ.get("HDW4S_INVITE_DIR", "/run/hdw4s-invite")
+SPENT_DIR = os.path.join(STATE_DIR, "spent-invites")
+_INVITE_SHAPE = r"^[0-9a-f]{32}$"
+
+
+def invite_open(token, root=None, spent=None, now=None):
+    """True if TOKEN names an invite that is unexpired and unspent. SPENDS
+    NOTHING: this only decides whether a GET shows the button or says the link
+    is dead. The POST's spend_invite() is still the only thing that admits."""
+    if not isinstance(token, str) or not re.match(_INVITE_SHAPE, token):
+        return False
+    name = hashlib.sha256(token.encode("ascii")).hexdigest()
+    try:
+        with open(os.path.join(INVITE_DIR if root is None else root,
+                               name), "r") as f:
+            bits = f.read(256).split()
+        expires = float(bits[1])
+    except (OSError, IndexError, ValueError):
+        return False
+    return (time.time() if now is None else now) <= expires and not \
+        os.path.exists(os.path.join(SPENT_DIR if spent is None else spent,
+                                    name))
+
+
+def spend_invite(token, root=None, spent=None, now=None, table=_READ_IT):
+    """The template instance TOKEN admits to, or None. Spends it either way.
+
+    THE O_EXCL DECIDES. Two requests carrying the same token both read the
+    invite; exactly one creates the spent marker and only that caller gets an
+    instance -- nothing reads-then-writes, so there is no window to widen. A
+    replay finds the marker, which is refused exactly like a token never issued.
+    The marker lives in a directory that survives a router restart, so a
+    restart cannot make a spent invite good again.
+
+    An expired invite is refused. The row the invite names must still be typed
+    "template" in the slot table: the file is root's, but the table is the
+    authority on what a slot is, and this route must never let a visitor onto
+    a pool slot or a named desktop.
+    """
+    if not isinstance(token, str) or not re.match(_INVITE_SHAPE, token):
+        return None
+    name = hashlib.sha256(token.encode("ascii")).hexdigest()
+    try:
+        with open(os.path.join(INVITE_DIR if root is None else root,
+                               name), "r") as f:
+            body = f.read(256)
+    except OSError:
+        return None
+    bits = body.split()
+    if len(bits) != 2 or not re.match(_SLOT_SHAPE, bits[0]):
+        return None
+    try:
+        expires = float(bits[1])
+    except ValueError:
+        return None
+    if (time.time() if now is None else now) > expires:
+        log("refused an expired template invite for %s" % bits[0])
+        return None
+    rows = slot_table() if table is _READ_IT else table
+    if rows is None or (bits[0], "template") not in rows:
+        log("refused a template invite for %s: the slot table does not type "
+            "it 'template'" % bits[0])
+        return None
+    marks = SPENT_DIR if spent is None else spent
+    try:
+        os.makedirs(marks, mode=0o700, exist_ok=True)
+        os.close(os.open(os.path.join(marks, name),
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except OSError:
+        log("refused a template invite for %s: it has been used" % bits[0])
+        return None
+    return bits[0]
+
+
+def template_card(token):
+    """What a GET of the invite link shows: a button, and nothing spent. The
+    link is pasted from a terminal, and a chat preview, a prefetcher or a
+    restored tab fetches with GET -- any of which would otherwise take the one
+    use, and a live desktop with it. The same reason create_form() is a form."""
+    return card(
+        "Edit the template",
+        "<p>This opens the desktop every new visitor's desktop starts from. "
+        "The link works once.</p>"
+        "<form method=\"post\" action=\"/template/%s\">"
+        "<button class=\"btn primary\" type=\"submit\">Open the template "
+        "desktop</button></form>" % token)
+
+
+def assert_invite_is_single_use(spend=None):
+    """Seen refusing, at every start: a replay, an expired invite, an invite
+    onto a pool slot and a malformed token are refused; one good spend is
+    admitted -- so a spender that refused everything fails here too."""
+    import tempfile
+    spend = spend_invite if spend is None else spend
+    table = [("tmpl", "template"), ("ephemeral0", "ephemeral")]
+    with tempfile.TemporaryDirectory() as d:
+        marks = os.path.join(d, "spent")
+        def plant(token, inst, expires):
+            name = hashlib.sha256(token.encode("ascii")).hexdigest()
+            with open(os.path.join(d, name), "w") as f:
+                f.write("%s %d\n" % (inst, expires))
+        now = time.time()
+        kw = dict(root=d, spent=marks, now=now, table=table)
+        plant("a" * 32, "tmpl", now + 60)
+        assert spend("a" * 32, **kw) == "tmpl", \
+            "a valid template invite was refused"
+        assert spend("a" * 32, **kw) is None, \
+            "a spent template invite was admitted twice"
+        plant("b" * 32, "tmpl", now - 1)
+        assert spend("b" * 32, **kw) is None, \
+            "an expired template invite was admitted"
+        plant("c" * 32, "ephemeral0", now + 60)
+        assert spend("c" * 32, **kw) is None, \
+            "a template invite onto a pool slot was admitted"
+        assert spend("../" + "d" * 29, **kw) is None, \
+            "a malformed template token was admitted"
+
+
 # HOW LONG A REQUEST THAT IS NOT A PAGE WAITS FOR A DESKTOP BEING STARTED. The
 # same thirty seconds forward_request() already gives an upstream to answer, so
 # nothing that used to be served is now refused sooner. A page does not wait
@@ -6263,6 +6389,40 @@ def serve(sock, own, expected_b64):
                         refresh_headers(own, identity, new_identity))
                 continue
 
+            if sid is None and rest.startswith(b"/template/"):
+                # NOT AN ARRIVAL: this mints only on a spent invite, and only
+                # onto the row the invite names. A GET spends nothing; the
+                # POST from its own page does, and only from this origin.
+                token = rest[len(b"/template/"):].rstrip(b"/") \
+                    .decode("ascii", "replace")
+                if method == b"POST":
+                    why = cross_site_refusal(headers)
+                    if why is not None:
+                        refuse_cross_site(wf, "template", why, identity)
+                        continue
+                    inst = spend_invite(token)
+                else:
+                    inst = "" if invite_open(token) else None
+                if inst is None:
+                    respond(wf, 404, card(
+                        "Nothing here",
+                        "<p>This link is not valid: it has been used, or it "
+                        "has expired.</p>"),
+                        refresh_headers(own, identity, new_identity))
+                    continue
+                if inst == "":
+                    respond(wf, 200, template_card(token),
+                            [("Cache-Control", "no-store")] +
+                            refresh_headers(own, identity, new_identity))
+                    continue
+                with own.letting:
+                    tsid = own.mint_session(identity, inst)
+                log("admitted a template invite: %s let to visitor %s"
+                    % (inst, visitor_tag(identity)))
+                respond(wf, 303, b"", [("Location", "/s/%s/" % tsid)] +
+                        refresh_headers(own, identity, new_identity))
+                continue
+
             if sid is None:
                 what, csid = console_target(rest)
                 if what is not None:
@@ -6671,6 +6831,8 @@ def main():
     assert_console_shows_only_your_own(console_target)
     # And the press that another page made, refused and ours permitted.
     assert_cross_site_posts_are_refused(cross_site_refusal)
+    # And the one door onto the template-authoring desktop.
+    assert_invite_is_single_use(spend_invite)
 
     # The third guard REPORTS and does not refuse, and the asymmetry with the
     # two above is deliberate. Those two fail closed because what they catch is

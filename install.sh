@@ -17,7 +17,7 @@ trap 'rc="$?"
 }
 
 src="$(cd "$(dirname "$0")" && pwd)"
-SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration}
+SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-template}
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
          hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index hdw4s-names.js
@@ -32,7 +32,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration}
          hdw4s-demux hdw4s-demux.socket hdw4s-demux.service
          hdw4s-firewall.service
          hdw4s-firewall-check.service hdw4s-firewall.timer
-         dconf/profile dconf/10-policy dconf/locks/10-policy
+         dconf/profile dconf/profile-author dconf/10-policy dconf/locks/10-policy
          chrome-policies/hdw4s-ephemeral.json
          hdw4s-updater.{service,timer} hdw4s-reaper.{service,timer}
          hdw4s-check.{service,timer}
@@ -169,7 +169,7 @@ if [ "${src}" != "${dst}" ]; then
   cp -f "${src}"/wrappers/* "${dst}/wrappers/"
 fi
 chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
-           "${dst}"/hdw4s-duration \
+           "${dst}"/hdw4s-duration "${dst}"/hdw4s-template \
            "${dst}"/hdw4s-ephemeral-slots "${dst}"/hdw4s-webroot \
            "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse \
            "${dst}"/hdw4s-incarnation "${dst}"/hdw4s-stream-dir \
@@ -184,12 +184,13 @@ chmod 0644 "${dst}"/hdw4s-selkies-webrtc "${dst}"/*.service "${dst}"/*.timer "${
 # that is visible only inside one.
 #
 # The dconf files are package-owned and are rewritten on every install: they are
-# ours, the administrator's own additions belong in the 50-template layer above
-# them, and an install that left a stale lockdown in place would be the kind of
-# difference nobody looks for.
+# ours, the administrator's own additions belong in the hdw4s-template database
+# above them ("hdw4s template edit"), and an install that left a stale lockdown
+# in place would be the kind of difference nobody looks for.
 install -d -m0755 /etc/dconf/profile /etc/dconf/db/hdw4s-ephemeral.d/locks \
-                  /etc/hdw4s/chrome-policies
+                  /etc/dconf/db/hdw4s-template.d /etc/hdw4s/chrome-policies
 install -m0644 "${dst}/dconf/profile"         /etc/dconf/profile/hdw4s-ephemeral
+install -m0644 "${dst}/dconf/profile-author"  /etc/dconf/profile/hdw4s-author
 install -m0644 "${dst}/dconf/10-policy"       /etc/dconf/db/hdw4s-ephemeral.d/10-policy
 install -m0644 "${dst}/dconf/locks/10-policy" /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
 install -m0644 "${dst}/chrome-policies/hdw4s-ephemeral.json" \

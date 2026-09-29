@@ -11,4 +11,9 @@
 # Never add these lines to /etc/dconf/profile/user. Every dconf client on the
 # machine reads that file, including the administrator's own login session.
 user-db:user
+# The administrator's template ("hdw4s template edit"), a database of its own
+# rather than a file beside 10-policy: the command replaces it whole, and a lock
+# in the policy database below still binds it, because a dconf lock applies to
+# every database above the one that sets it.
+system-db:hdw4s-template
 system-db:hdw4s-ephemeral

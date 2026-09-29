@@ -1,11 +1,10 @@
 # Settings every ephemeral session starts from. Package-owned: edit the file,
 # run "dconf update", and the next session reads the compiled database.
 #
-# The 50-template layer sits above this one and is NOT generated yet. Its
-# position is reserved deliberately: a session that resets a key falls back to
-# the administrator's template rather than to stock GNOME, and that only works
-# if the template is a layer rather than a seeded copy of the user database.
-# Do not renumber these files to close the gap.
+# The administrator's template sits above this one, as a database of its own
+# (hdw4s-template; see /etc/dconf/profile/hdw4s-ephemeral), so a session that
+# resets a key falls back to the template rather than to stock GNOME. The locks
+# below bind it too.
 
 # ---- the session cannot be locked, because nobody can unlock it ------------
 # There is no password to type: the session has no PAM, and the account has no

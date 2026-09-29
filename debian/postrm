@@ -38,6 +38,8 @@ if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
 # Deleting the directory here destroyed an edited copy under plain remove,
 # silently, with dpkg still listing the file as present and owned.
 rm -rf /etc/dconf/db/hdw4s-ephemeral.d /etc/dconf/db/hdw4s-ephemeral \
+       /etc/dconf/db/hdw4s-template.d /etc/dconf/db/hdw4s-template \
+       /etc/dconf/profile/hdw4s-author \
        /etc/dconf/profile/hdw4s-ephemeral
 rmdir --ignore-fail-on-non-empty /etc/opt/chrome/policies/managed \
       /etc/opt/chrome/policies 2>/dev/null || :
@@ -52,6 +54,8 @@ if [ "$1" = 'purge' ]; then
   # Session slots, per-session overrides and the desktop profiles are the
   # administrator's configuration and the users' state. Purge removes ours.
   rm -f /etc/hdw4s/instances /etc/hdw4s/hdw4s.conf
+  # The published template, and an authoring profile a crash left behind.
+  rm -rf /var/lib/hdw4s-template /run/hdw4s-author
   # Per-instance overrides, and the credentials sealed to this machine. Leaving
   # the credentials contradicted the sentence above, and leaving the drop-ins
   # meant a reinstall came back up with stale User= and port assignments

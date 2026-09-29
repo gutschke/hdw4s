@@ -505,7 +505,7 @@ esac
 #
 # DERIVED, NEVER ASSUMED: it asks dconf what picture-uri is ACTUALLY in force
 # and writes only when the answer is the path this product owns. One line, and
-# it buys three things. An administrator with a 50-template layer keeps their
+# it buys three things. An administrator with a template (hdw4s template) keeps their
 # wallpaper -- that layer outranks ours, measured with a control -- because the
 # value read back is theirs and not ours, and nothing here has to know the
 # template exists. An administrator who set HDW4S_EPHEMERAL_BACKGROUND to a
