@@ -67,6 +67,12 @@ PROXYDIR="${HDW4S_PROXY_RUNDIR:-/run/hdw4s-proxy}"
 TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
 STARTDIR="${HDW4S_START_DIR:-/run/hdw4s-start}"
 INCARNDIR="${HDW4S_INCARNATION_DIR:-/run/hdw4s-incarnation}"
+# Where each session's streaming server listens: one directory per instance,
+# prepared at every session start by hdw4s-stream-dir. Named here because it is
+# machine-wide and must exist before any session can start, for NAMED sessions
+# as much as for the pool -- see the install -d below.
+STREAMDIR="${HDW4S_STREAM_DIR:-/run/hdw4s-stream}"
+RELAY_GROUP='hdw4s-relay'
 # shellcheck source=/dev/null
 [ ! -r "${ETCDIR}/hdw4s.conf" ] || . "${ETCDIR}/hdw4s.conf"
 
@@ -203,6 +209,23 @@ install -d -m 0770 -g www-data "${STARTDIR}"
 # 0700, not 0755: this one holds a token per live slot, so its listing is a list of
 # which slots exist. Made separately rather than loosened into the line above.
 install -d -m 0700 "${INCARNDIR}"
+# THE STREAM ROOT: root-owned, group hdw4s-relay, 0711. Search for everyone and
+# a listing for nobody -- the names inside are account names, and an occupant
+# may reach its own directory by name without learning anyone else's. The GROUP
+# is not for access (the mode gives the group nothing the world lacks); it is
+# where hdw4s-stream-dir and hdw4s-session READ the relay's gid from, so that
+# neither has to resolve a group name inside a session's namespace, where the
+# ephemeral unit binds its own /etc/group over the real one.
+#
+# No group, no stream root, and said so: without it no session on this machine
+# can be reached, and the relay would fail on SupplementaryGroups= with a
+# status code that names neither this file nor the package step that was missed.
+getent group "${RELAY_GROUP}" >/dev/null ||
+  die "the system group ${RELAY_GROUP} does not exist, so no desktop on this
+  machine can be reached. It is created by systemd-sysusers from
+  hdw4s-sysusers.conf in a sysusers.d directory; run 'systemd-sysusers' and
+  start this unit again."
+install -d -m 0711 -g "${RELAY_GROUP}" "${STREAMDIR}"
 
 # Set when a slot's unit has already been loaded, which is the only case that
 # needs a reload; see the note beside the drop-in below.

@@ -1,0 +1,120 @@
+#!/bin/bash -e
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+# Prepares, and removes, the directory a session's streaming server listens in.
+#
+#   hdw4s-stream-dir prepare <instance>    ExecStart= of hdw4s-stream@<instance>
+#   hdw4s-stream-dir remove  <instance>    ExecStop=  of hdw4s-stream@<instance>
+#
+# WHY A DIRECTORY AND NOT A PORT. Every desktop on the machine shares one network
+# namespace, so a loopback port is a name ANY occupant may take: one desktop could
+# listen on another slot's free port, the victim's relay would find it "up", and the
+# victim's visitor would be served by the squatter. Nothing on a systemd built without
+# its BPF framework can stop a bind() to a given port (SocketBindDeny= was measured
+# enforcing nothing), but a filesystem path is guarded by ordinary permissions, which
+# every kernel enforces. So the streaming server listens on
+#
+#   /run/hdw4s-stream/<instance>/s/stream.sock
+#
+# and the layout is what does the refusing:
+#
+#   /run/hdw4s-stream                root:hdw4s-relay 0711  made at boot (slot minter)
+#   /run/hdw4s-stream/<instance>     root:root        0711  made here, never removed
+#   /run/hdw4s-stream/<instance>/s   <account>:hdw4s-relay 2750  REMADE at every
+#                                                        start, removed at stop
+#
+# Nobody but the session's own account may create anything in "s", and nobody but
+# that account and the relay's group may enter it -- so another occupant can neither
+# plant a socket there nor connect to the one that is there.
+#
+# WHY TWO LEVELS. The relay sees ONLY <instance> (hdw4s-proxy@.service binds it into
+# an otherwise empty /run), and it must go on seeing the NEXT session's socket after
+# this one stops, because a pool relay outlives its session. A bind of "s" itself
+# would pin the directory this script deletes at stop, and the relay would go on
+# looking into a removed inode. <instance> is root's and never goes away, so the
+# relay's view of it stays live while "s" beneath it is replaced.
+#
+# WHY "s" IS REMADE RATHER THAN EMPTIED. It belongs to the session's uid, and pool
+# uids are REUSED by successive occupants. Anything the last one left in it -- a
+# symlink in place of the socket, a mode change, a file named like the socket --
+# goes with the directory; emptying it would be a list of what to look for.
+#
+# WHY A UNIT OF ITS OWN AND NOT AN ExecStartPre= OF THE SESSION. Both obvious forms
+# are broken there, and neither fails loudly on every machine:
+#
+#   "+"  drops ProtectHome= but KEEPS TemporaryFileSystem=, so the ephemeral unit's
+#        /home/user mount would be made on the REAL /home -- fatal (226/NAMESPACE)
+#        where /home is NFS, a stray empty directory on the host where it is not.
+#        That unit documents the same trap beside its "!" lines.
+#   "!"  keeps the unit's CapabilityBoundingSet=, which has no CAP_CHOWN and no
+#        CAP_DAC_OVERRIDE in either session unit, so root could neither hand "s"
+#        to the account nor remove what the last occupant left in it.
+#
+# Outside the session's namespace the account also resolves by its real name: the
+# ephemeral unit binds its own /etc/passwd and /etc/group over the real ones, which
+# is why hdw4s-session, which runs INSIDE, reads the relay's gid off the stream root
+# rather than by name.
+
+usage() {
+  echo 'usage: hdw4s-stream-dir prepare|remove <instance>' >&2
+  exit 2
+}
+
+[ $# -eq 2 ] || usage
+action="$1"
+instance="$2"
+
+# An instance is an account name. One with a slash, or one of the two names that
+# are not names, would put the rm -rf below somewhere else.
+case "${instance}" in
+  ''|.|..|*/*) echo "hdw4s-stream-dir: '${instance}' is not an instance name" >&2
+               exit 1;;
+esac
+
+STREAMDIR="${HDW4S_STREAM_DIR:-/run/hdw4s-stream}"
+outer="${STREAMDIR}/${instance}"
+inner="${outer}/s"
+
+case "${action}" in
+  prepare)
+    if [ ! -d "${STREAMDIR}" ] || [ -L "${STREAMDIR}" ]; then
+      echo "hdw4s-stream-dir: ${STREAMDIR} does not exist; hdw4s-ephemeral-slots" >&2
+      echo '  makes it at boot, and nothing can be reached without it.' >&2
+      exit 1
+    fi
+    gid="$(stat -c %g -- "${STREAMDIR}")"
+    [ "${gid}" != '0' ] || {
+      echo "hdw4s-stream-dir: ${STREAMDIR} is not in the relay's group, so no" >&2
+      echo '  relay could open a stream in it. hdw4s-ephemeral-slots makes it.' >&2
+      exit 1
+    }
+    uid="$(id -u -- "${instance}" 2>/dev/null)" || {
+      echo "hdw4s-stream-dir: no account named ${instance}; a session's instance" >&2
+      echo '  name is its account name.' >&2
+      exit 1
+    }
+    # Handing a root-owned directory to the stream would work, and would mean
+    # the streaming server was running as root.
+    [ "${uid}" != '0' ] || {
+      echo "hdw4s-stream-dir: ${instance} is root; refusing to prepare a stream" >&2
+      echo '  directory for a session that would run as root.' >&2
+      exit 1
+    }
+    # <instance> is in a root-owned 0711 directory, so nothing but root can have
+    # put anything at this name. A symlink here is still refused rather than
+    # followed: install -d on a symlink would chmod whatever it points at.
+    if [ -L "${outer}" ] || { [ -e "${outer}" ] && [ ! -d "${outer}" ]; }; then
+      echo "hdw4s-stream-dir: ${outer} is not a directory; refusing to use it" >&2
+      exit 1
+    fi
+    install -d -o 0 -g 0 -m 0711 -- "${outer}"
+    rm -rf --one-file-system -- "${inner}"
+    install -d -o "${uid}" -g "${gid}" -m 2750 -- "${inner}"
+    ;;
+  remove)
+    rm -rf --one-file-system -- "${inner}"
+    ;;
+  *) usage;;
+esac

@@ -8,6 +8,8 @@ Documentation=man:hdw4s(8)
 # ahead of the sockets is what keeps that from being anybody's 2 a.m. puzzle.
 DefaultDependencies=no
 After=local-fs.target
+# The stream root below is handed to a group systemd-sysusers creates.
+After=systemd-sysusers.service
 Before=sockets.target shutdown.target
 Conflicts=shutdown.target
 # /run is tmpfs, so the records are gone at every boot and this is what puts

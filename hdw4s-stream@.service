@@ -1,0 +1,57 @@
+[Unit]
+Description=Stream directory of the HDW4S session %i
+Documentation=man:hdw4s(8)
+# Made before the session by Requires= and After= on the session unit, not by a
+# Before= here: one relationship stated in one place stays true, two halves drift.
+#
+# Gone when the session is. Nothing but the session unit requires this, so once it
+# stops -- on either stop path, including a logout -- this unit is unneeded, its
+# ExecStop= runs, and the directory the last occupant owned goes with it. The next
+# start of a pool slot, which is the next OCCUPANT of a reused uid, therefore always
+# gets a directory made that moment. See hdw4s-stream-dir for the layout and why.
+StopWhenUnneeded=yes
+# The stream root is made by the slot minter at boot, for named sessions as much as
+# for the pool, and a pool account resolves only once the minter has written it.
+Wants=hdw4s-ephemeral-slots.service
+After=hdw4s-ephemeral-slots.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/hdw4s/hdw4s-stream-dir prepare %i
+ExecStop=/usr/lib/hdw4s/hdw4s-stream-dir remove %i
+
+# Hardened only in ways that leave its three jobs possible: resolve the account by
+# name (userdb, so /run is left visible), hand a directory to it (CAP_CHOWN), and
+# remove what the last occupant left in a directory root does not own
+# (CAP_DAC_OVERRIDE, CAP_FOWNER). Not an ExecStartPre= of the session, for the two
+# reasons hdw4s-stream-dir gives -- the same reasons hdw4s-incarnation@ is a unit.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+LockPersonality=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ReadWritePaths=/run/hdw4s-stream
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+# NOT RestrictSUIDSGID=: "s" is 2750, and the setgid bit is what gives the
+# socket the session creates in it the relay's group -- the occupant is not in
+# that group and so could not chgrp it. The filter refuses a chmod carrying
+# S_ISGID on a directory as well as a file; measured on ct154, install -d -m 2750
+# under RestrictSUIDSGID=yes fails and leaves nothing behind, and every session
+# then fails on its Requires=.
+RestrictSUIDSGID=no
+SystemCallFilter=@system-service
+
+TimeoutStartSec=30

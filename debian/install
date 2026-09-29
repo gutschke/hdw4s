@@ -7,6 +7,10 @@ hdw4s-refuse             usr/lib/hdw4s
 hdw4s-teardown           usr/lib/hdw4s
 hdw4s-start              usr/lib/hdw4s
 hdw4s-incarnation        usr/lib/hdw4s
+hdw4s-stream-dir         usr/lib/hdw4s
+# The relay's system group. sysusers.d wants a ".conf" name, and debian/install
+# cannot rename, so the tree carries it under the name it is installed as.
+hdw4s-sysusers.conf      usr/lib/sysusers.d
 # The per-session background generator. Shipped rather than kept beside the
 # measurements it came from, because the SESSION has to run it at every start:
 # a tool that lives only in a private tree is a feature that works on one

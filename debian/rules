@@ -50,6 +50,9 @@ override_dh_installsystemd:
 # been absent from this file since they were written; ".github/checks.sh"
 # now fails the build if a unit file exists with no line of its own.
 	dh_installsystemd --no-enable --no-start hdw4s-incarnation@.service
+# The stream directory of one session, pulled in by Requires= on the session unit
+# and stopped when that session no longer needs it (StopWhenUnneeded=).
+	dh_installsystemd --no-enable --no-start hdw4s-stream@.service
 	dh_installsystemd --no-enable --no-start hdw4s-refuse@.service
 # The teardown watcher and the teardown itself. --no-enable --no-start for
 # the same reason as the two above and one of its own: HOW MANY SLOTS THERE

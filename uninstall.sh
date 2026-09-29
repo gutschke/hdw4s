@@ -150,6 +150,13 @@ if [ -e /etc/sysctl.d/60-hdw4s.conf ]; then
   rm -f /etc/sysctl.d/60-hdw4s.conf
   sysctl -q --system 2>/dev/null || :
 fi
+# The relay's group declaration, copied there by install.sh. The group itself is
+# left: systemd-sysusers never deletes one, and a gid removed while anything on
+# the machine still carries it is a gid the next group created may inherit.
+rm -f /etc/sysusers.d/hdw4s-sysusers.conf
+# The stream directories, made per session start. /run clears at a reboot; an
+# uninstall should not wait for one.
+rm -rf --one-file-system /run/hdw4s-stream
 # The slot identities and the per-slot drop-ins the minting writes. They live in
 # /run and a reboot would clear them, but an uninstall that leaves accounts
 # resolving is a surprise nobody needs. /run/userdb is shared with any other
