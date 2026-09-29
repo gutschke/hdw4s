@@ -175,6 +175,29 @@ echo '== the stream listens on a path, never a port =='
   done
 )
 
+echo '== the WebRTC signalling adapter refuses code it does not recognise =='
+( set +e
+  # The adapter reroutes one aiohttp.ClientSession; any other one in the module
+  # would bypass it unseen. Its module check, run against the shape 2.0.0rc1 has
+  # and against doctored copies (the red arms).
+  out="$(python3 - "${ROOT}/hdw4s-selkies-webrtc" <<'PY'
+import importlib.machinery, importlib.util, sys
+l = importlib.machinery.SourceFileLoader("a", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("a", l)); l.exec_module(m)
+good = ("import aiohttp\nfrom aiohttp import ClientWebSocketResponse, WSMsgType\n"
+        "x: Optional[aiohttp.ClientSession] = None\ns = aiohttp.ClientSession()\n")
+print("good", m.module_source_problem(good) is None)
+print("second", m.module_source_problem(good + "t = aiohttp.ClientSession()\n") is not None)
+print("fromimport", m.module_source_problem(good.replace("WSMsgType\n", "WSMsgType, TCPConnector\n")) is not None)
+print("alias", m.module_source_problem(good + "import aiohttp as h\n") is not None)
+PY
+)"
+  has 'the code 2.0.0rc1 has is accepted'           "${out}" 'good True'
+  has 'RED: a second ClientSession is refused'      "${out}" 'second True'
+  has 'RED: another name imported from aiohttp is refused' "${out}" 'fromimport True'
+  has 'RED: aiohttp under another name is refused'  "${out}" 'alias True'
+)
+
 echo '== a session counts as protected only when both halves are there =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   # "hdw4s enable" decides whether to generate a credential by asking this, and
@@ -3647,7 +3670,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=565   # update when tests are added; a wrong number is the point
+EXPECTED=569   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

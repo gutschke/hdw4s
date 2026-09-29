@@ -24,7 +24,10 @@ all and no port to squat.
 
 THREE OUTCOMES, per the project's rule for changes it would offer upstream:
   * upstream grows the support (WebRTCSignalingClient.SUPPORTS_UNIX_SOCKET): stand
-    down and run stock;
+    down and run stock. SAFE ONLY IF upstream's support switches on by itself
+    whenever --unix-socket is given -- a marker for support that must be enabled
+    separately would stand this down onto the TCP path. That condition is part of
+    what we offer upstream, not an assumption to make about what they merge;
   * the code is still the code this was written against: apply;
   * anything else: REFUSE TO START, loudly. Running stock here is not a safe
     degradation -- it is the squattable TCP connection with the token on it.
@@ -33,6 +36,39 @@ THREE OUTCOMES, per the project's rule for changes it would offer upstream:
 import sys
 
 MARKER = "SUPPORTS_UNIX_SOCKET"
+
+# THE WHOLE MODULE, not only the two functions: a second ClientSession, or one
+# reached by another name ("from aiohttp import ClientSession", "import aiohttp
+# as ..."), anywhere in the signalling client would open a connection this
+# replacement never sees. 2.0.0rc1 and the dev build both name it exactly twice:
+# the attribute's annotation and the one call.
+EXPECTED_CLIENTSESSION = 2
+ALLOWED_FROM_AIOHTTP = {"ClientWebSocketResponse", "WSMsgType"}
+
+
+def module_source_problem(src):
+    """Why the signalling client's module is not the code this adapts, or None."""
+    n = src.count("ClientSession")
+    if n != EXPECTED_CLIENTSESSION:
+        return "it names ClientSession %d time(s), not %d" % (n, EXPECTED_CLIENTSESSION)
+    if src.count("aiohttp.ClientSession()") != 1:
+        return "it does not open exactly one aiohttp.ClientSession()"
+    for other in ("import aiohttp as", "from aiohttp."):
+        if other in src:
+            return "it reaches aiohttp another way (%r)" % other
+    # Names imported directly from aiohttp are WHITELISTED: the two the installed
+    # module takes, neither of which opens a connection. Anything else -- a
+    # session, a connector, a request helper -- could reach the network by a
+    # route this replacement does not cover.
+    for line in src.splitlines():
+        line = line.strip()
+        if line.startswith("from aiohttp import"):
+            names = {n.strip().split(" as ")[0] for n in
+                     line[len("from aiohttp import"):].strip(" ()").split(",") if n.strip()}
+            extra = names - ALLOWED_FROM_AIOHTTP
+            if extra:
+                return "it imports %s from aiohttp directly" % ", ".join(sorted(extra))
+    return None
 
 
 def refuse(why):
@@ -60,6 +96,12 @@ def adapt(path):
     if getattr(sc.WebRTCSignalingClient, MARKER, False):
         return "upstream carries unix-socket signalling; standing down"
 
+    try:
+        why = module_source_problem(inspect.getsource(sc))
+    except (OSError, TypeError) as e:
+        refuse("cannot read the signalling client module (%s)" % e)
+    if why:
+        refuse("Selkies' signalling client module is not the code this adapts: " + why)
     try:
         client_src = inspect.getsource(sc.WebRTCSignalingClient.connect_and_listen)
         make_src = inspect.getsource(wm.WebRTCService.create_signaling_client)
