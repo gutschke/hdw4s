@@ -6424,6 +6424,84 @@ def red_the_first_request_is_refused():
         _remove_scratch_demuxes()
 
 
+# --- the edge of MINT_GRACE ------------------------------------------------
+#
+# Found by the threat review at function level
+# (private/threatd-round-d/mint/grace-race.py): a letting whose first request came
+# just inside MINT_GRACE passed the gate and asked for its start; the grace then
+# ran out before the session's runtime directory existed, so nothing held the
+# slot -- not pending, reservation stale, not yet occupied -- and a second
+# visitor was let it. The first visitor's request, forwarded on a stale copy of
+# its record, reached the second visitor's desktop; attach() accepted it, and the
+# release that followed deleted the second visitor's reservation.
+
+
+def grace_edge(path):
+    """(slot B was let, A's verdict after the wait, attach of an ended letting).
+    Replays the handler's order against the router at PATH, in this process."""
+    m = load_demux_from(path)
+    tmp = tempfile.mkdtemp(prefix="demux-grace-")
+    for d in ("run/hdw4s", "reserved", "start", "teardown"):
+        os.makedirs(os.path.join(tmp, d))
+    m.log = lambda msg: None
+    m.ephemeral_slots = lambda table=None: ["ephemeral0"]
+    m.SESSION_RUNDIR = os.path.join(tmp, "run", "hdw4s")
+    m.RESERVE_DIR = os.path.join(tmp, "reserved")
+    m.START_DIR = os.path.join(tmp, "start")
+    m.TEARDOWN_DIR = os.path.join(tmp, "teardown")
+    m.listening_paths = lambda *a, **kw: None
+    own = m.Ownership()
+    inst, sid_a = m.let_slot(own, "a" * 32)
+    # A arrives 50 ms before its grace ends -- its record and its reservation
+    # both aged to match.
+    own._by_sid[sid_a]["minted"] -= m.MINT_GRACE - 0.05
+    old = time.time() - m.MINT_GRACE + 0.05
+    os.utime(os.path.join(m.RESERVE_DIR, inst), (old, old))
+    m.start_for_first_request(own, sid_a)
+    time.sleep(0.2)                    # the grace ends; no runtime directory yet
+    inst_b, sid_b = m.let_slot(own, "b" * 32)
+    os.makedirs(os.path.join(m.SESSION_RUNDIR, inst))      # a desktop comes up
+    with own.letting:
+        after = m.still_this_letting(own, sid_a, grace=False)
+    own.end_session(sid_a, "ended for the test")
+    attached = own.attach(sid_a, "TOKEN")
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+    return inst_b, after, attached
+
+
+def test_a_first_request_at_the_edge_of_grace_keeps_its_slot_held(rig=None,
+                                                                 path=None):
+    """The first request renews the hold, so no second visitor is let the slot
+    while its desktop is still coming up; and an ended letting is never
+    attached to whatever desktop is in its slot."""
+    inst_b, after, attached = grace_edge(DEMUX if path is None else path)
+    assert inst_b is None, (
+        "a second visitor was let %s while the first one's desktop was still "
+        "starting in it -- one desktop, two strangers" % inst_b)
+    assert after is None, \
+        "the first visitor's own letting was refused after its wait: %r" % after
+    assert attached is False, \
+        "an ENDED letting was attached to the desktop in its slot"
+
+
+NO_HOLD_RENEWED = """
+
+# Appended by the red arm: the start request no longer renews the slot's hold.
+def renew_reservation(instance, now=None, root=None):
+    return None
+"""
+
+
+def red_the_grace_edge_lets_the_slot_twice():
+    path = scratch_demux("-nohold.py", NO_HOLD_RENEWED)
+    try:
+        test_a_first_request_at_the_edge_of_grace_keeps_its_slot_held(
+            path=path)
+    finally:
+        _remove_scratch_demuxes()
+
+
 def main():
     print("== hdw4s-demux, stand-in slots, no browser ==")
     print("Real: the demultiplexer, TCP, HTTP, cookies, UNIX upstreams.")
@@ -6581,6 +6659,7 @@ def main():
                test_a_duration_already_in_seconds_is_refused,
                test_the_records_the_refusal_log_is_read_from_survive_a_restart,
                test_a_table_with_lettings_that_ended_unseen_is_settled_at_start,
+               test_a_first_request_at_the_edge_of_grace_keeps_its_slot_held,
                # In-process, with the window between the pick and the record
                # held open; see concurrent_lettings().
                test_concurrent_arrivals_are_let_distinct_slots,
@@ -6640,6 +6719,7 @@ def main():
                red_reclaim_on_mismatch_alone,
                red_lettings_that_ended_unseen_disarm_the_reclaim,
                red_a_connection_starts_a_desktop_again,
+               red_the_grace_edge_lets_the_slot_twice,
                red_the_first_request_is_refused,
                red_the_table_is_forgotten_at_a_restart,
                red_a_refusal_is_logged_per_request,

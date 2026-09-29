@@ -1300,11 +1300,22 @@ class Ownership:
         """
         with self._lock:
             rec = self._by_sid.get(sid)
-            if rec is None or rec["live"]:
-                return
+            if rec is None:
+                return False
+            if rec["live"]:
+                return True
+            # NOT AN ENDED OR RE-LET LETTING: its slot's desktop is somebody
+            # else's, and recording that desktop's token against this letting
+            # would make it this letting's. False tells the caller.
+            if rec.get("ended") or any(
+                    r["instance"] == rec["instance"] and
+                    r["minted"] > rec["minted"]
+                    for s, r in self._by_sid.items() if s != sid):
+                return False
             rec["live"] = True
             rec["incarnation"] = incarnation
             self._save()
+            return True
 
     def end_session(self, sid, why):
         """Record that this letting is OVER, from here on, whatever the box says.
@@ -2172,6 +2183,20 @@ def assert_reservation_only_refuses(reserve=None, reserved=None, release=None,
             "the reservation reader answers something richer than slot names"
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def renew_reservation(instance, now=None, root=None):
+    """Hold INSTANCE for MINT_GRACE from NOW: the letting whose desktop is being
+    started is still walking to it. Only ever extends a hold; never permits."""
+    now = time.time() if now is None else now
+    base = RESERVE_DIR if root is None else root
+    path = os.path.join(base, instance)
+    try:
+        os.makedirs(base, mode=0o700, exist_ok=True)
+        os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
+        os.utime(path, (now, now))
+    except OSError:
+        pass
 
 
 def release_slot(instance, root=None):
@@ -3867,22 +3892,65 @@ def await_desktop(instance, navigation, door=None, clock=time.monotonic,
         sleep(0.05)
 
 
-def start_for_first_request(own, rec):
-    """Ask for REC's desktop to be started, if this is the moment. True if asked.
+def still_this_letting(own, sid, grace=True):
+    """Why SID's letting may no longer use its slot, or None. Asked of the
+    TABLE, by sid, never of a copy of the record a handler read earlier.
+
+    Called under own.letting, so no mint can change the answer between the
+    question and what the caller does with it. GRACE says whether a letting
+    that never had a desktop and is past MINT_GRACE is refused too: at the
+    start request, yes (the slot may be let again from that instant); after
+    the wait for the desktop, no -- the start request renewed the hold, so the
+    slot cannot have been let since.
+    """
+    rec = own.lookup(sid)
+    if rec is None:
+        return "there is no letting on record for it"
+    if rec.get("ended"):
+        return rec["ended"]
+    if own.superseded(sid):
+        return "%s has been let again since this letting" % rec["instance"]
+    if grace and not rec.get("live") and \
+            time.time() - rec["minted"] >= MINT_GRACE:
+        return "no desktop ever came up on %s for this letting" \
+            % rec["instance"]
+    return None
+
+
+def start_for_first_request(own, sid):
+    """Ask for SID's desktop to be started if this is the moment. None to go
+    on, or why this letting may not (the caller gates the visitor).
 
     Asked for a letting whose desktop has never answered, and only while its
     slot shows no desktop at all -- a desktop already starting or running is
     left alone, which is what makes a second first-request (a browser opens two
-    connections) and a router restart harmless. Under the letting lock, so a
-    reclaim's decision cannot interleave with it.
+    connections) and a router restart harmless.
+
+    THE CHECK AND THE ACT UNDER ONE LOCK, and the hold RENEWED. Found by the
+    threat review at function level: a letting whose first request came just
+    inside MINT_GRACE passed the gate, asked for its start, and the grace then
+    ran out before the session's runtime directory existed -- so for that gap
+    nothing held the slot (not pending, reservation stale, not occupied), a
+    second visitor was let it, and the first visitor's request was forwarded
+    into the second visitor's desktop. So the letting is re-read here by sid,
+    under the letting lock, and refused if it is no longer this slot's; and the
+    reservation is renewed as the start is asked for, so the slot stays held
+    for MINT_GRACE from THIS moment -- until the desktop is up and occupancy
+    speaks for it.
     """
-    if rec.get("live") or rec.get("ended"):
-        return False
-    instance = rec["instance"]
     with own.letting:
+        why = still_this_letting(own, sid)
+        if why is not None:
+            return why
+        rec = own.lookup(sid)
+        if rec.get("live"):
+            return None
+        instance = rec["instance"]
+        renew_reservation(instance)
         if occupancy_readable() and slot_occupied(instance):
-            return False
-        return request_start(instance)
+            return None
+        request_start(instance)
+        return None
 
 
 def request_start(instance, root=None, lines=()):
@@ -6376,9 +6444,26 @@ def serve(sock, own, expected_b64):
                 # for it. See start_for_first_request() and await_desktop():
                 # connecting earlier is refused by the relay now that a
                 # connection cannot start anything.
-                start_for_first_request(own, rec)
+                why = start_for_first_request(own, sid)
                 navigation = is_page_navigation(method, rest, headers)
-                state = await_desktop(rec["instance"], navigation)
+                state = "gone" if why else \
+                    await_desktop(rec["instance"], navigation)
+                if state in ("up", "unknown"):
+                    # AND ASKED AGAIN after the wait, from the table: the
+                    # hold was renewed, but a letting that was ended or
+                    # re-let meanwhile must not be forwarded into the slot.
+                    with own.letting:
+                        why = still_this_letting(own, sid, grace=False)
+                    state = "gone" if why else state
+                if state == "gone":
+                    own.forget(sid)
+                    log("gated a returning visitor at %s: %s"
+                        % (rec["instance"], why))
+                    say_once(("unknown", sid))
+                    respond(wf, 410, ended_page(owned_rows(own, identity),
+                                                True),
+                            refresh_headers(own, identity, new_identity))
+                    continue
                 if state == "starting":
                     log("%s had not answered a page request after %.1f s; "
                         "sent the starting page"
@@ -6441,12 +6526,14 @@ def serve(sock, own, expected_b64):
             # session could not be reached, and those must not attach alike --
             # treating a 502 as an attachment would pin a record to a desktop
             # that never existed. One stat settles it and cannot be confused.
-            if occupancy_readable() and slot_occupied(rec["instance"]):
-                own.attach(sid, slot_incarnation(rec["instance"]))
+            if occupancy_readable() and slot_occupied(rec["instance"]) and \
+                    own.attach(sid, slot_incarnation(rec["instance"])):
                 # The desktop has answered, so the authority now speaks for
                 # this slot and is more current than we are. Our reservation
                 # has nothing left to say and holding it would only delay the
-                # slot's return when the session stops.
+                # slot's return when the session stops. ONLY FOR A LETTING
+                # attach() accepted: releasing on a refused one deleted the
+                # hold of whoever the slot had been let to since.
                 release_slot(rec["instance"])
             if not served:
                 return
