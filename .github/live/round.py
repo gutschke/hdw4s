@@ -560,6 +560,14 @@ class Visitor:
         gets an answer that no later navigation can have overwritten.
         """
         self.goto(url, settle=settle)
+        # The router answers a fresh arrival with "Your desktop is starting"
+        # until the desktop is up; a fixed settle reads that page as a broken
+        # desktop. Wait it out, bounded, as a person would. (Measured
+        # 2026-09-28: the page became a desktop at 5.1 s, after a 4 s settle.)
+        for _ in range(60):
+            if "starting" not in (self.title() or ""):
+                break
+            time.sleep(0.5)
         clicked = self.click_gate()
         kind = classify(self.title(), self.html())
         self.held = owner_update(kind, self.sid(), self.held)
