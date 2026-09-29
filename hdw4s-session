@@ -57,7 +57,6 @@ export HDW4S_SESSION_TYPE
 : "${XDG_RUNTIME_DIR:?must be set by the unit}"
 
 CONF='/etc/hdw4s/hdw4s.conf'
-SLOTS='/etc/hdw4s/instances'
 # shellcheck source=/dev/null
 if [ -r "${CONF}" ]; then
   f="${CONF}"
@@ -96,25 +95,6 @@ if [ -r "/etc/hdw4s/${instance}.conf" ]; then
   # false, which is not an error worth dying over.
   . "/etc/hdw4s/${instance}.conf" || :
 fi
-
-# Every session is in the slot table, because "hdw4s enable" is what writes the
-# drop-ins it cannot run without. A unit started directly, for an account that was
-# never enabled, is stopped here with something an administrator can act on.
-#
-# awk exits non-zero when the file is not there, and the assignment carries that
-# status out, so under errexit the script died here and the diagnostic below --
-# the one that says what to do about it -- never printed.
-slot=''
-if [ -r "${SLOTS}" ]; then
-  slot="$(awk -v i="${instance}" \
-          '$1 !~ /^#/ && $2 == i { print $1; exit }' "${SLOTS}")" || :
-fi
-[ -n "${slot}" ] || {
-  echo "hdw4s: ${instance} has no slot in ${SLOTS}." >&2
-  echo "  Run 'hdw4s enable ${instance}' rather than starting the unit" >&2
-  echo '  directly.' >&2
-  exit 1
-}
 
 # WHERE THE STREAMING SERVER LISTENS, and it is a path, never a port: every desktop
 # on this machine shares one network namespace, so a port is a name any occupant

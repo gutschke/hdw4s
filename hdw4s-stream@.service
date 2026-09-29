@@ -10,6 +10,16 @@ Documentation=man:hdw4s(8)
 # start of a pool slot, which is the next OCCUPANT of a reused uid, therefore always
 # gets a directory made that moment. See hdw4s-stream-dir for the layout and why.
 StopWhenUnneeded=yes
+# AND REMADE WHEN THE SESSION IS RESTARTED, which StopWhenUnneeded= does not do:
+# a session with a restart job pending still needs this unit, so "systemctl
+# restart" -- what the updater does to every idle session -- would keep the
+# previous occupant's directory, with whatever they did to it. PartOf= carries a
+# stop or restart of the session to this unit, and After= on the session side
+# makes it finish first. Both session templates are named; the one that does not
+# exist for this instance is never loaded and costs nothing. A named session's
+# own automatic Restart= is not a restart job and keeps its directory: the same
+# person, the same account.
+PartOf=hdw4s-ephemeral@%i.service hdw4s@%i.service
 # The stream root is made by the slot minter at boot, for named sessions as much as
 # for the pool, and a pool account resolves only once the minter has written it.
 Wants=hdw4s-ephemeral-slots.service
@@ -21,12 +31,15 @@ RemainAfterExit=yes
 ExecStart=/usr/lib/hdw4s/hdw4s-stream-dir prepare %i
 ExecStop=/usr/lib/hdw4s/hdw4s-stream-dir remove %i
 
-# Hardened only in ways that leave its three jobs possible: resolve the account by
-# name (userdb, so /run is left visible), hand a directory to it (CAP_CHOWN), and
+# Hardened only in ways that leave its jobs possible: resolve the account by name
+# (userdb, so /run is left visible), hand a directory to it (CAP_CHOWN), set the
+# setgid bit on a directory whose group root is not in (CAP_FSETID -- without it
+# the kernel clears S_ISGID silently and chmod still succeeds; measured on a test container,
+# the socket then took the occupant's group and no relay could open it), and
 # remove what the last occupant left in a directory root does not own
 # (CAP_DAC_OVERRIDE, CAP_FOWNER). Not an ExecStartPre= of the session, for the two
 # reasons hdw4s-stream-dir gives -- the same reasons hdw4s-incarnation@ is a unit.
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID
 LockPersonality=yes
 NoNewPrivileges=yes
 PrivateDevices=yes
@@ -48,7 +61,7 @@ RestrictRealtime=yes
 # NOT RestrictSUIDSGID=: "s" is 2750, and the setgid bit is what gives the
 # socket the session creates in it the relay's group -- the occupant is not in
 # that group and so could not chgrp it. The filter refuses a chmod carrying
-# S_ISGID on a directory as well as a file; measured on ct154, install -d -m 2750
+# S_ISGID on a directory as well as a file; measured on a test container, install -d -m 2750
 # under RestrictSUIDSGID=yes fails and leaves nothing behind, and every session
 # then fails on its Requires=.
 RestrictSUIDSGID=no

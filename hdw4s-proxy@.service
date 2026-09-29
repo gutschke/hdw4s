@@ -110,6 +110,9 @@ BindReadOnlyPaths=/run/systemd/notify
 CapabilityBoundingSet=
 DynamicUser=yes
 NoNewPrivileges=yes
+# Nothing of another process is this relay's business, and its DynamicUser= uid
+# is shared by no one else -- so none of /proc need be visible to it.
+ProtectProc=invisible
 PrivateDevices=yes
 PrivateTmp=yes
 ProtectClock=yes
