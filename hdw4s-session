@@ -221,6 +221,24 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   install -d -m0700 "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" \
                     "${XDG_STATE_HOME}" "${XDG_CACHE_HOME}"
 
+  # WHICH FOLDERS THE HOME HAS IS A FACT ABOUT THE HOME, not about this
+  # machine's profile, so the home's own record of it wins. user-dirs.dirs
+  # lives under ~/.config, which the redirection above hides from this
+  # session; and xdg-user-dirs-update, run at every login, reads the PROFILE's
+  # copy. Measured 2026-09-29: with no copy there it recreates the default
+  # folders -- so a home whose owner hid ~/Music by renaming it to ~/.Music
+  # got a new ~/Music beside it, on the shared home, from the first session on
+  # any machine. Copied every start, from the home when it has one; a home
+  # that never had a desktop of its own keeps the profile's.
+  if [ "${HDW4S_SESSION_TYPE:-}" != 'ephemeral' ]; then
+    for f in user-dirs.dirs user-dirs.locale; do
+      [ -f "${HOME}/.config/${f}" ] || continue
+      cp -f "${HOME}/.config/${f}" "${XDG_CONFIG_HOME}/${f}" ||
+        echo "hdw4s-session: could not copy ~/.config/${f} into the profile;" \
+             'the default folders may be recreated in the home.' >&2
+    done
+  fi
+
   # XDG_CONFIG_HOME is redirected along with the rest, which is what puts the
   # settings database on local disk. That is the whole point: dconf's default
   # database is memory-mapped and is documented as unsuitable on NFS, and the

@@ -97,6 +97,8 @@ KEEP_FILES = [
     "config/autostart",                 # Tweaks' startup applications
     "config/fontconfig",
     "config/mimeapps.list",             # default applications
+    "config/user-dirs.dirs",            # which folders exist, and hidden ones
+    "config/user-dirs.locale",          # (see user_dirs_folders below)
     "config/gtk-3.0/settings.ini",
     "config/gtk-4.0/settings.ini",
     "data/gnome-shell/extensions",
@@ -318,6 +320,8 @@ def copy_entry(src, dst):
 
 
 def du(path):
+    if os.path.isfile(path) and not os.path.islink(path):
+        return os.path.getsize(path)
     total = 0
     for dirpath, _, files in os.walk(path):
         for n in files:
@@ -688,6 +692,44 @@ def scan_kept(gen, rel, notes):
                      % (rel, human(total)))
 
 
+def user_dirs_folders(gen, author_home, notes):
+    """Give the template the EMPTY folders its user-dirs.dirs names.
+
+    Measured 2026-09-29: xdg-user-dirs-update, run at every login, treats a
+    folder its file names but the home lacks as REMOVED and points that entry
+    at the home itself. A fresh visitor home has none of them, so carrying the
+    file alone took every visitor's Downloads, Music and the rest away. Carrying
+    the file and its folders (empty -- never their contents) reproduces the
+    author's layout exactly, including a folder hidden by renaming it to a
+    dotfile, and one removed on purpose stays removed.
+
+    An entry whose folder the AUTHOR'S home no longer has is published as
+    "$HOME/", which is exactly what xdg-user-dirs-update would write at the
+    author's next login: renaming ~/Music to ~/.Music in Files is then the
+    whole of hiding it, with no file to edit -- as on any desktop."""
+    f = os.path.join(gen, "profile", "config", "user-dirs.dirs")
+    if not os.path.isfile(f) or os.path.islink(f):
+        return
+    out = []
+    with open(f, errors="replace") as fh:
+        for line in fh:
+            m = re.match(r'^(\s*XDG_[A-Z]+_DIR=)"\$HOME/([^"]*)"', line)
+            if m and m.group(2).strip("/"):
+                rel = os.path.normpath(m.group(2))
+                if rel.startswith("..") or os.path.isabs(rel):
+                    notes.append("left out a folder user-dirs.dirs names "
+                                 "outside the home: %s" % m.group(2))
+                    line = '%s"$HOME/"\n' % m.group(1)
+                elif not os.path.isdir(os.path.join(author_home, rel)) or \
+                        not inside(os.path.join(author_home, rel), author_home):
+                    line = '%s"$HOME/"\n' % m.group(1)
+                else:
+                    os.makedirs(os.path.join(gen, "home", rel), exist_ok=True)
+            out.append(line)
+    with open(f, "w") as fh:
+        fh.writelines(out)
+
+
 def autostart_notes(gen, notes):
     d = os.path.join(gen, "profile", "config", "autostart")
     if not os.path.isdir(d):
@@ -773,6 +815,7 @@ def harvest(author, home, inst):
             os.unlink(os.path.join(bg, n))
 
     autostart_notes(gen, notes)
+    user_dirs_folders(gen, home, notes)
     normalise(gen)
     size = du(gen)
     if size > 200 * 1024 * 1024:
