@@ -847,9 +847,42 @@ __ACT__
   //
   // Sampled through our own small canvas so a WebGL or bitmap-renderer client, whose
   // own context refuses getImageData, is still readable.
+  //
+  // THE SURFACE THAT IS SHOWN, NOT THE FIRST ONE IN THE DOCUMENT. The client has
+  // several: a <video> fed by a track generator where the browser has one, a 2D
+  // canvas it draws into by hand, and a worker's canvas. Once the <video> has shown
+  // a frame the client HIDES the canvas and stops drawing into it, and the next
+  // resize -- there are several in a start's first second -- resets that canvas's
+  // buffer to blank. Sampling it then reads one colour for ever over a desktop that
+  // is streaming normally. Reported 2026-09-30 as "the desktop shows for a second,
+  // then says it is starting": the capture had video arriving without a gap for the
+  // whole time the card was up, and it came and went with whether this sample won
+  // the race against the first resize.
+  //
+  // The client's own surfaces by name first, so a dashboard widget that happens to
+  // be a visible canvas is never mistaken for the desktop; any visible <video> or
+  // <canvas> only for a client that names none of them.
+  function shown(el){
+    return !!el && !!el.offsetWidth && !!el.offsetHeight      // display:none, or 0x0
+        && getComputedStyle(el).visibility !== 'hidden';
+  }
+  function shownSurface(){
+    var named = ['videoStream', 'videoWorkerCanvas', 'videoCanvas'], any = false;
+    for (var i = 0; i < named.length; i++) {
+      var el = document.getElementById(named[i]);
+      if (el) any = true;
+      if (shown(el)) return el;
+    }
+    if (any) return null;
+    var all = document.querySelectorAll('video, canvas');
+    for (var j = 0; j < all.length; j++)
+      if (shown(all[j]) && !(all[j].closest && all[j].closest('#hdw4s-starting, #hdw4s-gate')))
+        return all[j];
+    return null;
+  }
   function paintedColours(){
     try {
-      var src = document.querySelector('canvas#videoCanvas, canvas, video');
+      var src = shownSurface();
       if (!src) return 'waiting';
       var w = src.videoWidth || src.width, h = src.videoHeight || src.height;
       if (!w || !h) return 'waiting';
@@ -1613,6 +1646,12 @@ if _pc is None:
     raise SystemExit("hdw4s-gate-index: paintedColours() could not be found in the page "
                      "about to be written -- refusing to build, because the guard below "
                      "would otherwise pass by not looking")
+if "shownSurface()" not in _pc.group(1):
+    raise SystemExit(
+        "hdw4s-gate-index: paintedColours() no longer samples the surface that is SHOWN. "
+        "The client hides its canvas once its <video> has a frame and a resize then "
+        "blanks it, so sampling the first canvas in the document holds the starting "
+        "card over a desktop that is streaming (2026-09-30) -- refusing to build")
 if "'waiting'" not in _pc.group(1):
     raise SystemExit(
         "hdw4s-gate-index: paintedColours() no longer separates 'the client has not "
