@@ -1667,6 +1667,13 @@ STATE_INVENTORY = {
     # the caller passed in, which may be None -- the answer for "could not be
     # read" -- and must not be mistaken for "go and read it".
     "_ASK_KERNEL": "not state",
+    # The Host of the request this thread is serving, set per request and read
+    # only by note_front_door(). It decides nothing: the name it leads to is a
+    # CANDIDATE that "template edit" prints only after checking it resolves to
+    # HDW4S_PROXIES.
+    "REQUEST": "cache",
+    # A compiled constant, the shape a front-door name must have.
+    "_HOSTNAME": "not state",
 }
 
 
@@ -2365,6 +2372,66 @@ def say_once(key, msg=None):
     if msg is not None:
         log(msg)
     return True
+
+
+# THE FRONT DOOR'S NAME, learned from the visits that got a desktop, for the
+# one reader that needs it and cannot know it: "hdw4s template edit" prints a
+# one-time link, and an administrator asked which of several hostnames that
+# link belongs on, and will click whatever is printed. This machine never
+# otherwise learns the name visitors use -- the proxy does, and passes it as
+# Host.
+#
+# HOST IS WHAT THE BROWSER SAID, and a catch-all proxy passes any name, so this
+# is a CANDIDATE list and never an answer: the template tool prints a name only
+# if it resolves to one of HDW4S_PROXIES, so a name planted by an outsider,
+# which would carry the administrator's token to them, is never offered. Each
+# name keeps the visitor tags that minted under it (capped), so one noisy
+# visitor counts once.
+REQUEST = threading.local()
+FRONT_DOORS = os.path.join(STATE_DIR, "front-doors")
+_FRONT_DOORS_LOCK = threading.Lock()
+_HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                       r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+
+def note_front_door(identity):
+    """Record the Host of the request being served against IDENTITY's tag.
+    Best effort and silent: losing it costs a printed placeholder, never a
+    visit."""
+    try:
+        raw = getattr(REQUEST, "host", None)
+        if not raw:
+            return
+        host = raw.decode("ascii").strip().lower()
+        if host.startswith("["):
+            return                                  # an address, not a name
+        host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        if len(host) > 253 or not _HOSTNAME.match(host):
+            return
+        tag = visitor_tag(identity)
+        with _FRONT_DOORS_LOCK:
+            seen = {}
+            try:
+                with open(FRONT_DOORS) as f:
+                    for line in f:
+                        bits = line.split()
+                        if bits:
+                            seen[bits[0]] = bits[1:]
+            except OSError:
+                pass
+            tags = seen.setdefault(host, [])
+            if tag not in tags:
+                tags.append(tag)
+                del tags[:-64]
+            keep = sorted(seen.items(), key=lambda kv: -len(kv[1]))[:8]
+            tmp = FRONT_DOORS + ".new"
+            with open(tmp, "w") as f:
+                for h, t in keep:
+                    f.write("%s %s\n" % (h, " ".join(t)))
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, FRONT_DOORS)
+    except Exception:
+        pass
 
 
 def log_arrival(what, identity, instance, sid, why=None):
@@ -4698,6 +4765,7 @@ def arrival(own, wf, identity, query, new_identity, dest=None):
         # visitor never comes back for it. A record written only once a request
         # reached the session would miss exactly the mint that went nowhere,
         # which is the one that quietly consumed a slot.
+        note_front_door(identity)
         log_arrival("minted a session", identity, instance, sid,
                     "arm %s, %d slot(s) now let" % (arm,
                                                     len(own.instances_in_use())))
@@ -5353,6 +5421,7 @@ def console(own, wf, identity, new_identity, what, sid, method):
         #
         # THE LETTING IS arrival()'S, the same call: one lock across the pick
         # and the record, and the reservation on disk before the redirect.
+        note_front_door(identity)
         log_arrival("minted a session on request", identity, instance, new_sid,
                     "asked for from the directory, %d slot(s) now let"
                     % len(own.instances_in_use()))
@@ -6372,6 +6441,7 @@ def serve(sock, own, expected_b64):
             # Until forward_request() takes it, this body is unread.
             unread = body[0] != "none"
 
+            REQUEST.host = header_value(headers, "Host")
             if not authorized(headers, expected_b64):
                 respond(wf, 401, page(
                     "Not authorised",

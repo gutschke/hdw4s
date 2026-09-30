@@ -52,6 +52,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -873,6 +874,84 @@ def install_keyfile(src):
             "settings yet: %s" % r.stderr.strip())
 
 
+FRONT_DOORS = "/run/hdw4s-demux/front-doors"
+
+
+def front_door():
+    """The address the one-time link is printed on, and a line saying where it
+    came from (or what to set). HDW4S_EPHEMERAL_URL when set; else the name
+    visitors have been getting desktops under, as the router recorded it --
+    BUT ONLY ONE THAT RESOLVES TO AN ADDRESS IN HDW4S_PROXIES. The router
+    records what browsers send as Host, and a catch-all proxy passes any name:
+    printing an unchecked one could hand the administrator's token to whoever
+    planted it. The administrator clicks what is printed, so a name that fails
+    the check is shown as text, never as the link."""
+    door = conf("HDW4S_EPHEMERAL_URL", "")
+    if door:
+        return door.rstrip("/"), None
+    placeholder = "https://<your ephemeral hostname>"
+    set_it = "set HDW4S_EPHEMERAL_URL in %s/hdw4s.conf" % ETC
+    hint = "(To have the address printed, %s.)" % set_it
+    seen = []
+    try:
+        with open(FRONT_DOORS) as f:
+            for line in f:
+                bits = line.split()
+                if bits and re.match(r"^[a-z0-9.-]{1,253}$", bits[0]):
+                    seen.append((len(bits) - 1, bits[0]))
+    except OSError:
+        return placeholder, hint
+    seen.sort(reverse=True)
+
+    def addrs(name):
+        try:
+            return {a[4][0] for a in socket.getaddrinfo(name, 443)}
+        except OSError:
+            return set()
+    proxies = set()
+    for p in conf("HDW4S_PROXIES", "").split():
+        proxies |= {p} | addrs(p)
+    if not proxies:
+        names = ", ".join(n for _, n in seen[:3])
+        return placeholder, ("(Visitors have used %s, but HDW4S_PROXIES is not "
+                             "set, so it cannot be checked that the name "
+                             "reaches this machine's proxy. To have the "
+                             "address printed, %s.)"
+                             % (names or "no name yet", set_it))
+    for visitors, name in seen:
+        if addrs(name) & proxies:
+            return "https://" + name, (
+                "(The name %d visitor(s) got desktops under, checked to "
+                "resolve to your proxy. If it is wrong, %s.)"
+                % (visitors, set_it))
+    if seen:
+        # THE COMMON CASE, and why the name is not simply printed: behind a
+        # CDN, or wherever this machine's DNS is not the one visitors use, the
+        # name resolves to somewhere else from here, and the proxy's address
+        # is not reachable from a guest to ask it either. So the name cannot be
+        # proven to be ours -- but the administrator can tell at a glance, and
+        # confirming it once makes every later link complete.
+        #
+        # A READY-MADE COMMAND ONLY FOR A SINGLE NAME. With several, the one
+        # most visitors used is not evidence of anything -- an outsider can
+        # outvote a quiet pool -- and a pasted command would make their name
+        # permanent, which is worse than one bad link. So they are listed and
+        # the administrator writes the name.
+        if len(seen) == 1:
+            visitors, name = seen[0]
+            return placeholder, (
+                "(Visitors reached this machine as %s (%d visitor(s)). If that "
+                "is its front door, run this once and later links will be "
+                "printed whole:\n    hdw4s set HDW4S_EPHEMERAL_URL=https://%s )"
+                % (name, visitors, name))
+        return placeholder, (
+            "(Visitors reached this machine under more than one name: %s. Set "
+            "the right one once and later links will be printed whole:\n"
+            "    hdw4s set HDW4S_EPHEMERAL_URL=https://<its name> )"
+            % ", ".join("%s (%d)" % (n, v) for v, n in seen))
+    return placeholder, hint
+
+
 def cmd_edit(yes):
     inst = pick_instance()
     # THE MINTER'S OWN EVIDENCE, NOT "the name resolves". A row an earlier
@@ -952,17 +1031,15 @@ def cmd_edit(yes):
         os.replace(invite + ".new", invite)
         spent = os.path.join(SPENT_DIR, os.path.basename(invite))
 
-        door = conf("HDW4S_EPHEMERAL_URL", "")
-        base = door.rstrip("/") if door else "https://<your ephemeral hostname>"
+        base, why = front_door()
         say("")
         say("Open this link in a browser. It works once, within %d minutes:"
             % (INVITE_SECONDS // 60))
         say("")
         say("  %s/template/%s" % (base, token))
         say("")
-        if not door:
-            say("(Set HDW4S_EPHEMERAL_URL in %s/hdw4s.conf to have the "
-                "address printed.)" % ETC)
+        if why:
+            say(why)
         say("Change anything you like: settings, the background, Chrome "
             "extensions and\nbookmarks. When you are done, LOG OUT of that "
             "desktop, and this command will\nask whether to keep the changes. "
