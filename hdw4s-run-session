@@ -521,7 +521,11 @@ if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
   background_file="${HOME}/.hdw4s/background.svg"
   if [ "$(gsettings_value org.gnome.desktop.background picture-uri)" = \
        "'file://${background_file}'" ]; then
-    "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-background" write \
+    # --kind SAID, not inferred: left to itself the generator guesses from
+    # whether the instance name ends in a number, and refuses a "named" one --
+    # which a template slot ("tmpl") or a pool with another prefix would be taken
+    # for. This script knows the session type; it is the authority.
+    "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-background" write --kind ephemeral \
         "${instance}" "${background_file}" || {
       # Reported and not fatal. A desktop nobody can tell apart is a worse
       # product; a desktop that will not start is a worse outcome.
