@@ -386,6 +386,24 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
                   'Name=PulseAudio Sound System' 'Hidden=true' \
       > "${XDG_CONFIG_HOME}/autostart/pulseaudio.desktop"
   fi
+
+  # The machine's upgrade prompts. update-notifier says "software updates are
+  # available" AND is what starts the release checker that advertises the next
+  # Ubuntu release -- one this package may not run on at all; the Pro notifier
+  # advertises a subscription. Owner, 2026-09-30: "entirely pointless. our
+  # ephemeral users can never do this, our named users might, but it is unlikely
+  # as they won't have sudo by default." The machine's administrator upgrades the
+  # machine; a prompt inside a remote desktop asks the one person who cannot act
+  # on it. Hidden here, for both kinds of desktop, with the same per-profile
+  # mechanism as above -- the machine's /etc/xdg/autostart entries are left alone
+  # for its local desktops. ubuntu-report-on-upgrade is not listed: it acts only
+  # after a release upgrade, which cannot happen from in here.
+  install -d -m0700 "${XDG_CONFIG_HOME}/autostart"
+  for entry in update-notifier ubuntu-advantage-notification; do
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' \
+                  "Name=${entry}" 'Hidden=true' \
+      > "${XDG_CONFIG_HOME}/autostart/${entry}.desktop"
+  done
 fi
 
 # Set when an account could have two desktops on one machine, to stop them
