@@ -326,6 +326,32 @@ CHAIN
     echo '       6.11 or newer.' >&2
   fi
 
+  # PRINTING FROM AN EPHEMERAL DESKTOP GOES ONLY THROUGH SELKIES. The unit hides
+  # the machine's CUPS socket and points applications at Selkies' queue, but CUPS
+  # also listens on the loopback at 631, and an application that ignores the
+  # configured server reached it there -- measured 2026-09-30: a job reached the
+  # machine's real printer queue from a visitor's uid that way. Matched on the
+  # socket OWNER, not the cgroup: every slot's uid lies in one fixed window, which
+  # exists whenever this table is loaded, where a per-slot cgroup may not. Named
+  # desktops run as people's own uids and keep the machine's printers.
+  local window slots_chain=''
+  window="$("$(dirname "$0")/hdw4s-ephemeral-slots" --uid-window 2>/dev/null)" || window=''
+  if [ -n "${window}" ]; then
+    slots_chain="$(cat <<CHAIN
+
+        # Ephemeral slots may not reach this machine's own CUPS.
+        chain slots_out {
+                type filter hook output priority filter; policy accept;
+                meta skuid ${window% *}-${window#* } tcp dport 631 fib daddr type local \\
+                        counter reject with tcp reset
+        }
+CHAIN
+)"
+  else
+    echo 'hdw4s: could not ask hdw4s-ephemeral-slots for the slot uid window, so' >&2
+    echo '       ephemeral desktops can reach this machine'"'"'s CUPS over the loopback.' >&2
+  fi
+
   cat <<EOF
 #!/usr/sbin/nft -f
 #
@@ -376,6 +402,7 @@ table inet hdw4s {${xreach_counters}
         }
 ${media_chain}
 ${xreach_chain}
+${slots_chain}
 }
 EOF
 }

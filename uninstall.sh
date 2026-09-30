@@ -168,14 +168,15 @@ for f in /run/userdb/*.user; do
   slot="${f%.user}"
   rm -f "${slot}.user" "${slot}.group"
 done
-rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.service.d
+rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.service.d \
+       /run/systemd/journald@hdw4s-*.conf.d /run/systemd/system/systemd-journald@hdw4s-*.service.d
 # The settings layer and the policy. Only our own profile and database are
 # touched; /etc/dconf/profile/user belongs to every session on the machine.
 rm -rf /etc/dconf/db/hdw4s-ephemeral.d /etc/dconf/db/hdw4s-ephemeral \
        /etc/dconf/db/hdw4s-template.d /etc/dconf/db/hdw4s-template \
        /etc/dconf/profile/hdw4s-author \
        /etc/dconf/profile/hdw4s-ephemeral /etc/hdw4s/chrome-policies \
-       /etc/hdw4s/chrome-author-policy.json
+       /etc/hdw4s/chrome-author-policy.json /etc/polkit-1/rules.d/60-hdw4s-slots.rules
 rmdir --ignore-fail-on-non-empty /etc/opt/chrome/policies/managed \
       /etc/opt/chrome/policies 2>/dev/null || :
 if command -v dconf >/dev/null 2>&1; then dconf update 2>/dev/null || :; fi

@@ -1,0 +1,24 @@
+# Remove what daemons outside an ephemeral desktop kept under its slot's reused
+# name and uid; see hdw4s-slot-scrub. Instance: <start|stop>-<slot>.
+#
+# A UNIT OF ITS OWN, started by hdw4s-ephemeral@.service before and after each
+# visit, because the desktop's own Exec*= lines -- even with "!" -- run inside
+# the desktop's sandbox: there the slot's account does not resolve (/run/userdb
+# is hidden) and /var and /run are read-only, so the first version failed every
+# start and took the pool down with it (measured 2026-09-30). This runs in the
+# host's namespace, as root, and touches only paths named by the slot.
+[Unit]
+Description=HDW4S scrub of slot records (%i)
+Documentation=man:hdw4s(8)
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/hdw4s/hdw4s-slot-scrub %i
+ProtectHome=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes

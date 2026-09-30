@@ -3163,8 +3163,12 @@ echo '== the web-root check reads THIS start, and silence is never a pass =='
   # unreadable journal.
   cat > "${d}/bin/journalctl" <<'STUB'
 #!/bin/bash
-pat=''
-for a in "$@"; do case "${a}" in --grep=*) pat="${a#--grep=}";; esac; done
+pat=''; ns=''
+for a in "$@"; do case "${a}" in --grep=*) pat="${a#--grep=}";; --namespace=\*) ns='all';; esac; done
+# An ephemeral desktop logs into its own journal namespace, so a query without
+# --namespace='*' reads a journal that holds none of its lines: the stub then
+# returns nothing, as the real journal would, and every arm below goes red.
+[ "${ns}" = 'all' ] || exit 0
 # The check builds its pattern as "<nonce>|<sentence>|<sentence>", so the nonce
 # is the first alternative. Taking it from the pattern is what lets the stub
 # play the journal back rather than be told the answer.

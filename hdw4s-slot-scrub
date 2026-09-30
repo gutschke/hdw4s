@@ -1,0 +1,76 @@
+#!/bin/bash -e
+# Remove what the distribution kept for an ephemeral slot on its behalf.
+#
+#   hdw4s-slot-scrub <start|stop>-<slot>
+#
+# Run as root by hdw4s-slot-scrub@.service, which hdw4s-ephemeral@.service starts
+# before each desktop and after it stops. Never from inside the desktop's own
+# unit: there the account does not resolve and /var and /run are read-only. A slot's uid and name are reused by the next visitor, so anything a
+# daemon OUTSIDE the session keeps under that uid or name is either a trace of
+# this visitor or something the next one inherits. The session's own sandbox
+# cannot reach these: they are written by other programs, on the visitor's
+# request or merely because the uid ran. Found by the leak audit of 2026-09-30
+# (private notes), each one measured on a real visitor desktop:
+#
+#   the per-slot journal   the desktop logs into its own journald namespace,
+#                          hdw4s-<slot>, kept in memory only (see
+#                          hdw4s-ephemeral-slots). It belongs to the SLOT, not
+#                          the visit, so it is emptied when the visit ends:
+#                          measured, 381 lines before, none after.
+#   AccountsService        accounts-daemon files a record per name the first
+#                          time anything asks about the account, and keeps what
+#                          the account sets there (e.g. an email address) on
+#                          disk, world-readable, across reboots. The polkit rule
+#                          stops a slot SETTING anything; this removes the
+#                          record the lookup itself creates.
+#   crash reports          /var/crash/*.<uid>.crash is owned by the uid and so
+#                          readable by the next visitor. apport skips processes
+#                          in a foreign mount namespace unless their cgroup is
+#                          under system.slice, which ours is not -- an accident
+#                          of the slice name this cleans up after regardless.
+#
+# BY EXACT NAME AND UID, NEVER BY PATTERN OVER OTHER ACCOUNTS. The slot must be
+# one this machine minted (hdw4s-is-slot); anything else is refused, so a unit
+# pointed at a real person's instance by mistake cannot delete their records.
+LC_ALL=C; export LC_ALL
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH
+
+arg="${1:-}"; phase="${arg%%-*}"; slot="${arg#*-}"
+case "${phase}" in start|stop) ;; *)
+  echo "usage: hdw4s-slot-scrub <start|stop>-<slot>" >&2; exit 2;; esac
+"$(dirname "$0")/hdw4s-is-slot" "${slot}" || {
+  echo "hdw4s-slot-scrub: '${slot}' is not an ephemeral slot on this machine;" \
+       'refusing to touch its records.' >&2
+  exit 1
+}
+uid="$(id -u "${slot}")"
+ns="hdw4s-${slot}"
+mid="$(cat /etc/machine-id)"
+
+rm -f "/var/lib/AccountsService/users/${slot}" \
+      "/var/lib/AccountsService/icons/${slot}"
+rm -f /var/crash/*".${uid}.crash"
+
+# The journal is emptied at STOP only. At start the namespace already holds this
+# visit's own first lines (the start steps before this one log into it), so
+# "not empty" says nothing there; a store left by a stop that never ran can only
+# be one with no reboot since, because it lives in /run.
+if [ "${phase}" = 'stop' ]; then
+  # EMPTIED WITHOUT STOPPING ANYTHING. The desktop's unit requires its
+  # namespace's journald sockets, and this runs inside that unit's stop: asking
+  # systemd to stop those sockets here waited for the desktop's stop, which was
+  # waiting for this -- a deadlock broken only by the 90-second timeout, measured
+  # 2026-09-30. So the running journald is told to ROTATE (the current file is
+  # archived and a new, empty one opened) and the archived files are vacuumed;
+  # a journald that is not running holds nothing open and its files simply go.
+  # The store was never readable by the slot (SplitMode=none, root's file); this
+  # is the "keeps nothing" half, not the isolation half.
+  store="/run/log/journal/${mid}.${ns}"
+  if systemctl -q is-active "systemd-journald@${ns}.service"; then
+    journalctl --namespace="${ns}" --rotate >/dev/null 2>&1 || :
+    journalctl --namespace="${ns}" --vacuum-size=1 >/dev/null 2>&1 || :
+  else
+    rm -rf "${store}"
+  fi
+  rm -rf "/var/log/journal/${mid}.${ns}"
+fi

@@ -428,7 +428,11 @@ journal of invocation ${inv} (probe ${nonce})" >&2
   local pat="${nonce}|Using custom web_root directory: |web_root directory .* not found or missing index|${held}"
   local ticks=$(( budget * 4 )) i hits probe='' accepted refused outcome
   for (( i = 0; i < ticks; i++ )); do
-    hits="$("${jctl}" "_SYSTEMD_INVOCATION_ID=${inv}" --case-sensitive=yes \
+    # --namespace='*': an ephemeral desktop logs into a journal namespace of its
+    # own (the unit's LogNamespace=), a named one into the default journal, and
+    # "*" reads both -- measured 2026-09-30. Without it the gate searched only the
+    # default journal and a namespaced desktop waited here until the budget ran out.
+    hits="$("${jctl}" --namespace='*' "_SYSTEMD_INVOCATION_ID=${inv}" --case-sensitive=yes \
               --grep="${pat}" --no-pager --output=cat 2>/dev/null || :)"
     case "${hits}" in *"${nonce}"*) probe='seen' ;; esac
     refused="$(printf '%s\n' "${hits}" |

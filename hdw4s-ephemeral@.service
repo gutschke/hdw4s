@@ -59,7 +59,22 @@ After=hdw4s-stream@%i.service
 # Resolved at service START, not at unit load, which is what lets one template
 # serve a pool of slots whose accounts are minted just before the unit runs.
 User=%i
+# NOT under system.slice, and that also keeps apport from writing crash reports
+# for this desktop: it skips a crash in a foreign mount namespace unless the
+# process's cgroup is under /system.slice (read in /usr/share/apport/apport).
+# That is an accident, not a design -- moving this slice would re-enable
+# /var/crash/*.<uid>.crash, readable by the next visitor of the slot -- so
+# hdw4s-slot-scrub removes any such file at every start and stop regardless.
 Slice=hdw4s-%i.slice
+# THE DESKTOP LOGS INTO A JOURNAL OF ITS OWN, kept in memory and emptied when
+# the visit ends (hdw4s-slot-scrub stop). On a stock install the default journal
+# is persistent and journald gives every regular uid its own file, readable by
+# that uid -- and slot uids are reused, so the next visitor read the previous
+# one's log (measured 2026-09-30). The namespace's settings are /run drop-ins
+# written per slot by hdw4s-ephemeral-slots; nothing about the machine's own
+# journal changes. That the desktop exists and runs still appears in the
+# default journal, which systemd itself writes; what happens inside it does not.
+LogNamespace=hdw4s-%i
 Type=notify
 NotifyAccess=all
 TimeoutStartSec=120
@@ -108,6 +123,13 @@ InaccessiblePaths=%t/userdb
 # applies to the namespace rather than to a uid, so the one command that has to
 # read that record was locked out by it too.
 InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s-proxy
+# PRINTING GOES ONLY THROUGH SELKIES: its queue hands the document to the
+# visitor's own browser (hdw4s-run-session points CUPS_SERVER at it). The
+# machine's CUPS socket is hidden so an application cannot fall back to the
+# system's printers -- which, measured 2026-09-30, a visitor saw as its DEFAULT
+# destination. CUPS also listens on 127.0.0.1:631, which this does not close;
+# reaching it means an application ignoring the configured server on purpose.
+InaccessiblePaths=-/run/cups
 # systemd fills these from the slot account, which resolves OUTSIDE the
 # namespace and so carries the outside name. They are the last two leaks.
 Environment=USER=user
@@ -398,6 +420,14 @@ KillMode=control-group
 # this line runs. Refusing here rather than in the session is also strictly
 # better -- nothing of the desktop has been started yet when it fails.
 ExecStartPre=!/usr/lib/hdw4s/hdw4s-webroot gate %i
+# What daemons outside the session keep under the slot's reused name and uid;
+# see hdw4s-slot-scrub. Before (a crash can skip the stop) and after every visit,
+# through a unit of its own because these lines run inside this sandbox, where
+# the scrub cannot see the account or write /var. The start is "-": a failed
+# scrub at start must never keep a visitor out -- it did, the first time -- and
+# the stop is the one that empties the journal.
+ExecStartPre=-!/usr/bin/systemctl start hdw4s-slot-scrub@start-%i.service
+ExecStopPost=!/usr/bin/systemctl start hdw4s-slot-scrub@stop-%i.service
 ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
 # The session type arrives as an ARGUMENT, not as an environment variable.
 # EnvironmentFile= overrides Environment= regardless of the order they appear in

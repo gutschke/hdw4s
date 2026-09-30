@@ -763,6 +763,19 @@ if [ "${HDW4S_STARTUP_HOLD}" = 'on' ]; then
   fi
 fi
 
+# PRINTING FROM AN EPHEMERAL DESKTOP GOES TO SELKIES' QUEUE and nowhere else:
+# the document reaches the visitor's own browser as a PDF, where their own print
+# dialog takes over. Selkies runs that queue as this account, in this runtime
+# directory (selkies/printing.py, PrintQueue: "Applications reach it with
+# CUPS_SERVER set to `socket`"), but nothing told the desktop's applications, so
+# they fell back to the machine's CUPS -- whose printer a visitor saw as its
+# default destination, measured 2026-09-30. The unit also hides the machine's
+# CUPS socket (InaccessiblePaths=-/run/cups), so this is not the only barrier.
+# Named desktops keep the machine's printers: they belong to people who work here.
+if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+  export CUPS_SERVER="${XDG_RUNTIME_DIR}/selkies-cups/cups.sock"
+fi
+
 # The watcher's pipe is closed in the desktop, so nothing started under it
 # inherits the descriptor or can read the verdict meant for this script.
 if [ -n "${stage_fd}" ]; then

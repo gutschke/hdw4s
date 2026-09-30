@@ -27,6 +27,10 @@ hdw4s-stage-wait         usr/lib/hdw4s
 # hdw4s runs it as a command: two callers, one file, and nothing to configure.
 hdw4s-duration           usr/lib/hdw4s
 hdw4s-template           usr/lib/hdw4s
+hdw4s-is-slot            usr/lib/hdw4s
+hdw4s-slot-scrub         usr/lib/hdw4s
+# polkit's vendor directory: a package's own rules live here and go with it.
+60-hdw4s-slots.rules     usr/share/polkit-1/rules.d
 hdw4s.xorg.conf          usr/lib/hdw4s
 wrappers/*               usr/lib/hdw4s/wrappers
 hdw4s.conf               usr/share/hdw4s

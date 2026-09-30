@@ -970,6 +970,21 @@ working in, at an hour chosen by a timer, is an updater that gets switched off.
     hdw4s --version                  which version this is
     systemctl status hdw4s@<i>       includes the display and port when running
     journalctl -xeu hdw4s@<i>        session output, including the X server
+    journalctl --namespace=hdw4s-<slot>
+                                     an ephemeral desktop's own output
+
+An ephemeral desktop logs into a journal of its own, not the machine's: kept in
+memory only, readable by root only, and emptied when the visit ends. Starts and
+stops still appear in the machine's journal (`journalctl -u
+hdw4s-ephemeral@<slot>`); what happened inside the desktop does not, and is gone
+once the visitor has left. Look while the desktop is running. On a machine with
+a persistent journal the machine's own journal would otherwise give each slot's
+reused uid a file of its own, so the next visitor could read the previous one's
+output.
+
+Printing from an ephemeral desktop goes only to the visitor's own browser, as a
+PDF through the streaming server's print queue; the machine's printers are
+neither listed nor reachable from it. Named desktops keep the machine's printers.
 
 `hdw4s check` asks three questions, and the first two are about the machine
 rather than about any session.

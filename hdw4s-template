@@ -906,8 +906,8 @@ def cmd_edit(asked, yes):
                            capture_output=True, text=True)
         if r.returncode != 0:
             die("the template desktop did not start:\n  %s\n"
-                "  journalctl -u %s says why." % (r.stderr.strip(),
-                                                  unit_of(inst)))
+                "  journalctl --namespace=hdw4s-%s says why (its desktop logs\n"
+                "  into a journal of its own)." % (r.stderr.strip(), inst))
         expires = time.time() + INVITE_SECONDS
         os.makedirs(INVITE_DIR, mode=0o711, exist_ok=True)
         fd = os.open(invite + ".new", os.O_WRONLY | os.O_CREAT | os.O_EXCL,

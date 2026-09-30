@@ -67,3 +67,6 @@ override_dh_installsystemd:
 # router's start request is the only way a pool desktop starts.
 	dh_installsystemd --no-enable --no-start hdw4s-start@.path
 	dh_installsystemd --no-enable --no-start hdw4s-start@.service
+# The scrub of a slot's records, started by the ephemeral desktop's own unit
+# before and after each visit; never enabled, never started at install.
+	dh_installsystemd --no-enable --no-start hdw4s-slot-scrub@.service

@@ -27,7 +27,8 @@ if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
     slot="${f%.user}"
     rm -f "${slot}.user" "${slot}.group"
   done
-  rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.service.d
+  rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.service.d \
+       /run/systemd/journald@hdw4s-*.conf.d /run/systemd/system/systemd-journald@hdw4s-*.service.d
 # The settings layer. Only our own profile and database are touched;
 # /etc/dconf/profile/user belongs to every session on the machine.
 #

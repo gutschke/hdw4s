@@ -1,0 +1,35 @@
+// Ephemeral desktops may not leave state with the system's account daemons.
+//
+// Installed by hdw4s. It answers only for the ephemeral SLOT accounts hdw4s
+// mints, and only for the actions below; for everyone else, and for every other
+// action, it says nothing and the machine's own policy decides.
+//
+// A slot's name and uid are reused by the next visitor. Two daemons outside the
+// session would keep what a visitor asks them to, under that name, for whoever
+// comes next (measured 2026-09-30):
+//
+//   org.freedesktop.accounts.*        accounts-daemon stores an email address,
+//                                     language, avatar... on disk, readable by
+//                                     every local user, surviving reboots.
+//   org.freedesktop.login1.set-*-linger
+//                                     linger would start the slot's user manager
+//                                     at every boot, outside the session's
+//                                     sandbox, running as the next visitor's uid.
+//
+// Refusing them costs the avatar and region panels inside ephemeral desktops.
+//
+// hdw4s-is-slot decides who is a slot, from an artefact only the slot minter
+// creates; it is asked only after the action matched, so ordinary requests never
+// run it.
+polkit.addRule(function (action, subject) {
+    if (action.id.indexOf("org.freedesktop.accounts.") !== 0 &&
+        action.id !== "org.freedesktop.login1.set-self-linger" &&
+        action.id !== "org.freedesktop.login1.set-user-linger")
+        return polkit.Result.NOT_HANDLED;
+    try {
+        polkit.spawn(["/usr/lib/hdw4s/hdw4s-is-slot", subject.user]);
+    } catch (notASlot) {
+        return polkit.Result.NOT_HANDLED;
+    }
+    return polkit.Result.NO;
+});

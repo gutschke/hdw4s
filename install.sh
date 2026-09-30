@@ -18,12 +18,14 @@ trap 'rc="$?"
 
 src="$(cd "$(dirname "$0")" && pwd)"
 SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-template}
+         hdw4s-is-slot hdw4s-slot-scrub 60-hdw4s-slots.rules
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
          hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index hdw4s-names.js
          hdw4s-title.js
          hdw4s-refuse hdw4s-refuse@.service
          hdw4s-teardown hdw4s-teardown@.service hdw4s-teardown@.path
+         hdw4s-slot-scrub@.service
          hdw4s-start hdw4s-start@.service hdw4s-start@.path
          hdw4s-incarnation hdw4s-incarnation@.service
          hdw4s-stream-dir hdw4s-stream@.service hdw4s-sysusers.conf
@@ -171,6 +173,7 @@ if [ "${src}" != "${dst}" ]; then
 fi
 chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
            "${dst}"/hdw4s-duration "${dst}"/hdw4s-template \
+           "${dst}"/hdw4s-is-slot "${dst}"/hdw4s-slot-scrub \
            "${dst}"/hdw4s-ephemeral-slots "${dst}"/hdw4s-webroot \
            "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse \
            "${dst}"/hdw4s-incarnation "${dst}"/hdw4s-stream-dir \
@@ -388,6 +391,11 @@ systemctl enable --now hdw4s-check.timer
 # packaged copy goes to /usr/lib/sysusers.d. systemd-sysusers also runs at every
 # boot, so the group is there before anything that needs it.
 install -d -m0755 /etc/sysusers.d
+# The polkit rule keeping ephemeral slots from leaving state with the account
+# daemons (60-hdw4s-slots.rules). The package ships it in polkit's vendor
+# directory; this is not a package, so it goes where an administrator's go.
+install -d -m0755 /etc/polkit-1/rules.d
+install -m0644 "${dst}/60-hdw4s-slots.rules" /etc/polkit-1/rules.d/60-hdw4s-slots.rules
 install -m0644 "${dst}/hdw4s-sysusers.conf" /etc/sysusers.d/hdw4s-sysusers.conf
 systemd-sysusers /etc/sysusers.d/hdw4s-sysusers.conf
 systemctl enable --now hdw4s-ephemeral-slots.service
