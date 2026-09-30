@@ -575,11 +575,23 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
   is    'no refusal touched the table or a unit' \
         "$(cat "${SLOTS}"; cat "${CALLS}")" "${table}"
 
-  # The one way past, which must actually work.
+  # The one way past, which must actually work -- and take the identity the
+  # minter made with it, or the next mint dies on "uid already belongs to"
+  # (measured on a box 2026-09-30, releasing a template row). Only records that
+  # name this seat: 60901 below belongs to another and must survive.
+  USERDB="${SB}/userdb"; mkdir -p "${USERDB}"
+  for f in eph0.user 60900.user eph0.group 60900.group; do
+    printf '{"userName":"eph0","uid":60900,"gid":60900}\n' > "${USERDB}/${f}"
+  done
+  printf '{"userName":"eph1","uid":60901,"gid":60901}\n' > "${USERDB}/60901.user"
+  systemctl() { echo "systemctl $*" >> "${CALLS}"; [ "$1" != is-active ]; }
   (cmd_release --internal eph0) >/dev/null 2>&1
   is    'release --internal removes the seat' "$(slot_of eph0)" ''
   is    'and only that row' "$(slot_of alice):$(slot_of tmpl)" '0:2'
   has   'and keeps the comments' "$(cat "${SLOTS}")" '# comment'
+  is    'and the identity the minter made for it' \
+        "$(ls "${USERDB}" | tr '\n' ' ')" '60901.user '
+  is    'and its namespace' "$([ -e "${NSDIR}/eph0" ] && echo left || echo gone)" 'gone'
 )
 
 echo '== template edit needs no prior step, and a failed mint leaves no row =='
@@ -3836,7 +3848,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=615   # update when tests are added; a wrong number is the point
+EXPECTED=617   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

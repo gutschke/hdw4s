@@ -429,6 +429,7 @@ TEMPLATE_SLOT='_hdw4s_author'
 # same variable the minter reads, so a test that points one somewhere disposable
 # points both; two spellings of one path is two paths as soon as either moves.
 NSDIR="${HDW4S_NS_DIR:-/run/hdw4s-ns}"
+USERDB="${HDW4S_USERDB_DIR:-/run/userdb}"
 
 # Is this name one of OURS -- a seat of the ephemeral pool or the authoring slot
 # -- rather than a person's desktop? Prints "pool", "template", or nothing.
@@ -3366,6 +3367,33 @@ cmd_release() {
          "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
   rm -f "${ETCDIR}/${inst}.keyring.cred" "${ETCDIR}/${inst}.auth.cred"
   drop_row "${inst}"
+  # AND THE IDENTITY WE MINTED FOR IT, for a pool seat or the authoring slot.
+  # The minter writes it at boot from the rows, so it outlived the row until the
+  # next reboot -- and held its uid meanwhile: releasing the old template row
+  # and running "template edit" died with "uid 60999 already belongs to
+  # 'tmpl'" (measured 2026-09-30), because the minter rightly refuses a uid
+  # somebody else holds and cannot tell its own leftover from a real account.
+  # Only once the unit is really stopped -- a desktop whose identity vanished
+  # under it is worse than a stale record -- and only records that name this
+  # seat, judged by the same namespace evidence that made it internal.
+  if [ -n "${internal}" ] && [ -f "${NSDIR}/${inst}/passwd" ]; then
+    if systemctl is-active --quiet "$(unit_of "${inst}")"; then
+      echo "hdw4s: ${inst} is still running, so its identity was left in place;" >&2
+      echo "  it goes at the next reboot." >&2
+    else
+      local uid=''
+      uid="$(sed -n 's/.*"uid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+               "${USERDB}/${inst}.user" 2>/dev/null | head -n1)"
+      rm -f "${USERDB}/${inst}.user" "${USERDB}/${inst}.group"
+      if [ -n "${uid}" ]; then
+        local f
+        for f in "${USERDB}/${uid}.user" "${USERDB}/${uid}.group"; do
+          grep -qs "\"${inst}\"" "${f}" && rm -f "${f}"
+        done
+      fi
+      rm -rf "${NSDIR:?}/${inst}"
+    fi
+  fi
   systemctl daemon-reload
   echo "Session ${inst} released. Its credentials were removed with it, so a"
   echo 'keyring in the profile below can no longer be unlocked. Left in place:'
