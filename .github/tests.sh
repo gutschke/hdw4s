@@ -590,7 +590,7 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
   is    'and only that row' "$(slot_of alice):$(slot_of tmpl)" '0:2'
   has   'and keeps the comments' "$(cat "${SLOTS}")" '# comment'
   is    'and the identity the minter made for it' \
-        "$(ls "${USERDB}" | tr '\n' ' ')" '60901.user '
+        "$(find "${USERDB}" -mindepth 1 -printf '%f ')" '60901.user '
   is    'and its namespace' "$([ -e "${NSDIR}/eph0" ] && echo left || echo gone)" 'gone'
 )
 
