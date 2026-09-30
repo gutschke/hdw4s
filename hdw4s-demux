@@ -6058,7 +6058,7 @@ def registers_a_service_worker(headers):
 def forward_request(instance, method, rest, query, headers, rf, wf, sock,
                     extra=(), navigation=False,
                     version=b"HTTP/1.1", body=("none", None),
-                    refusal_ends=False):
+                    refusal_ends=False, who=""):
     """One upstream connection for ONE request. Never one per downstream
     connection -- that is the pooling defect this component exists to avoid.
 
@@ -6180,8 +6180,15 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         answered = None
     if answered is None:
         up.close()
-        log("%s did not answer a request within %d s"
-            % (instance, up.gettimeout()))
+        # WHO IT WAS FOR, because the slot is not the question. A request
+        # forwarded while a visit logged out hung here for the full wait and
+        # was answered after the slot had been let to the next visitor, and
+        # the log could not say which of the two lettings it belonged to --
+        # which is the one thing that decides whether a visitor ever saw it.
+        log("%s did not answer a request within %d s (%s%s %s)"
+            % (instance, up.gettimeout(), who + ", " if who else "",
+               method.decode("ascii", "replace"),
+               rest[:60].decode("ascii", "replace")))
         respond(wf, 502, page("That desktop is not answering",
                               "Try again."), extra)
         return False
@@ -6600,7 +6607,11 @@ def serve(sock, own, expected_b64):
                                                      new_identity),
                                      is_page_navigation(method, rest, headers),
                                      version=version, body=body,
-                                     refusal_ends=bool(rec.get("live")))
+                                     refusal_ends=bool(rec.get("live")),
+                                     who="session %s, visitor %s, %s" % (
+                                         sid[:8], visitor_tag(identity),
+                                         "live" if rec.get("live")
+                                         else "first request"))
             if served is REFUSED:
                 # THE DESKTOP THIS LETTING HAD IS NOT RUNNING, on systemd's own
                 # word: its relay's Requisite= was refused. Gated exactly as a
