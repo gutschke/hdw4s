@@ -2195,7 +2195,7 @@ cmd_unset() {
 # files get a reputation for not working.
 set_hint() {
   local inst="$1" pair firewall='' session='' updater='' atenable='' relay='' \
-        atenable2='' atboot='' poolsize=''
+        atenable2='' atboot='' poolsize='' atedit=''
   shift
   for pair in "$@"; do
     case "${pair%%=*}" in
@@ -2233,6 +2233,10 @@ set_hint() {
       # boot no longer makes, and each visitor sent there gets a desktop that
       # fails to start.
       HDW4S_EPHEMERAL_SLOTS) atboot='yes'; poolsize="${pair#*=}";;
+      # Read afresh by every "hdw4s template edit" to print its link, and by
+      # nothing that runs in a session; "restart the affected sessions" was
+      # printed for it, and no restart touches it.
+      HDW4S_EPHEMERAL_URL) atedit='yes';;
       *) session='yes';;
     esac
   done
@@ -2246,6 +2250,8 @@ set_hint() {
     echo "  To lower it, before the reboot release every seat from ${prefix}${poolsize} up:"
     echo "    hdw4s release --internal ${prefix}<N>"
   fi
+  [ -z "${atedit}" ] ||
+    echo "  Used by the next 'hdw4s template edit'; nothing needs restarting."
   [ -z "${firewall}" ] || echo "  Run 'hdw4s firewall --apply' to use it."
   [ -z "${updater}" ] || echo "  Run '/usr/lib/hdw4s/hdw4s-update' to use it."
   [ -z "${atenable}" ] || echo '  Applies to sessions created after this.'
