@@ -6174,28 +6174,45 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
 
     # Response. See read_response_head() and response_head(): nothing of the
     # desktop's head is written as it came, only what was parsed out of it.
+    #
+    # A TIMEOUT AND A BROKEN CONNECTION ARE DIFFERENT FAULTS, and this used to
+    # log both as "did not answer a request within 30 s" -- the socket's
+    # timeout SETTING, printed whatever happened. Measured 2026-09-30: a new
+    # visitor's page reload failed SIX seconds after the mint, the relay's
+    # connection breaking while the desktop came up, and the line sent the
+    # diagnosis looking for a request that had waited half a minute.
+    why = None
     try:
         answered = upf.peek(1)
-    except OSError:
+    except socket.timeout:
+        answered, why = None, "did not answer within %d s" % up.gettimeout()
+    except OSError as e:
         answered = None
-    if answered is None:
+        why = "broke the connection before answering (%s)" % \
+            errno.errorcode.get(e.errno, e.errno)
+    if answered is not None and not answered:
+        why = "closed the connection before answering"
+    if why is not None:
         up.close()
-        # WHO IT WAS FOR, because the slot is not the question. A request
-        # forwarded while a visit logged out hung here for the full wait and
-        # was answered after the slot had been let to the next visitor, and
-        # the log could not say which of the two lettings it belonged to --
-        # which is the one thing that decides whether a visitor ever saw it.
-        log("%s did not answer a request within %d s (%s%s %s)"
-            % (instance, up.gettimeout(), who + ", " if who else "",
+        log("%s %s (%s%s %s)"
+            % (instance, why, who + ", " if who else "",
                method.decode("ascii", "replace"),
                rest[:60].decode("ascii", "replace")))
-        respond(wf, 502, page("That desktop is not answering",
-                              "Try again."), extra)
-        return False
-    if not answered:
-        up.close()
-        respond(wf, 502, page("That desktop closed the connection",
-                              "Try again."), extra)
+        # A PAGE gets the starting page instead, which polls and reloads: the
+        # visitor above reloaded seconds later and found the desktop running,
+        # so a dead end here was the only thing wrong. Nothing was relayed yet,
+        # so there is no half-sent reply to take back. Anything that is not a
+        # page keeps its error; its sender retries on its own terms.
+        if navigation:
+            respond(wf, 200, starting_page(),
+                    [("Cache-Control", "no-store")] + list(extra))
+            return STARTING
+        if answered is None and why.startswith("did not answer"):
+            respond(wf, 502, page("That desktop is not answering",
+                                  "Try again."), extra)
+        else:
+            respond(wf, 502, page("That desktop closed the connection",
+                                  "Try again."), extra)
         return False
     asked_upgrade = header_value(headers, "Upgrade") is not None
     try:
