@@ -1,16 +1,16 @@
 #!/usr/bin/python3
 """The template every new ephemeral desktop starts from.
 
-    hdw4s template edit [<instance>] [--yes]
+    hdw4s template edit [--yes]
     hdw4s template keep [<path>...]
     hdw4s template forget <path>...
     hdw4s template reset
     hdw4s template show
 
 "edit" starts the template-authoring desktop (the slot table's row typed
-"template"), prints a link that works once, for five minutes, and waits. Log
-out of that desktop when done and this asks whether to publish what you
-changed; interrupting it (Ctrl-C) stops the desktop and keeps nothing.
+"template", which "hdw4s template edit" sets up the first time), prints a
+link that works once, for five minutes, and waits. Log out of that desktop
+when done and this asks whether to publish what you changed; interrupting it (Ctrl-C) stops the desktop and keeps nothing.
 
 WHAT IS PUBLISHED IS FILTERED, and the filter is an ALLOW-list on purpose: a
 path nobody thought of is left out, which the author notices and can ask for,
@@ -214,16 +214,24 @@ def template_rows():
     return rows
 
 
-def pick_instance(asked):
+# Where hdw4s-ephemeral-slots writes each minted slot's own passwd view: the
+# evidence that a name is a slot IT made, and not merely a name that resolves.
+NS_DIR = os.environ.get("HDW4S_NS_DIR", "/run/hdw4s-ns")
+
+
+def pick_instance():
+    """The authoring slot: the first row typed "template".
+
+    There is no argument to choose one. The administrator never names this slot
+    -- "hdw4s template edit" provisions it (see provision_template in hdw4s)
+    before this runs -- and a machine has one template, so there is nothing to
+    choose between. An install that made several rows with the retired
+    "enable --template" gets the first, which is what the default was then."""
     rows = template_rows()
-    if asked:
-        if asked not in rows:
-            die("%s is not a template slot. The slot table types these as "
-                "template: %s" % (asked, ", ".join(rows) or "none"))
-        return asked
     if not rows:
-        die("this machine has no template slot. Make one with:\n"
-            "  hdw4s enable --template <name>")
+        die("this machine has no template-authoring slot. Run this as\n"
+            "  hdw4s template edit\n"
+            "which sets one up the first time.")
     return rows[0]
 
 
@@ -854,8 +862,24 @@ def install_keyfile(src):
             "settings yet: %s" % r.stderr.strip())
 
 
-def cmd_edit(asked, yes):
-    inst = pick_instance(asked)
+def cmd_edit(yes):
+    inst = pick_instance()
+    # THE MINTER'S OWN EVIDENCE, NOT "the name resolves". A row an earlier
+    # version's "enable --template <name>" left on a PERSON'S account resolves
+    # perfectly well -- to that person -- and the authoring desktop would then
+    # have been started as them. Only a slot hdw4s-ephemeral-slots made has its
+    # passwd view; hdw4s-is-slot asks polkit's question the same way. Asked
+    # before anything is stopped or wiped: nothing of an edit can be running in a
+    # slot that has no identity, and a refusal should leave everything as it was.
+    if not os.path.isfile(os.path.join(NS_DIR, inst, "passwd")):
+        die("the authoring slot %s has no identity this boot, so its desktop "
+            "cannot start.\n"
+            "  'journalctl -b -u hdw4s-ephemeral-slots' says why it was not "
+            "made.\n"
+            "  If %s is a person's account, an earlier version left this row "
+            "on it:\n"
+            "    hdw4s release --internal %s\n"
+            "  and run 'hdw4s template edit' again." % (inst, inst, inst))
     lockfd = take_lock()
     # WE HOLD THE LOCK, so no other "template" command is running: anything of
     # an edit still here was left by one that was killed outright (SIGKILL, a
@@ -877,8 +901,8 @@ def cmd_edit(asked, yes):
     try:
         pw = pwd.getpwnam(inst)
     except KeyError:
-        die("%s has no account yet. It is made at boot, or by:\n"
-            "  hdw4s enable --template %s" % (inst, inst))
+        die("%s has no account, though it was minted this boot; "
+            "'journalctl -b -u hdw4s-ephemeral-slots' may say why." % inst)
     author = os.path.join(AUTHOR_ROOT, inst)
     home = os.path.join(AUTHOR_ROOT, inst + ".home")
     token = secrets.token_hex(16)
@@ -1059,9 +1083,9 @@ def main(argv):
     if cmd == "edit":
         yes = "--yes" in rest
         rest = [a for a in rest if a != "--yes"]
-        if len(rest) > 1 or any(a.startswith("-") for a in rest):
-            die("usage: hdw4s template edit [<instance>] [--yes]", 2)
-        return cmd_edit(rest[0] if rest else None, yes)
+        if rest:
+            die("usage: hdw4s template edit [--yes]", 2)
+        return cmd_edit(yes)
     if cmd == "keep":
         return cmd_keep(rest)
     if cmd == "forget":
@@ -1070,7 +1094,7 @@ def main(argv):
         return cmd_reset()
     if cmd == "show" and not rest:
         return cmd_show()
-    die("usage: hdw4s template edit [<instance>] [--yes] | keep [<path>...] | "
+    die("usage: hdw4s template edit [--yes] | keep [<path>...] | "
         "forget <path>... | reset | show", 2)
 
 

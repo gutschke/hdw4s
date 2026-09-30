@@ -8,7 +8,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `show` <instance><br>
 `hdw4s` `enable` <instance><br>
 `hdw4s` `disable` <instance><br>
-`hdw4s` `release` <instance><br>
+`hdw4s` `release` [`--internal`] <instance><br>
 `hdw4s` `transport` <instance> `tcp`|`unix`<br>
 `hdw4s` `auth` <instance><br>
 `hdw4s` `noauth` <instance><br>
@@ -18,7 +18,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `seed` <instance> [`--only` <path>]...<br>
 `hdw4s` `keyring` <instance><br>
 `hdw4s` `reap`<br>
-`hdw4s` `template` `edit` [<instance>] [`--yes`]|`keep` [<path>...]|`forget` <path>...|`reset`|`show`<br>
+`hdw4s` `template` `edit` [`--yes`]|`keep` [<path>...]|`forget` <path>...|`reset`|`show`<br>
 `hdw4s` `firewall` `--apply`|`--check`|`--print`|`--restore`<br>
 `hdw4s` `--version`
 
@@ -61,10 +61,15 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Allocate a slot for a session and open its front door. The desktop is not
     started here and is not started at boot: the socket listens, and the first
     connection to arrive starts the session behind it. Safe to re-run.
+    Refused for a seat of the ephemeral pool and for the template-authoring
+    slot: neither is a person's desktop, and the refusal says what to run
+    instead.
 
   * `disable` <instance>:
     Stop a session and close its front door, so nothing starts it again. The
     slot stays reserved, so the port does not change if it is enabled later.
+    Refused for a seat of the ephemeral pool, where it would make the pool
+    smaller with nothing reporting it, and for the template-authoring slot.
 
   * `noauth` <instance>:
     Remove the credential `auth` added, and explain when running without one is
@@ -77,9 +82,16 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     keeps its files and settings; stopping an ephemeral slot destroys the
     session, because its home and profile are held in memory.
 
-  * `release` <instance>:
+  * `release` [`--internal`] <instance>:
     Stop a session and give up its slot, so another session may take the port.
     The session's profile directory is left in place.
+
+    A seat of the ephemeral pool, or the template-authoring slot, is released
+    only with `--internal`, and `--internal` is refused for anything else.
+    Releasing a seat makes the pool smaller for good; see **THE EPHEMERAL
+    POOL**. Releasing the authoring slot is never needed -- `template reset`
+    empties the template -- but is harmless: the next `template edit` sets up a
+    fresh one.
 
   * `transport` <instance> `tcp`|`unix`:
     Choose how the reverse proxy reaches this session. See **TRANSPORTS**.
@@ -153,10 +165,10 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     separate from the account's login keyring: passwords saved in one are not
     visible in the other. Requires root and a restart of the session.
 
-  * `template edit` [<instance>] [`--yes`]:
+  * `template edit` [`--yes`]:
     Change what every new ephemeral desktop starts from. Starts the
-    template-authoring desktop -- the slot table's row typed `template`, made
-    by `enable --template` -- and prints a link that works **once, within five
+    template-authoring desktop -- setting it up the first time, so there is
+    nothing to do beforehand -- and prints a link that works **once, within five
     minutes**. Open it, change what you like, and **log out** of that desktop
     when done: the command then asks whether to publish the changes.
     Interrupting the command stops the desktop and keeps nothing. It is for
@@ -699,6 +711,13 @@ single hostname for the whole pool and are given a session from it.
     28 the kernel's OOM killer began choosing victims inside desktops, which
     leaves a unit reporting `active` behind a blank screen. Size the pool for
     the machine.
+
+  * **Changing the size.** It is two things today, and both must agree: the
+    number `HDW4S_EPHEMERAL_SLOTS`, which the minter reads **once, at boot**,
+    and one row per seat in the slot table, which is what the pool hands out.
+    `hdw4s set HDW4S_EPHEMERAL_SLOTS=N` prints the steps. To raise it, reboot
+    and then `hdw4s enable --ephemeral` each new seat. To lower it, first
+    `hdw4s release --internal` every seat numbered N or above, then reboot.
 
   * **The credential belongs to the pool, not to a slot.** A reverse proxy
     presents one credential to reach the pool; individual slots have none and

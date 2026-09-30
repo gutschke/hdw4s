@@ -14,7 +14,7 @@
 .br
 \fBhdw4s\fR \fBdisable\fR \fIinstance\fR
 .br
-\fBhdw4s\fR \fBrelease\fR \fIinstance\fR
+\fBhdw4s\fR \fBrelease\fR [\fB\-\-internal\fR] \fIinstance\fR
 .br
 \fBhdw4s\fR \fBtransport\fR \fIinstance\fR \fBtcp\fR|\fBunix\fR
 .br
@@ -34,7 +34,7 @@
 .br
 \fBhdw4s\fR \fBreap\fR
 .br
-\fBhdw4s\fR \fBtemplate\fR \fBedit\fR [\fIinstance\fR] [\fB\-\-yes\fR]|\fBkeep\fR [\fIpath\fR\|\.\|\.\|\.]|\fBforget\fR \fIpath\fR\|\.\|\.\|\.|\fBreset\fR|\fBshow\fR
+\fBhdw4s\fR \fBtemplate\fR \fBedit\fR [\fB\-\-yes\fR]|\fBkeep\fR [\fIpath\fR\|\.\|\.\|\.]|\fBforget\fR \fIpath\fR\|\.\|\.\|\.|\fBreset\fR|\fBshow\fR
 .br
 \fBhdw4s\fR \fBfirewall\fR \fB\-\-apply\fR|\fB\-\-check\fR|\fB\-\-print\fR|\fB\-\-restore\fR
 .br
@@ -57,10 +57,10 @@ Report any running session that is not publishing the identity a returning brows
 Print one session's settings and, for each of them, which file it came from\.
 .TP
 \fBenable\fR \fIinstance\fR
-Allocate a slot for a session and open its front door\. The desktop is not started here and is not started at boot: the socket listens, and the first connection to arrive starts the session behind it\. Safe to re\-run\.
+Allocate a slot for a session and open its front door\. The desktop is not started here and is not started at boot: the socket listens, and the first connection to arrive starts the session behind it\. Safe to re\-run\. Refused for a seat of the ephemeral pool and for the template\-authoring slot: neither is a person's desktop, and the refusal says what to run instead\.
 .TP
 \fBdisable\fR \fIinstance\fR
-Stop a session and close its front door, so nothing starts it again\. The slot stays reserved, so the port does not change if it is enabled later\.
+Stop a session and close its front door, so nothing starts it again\. The slot stays reserved, so the port does not change if it is enabled later\. Refused for a seat of the ephemeral pool, where it would make the pool smaller with nothing reporting it, and for the template\-authoring slot\.
 .TP
 \fBnoauth\fR \fIinstance\fR
 Remove the credential \fBauth\fR added, and explain when running without one is a reasonable choice\. Editing the file by hand is the same decision made quietly; this is the supported way to make it\.
@@ -68,8 +68,10 @@ Remove the credential \fBauth\fR added, and explain when running without one is 
 \fBreap\fR
 Stop sessions nobody has connected to for \fBHDW4S_IDLE_DAYS\fR\. Run from a timer; there is no need to invoke it by hand\. Stopping a named session keeps its files and settings; stopping an ephemeral slot destroys the session, because its home and profile are held in memory\.
 .TP
-\fBrelease\fR \fIinstance\fR
+\fBrelease\fR [\fB\-\-internal\fR] \fIinstance\fR
 Stop a session and give up its slot, so another session may take the port\. The session's profile directory is left in place\.
+.IP
+A seat of the ephemeral pool, or the template\-authoring slot, is released only with \fB\-\-internal\fR, and \fB\-\-internal\fR is refused for anything else\. Releasing a seat makes the pool smaller for good; see \fBTHE EPHEMERAL POOL\fR\. Releasing the authoring slot is never needed \-\- \fBtemplate reset\fR empties the template \-\- but is harmless: the next \fBtemplate edit\fR sets up a fresh one\.
 .TP
 \fBtransport\fR \fIinstance\fR \fBtcp\fR|\fBunix\fR
 Choose how the reverse proxy reaches this session\. See \fBTRANSPORTS\fR\. An ephemeral slot is not offered the choice: it is always reached over its Unix socket, and \fBtcp\fR is refused for one\.
@@ -107,8 +109,8 @@ The session must be stopped, or the copy captures half\-written state\.
 \fBkeyring\fR \fIinstance\fR
 Give a session its own keyring with a generated password, sealed to this machine with systemd\-creds and handed to the session at start time, so it is unlocked without anyone typing anything\. The session's keyring is separate from the account's login keyring: passwords saved in one are not visible in the other\. Requires root and a restart of the session\.
 .TP
-\fBtemplate edit\fR [\fIinstance\fR] [\fB\-\-yes\fR]
-Change what every new ephemeral desktop starts from\. Starts the template\-authoring desktop \-\- the slot table's row typed \fBtemplate\fR, made by \fBenable \-\-template\fR \-\- and prints a link that works \fBonce, within five minutes\fR\. Open it, change what you like, and \fBlog out\fR of that desktop when done: the command then asks whether to publish the changes\. Interrupting the command stops the desktop and keeps nothing\. It is for editing, not for working in: nothing but this command starts that desktop, and one left running by a command that was killed is stopped, unpublished, by the next \fBtemplate edit\fR\.
+\fBtemplate edit\fR [\fB\-\-yes\fR]
+Change what every new ephemeral desktop starts from\. Starts the template\-authoring desktop \-\- setting it up the first time, so there is nothing to do beforehand \-\- and prints a link that works \fBonce, within five minutes\fR\. Open it, change what you like, and \fBlog out\fR of that desktop when done: the command then asks whether to publish the changes\. Interrupting the command stops the desktop and keeps nothing\. It is for editing, not for working in: nothing but this command starts that desktop, and one left running by a command that was killed is stopped, unpublished, by the next \fBtemplate edit\fR\.
 .IP
 What is published is an allow\-list, so a setting nobody thought of is left out rather than handed to every visitor\. Carried: GNOME settings, including everything GNOME Tweaks sets (the background, the dock, focus mode, desktop icons, fonts, window buttons, extensions' settings; not notifications, recent folders, command histories, or weather and world\-clock locations), pictures added as backgrounds, startup applications, default applications, GNOME Shell extensions, fonts, icons and themes installed for the user, and Chrome's extensions, bookmarks and preferences\. \fBNot carried\fR: Chrome's cookies, history, saved logins, autofill, open tabs, site storage, or any extension's own stored data \-\- extensions arrive installed, with their defaults\. Signing in to a Google account in the authoring desktop is refused by the managed Chrome policy; visitors' own desktops allow it\. Nothing else from the home directory is carried unless \fBtemplate keep\fR names it\. A setting that names a file only the authoring desktop had is left out and reported, and the publish lists every command the template makes a visitor's desktop run\.
 .IP
@@ -353,6 +355,8 @@ The pool is configured as \fBone thing\fR, not slot by slot\. Visitors arrive at
 An idle slot costs an entry under \fB/run\fR and nothing else\. An occupied one costs about \fB560 MB\fR \-\- measured across sixteen concurrent attached desktops on this project's own image, flat from the first to the sixteenth \-\- so the number a machine can \fIserve\fR is its free memory divided by that, which is usually far smaller than the number of slots it is safe to \fImint\fR\. The per\-session sizes are ceilings rather than consumption: the same desktops used about 21 MB of a 3\.5 GB allowance\.
 .IP
 \fBThe slot count is the only admission control there is\.\fR Nothing asks whether the machine can afford a desktop before starting one, so a pool larger than the machine can serve is a machine that will run out of memory rather than one that turns somebody away\. Measured on a 16 GiB container with no swap and a pool of 32: served normally to 18, slower from 19, and at 28 the kernel's OOM killer began choosing victims inside desktops, which leaves a unit reporting \fBactive\fR behind a blank screen\. Size the pool for the machine\.
+.IP "\[ci]" 4
+\fBChanging the size\.\fR It is two things today, and both must agree: the number \fBHDW4S_EPHEMERAL_SLOTS\fR, which the minter reads \fBonce, at boot\fR, and one row per seat in the slot table, which is what the pool hands out\. \fBhdw4s set HDW4S_EPHEMERAL_SLOTS=N\fR prints the steps\. To raise it, reboot and then \fBhdw4s enable \-\-ephemeral\fR each new seat\. To lower it, first \fBhdw4s release \-\-internal\fR every seat numbered N or above, then reboot\.
 .IP "\[ci]" 4
 \fBThe credential belongs to the pool, not to a slot\.\fR A reverse proxy presents one credential to reach the pool; individual slots have none and cannot be given one, which is why \fBauth\fR refuses for a slot\.
 .IP "" 0

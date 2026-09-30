@@ -403,6 +403,141 @@ in_ephemeral_pool() {
   [ "${1}" = 'ephemeral' ]
 }
 
+# THE NAME OF THE AUTHORING SLOT "hdw4s template edit" PROVISIONS FOR ITSELF.
+#
+# There used to be no such name: the administrator was told to run
+# "hdw4s enable --template <name>" first, with nothing to say what the name was
+# for -- and it is for nothing the administrator ever needs. Only ephemeral
+# desktops read the template, a visitor is handed whichever seat is free, and so
+# there is one template and one place it is authored. A name the administrator
+# has to invent, and then never type again, is an internal detail they were made
+# to own. Worse, the obvious guess was their own account name, and that guess
+# wrote a row that later turned their own desktop into an authoring slot.
+#
+# A LEADING UNDERSCORE, because it cannot collide with a person. adduser's
+# default NAME_REGEX refuses it for an ordinary account, the pool's names are
+# HDW4S_EPHEMERAL_PREFIX -- lowercase letters only -- plus a number, and systemd
+# accepts it unchanged as an instance name, a userdb record and a journal
+# namespace. "-" was the other candidate and is wrong: "%I" unescapes it to "/".
+#
+# An install whose table already has a row typed "template" keeps using THAT row
+# -- see provision_template -- so this name is what a fresh install gets, not a
+# rename imposed on an existing one.
+TEMPLATE_SLOT='_hdw4s_author'
+
+# Where hdw4s-ephemeral-slots writes each minted slot's own passwd view. The
+# same variable the minter reads, so a test that points one somewhere disposable
+# points both; two spellings of one path is two paths as soon as either moves.
+NSDIR="${HDW4S_NS_DIR:-/run/hdw4s-ns}"
+
+# Is this name one of OURS -- a seat of the ephemeral pool or the authoring slot
+# -- rather than a person's desktop? Prints "pool", "template", or nothing.
+#
+# THE ROW FIRST, because the table is the authority for what a slot is. Then two
+# cases the table cannot answer: the reserved authoring name before anything has
+# provisioned it, and a pool identity the minter made from HDW4S_EPHEMERAL_SLOTS
+# that has no row yet. The second is judged by the artefact only the minter
+# writes, which is hdw4s-is-slot's evidence too, and never by the name: a person
+# may perfectly well be called "ephemeral3", and a pattern would lock them out.
+internal_kind() {
+  case "$(type_of "$1")" in
+    ephemeral) echo 'pool'; return 0 ;;
+    template)  echo 'template'; return 0 ;;
+  esac
+  if [ "$1" = "${TEMPLATE_SLOT}" ]; then
+    echo 'template'
+  elif [ -f "${NSDIR}/$1/passwd" ]; then
+    echo 'pool'
+  fi
+}
+
+# REFUSE A PER-NAME COMMAND ON A SLOT THE ADMINISTRATOR NEVER NAMED.
+#
+# Three of these were footguns that did their damage quietly, which is why they
+# are refused rather than warned about:
+#
+#   enable   on a pool seat wrote a person's drop-ins -- User=, a home to write
+#            to, a GPU group -- into the EPHEMERAL unit's directory, and turned
+#            its relay's Requisite= into BindsTo=, so every connection started a
+#            desktop for nobody. On an authoring row it did the same to the one
+#            desktop templates are made in.
+#   disable  took a seat out of the pool with nothing saying the pool was now
+#            smaller; visitors found out as a 503 at a lower count than
+#            configured.
+#   release  did the same, for good, and dropped the row the router reads, so
+#            not even "hdw4s list" showed the seat any more.
+#
+# Each message says what to do INSTEAD, because the administrator typing one of
+# these wanted something, and "refused" with no route is how people end up
+# editing the slot table by hand. "release --internal" is the one way past, and
+# it exists because the pool has no size command of its own yet; see set_hint.
+refuse_internal_slot() {
+  local inst="$1" verb="$2" kind unit
+  kind="$(internal_kind "${inst}")"
+  [ -n "${kind}" ] || return 0
+  unit="hdw4s-ephemeral@${inst}.service"
+  if [ "${kind}" = 'pool' ]; then
+    printf '%s\n' \
+      "hdw4s: ${inst} is a seat of the ephemeral pool, not a person's desktop." \
+      '  Visitors are handed whichever seat is free, so the pool is managed as' \
+      '  one thing: its seats are not enabled, disabled or released one by one.' >&2
+    case "${verb}" in
+      enable)
+        printf '%s\n' \
+          '  It is already enabled, as part of the pool. Enabling it as a named' \
+          '  desktop would give a visitor'"'"'s seat a home directory and start a' \
+          '  desktop on every connection. A person'"'"'s desktop is enabled by their' \
+          '  account name: hdw4s enable <user>' >&2 ;;
+      disable)
+        printf '%s\n' \
+          '  Disabling one seat makes the pool smaller with nothing reporting it.' \
+          '  To end the desktop a visitor has in it now:' \
+          "    systemctl stop ${unit}" \
+          '  To make the pool smaller for good, see HDW4S_EPHEMERAL_SLOTS in' \
+          '  hdw4s(8).' >&2 ;;
+      release)
+        printf '%s\n' \
+          '  Releasing it removes the seat from the pool for good, so fewer' \
+          '  visitors can be served at once, and nothing else reports it. To make' \
+          '  the pool smaller, release the highest-numbered seats and lower' \
+          '  HDW4S_EPHEMERAL_SLOTS to match; this one, if that is what you want:' \
+          "    hdw4s release --internal ${inst}" >&2 ;;
+    esac
+  else
+    printf '%s\n' \
+      "hdw4s: ${inst} is the slot 'hdw4s template edit' authors the template in," \
+      '  not a person'"'"'s desktop. That command provisions it, starts it and' \
+      '  stops it; nothing else needs to name it.' >&2
+    case "${verb}" in
+      enable)  printf '%s\n' '  To change what new ephemeral desktops start from:' \
+                             '    hdw4s template edit' >&2 ;;
+      disable) printf '%s\n' '  It runs only while "hdw4s template edit" does; ending' \
+                             '  that command stops it.' >&2 ;;
+      release) printf '%s\n' '  To go back to the stock desktop: hdw4s template reset' \
+                             '  To remove the slot anyway -- the next "template edit"' \
+                             '  provisions a fresh one:' \
+                             "    hdw4s release --internal ${inst}" >&2 ;;
+    esac
+    # THE ROW AN EARLIER VERSION COULD LEAVE ON A PERSON'S NAME. "enable
+    # --template <name>" wrote its row before minting, so a name that was
+    # already an account -- the administrator's own, the obvious guess -- died on
+    # the collision and left the row behind, typed "template". The person's
+    # desktop is what this refusal is then standing in front of, so the way out
+    # is named. "An account the minter did not make" is the test: a slot the
+    # minter made has its passwd view, and a person's account does not.
+    if [ "${inst}" != "${TEMPLATE_SLOT}" ] && [ ! -f "${NSDIR}/${inst}/passwd" ] &&
+       getent passwd -- "${inst}" >/dev/null 2>&1; then
+      printf '%s\n' \
+        "  ${inst} is also an account on this machine. If the row was left by" \
+        "  'hdw4s enable --template ${inst}' in an earlier version, remove it and" \
+        '  enable the desktop:' \
+        "    hdw4s release --internal ${inst}" \
+        "    hdw4s enable ${inst}" >&2
+    fi
+  fi
+  return 1
+}
+
 # The systemd unit that runs a given instance's desktop. One place, because a
 # second kind of session means every "hdw4s@${inst}" spelled out by hand is a
 # site that silently acts on the wrong unit -- and acting on the wrong unit is
@@ -496,6 +631,23 @@ alloc_slot() {
   printf '%s %s %s\n' "${idx}" "${inst}" "${type}" >> "${SLOTS}"
   exec {lock}<&-
   echo "${idx}"
+}
+
+# Take one instance's row out of the table. One implementation, because two
+# callers need it -- "release", and "enable" undoing a row whose mint failed --
+# and a second copy of the rewrite is a second chance to drop the comments or
+# the mode. Under the same lock alloc_slot takes, so a concurrent enable cannot
+# append a row to the copy this is about to replace.
+drop_row() {
+  local inst="$1" tmp lock
+  [ -r "${SLOTS}" ] || return 0
+  exec {lock}<>"${SLOTS}"
+  flock "${lock}"
+  tmp="$(mktemp "${SLOTS}.XXXXXX")"
+  awk -v i="${inst}" '$1 ~ /^#/ || $2 != i' "${SLOTS}" > "${tmp}"
+  chmod 0644 "${tmp}"
+  mv "${tmp}" "${SLOTS}"
+  exec {lock}<&-
 }
 
 port_of() {
@@ -1104,18 +1256,56 @@ cmd_show() {
 }
 
 cmd_enable() {
-  local type='desktop'
+  local type='desktop' inst what
   case "${1:-}" in
     --ephemeral) type='ephemeral'; shift;;
-    # The administrator's authoring slot. It takes the ephemeral machinery --
-    # ephemeral_shaped() says so in one place, so nothing here repeats the
-    # list -- and differs from a pooled slot in exactly one way that matters
-    # to a stranger: the router's pool is the rows typed "ephemeral", so this
-    # row is never minted onto. That is the whole of "it is not in the pool",
-    # and it is a property of the table rather than of a filename.
-    --template)  type='template';  shift;;
   esac
-  local inst="$1" idx prof fresh='no'
+  inst="$1"
+  # The name first, for every type: it reaches file paths below, and a pool
+  # seat's name was the one nothing checked.
+  split_name "${inst}" || fail
+  # BEFORE ANYTHING IS WRITTEN, and the reason is what used to happen after:
+  # alloc_slot hands back the EXISTING row whatever type was asked for, so
+  # "hdw4s enable ephemeral3" went on to write a person's drop-ins into the pool
+  # unit's directory. The guard is on the name, not on the flag, because the
+  # administrator who types a pool seat's name without the flag is exactly the
+  # one who does not know it is a pool seat.
+  if [ "${type}" = 'desktop' ]; then
+    refuse_internal_slot "${inst}" enable || fail
+  else
+    # The other direction: a name that already has a row of another type -- a
+    # person's desktop, or the authoring slot -- is not turned into a seat by a
+    # flag. alloc_slot would keep the old type in the table while this wrote
+    # the new type's drop-ins, and the two would disagree for good.
+    what=''
+    if [ "$(internal_kind "${inst}")" = 'template' ]; then
+      what='the template-authoring slot'
+    elif [ -n "$(slot_of "${inst}")" ] && [ "$(type_of "${inst}")" != 'ephemeral' ]; then
+      what='a named desktop'
+    fi
+    [ -z "${what}" ] ||
+      die "hdw4s: ${inst} is ${what}, and a pool seat cannot take its name."
+  fi
+  enable_slot "${type}" "${inst}"
+}
+
+# THE WORK OF "enable", for any type, with no opinion about who asked.
+#
+# Split from cmd_enable because there are two callers and only one of them is
+# the command line: "hdw4s template edit" provisions its own authoring slot
+# through here (provision_template), and that type is deliberately NOT reachable
+# from "hdw4s enable" any more. The guards above are about what an administrator
+# may name; this is about what a slot of each type needs.
+#
+#   template   the authoring slot. It takes the ephemeral machinery --
+#              ephemeral_shaped() says so in one place, so nothing here repeats
+#              the list -- and differs from a pooled slot in exactly one way
+#              that matters to a stranger: the router's pool is the rows typed
+#              "ephemeral", so this row is never minted onto. That is the whole
+#              of "it is not in the pool", and it is a property of the table
+#              rather than of a filename.
+enable_slot() {
+  local type="$1" inst="$2" idx prof fresh='no' had
   # An ephemeral slot is not an account anybody named: it is minted by
   # hdw4s-ephemeral-slots, and the checks below are about a human's account.
   if [ "${type}" = 'desktop' ]; then
@@ -1128,6 +1318,9 @@ cmd_enable() {
   # deployment would answer its reverse proxy with 401 and take the desktop
   # away from someone who changed nothing.
   [ -e "${ETCDIR}/${inst}.conf" ] || fresh='yes'
+  # Whether the row existed before this call, so that a mint that fails below
+  # can take back exactly what this call added and nothing an earlier one did.
+  had="$(slot_of "${inst}")"
   idx="$(alloc_slot "${inst}" "${type}")"
 
   # THE AUTHORING SLOT GETS ITS IDENTITY HERE, AND THE PLACE IS THE POINT.
@@ -1135,9 +1328,9 @@ cmd_enable() {
   # A pooled slot's account is minted at boot by hdw4s-ephemeral-slots, ahead of
   # any socket. A named session's comes from /etc/passwd and was there already.
   # A template row had NEITHER -- nothing minted it and nobody had named the
-  # gap -- so "hdw4s enable --template" did not refuse, it HALF-APPLIED: it
-  # wrote this row, wrote the relay's drop-ins, enabled and started the socket,
-  # and only then died a few lines below inside cmd_transport, whose first act
+  # gap -- so "hdw4s enable --template", which provisioned it then, did not
+  # refuse, it HALF-APPLIED: it wrote this row, wrote the relay's drop-ins,
+  # enabled and started the socket, and only then died a few lines below inside cmd_transport, whose first act
   # is split_instance and whose first question is "getent passwd <inst>". What
   # it left behind was a listening door in front of a unit that cannot start.
   #
@@ -1156,9 +1349,20 @@ cmd_enable() {
   # minter from the slot table, not passed from here: these records live in /run
   # and the pool is re-minted at every boot, so a uid chosen here would be
   # silently contradicted by the next boot.
+  #
+  # A FAILED MINT TAKES ITS ROW BACK WITH IT. The minter reads the row -- the
+  # table is its authority, so the row has to be written first -- and the old
+  # code then died and LEFT it. That row outlived the command: the next boot
+  # tried to mint it again, and every command that asks the table what a name
+  # is went on answering "template" for it. When the name was a person's
+  # account, which was the obvious guess at a name nobody explained, that
+  # person's desktop was from then on an authoring slot. Nothing below has been
+  # written yet, so the row is the whole of what there is to undo.
   if [ "${type}" = 'template' ]; then
-    "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-ephemeral-slots" --template "${inst}" ||
+    if ! "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-ephemeral-slots" --template "${inst}"; then
+      [ -n "${had}" ] || drop_row "${inst}"
       die "hdw4s: could not mint an identity for ${inst}; it cannot start without one."
+    fi
     # A slot that failed to start before this repair latches, and a latched unit
     # is not started by an arrival -- so without this the first visit after a
     # successful enable fails for a reason that has nothing to do with the slot.
@@ -1989,7 +2193,7 @@ cmd_unset() {
 # files get a reputation for not working.
 set_hint() {
   local inst="$1" pair firewall='' session='' updater='' atenable='' relay='' \
-        atenable2=''
+        atenable2='' atboot='' poolsize=''
   shift
   for pair in "$@"; do
     case "${pair%%=*}" in
@@ -2009,9 +2213,37 @@ set_hint() {
       # the same drop-in and changes nothing, which is the advice this used to
       # give.
       HDW4S_PROFILE_DIR) atenable2='yes';;
+      # Read by hdw4s-ephemeral-slots and by nothing else, and that runs ONCE,
+      # at boot: it writes the identities and the per-seat drop-ins these
+      # size, into /run. This used to say "restart the affected sessions", which
+      # re-reads the drop-ins the boot wrote and changes nothing -- and the unit
+      # itself cannot be restarted by hand (RefuseManualStop=, since every
+      # session Requires= it), so a reboot is the true answer and not a
+      # conservative one.
+      HDW4S_EPHEMERAL_HOME_SIZE|HDW4S_EPHEMERAL_PROFILE_SIZE|\
+      HDW4S_EPHEMERAL_SHM_SIZE|HDW4S_EPHEMERAL_BACKGROUND) atboot='yes';;
+      # The same, and it is also not the whole of the pool's size: the router
+      # hands out the seats that have a ROW in the slot table, and this writes
+      # none. So the hint names both halves and their order. Raising: the rows
+      # can only be written after the reboot, because "enable" looks the seat's
+      # account up and the reboot is what mints it. Lowering: the rows go
+      # BEFORE it, or the router goes on offering seats whose identity the next
+      # boot no longer makes, and each visitor sent there gets a desktop that
+      # fails to start.
+      HDW4S_EPHEMERAL_SLOTS) atboot='yes'; poolsize="${pair#*=}";;
       *) session='yes';;
     esac
   done
+  [ -z "${atboot}" ] ||
+    echo '  Read only at boot, by hdw4s-ephemeral-slots.service: reboot to use it.'
+  if [ -n "${poolsize}" ]; then
+    local prefix="${HDW4S_EPHEMERAL_PREFIX:-ephemeral}"
+    echo '  The pool is also one row per seat in the slot table, and this writes'
+    echo '  none. To raise it, after the reboot enable each new seat:'
+    echo "    hdw4s enable --ephemeral ${prefix}<N>"
+    echo "  To lower it, before the reboot release every seat from ${prefix}${poolsize} up:"
+    echo "    hdw4s release --internal ${prefix}<N>"
+  fi
   [ -z "${firewall}" ] || echo "  Run 'hdw4s firewall --apply' to use it."
   [ -z "${updater}" ] || echo "  Run '/usr/lib/hdw4s/hdw4s-update' to use it."
   [ -z "${atenable}" ] || echo '  Applies to sessions created after this.'
@@ -3075,6 +3307,12 @@ cmd_keyring() {
 
 cmd_disable() {
   local inst="$1"
+  # The name is checked before it is looked up anywhere, and the refusal comes
+  # before the account lookup: a seat whose identity is not minted this boot is
+  # still a seat, and "no such user" would send the administrator looking for
+  # an account that was never meant to exist.
+  split_name "${inst}" || fail
+  refuse_internal_slot "${inst}" disable || fail
   split_instance "${inst}" || fail
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
@@ -3084,7 +3322,9 @@ cmd_disable() {
 }
 
 cmd_release() {
-  local inst="$1" tmp
+  local internal=''
+  if [ "${1:-}" = '--internal' ]; then internal='yes'; shift; fi
+  local inst="$1"
   # An account that has since been deleted still holds a slot, and its port
   # stays open in the firewall. Refusing to release it because the account is
   # gone leaves editing the table by hand as the only way out -- which its own
@@ -3096,6 +3336,21 @@ cmd_release() {
   # now needs to be able to retire, so this is the one command that accepts the
   # name the rest of the tool refuses.
   split_legacy_name "${inst}" || fail
+  # A POOL SEAT OR THE AUTHORING SLOT ONLY WHEN SAID SO. See
+  # refuse_internal_slot: releasing a seat is a permanent, unreported cut to the
+  # pool, and this was the only command that could make it. "--internal" is the
+  # administrator saying they know what the name is. It is also the only way to
+  # retire a template row an earlier version left on a person's name, which is
+  # why the flag is not simply "--pool".
+  #
+  # AND ONLY THEN: the flag on a person's desktop is refused, so that it cannot
+  # become the habitual way to type "release" and stop meaning anything.
+  if [ -z "${internal}" ]; then
+    refuse_internal_slot "${inst}" release || fail
+  elif [ -z "$(internal_kind "${inst}")" ]; then
+    die "hdw4s: ${inst} is not a pool seat or the authoring slot; --internal is" \
+        "  only for those. To release a person's desktop: hdw4s release ${inst}"
+  fi
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
   systemctl stop "hdw4s-proxy@${inst}.service" "$(unit_of "${inst}")" 2>/dev/null || :
   # The filesystem socket, which systemd will not remove for a unit that is
@@ -3110,12 +3365,7 @@ cmd_release() {
          "${DROPIN}/hdw4s-proxy@${inst}.service.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
   rm -f "${ETCDIR}/${inst}.keyring.cred" "${ETCDIR}/${inst}.auth.cred"
-  if [ -r "${SLOTS}" ]; then
-    tmp="$(mktemp "${SLOTS}.XXXXXX")"
-    awk -v i="${inst}" '$1 ~ /^#/ || $2 != i' "${SLOTS}" > "${tmp}"
-    chmod 0644 "${tmp}"
-    mv "${tmp}" "${SLOTS}"
-  fi
+  drop_row "${inst}"
   systemctl daemon-reload
   echo "Session ${inst} released. Its credentials were removed with it, so a"
   echo 'keyring in the profile below can no longer be unlocked. Left in place:'
@@ -3136,6 +3386,37 @@ cmd_release() {
       echo 'port, is not reserved and may go to someone else; enabling again'
       echo 'rewrites the port that conf file records.';;
   esac
+}
+
+# GIVE "hdw4s template edit" AN AUTHORING SLOT IF THE MACHINE HAS NONE.
+#
+# The command used to refuse on a fresh install and send the administrator to
+# "hdw4s enable --template <name>" -- a name with no meaning to them, for a slot
+# they never need to address. It provisions its own now, and that command is
+# gone.
+#
+# AN EXISTING TEMPLATE ROW IS USED AS IT IS, whatever it is called: an install
+# that made one with the old command keeps it through an upgrade, with the same
+# uid the minter derives for it at every boot and the same drop-ins. Only a
+# table with no template row at all gets TEMPLATE_SLOT. hdw4s-template picks the
+# first template row, and "first" here is the same awk order it reads.
+#
+# KEPT AFTER THE EDIT, NOT RELEASED. What it holds between edits is a row, a
+# socket nothing is routed to without a one-time invite, and a few drop-ins; no
+# desktop runs, because nothing but "template edit" starts one and its relay is
+# Requisite=. Releasing it would buy nothing a visitor or an administrator can
+# see, and it would put the provisioning -- a mint, a daemon-reload, a socket
+# enabled -- on every edit instead of the first, which is where a failure is
+# least expected and hardest to read. It also costs one index from the port
+# block, which the pool's seats spend too; that is a cost of the index scheme,
+# not of keeping this, and is noted where the pool is sized.
+provision_template() {
+  local have
+  have="$( [ ! -r "${SLOTS}" ] ||
+           awk '$1 !~ /^#/ && $3 == "template" { print $2; exit }' "${SLOTS}")"
+  [ -z "${have}" ] || return 0
+  echo 'Setting up the template-authoring desktop (once; later edits reuse it)...'
+  enable_slot template "${TEMPLATE_SLOT}" >/dev/null
 }
 
 # REFUSE AN UNREADABLE SLOT TABLE HERE, ONCE, BEFORE ANY COMMAND RUNS.
@@ -3182,7 +3463,7 @@ case "${1:-}" in
   check)    shift; [ $# -eq 0 ] || usage_error; cmd_check "$@";;
   show)     shift; [ $# -eq 1 ] || usage_error; cmd_show "$@";;
   enable)   shift
-            case "${1:-}" in --ephemeral|--template) [ $# -eq 2 ] || usage_error;;
+            case "${1:-}" in --ephemeral) [ $# -eq 2 ] || usage_error;;
                          *)           [ $# -eq 1 ] || usage_error;; esac
             cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || usage_error; cmd_disable "$@";;
@@ -3195,9 +3476,24 @@ case "${1:-}" in
   proxy)    shift; [ $# -eq 1 ] || usage_error; cmd_proxy "$@";;
   set)      shift; cmd_set "$@";;
   unset)    shift; cmd_unset "$@";;
-  release)  shift; [ $# -eq 1 ] || usage_error; cmd_release "$@";;
+  release)  shift
+            case "${1:-}" in --internal) [ $# -eq 2 ] || usage_error;;
+                             *)          [ $# -eq 1 ] || usage_error;; esac
+            cmd_release "$@";;
   firewall) shift; exec /usr/lib/hdw4s/hdw4s-firewall "$@";;
-  template) shift; exec /usr/lib/hdw4s/hdw4s-template "$@";;
+  # "edit" needs a slot to run the authoring desktop in, and makes one here, in
+  # the program that owns the slot table, rather than in hdw4s-template: a second
+  # writer of the table would be a second copy of alloc_slot's rules. Root is
+  # checked first so that a non-root run is refused in the template command's
+  # own words rather than by the first write into /etc.
+  template) shift
+            # Only for an invocation hdw4s-template will accept, so that a
+            # mistyped one is refused by its usage line and provisions nothing.
+            if [ "$*" = 'edit' ] || [ "$*" = 'edit --yes' ]; then
+              [ "${EUID}" -eq 0 ] || die 'hdw4s template: this needs root.'
+              provision_template
+            fi
+            exec /usr/lib/hdw4s/hdw4s-template "$@";;
   --version) echo "hdw4s ${HDW4S_VERSION}";;
   -h|--help|help|'') usage;;
   *) echo "hdw4s: unknown command '$1'" >&2; usage >&2

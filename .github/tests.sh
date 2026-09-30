@@ -497,6 +497,168 @@ echo '== a setting is pointed at the action that applies it =='
   out="$(set_hint 'alice' 'HDW4S_RESIZE=true' 2>&1)"
   has   'an ordinary setting still points at a restart' \
         "${out}" 'systemctl restart hdw4s@alice'
+  # The pool's size used to be told "restart the affected sessions", which
+  # re-reads what the boot wrote and changes nothing -- and did not say that the
+  # router hands out only seats with a ROW, which this setting never writes.
+  out="$(set_hint '' 'HDW4S_EPHEMERAL_SLOTS=4' 2>&1)"
+  has   'the pool size points at a reboot'     "${out}" 'reboot to use it'
+  hasnt 'and not at a restart'                 "${out}" 'estart'
+  has   'and names the rows it does not write' "${out}" 'hdw4s enable --ephemeral ephemeral<N>'
+  has   'and which seats go when it is lowered' "${out}" 'from ephemeral4 up'
+  has   'and how'                              "${out}" 'hdw4s release --internal ephemeral<N>'
+  out="$(set_hint '' 'HDW4S_EPHEMERAL_HOME_SIZE=2G' 2>&1)"
+  has   'a seat size points at a reboot'       "${out}" 'reboot to use it'
+  hasnt 'and not at a restart'                 "${out}" 'estart'
+  hasnt 'and says nothing about rows'          "${out}" 'enable --ephemeral'
+)
+
+echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # Every refusal here stood in front of a command that used to do its damage
+  # quietly: "enable ephemeral3" wrote a person's drop-ins into the pool unit,
+  # and "disable"/"release" shrank the pool with nothing saying so. Each case
+  # asserts the refusal AND that nothing was written, because a refusal that
+  # prints after the damage is the half-apply this tree has shipped before.
+  NSDIR="${SB}/ns"
+  mkdir -p "${NSDIR}/eph0" "${NSDIR}/eph1" "${NSDIR}/tmpl"
+  : > "${NSDIR}/eph0/passwd"; : > "${NSDIR}/eph1/passwd"; : > "${NSDIR}/tmpl/passwd"
+  printf '%s\n' '# comment' '0 alice' '1 eph0 ephemeral' '2 tmpl template' \
+    '3 root template' > "${SLOTS}"
+  table="$(cat "${SLOTS}")"
+  CALLS="${SB}/calls"; : > "${CALLS}"
+  systemctl() { echo "systemctl $*" >> "${CALLS}"; }
+  RUNDIR="${SB}/run"
+
+  # The seat's account is stood in for, as the minter would have made it. Without
+  # it the enable died later, at the account lookup, and "nothing was written"
+  # passed with the guard removed -- measured, by removing it.
+  seat() { getent() { printf 'eph0:x:60900:60900::/home/user:/bin/bash\n'; }; "$@"; }
+  out="$( (seat cmd_enable eph0) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'enable refuses a pool seat' || bad 'enable refuses a pool seat' "rc ${rc}"
+  has   'and says what it is'           "${out}" 'seat of the ephemeral pool'
+  has   'and what to do instead'        "${out}" 'hdw4s enable <user>'
+  is    'and writes no drop-in'         "$(find "${DROPIN}" -mindepth 1 | wc -l | tr -d ' ')" '0'
+  out="$( (cmd_enable eph1) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'and a minted seat with no row yet' \
+    || bad 'and a minted seat with no row yet' "rc ${rc}"
+  out="$( (cmd_enable tmpl) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'enable refuses the authoring slot' || bad 'enable refuses the authoring slot' "rc ${rc}"
+  has   'and points at template edit'   "${out}" 'hdw4s template edit'
+  out="$( (cmd_enable "${TEMPLATE_SLOT}") 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'and the reserved name before anything provisions it' \
+    || bad 'and the reserved name before anything provisions it' "rc ${rc}"
+  # The row an earlier "enable --template root" could leave on a real account.
+  out="$( (cmd_enable root) 2>&1 )"; rc=$?
+  has   'a template row on a real account names the way out' \
+        "${out}" 'hdw4s release --internal root'
+  out="$( (cmd_enable --ephemeral alice) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a named desktop is not turned into a seat' \
+    || bad 'a named desktop is not turned into a seat' "rc ${rc}"
+  out="$( (cmd_enable --ephemeral "${TEMPLATE_SLOT}") 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'nor is the authoring slot' || bad 'nor is the authoring slot' "rc ${rc}"
+  is    'no enable changed the table'   "$(cat "${SLOTS}")" "${table}"
+
+  out="$( (seat cmd_disable eph0) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'disable refuses a pool seat' || bad 'disable refuses a pool seat' "rc ${rc}"
+  has   'and says how to end one desktop' "${out}" 'systemctl stop hdw4s-ephemeral@eph0.service'
+  out="$( (cmd_disable tmpl) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'and the authoring slot' || bad 'and the authoring slot' "rc ${rc}"
+  out="$( (cmd_release eph0) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'release refuses a pool seat' || bad 'release refuses a pool seat' "rc ${rc}"
+  has   'and names the deliberate form' "${out}" 'hdw4s release --internal eph0'
+  out="$( (cmd_release tmpl) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'and the authoring slot, too' || bad 'and the authoring slot, too' "rc ${rc}"
+  has   'and points at template reset' "${out}" 'hdw4s template reset'
+  out="$( (cmd_release --internal alice) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok '--internal is refused on a person'"'"'s desktop' \
+    || bad '--internal is refused on a person'"'"'s desktop' "rc ${rc}"
+  is    'no refusal touched the table or a unit' \
+        "$(cat "${SLOTS}"; cat "${CALLS}")" "${table}"
+
+  # The one way past, which must actually work.
+  (cmd_release --internal eph0) >/dev/null 2>&1
+  is    'release --internal removes the seat' "$(slot_of eph0)" ''
+  is    'and only that row' "$(slot_of alice):$(slot_of tmpl)" '0:2'
+  has   'and keeps the comments' "$(cat "${SLOTS}")" '# comment'
+)
+
+echo '== template edit needs no prior step, and a failed mint leaves no row =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  systemctl() { :; }
+  # provision_template is judged by what it hands enable_slot, which is stood in
+  # for: the real one needs systemd, the minter and an account, and its own
+  # behaviour for a template row is covered where the slot types are.
+  CALLS="${SB}/calls"; : > "${CALLS}"
+  enable_slot() { echo "$*" >> "${CALLS}"; }
+  rm -f "${SLOTS}"
+  provision_template >/dev/null
+  is 'a fresh install gets the reserved authoring slot' "$(cat "${CALLS}")" "template ${TEMPLATE_SLOT}"
+  : > "${CALLS}"
+  printf '%s\n' '0 alice' '1 eph0 ephemeral' > "${SLOTS}"
+  provision_template >/dev/null
+  is 'so does one with only people and seats' "$(cat "${CALLS}")" "template ${TEMPLATE_SLOT}"
+  # AN UPGRADE: a row the retired "enable --template" made is used as it is.
+  : > "${CALLS}"
+  printf '%s\n' '0 alice' '1 author template' '2 eph0 ephemeral' > "${SLOTS}"
+  provision_template >/dev/null
+  is 'an existing template row is kept, not replaced' "$(cat "${CALLS}")" ''
+  unset -f enable_slot
+  . "${SB}/setup.sh"
+  systemctl() { :; }
+
+  # F1: the minter reads the row, so the row is written first -- and a failed
+  # mint used to leave it, typed "template", for good.
+  mkdir -p "${SB}/lib"
+  printf '#!/bin/sh\necho "minter refused $*" >&2\nexit 1\n' > "${SB}/lib/hdw4s-ephemeral-slots"
+  chmod +x "${SB}/lib/hdw4s-ephemeral-slots"
+  printf '%s\n' '0 alice' > "${SLOTS}"
+  out="$( (HDW4S_LIBDIR="${SB}/lib" enable_slot template "${TEMPLATE_SLOT}") 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a failed mint fails the provisioning' || bad 'a failed mint fails the provisioning' "rc ${rc}"
+  has 'and it was the minter that failed' "${out}" 'minter refused --template'
+  is  'and the row it wrote is taken back' "$(slot_of "${TEMPLATE_SLOT}")" ''
+  is  'and nothing else is'                "$(slot_of alice)" '0'
+  # A row that was there BEFORE this call is not this call's to remove.
+  printf '%s\n' '0 alice' '1 author template' > "${SLOTS}"
+  (HDW4S_LIBDIR="${SB}/lib" enable_slot template author) >/dev/null 2>&1
+  is  'a row that predates the call is kept' "$(slot_of author)" '1'
+
+  # The command line no longer offers the type at all: the retired spelling is a
+  # usage error from the real dispatcher, before anything is looked up.
+  HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" enable --template x >/dev/null 2>&1
+  is 'enable --template is a usage error' "$?" '2'
+)
+
+echo '== the template editor refuses a row the minter did not make =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  mkdir -p "${SB}/etc" "${SB}/ns/_hdw4s_author"
+  # "root" stands in for a person: an account that resolves, which the minter
+  # did not make. Starting the authoring desktop there would start it as them.
+  printf '%s\n' '0 root template' > "${SB}/etc/instances"
+  out="$(HDW4S_ETCDIR="${SB}/etc" HDW4S_NS_DIR="${SB}/ns" python3 - "${ROOT}/hdw4s-template" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tmpl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tmpl", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+m.cmd_edit(False)
+print("STARTED")
+PY
+)"
+  hasnt 'it does not go on to start the desktop' "${out}" 'STARTED'
+  has   'it says why'                            "${out}" 'no identity this boot'
+  has   'and names the way out'                  "${out}" 'hdw4s release --internal root'
+  printf '%s\n' '# nothing' > "${SB}/etc/instances"
+  out="$(HDW4S_ETCDIR="${SB}/etc" HDW4S_NS_DIR="${SB}/ns" python3 - "${ROOT}/hdw4s-template" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tmpl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tmpl", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+m.cmd_edit(False)
+PY
+)"
+  hasnt 'with no row it no longer asks for a name' "${out}" 'enable --template'
+  has   'it points at the command that sets one up' "${out}" 'hdw4s template edit'
 )
 
 echo '== the updater checks what it downloaded =='
@@ -3674,7 +3836,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=569   # update when tests are added; a wrong number is the point
+EXPECTED=615   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

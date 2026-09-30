@@ -28,10 +28,11 @@
 #                   and is never handed to a visitor. Uids count DOWN from
 #                   UID_MAX. A failure here warns and leaves the pool alone.
 #
-# "--template NAME" mints exactly one of the second kind and is what
-# "hdw4s enable --template" calls, so that a freshly enabled authoring slot
-# works without waiting for a reboot. The five artefacts a slot needs have ONE
-# implementation, shared by both callers; see the note above the loop.
+# "--template NAME" mints exactly one of the second kind and is what "hdw4s"
+# calls when "hdw4s template edit" provisions its authoring slot, so that a
+# freshly provisioned slot works without waiting for a reboot. The five
+# artefacts a slot needs have ONE implementation, shared by both callers; see
+# the note above the loop.
 #
 # The records live in /run/userdb, which nss-systemd reads directly -- no
 # systemd-userdbd needed. /run is tmpfs, so they never touch disk and are minted
@@ -264,7 +265,7 @@ reload=''
 # rather than in the caller: as the header of this file says, systemd resolves
 # User= before any ExecStartPre= of ours could run, so a unit CANNOT mint its
 # own identity -- measured, it fails 217/USER. Whoever calls --template must call it
-# before that slot's socket can fire. "hdw4s enable" does; its socket is
+# before that slot's socket can fire. "hdw4s" does, in enable_slot; its socket is
 # enabled last.
 ONE_SHOT=''
 TEMPLATE_NAME=''
