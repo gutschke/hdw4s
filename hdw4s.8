@@ -1,6 +1,6 @@
 .\" generated with Ronn-NG/v0.9.1
 .\" http://github.com/apjanke/ronn-ng/tree/0.9.1
-.TH "HDW4S" "8" "January 2000" "hdw4s" "hdw4s"
+.TH "HDW4S" "8" "September 2026" "hdw4s" "hdw4s"
 .SH "NAME"
 \fBhdw4s\fR \- headless GNOME desktop streamed to a web browser
 .SH "SYNOPSIS"
@@ -135,6 +135,9 @@ Remove the template: new ephemeral desktops start from the stock desktop\. The w
 .TP
 \fBtemplate show\fR
 List the settings and files the template carries\.
+.TP
+\fBtemplate copyfrom\fR [\fIuser\fR\fB@\fR]\fIhost\fR
+Publish another hdw4s machine's template here: one \fBrsync\fR pulls the files it has published, and they are published as an edit here would be, including this machine's settings database\. The \fBrsync\fR command is printed before it runs, so a failure can be retried or debugged by hand\. It needs root on both machines; arranging that (keys, an agent, a \fBsudo\fR wrapper on the other side) is left to the administrator\.
 .TP
 \fBfirewall \-\-apply\fR
 Rewrite the package's nftables table and the kernel's reserved\-port list from the current configuration\. Run this after changing \fBHDW4S_PROXIES\fR, \fBHDW4S_BASE_PORT\fR or \fBHDW4S_BLOCK_SIZE\fR\.

@@ -6,6 +6,7 @@
     hdw4s template forget <path>...
     hdw4s template reset
     hdw4s template show
+    hdw4s template copyfrom [<user>@]<host>
 
 "edit" starts the template-authoring desktop (the slot table's row typed
 "template", which "hdw4s template edit" sets up the first time), prints a
@@ -33,6 +34,14 @@ is worked out here.
 
 "reset" returns every NEW session to the stock desktop. Running sessions keep
 what they started with.
+
+"copyfrom" publishes another machine's template here: one rsync pulls the
+files it has published into a staging directory, and they are published
+exactly as an edit here would be -- the settings database is rebuilt here,
+which copying the files alone would not do. The rsync is printed before it
+runs, so a failure can be retried or debugged by hand. Reaching the other
+machine as root -- keys, an agent, "sudo rsync" on its side -- is the
+administrator's to arrange; nothing here holds a credential.
 """
 
 import fcntl
@@ -40,8 +49,10 @@ import json
 import os
 import pwd
 import secrets
+import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1017,6 +1028,42 @@ def cmd_edit(yes):
         _ = committed
 
 
+def cmd_copyfrom(src):
+    """Publish SRC's ([user@]host) current template here."""
+    if src.startswith("-") or ":" in src or "/" in src:
+        die("usage: hdw4s template copyfrom [<user>@]<host> -- a host, not a "
+            "path", 2)
+    lockfd = take_lock()
+    gen = "gen-%d" % time.time_ns()
+    stage = os.path.join(ROOT, gen + ".incoming")
+    os.makedirs(ROOT, mode=0o755, exist_ok=True)
+    say("Copying the template published on %s to this machine." % src)
+    # "current/" with the slash: rsync follows the link on the other side and
+    # copies the generation it names, which is what that machine publishes. As
+    # root here, -a keeps the files root's; they are re-normalised anyway.
+    argv = ["rsync", "-a", "--delete", "%s:%s/current/" % (src, ROOT),
+            stage + "/"]
+    say("\n$ " + shlex.join(argv))
+    r = subprocess.run(argv)
+    if r.returncode != 0:
+        shutil.rmtree(stage, ignore_errors=True)
+        die("that command failed (exit %d); nothing was published here."
+            % r.returncode)
+    if not os.path.isfile(os.path.join(stage, "dconf", KEYFILE)):
+        shutil.rmtree(stage, ignore_errors=True)
+        die("%s sent no settings file, so it has no published template "
+            "(hdw4s template edit makes one there); nothing was published "
+            "here." % src)
+    dst = os.path.join(ROOT, gen)
+    os.rename(stage, dst)
+    normalise(dst)
+    publish(dst)
+    os.close(lockfd)
+    say("\nPublished here: new desktops start from %s's template; running "
+        "ones keep what they started with." % src)
+    return 0
+
+
 def cmd_reset():
     lockfd = take_lock()
     had = os.path.lexists(CURRENT)
@@ -1094,8 +1141,10 @@ def main(argv):
         return cmd_reset()
     if cmd == "show" and not rest:
         return cmd_show()
+    if cmd == "copyfrom" and len(rest) == 1:
+        return cmd_copyfrom(rest[0])
     die("usage: hdw4s template edit [--yes] | keep [<path>...] | "
-        "forget <path>... | reset | show", 2)
+        "forget <path>... | reset | show | copyfrom [<user>@]<host>", 2)
 
 
 if __name__ == "__main__":

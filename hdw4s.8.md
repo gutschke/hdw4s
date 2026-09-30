@@ -225,6 +225,14 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
   * `template show`:
     List the settings and files the template carries.
 
+  * `template copyfrom` [<user>`@`]<host>:
+    Publish another hdw4s machine's template here: one `rsync` pulls the
+    files it has published, and they are published as an edit here would be,
+    including this machine's settings database. The `rsync` command is printed
+    before it runs, so a failure can be retried or debugged by hand. It needs
+    root on both machines; arranging that (keys, an agent, a `sudo` wrapper on
+    the other side) is left to the administrator.
+
   * `firewall --apply`:
     Rewrite the package's nftables table and the kernel's reserved-port list
     from the current configuration. Run this after changing `HDW4S_PROXIES`,
