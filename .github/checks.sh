@@ -1343,55 +1343,11 @@ fi
 if [ "${1:-}" = '--package' ]; then
   echo
   echo '== build =='
-  # An artefact built from a tree that matches no commit is one nobody can
-  # reproduce, and during mutation testing it is one that may carry a defect
-  # somebody injected on purpose. Refused rather than warned about, because
-  # this is the step that produces the thing that gets installed.
-  build='yes'
-  case " $* " in
-    *' --dirty '*)
-      [ -z "${dirty}" ] ||
-        note 'build from dirty tree' 'ALLOWED by --dirty; this artefact matches no commit' ;;
-    *)
-      [ -z "${dirty}" ] || {
-        bad 'working tree' 'refusing to build: tracked files differ from HEAD (listed above); commit, stash, or pass --dirty on purpose'
-        build=''
-      } ;;
-  esac
-  if [ -n "${build}" ]; then
-  dpkg-buildpackage -us -uc -b >/dev/null
-  deb="../hdw4s_${version}_all.deb"
-  [ -f "${deb}" ] || bad 'dpkg-buildpackage' "did not produce ${deb}"
-  note 'built' "$(basename "${deb}")"
-
-  # What the recipient actually receives. Everything above reasons about the
-  # manifests; this reads the artefact. A glob in debian/install that matched
-  # nothing, a unit renamed in the tree but not in the file that copies it, a
-  # dh_install failure swallowed by the build -- none of those are visible from
-  # the source, and all of them end as a package that installs cleanly and is
-  # missing a unit. That is precisely the shape found on a live box: the file
-  # was absent, so "systemctl cat" did not answer, and nothing anywhere failed.
-  begin
-  contents="$(dpkg-deb -c "${deb}" 2>/dev/null | awk '{print $NF}')"
-  if [ -z "${contents}" ]; then
-    bad 'package contents' 'dpkg-deb -c produced nothing'
-  else
-    for u in "${UNITS[@]}"; do
-      grep -qxF "./usr/lib/systemd/system/${u}" <<<"${contents}" ||
-        bad "${u}" 'is not in the built package'
-    done
-  fi
-  okif 'every unit is in the .deb'
-
-  # Lintian's findings are shown but do not fail the run. It exits 0 on
-  # warnings, and some of its checks are sensitive to the version of groff on
-  # the machine rather than to anything in the package.
-  if command -v lintian >/dev/null; then
-    echo
-    echo '== lintian (informational) =='
-    lintian --fail-on error "${deb}" || bad 'lintian' 'reported an error'
-  fi
-  fi
+  # One copy of how the package is built and read back, shared with the deploy
+  # tool, which builds without running this whole file first.
+  args=()
+  case " $* " in *' --dirty '*) args=(--dirty) ;; esac
+  "$(dirname "$0")/package.sh" ${args[@]+"${args[@]}"} || bad 'package' 'the build or its read-back failed (above)'
 fi
 
 echo
