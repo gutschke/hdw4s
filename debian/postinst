@@ -2,18 +2,6 @@
 set -e
 
 if [ "$1" = 'configure' ]; then
-  # HDW4S_WEBRTC=yes NOW STOPS A SESSION FROM STARTING (hdw4s-run-session says
-  # why: Selkies' WebRTC signalling reaches its own server over TCP, which no
-  # longer listens there). Said at the upgrade, where an administrator is
-  # looking, rather than only at the next start of a desktop.
-  for f in /etc/hdw4s/*.conf; do
-    [ -f "${f}" ] || continue
-    if grep -qs '^[[:space:]]*HDW4S_WEBRTC=["'"'"']\{0,1\}yes' "${f}"; then
-      echo "hdw4s: WARNING: ${f} sets HDW4S_WEBRTC=yes. Sessions reading it" >&2
-      echo '       will now REFUSE TO START; set HDW4S_WEBRTC=no.' >&2
-    fi
-  done
-
   # The relay's system group, before anything below (or debhelper's own start of
   # the slot minter) hands the stream root to it. Idempotent.
   systemd-sysusers hdw4s-sysusers.conf || {
