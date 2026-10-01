@@ -3629,12 +3629,23 @@ retire_slot() {
       uid="$(sed -n 's/.*"uid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
                "${USERDB}/${inst}.user" 2>/dev/null | head -n1)"
       rm -f "${USERDB}/${inst}.user" "${USERDB}/${inst}.group"
+      local f
       if [ -n "${uid}" ]; then
-        local f
         for f in "${USERDB}/${uid}.user" "${USERDB}/${uid}.group"; do
           grep -qs "\"${inst}\"" "${f}" && rm -f "${f}"
         done
       fi
+      # AND ANY RECORD STORED BY NUMBER that still names this seat, found by its
+      # content: when the record under the name was already gone, the uid was
+      # unknowable and the numbered twin stayed -- resolving the old name and
+      # holding the uid, so the next seat minted there died on "uid 60900
+      # already belongs to 'ephemeral0'" (measured 2026-10-01, after a reset
+      # tool removed the named records only).
+      for f in "${USERDB}"/[0-9]*.user "${USERDB}"/[0-9]*.group; do
+        [ -f "${f}" ] || continue
+        grep -qs -e "\"userName\":\"${inst}\"" -e "\"groupName\":\"${inst}\"" "${f}" &&
+          rm -f "${f}"
+      done
       rm -rf "${NSDIR:?}/${inst}"
     fi
   fi
