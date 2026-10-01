@@ -711,6 +711,35 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
   is    'and its namespace' "$([ -e "${NSDIR}/eph0" ] && echo left || echo gone)" 'gone'
 )
 
+echo '== the minter mints one seat only inside the configured pool =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  # These refusals all come BEFORE the minter writes anything -- that is the
+  # point of settling the arguments first -- so the real script can be run here.
+  mkdir -p "${SB}/etc"
+  printf 'HDW4S_EPHEMERAL_SLOTS=3\n' > "${SB}/etc/hdw4s.conf"
+  m() { HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s-ephemeral-slots" "$@" 2>&1; }
+  is  'the largest pool keeps one uid for the authoring slot' "$(m --pool-max)" '99'
+  printf '%s\n' '0 a template' '1 b template' > "${SB}/etc/instances"
+  is  'and one per template row' "$(m --pool-max)" '98'
+  out="$(m --seat ephemeral3)"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a seat beyond the setting is refused' || bad 'a seat beyond the setting is refused' "rc ${rc}"
+  has 'and says to raise the setting first' "${out}" 'raise the'
+  out="$(m --seat ephemeral01)"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a seat number written another way is refused' \
+    || bad 'a seat number written another way is refused' "rc ${rc}"
+  out="$(m --seat alice)"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a name that is not a seat is refused' || bad 'a name that is not a seat is refused' "rc ${rc}"
+  printf 'HDW4S_EPHEMERAL_SLOTS=99\n' > "${SB}/etc/hdw4s.conf"
+  out="$(m --seat ephemeral98)"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a pool grown into the template uids is refused' \
+    || bad 'a pool grown into the template uids is refused' "rc ${rc}"
+  has 'and names the largest it can be' "${out}" 'largest pool here is'
+  # A pool of zero is a machine that serves only named desktops.
+  printf 'HDW4S_EPHEMERAL_SLOTS=0\n' > "${SB}/etc/hdw4s.conf"
+  out="$(m --seat ephemeral0)"
+  has 'zero is a size, and has no seats' "${out}" 'beyond HDW4S_EPHEMERAL_SLOTS=0'
+)
+
 echo '== template edit needs no prior step, and a failed mint leaves no row =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   systemctl() { :; }
@@ -4037,7 +4066,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=647   # update when tests are added; a wrong number is the point
+EXPECTED=656   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

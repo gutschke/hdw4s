@@ -30,7 +30,10 @@
 #
 # "--template NAME" mints exactly one of the second kind and is what "hdw4s"
 # calls when "hdw4s template edit" provisions its authoring slot, so that a
-# freshly provisioned slot works without waiting for a reboot. The five
+# freshly provisioned slot works without waiting for a reboot. "--seat NAME"
+# mints one seat of the first kind, for "hdw4s pool size" growing the pool
+# without a reboot; it reads the size from the configuration like the boot run
+# does, so it can only mint a seat the next boot will mint too. The five
 # artefacts a slot needs have ONE implementation, shared by both callers; see
 # the note above the loop.
 #
@@ -134,8 +137,10 @@ fi
 case "${HDW4S_EPHEMERAL_SLOTS}" in
   ''|*[!0-9]*) die "HDW4S_EPHEMERAL_SLOTS must be a number, not '${HDW4S_EPHEMERAL_SLOTS}'." ;;
 esac
-[ "${HDW4S_EPHEMERAL_SLOTS}" -ge 1 ] ||
-  die "HDW4S_EPHEMERAL_SLOTS must be at least 1."
+# ZERO IS A POOL, not an error. "hdw4s pool size 0" is how a machine that serves
+# only named desktops says so, and a floor of one minted an identity the router
+# could never hand out -- harmless, but it made "how big is the pool" have two
+# answers on every such machine.
 
 # Exact-match, not a prefix test: a name is either <prefix><digits> and nothing
 # else, or it is not one of ours. A substring check here would let a real account
@@ -180,9 +185,176 @@ case "${HDW4S_EPHEMERAL_BACKGROUND}" in
   *) die "HDW4S_EPHEMERAL_BACKGROUND must be 'generated', a colour like
   #772953, or an absolute path to an image -- not '${HDW4S_EPHEMERAL_BACKGROUND}'." ;;
 esac
+# The lowest uid the template rows hold, counting down from UID_MAX by their
+# position among the template rows -- the derivation --template uses below, and
+# it has to be the same one, so it is computed once here for both readers.
+# A table with NO template row still reserves one: "hdw4s template edit"
+# provisions the authoring slot on first use, and a pool already grown into its
+# uid would make that first use fail.
+template_rows="$(awk '$1 !~ /^#/ && $3 == "template" { n += 1 } END { print n + 0 }' \
+  "${ETCDIR}/instances" 2>/dev/null || echo 0)"
+[ "${template_rows}" -ge 1 ] || template_rows=1
+TEMPLATE_LOW=$(( UID_MAX - template_rows + 1 ))
+
+# THE LARGEST POOL THIS MACHINE CAN MINT, for "hdw4s pool size", which asks
+# before it writes anything rather than finding out from a boot that dies. Asked
+# here, as --uid-window is, so that the window and the template arithmetic have
+# exactly one home. Before the size checks below on purpose: the question is
+# what N may be, and a configuration whose CURRENT N is out of range must still
+# be able to get an answer, or the command that would repair it cannot run.
+if [ "${1:-}" = '--pool-max' ]; then
+  max=$(( TEMPLATE_LOW - HDW4S_EPHEMERAL_UID_BASE ))
+  [ "${max}" -ge 0 ] || max=0
+  echo "${max}"
+  exit 0
+fi
+
 last=$(( HDW4S_EPHEMERAL_UID_BASE + HDW4S_EPHEMERAL_SLOTS - 1 ))
 if [ "${HDW4S_EPHEMERAL_UID_BASE}" -lt "${UID_MIN}" ] || [ "${last}" -gt "${UID_MAX}" ]; then
   die "uids ${HDW4S_EPHEMERAL_UID_BASE}-${last} fall outside the ${UID_MIN}-${UID_MAX} window."
+fi
+
+# THE ARGUMENTS ARE SETTLED BEFORE ANYTHING IS WRITTEN. Every refusal below is
+# about which slot to mint, and a refusal that comes after the run directories
+# have been made has already changed the machine it is refusing to change.
+
+# WHICH SLOTS THIS RUN MINTS, as a list built before the loop rather than as a
+# counter inside it. The body below is unchanged and does not know which caller
+# it is serving, which is the whole point: the five artefacts a slot needs --
+# the userdb records, the namespaced passwd, the profile mount point, the gated
+# web root and the numeric-uid drop-in -- have exactly ONE implementation. A
+# second one written elsewhere would be a copy of a rule, and it would drift the
+# first time either was edited.
+#
+# TWO CALLERS, and the difference between them is which list they build:
+#
+#   (no arguments)        the pool, at boot, exactly as this unit always has
+#   --template NAME  one named slot, for a row that is NOT in the pool --
+#                         today that is the administrator's authoring slot,
+#                         typed "template" in the slot table
+#
+# THE ORDERING CONSTRAINT IS THE SAME FOR BOTH, and it is why --template exists here
+# rather than in the caller: as the header of this file says, systemd resolves
+# User= before any ExecStartPre= of ours could run, so a unit CANNOT mint its
+# own identity -- measured, it fails 217/USER. Whoever calls --template must call it
+# before that slot's socket can fire. "hdw4s" does, in enable_slot; its socket is
+# enabled last.
+ONE_SHOT=''
+TEMPLATE_NAME=''
+# Whether this run mints POOL seats -- the boot run, or one --seat. Gates the
+# teardown and start watchers below, which a pool seat needs and the authoring
+# slot must never have. A separate flag from ONE_SHOT because the two questions
+# ("is this the whole machine" and "is this the pool") stopped having the same
+# answer when --seat arrived.
+POOL_RUN='yes'
+if [ "${1:-}" = '--seat' ]; then
+  # ONE POOL SEAT, LIVE, for "hdw4s pool size" raising the pool without a
+  # reboot. The same five artefacts the boot run makes, for one name, by the
+  # same loop body -- which is the reason this is a flag here and not a copy in
+  # the caller.
+  #
+  # THE CONFIGURATION IS THE AUTHORITY, AND IS READ HERE, not trusted from the
+  # caller: the seat must be <prefix><i> with i below HDW4S_EPHEMERAL_SLOTS as
+  # the file says NOW. So the caller writes the new size first and mints after,
+  # and the next boot -- which mints from that same file -- makes exactly the
+  # seats this made. A seat minted outside that range would be a seat the next
+  # boot does not make, with a row the router goes on offering: the one
+  # disagreement between rows and identities that costs a visitor a desktop.
+  ONE_SHOT='yes'
+  [ "$#" -eq 2 ] || die "--seat takes exactly one seat name."
+  seatidx="${2#"${HDW4S_EPHEMERAL_PREFIX}"}"
+  case "${seatidx}" in
+    "$2"|''|*[!0-9]*|0?*)
+      die "$2 is not a seat of this pool; seats are ${HDW4S_EPHEMERAL_PREFIX}0, ${HDW4S_EPHEMERAL_PREFIX}1, ..." ;;
+  esac
+  [ "${seatidx}" -lt "${HDW4S_EPHEMERAL_SLOTS}" ] ||
+    die "$2 is beyond HDW4S_EPHEMERAL_SLOTS=${HDW4S_EPHEMERAL_SLOTS}; raise the
+  setting first, so the next boot mints it too."
+  # THE TEMPLATE'S END OF THE WINDOW, which the boot run does not check for the
+  # pool: there a "die" would take every seat down, and the template mint after
+  # it warns instead. Here one seat is being added on purpose, so refusing it
+  # costs one command and saves the authoring slot its uid.
+  [ $(( HDW4S_EPHEMERAL_UID_BASE + HDW4S_EPHEMERAL_SLOTS - 1 )) -lt "${TEMPLATE_LOW}" ] ||
+    die "a pool of ${HDW4S_EPHEMERAL_SLOTS} reaches uid ${TEMPLATE_LOW}, which the
+  template-authoring slot holds. The largest pool here is
+  $(( TEMPLATE_LOW - HDW4S_EPHEMERAL_UID_BASE ))."
+  SLOT_SPECS="$(printf '%s\t%s\t%s' "$2" \
+    "$(( HDW4S_EPHEMERAL_UID_BASE + seatidx ))" 'Desktop')"
+  SEAT_NAME="$2"
+elif [ "${1:-}" = '--template' ]; then
+  POOL_RUN=''
+  ONE_SHOT='yes'
+  [ "$#" -eq 2 ] || die "--template takes exactly one instance name."
+  TEMPLATE_NAME="$2"
+
+  # THE ROW IS THE AUTHORITY, and it is read here rather than trusted from the
+  # caller. "--template foo" on a row that is not typed "template" would mint a
+  # uid and a web root for a NAMED desktop or, far worse, for a pool member --
+  # and the slot table has no validator, so nothing downstream would catch it.
+  # A caller that already knows the type still has to prove it to this script.
+  rowtype="$(awk -v i="${TEMPLATE_NAME}" \
+    '$1 !~ /^#/ && $2 == i { print ($3 == "" ? "desktop" : $3); exit }' \
+    "${ETCDIR}/instances" 2>/dev/null)"
+  [ -n "${rowtype}" ] ||
+    die "${TEMPLATE_NAME} has no row in ${ETCDIR}/instances."
+  [ "${rowtype}" = 'template' ] ||
+    die "${TEMPLATE_NAME} is typed '${rowtype}', not 'template'; refusing to mint it."
+
+  # THE UID IS DERIVED HERE AND NOWHERE ELSE. An earlier shape had the caller
+  # pass it, and that is wrong in a way that is silent rather than loud: these
+  # records live in /run, so after a reboot the template's record does not exist
+  # when the pool is minted. The pool would take the uid unopposed, the template
+  # would be re-minted onto it afterwards, and the two would then disagree about
+  # who owns it with nothing anywhere complaining. One derivation, in the one
+  # script that owns the window, is what removes that.
+  #
+  # DOWN FROM THE TOP, while the pool grows UP from the bottom, which is the
+  # allocation this estate already uses where two things share a range. The
+  # ordinal is the row's position among the TEMPLATE rows of the table. That is
+  # stable because alloc_slot APPENDS -- go and check it -- and not because the
+  # derivation is independent of command order: inserting a template row above
+  # an existing one would move the existing one's uid. Benign while the records
+  # are re-minted from scratch at every boot; it would not be if they persisted.
+  ordinal="$(awk -v i="${TEMPLATE_NAME}" \
+    '$1 !~ /^#/ && $3 == "template" { n += 1; if ($2 == i) { print n - 1; exit } }' \
+    "${ETCDIR}/instances" 2>/dev/null)"
+  [ -n "${ordinal}" ] || die "could not place ${TEMPLATE_NAME} among the template rows."
+  id=$(( UID_MAX - ordinal ))
+
+  # THE TWO ENDS MUST NOT MEET, and this refusal is here rather than only in the
+  # collision check inside the loop because THAT one is a "die" in a oneshot unit
+  # every session Requires=. Reached at boot it does not decline the template, it
+  # takes the WHOLE POOL down with 217/USER. So the arithmetic is refused early,
+  # where it costs one command instead of every desktop on the machine.
+  high=$(( HDW4S_EPHEMERAL_UID_BASE + HDW4S_EPHEMERAL_SLOTS - 1 ))
+  [ "${id}" -gt "${high}" ] ||
+    die "uid ${id} for ${TEMPLATE_NAME} meets the pool, which reaches ${high}.
+  The pool grows up from ${HDW4S_EPHEMERAL_UID_BASE} and template rows grow down
+  from ${UID_MAX}; with ${HDW4S_EPHEMERAL_SLOTS} slot(s) there is no room for
+  this one. Make the pool smaller (hdw4s pool size N) or remove a template row."
+  { [ "${id}" -ge "${UID_MIN}" ] && [ "${id}" -le "${UID_MAX}" ]; } ||
+    die "derived uid ${id} is outside the ${UID_MIN}-${UID_MAX} window."
+
+  # CAPTURED HERE, and not read back off ${id} at the end. The minting loop is a
+  # "while read", and read CLEARS the variables it assigns when it finally hits
+  # EOF -- so ${id} is empty by the time the closing message runs, and the first
+  # version of that message printed "(uid )". Derive it once, name it, and let
+  # the loop variable be the loop's business.
+  TEMPLATE_UID="${id}"
+  SLOT_SPECS="$(printf '%s\t%s\t%s' "${TEMPLATE_NAME}" "${id}" 'Template')"
+elif [ "$#" -gt 0 ]; then
+  die "unknown argument '$1'; this takes no arguments, --template NAME or --seat NAME."
+else
+  SLOT_SPECS=''
+  i=0
+  while [ "${i}" -lt "${HDW4S_EPHEMERAL_SLOTS}" ]; do
+    SLOT_SPECS="${SLOT_SPECS}$(printf '%s\t%s\t%s\n' \
+      "${HDW4S_EPHEMERAL_PREFIX}${i}" \
+      "$(( HDW4S_EPHEMERAL_UID_BASE + i ))" \
+      'Desktop')
+"
+    i=$(( i + 1 ))
+  done
 fi
 
 # Everything the session needs to ALREADY EXIST, made in one place, at boot, before
@@ -245,104 +417,6 @@ install -d -m 0711 -g "${RELAY_GROUP}" "${STREAMDIR}"
 # Set when a slot's unit has already been loaded, which is the only case that
 # needs a reload; see the note beside the drop-in below.
 reload=''
-
-# WHICH SLOTS THIS RUN MINTS, as a list built before the loop rather than as a
-# counter inside it. The body below is unchanged and does not know which caller
-# it is serving, which is the whole point: the five artefacts a slot needs --
-# the userdb records, the namespaced passwd, the profile mount point, the gated
-# web root and the numeric-uid drop-in -- have exactly ONE implementation. A
-# second one written elsewhere would be a copy of a rule, and it would drift the
-# first time either was edited.
-#
-# TWO CALLERS, and the difference between them is which list they build:
-#
-#   (no arguments)        the pool, at boot, exactly as this unit always has
-#   --template NAME  one named slot, for a row that is NOT in the pool --
-#                         today that is the administrator's authoring slot,
-#                         typed "template" in the slot table
-#
-# THE ORDERING CONSTRAINT IS THE SAME FOR BOTH, and it is why --template exists here
-# rather than in the caller: as the header of this file says, systemd resolves
-# User= before any ExecStartPre= of ours could run, so a unit CANNOT mint its
-# own identity -- measured, it fails 217/USER. Whoever calls --template must call it
-# before that slot's socket can fire. "hdw4s" does, in enable_slot; its socket is
-# enabled last.
-ONE_SHOT=''
-TEMPLATE_NAME=''
-if [ "${1:-}" = '--template' ]; then
-  ONE_SHOT='yes'
-  [ "$#" -eq 2 ] || die "--template takes exactly one instance name."
-  TEMPLATE_NAME="$2"
-
-  # THE ROW IS THE AUTHORITY, and it is read here rather than trusted from the
-  # caller. "--template foo" on a row that is not typed "template" would mint a
-  # uid and a web root for a NAMED desktop or, far worse, for a pool member --
-  # and the slot table has no validator, so nothing downstream would catch it.
-  # A caller that already knows the type still has to prove it to this script.
-  rowtype="$(awk -v i="${TEMPLATE_NAME}" \
-    '$1 !~ /^#/ && $2 == i { print ($3 == "" ? "desktop" : $3); exit }' \
-    "${ETCDIR}/instances" 2>/dev/null)"
-  [ -n "${rowtype}" ] ||
-    die "${TEMPLATE_NAME} has no row in ${ETCDIR}/instances."
-  [ "${rowtype}" = 'template' ] ||
-    die "${TEMPLATE_NAME} is typed '${rowtype}', not 'template'; refusing to mint it."
-
-  # THE UID IS DERIVED HERE AND NOWHERE ELSE. An earlier shape had the caller
-  # pass it, and that is wrong in a way that is silent rather than loud: these
-  # records live in /run, so after a reboot the template's record does not exist
-  # when the pool is minted. The pool would take the uid unopposed, the template
-  # would be re-minted onto it afterwards, and the two would then disagree about
-  # who owns it with nothing anywhere complaining. One derivation, in the one
-  # script that owns the window, is what removes that.
-  #
-  # DOWN FROM THE TOP, while the pool grows UP from the bottom, which is the
-  # allocation this estate already uses where two things share a range. The
-  # ordinal is the row's position among the TEMPLATE rows of the table. That is
-  # stable because alloc_slot APPENDS -- go and check it -- and not because the
-  # derivation is independent of command order: inserting a template row above
-  # an existing one would move the existing one's uid. Benign while the records
-  # are re-minted from scratch at every boot; it would not be if they persisted.
-  ordinal="$(awk -v i="${TEMPLATE_NAME}" \
-    '$1 !~ /^#/ && $3 == "template" { n += 1; if ($2 == i) { print n - 1; exit } }' \
-    "${ETCDIR}/instances" 2>/dev/null)"
-  [ -n "${ordinal}" ] || die "could not place ${TEMPLATE_NAME} among the template rows."
-  id=$(( UID_MAX - ordinal ))
-
-  # THE TWO ENDS MUST NOT MEET, and this refusal is here rather than only in the
-  # collision check inside the loop because THAT one is a "die" in a oneshot unit
-  # every session Requires=. Reached at boot it does not decline the template, it
-  # takes the WHOLE POOL down with 217/USER. So the arithmetic is refused early,
-  # where it costs one command instead of every desktop on the machine.
-  high=$(( HDW4S_EPHEMERAL_UID_BASE + HDW4S_EPHEMERAL_SLOTS - 1 ))
-  [ "${id}" -gt "${high}" ] ||
-    die "uid ${id} for ${TEMPLATE_NAME} meets the pool, which reaches ${high}.
-  The pool grows up from ${HDW4S_EPHEMERAL_UID_BASE} and template rows grow down
-  from ${UID_MAX}; with ${HDW4S_EPHEMERAL_SLOTS} slot(s) there is no room for
-  this one. Reduce HDW4S_EPHEMERAL_SLOTS or remove a template row."
-  { [ "${id}" -ge "${UID_MIN}" ] && [ "${id}" -le "${UID_MAX}" ]; } ||
-    die "derived uid ${id} is outside the ${UID_MIN}-${UID_MAX} window."
-
-  # CAPTURED HERE, and not read back off ${id} at the end. The minting loop is a
-  # "while read", and read CLEARS the variables it assigns when it finally hits
-  # EOF -- so ${id} is empty by the time the closing message runs, and the first
-  # version of that message printed "(uid )". Derive it once, name it, and let
-  # the loop variable be the loop's business.
-  TEMPLATE_UID="${id}"
-  SLOT_SPECS="$(printf '%s\t%s\t%s' "${TEMPLATE_NAME}" "${id}" 'Template')"
-elif [ "$#" -gt 0 ]; then
-  die "unknown argument '$1'; this takes no arguments, or --template NAME."
-else
-  SLOT_SPECS=''
-  i=0
-  while [ "${i}" -lt "${HDW4S_EPHEMERAL_SLOTS}" ]; do
-    SLOT_SPECS="${SLOT_SPECS}$(printf '%s\t%s\t%s\n' \
-      "${HDW4S_EPHEMERAL_PREFIX}${i}" \
-      "$(( HDW4S_EPHEMERAL_UID_BASE + i ))" \
-      'Desktop')
-"
-    i=$(( i + 1 ))
-  done
-fi
 
 # IFS is a literal tab and read is -r, because a label may carry spaces. The
 # list is fed from a here-document rather than a pipe so that the loop runs in
@@ -661,7 +735,7 @@ fi
 # So this loop is gated and the minting loop is not. DO NOT RE-UNIFY THE TWO
 # for tidiness: that is the exact edit this comment exists to stop, and it was
 # made once already by the change that introduced the shared list.
-if [ -z "${ONE_SHOT}" ]; then
+if [ -n "${POOL_RUN}" ]; then
   while IFS="$(printf '\t')" read -r name id label; do
     [ -n "${name}" ] || continue
     # --no-block: this runs at boot, before the pool is servable, and a path unit
@@ -764,7 +838,9 @@ if [ -z "${ONE_SHOT}" ] && [ -r "${ETCDIR}/instances" ]; then
     echo "hdw4s: minted ${_minted} authoring slot(s) from the slot table."
 fi
 
-if [ -n "${ONE_SHOT}" ]; then
+if [ -n "${SEAT_NAME:-}" ]; then
+  echo "hdw4s: minted the pool seat ${SEAT_NAME}."
+elif [ -n "${ONE_SHOT}" ]; then
   # Names both, because the uid is DERIVED here rather than supplied: the slot
   # is what the administrator asked for and the uid is what they got, and the
   # two are worth reading together the first time a template row is minted.
