@@ -2352,7 +2352,8 @@ echo '== the arrival decision keeps its order =='
 # as shipped. A deliberate reorder updates this list; an accidental one fails here.
 #
 # Checked on the GENERATED page, and the red arms below edit the generated page rather
-# than the generator, so that they test this check and nothing else.
+# than the generator, so that they test this check and not the build-time guards,
+# which refuse some of the same edits earlier and are tested in the next group.
 #
 # WHAT IT CANNOT SEE: whether the page behaves as its order says in a browser. It is a
 # check on the text the browser is handed.
@@ -2369,6 +2370,7 @@ if not m:
     sys.exit(print("the arrival decision was not found"))
 a = m.group(1)
 steps = (
+    ("the switch marker is spent first", "var switched = takeSwitch();"),
     ("EXPECT is read", "expected = sessionStorage.getItem(EXPECT)==='1';"),
     ("EXPECT is deleted before it is used", "sessionStorage.removeItem(EXPECT);"),
     ("EXPECT connects", "if (expected) return boot();"),
@@ -2378,7 +2380,7 @@ steps = (
     ("a viewer connects", "if (/^#(shared|player[2-4]|display2)/.test(location.hash)) "
                           "return boot();"),
     ("gate=off connects", "if (GATE === 'off') return boot();"),
-    ("the resume branch opens", "if (LOADED_HIDDEN && knownInc) {"),
+    ("the resume branch opens", "if ((LOADED_HIDDEN || switched) && knownInc) {"),
     ("the incarnation is compared", "var same = !!served && served === knownInc;"),
     ("only the comparison connects", "if (same) return boot();"),
     ("a hidden tab waits", "if (!document.hidden) return decide();"),
@@ -2459,12 +2461,160 @@ PY
   redorder 'a resume that does not compare the incarnation is caught' \
     'the incarnation is compared: found 0 times' \
     'var same = !!served && served === knownInc;' 'var same = !!served;'
+  # The switch marker spent only after an earlier exit.
+  redorder 'a switch marker spent after a connecting path is caught' \
+    'EXPECT is read: out of order' \
+    '  var switched = takeSwitch();
+' '' \
+    'if (expected) return boot();' \
+    'if (expected) return boot();
+  var switched = takeSwitch();'
   # A sixth way to connect.
   redorder 'an extra unconditional connect is caught' \
     'connecting paths: 6, want 5' \
     "  if (GATE === 'off') return boot();" \
     "  if (GATE === 'off') return boot();
   if (knownInc) return boot();"
+)
+
+echo '== a transport switch may skip one arrival check and no other =='
+# THE FEATURE: switching between WebRTC and websockets in the client's side menu makes
+# upstream reload the page two seconds later, and that reload used to meet the card.
+# hdw4s-gate-index now lets that one reload through the resume branch, in place of
+# "nobody was looking" and nothing else. A review found the obvious version (arm EXPECT
+# on the switch message) unsafe and named the shape a safe one must keep; the generator
+# refuses a page that loses it, and these are that refusal seen to happen.
+#
+# Each arm edits a COPY of the generator INSIDE ITS PAGE TEMPLATE ONLY. The guards name
+# the very lines they require, so an edit across the whole file rewrites the guard's
+# needle along with the page and the two agree about the wrong thing -- the trap the
+# lifetime guard's arms above fell into first.
+#
+# AND THE UPSTREAM HALF: the generator looks in the client beside the index for the
+# handler that reloads after a switch. Not finding it is NOT a refusal -- it builds the
+# page that shipped before this feature, where a switch costs a click -- and says so.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+  # The client's shape, from upstream's own source: the entry loads the core as a
+  # chunk, and the core reloads two seconds after a {type:"mode"} message.
+  printf '%s\n' 'await import("./core.js");' > "${d}/x.js"
+  cat > "${d}/core.src" <<'JS'
+function handleMessage(event) {
+    if (event.origin !== window.location.origin) return;
+    let message = event.data;
+    if (message.mode !== undefined && message.type === "mode") {
+        if (![STREAM_MODE_WEBRTC, STREAM_MODE_WEBSOCKETS].includes(message.mode)) return;
+        console.log(`Switching streaming mode to: ${message.mode}`);
+        safeSetItem(getPrefixedKey('stream_mode'), message.mode);
+
+        setTimeout(() => {
+            window.location.reload();
+        }, 2000)
+    }
+}
+window.addEventListener("message", handleMessage)
+JS
+  cp "${d}/core.src" "${d}/core.js"
+  gen() { python3 "${1:-${ROOT}/hdw4s-gate-index}" "${d}/in.html" "${d}/out.html" \
+            >"${d}/stdout" 2>"${d}/err"; }
+
+  # The positive control FIRST: with upstream's handler present the page is armed and
+  # the build says where it looked.
+  rm -f "${d}/out.html"
+  gen && has 'the switch is armed when upstream reloads after it' \
+           "$(cat "${d}/out.html")" 'var SWITCH_UPSTREAM = true;' \
+      || bad 'the switch is armed when upstream reloads after it' "$(cat "${d}/err")"
+  has 'and the build names the file it found the reload in' "$(cat "${d}/stdout")" 'core.js'
+
+  # The same handler as the bundler writes it, which is what is actually installed.
+  # The ${...} in it is JavaScript's, so it must stay unexpanded.
+  # shellcheck disable=SC2016
+  printf '%s' 'function In(e){if(e.origin!==window.location.origin)return;let t=e.data;if(t.mode!==void 0&&t.type===`mode`){if(![On,kn].includes(t.mode))return;console.log(`Switching streaming mode to: ${t.mode}`),Nn(Mn(`stream_mode`),t.mode),setTimeout(()=>{window.location.reload()},2e3)}}typeof window<`u`&&(window.addEventListener(`message`,In))' \
+    > "${d}/core.js"
+  gen && has 'and it is found in the minified bundle' \
+           "$(cat "${d}/out.html")" 'var SWITCH_UPSTREAM = true;' \
+      || bad 'and it is found in the minified bundle' "$(cat "${d}/err")"
+
+  # Upstream stops reloading: the page builds, unarmed, and says so.
+  sed 's|window.location.reload();|/* in place now */|' "${d}/core.src" > "${d}/core.js"
+  gen && has 'an upstream that no longer reloads leaves the switch unarmed' \
+           "$(cat "${d}/out.html")" 'var SWITCH_UPSTREAM = false;' \
+      || bad 'an upstream that no longer reloads leaves the switch unarmed' \
+           "the build refused: $(cat "${d}/err")"
+  has 'and the build says the card is back' "$(cat "${d}/err")" 'will show the card again'
+  # Upstream reloads too late for the marker to be alive.
+  sed 's|}, 2000)|}, 20000)|' "${d}/core.src" > "${d}/core.js"
+  gen; has 'an upstream that reloads too late leaves the switch unarmed' \
+         "$(cat "${d}/out.html")" 'var SWITCH_UPSTREAM = false;'
+  # Upstream no longer listens for window messages at all.
+  sed 's|window.addEventListener("message", handleMessage)||' "${d}/core.src" \
+    > "${d}/core.js"
+  gen; has 'an upstream that no longer listens leaves the switch unarmed' \
+         "$(cat "${d}/out.html")" 'var SWITCH_UPSTREAM = false;'
+  cp "${d}/core.src" "${d}/core.js"
+
+  # Our own half: each arm must be REFUSED, write no page, and say why.
+  tarm() { python3 - "${ROOT}/hdw4s-gate-index" "${d}/red" "$@" <<'PY'
+import sys
+s = open(sys.argv[1], encoding="utf-8").read()
+a = s.index('OVERLAY = r"""'); b = s.index('__NAMES__"""', a)
+t = s[a:b]
+pairs = sys.argv[3:]
+for old, new in zip(pairs[::2], pairs[1::2]):
+    if t.count(old) != 1:
+        sys.exit("red arm does not apply: %r found %d times in the template"
+                 % (old, t.count(old)))
+    t = t.replace(old, new)
+open(sys.argv[2], "w", encoding="utf-8").write(s[:a] + t + s[b:])
+PY
+  }
+  refused() { rm -f "${d}/out.html"
+              if ! tarm "${@:3}" 2>"${d}/armerr"; then
+                bad "$1" "the arm did not apply: $(cat "${d}/armerr")"; return; fi
+              if gen "${d}/red"; then bad "$1" 'it was accepted'; return; fi
+              if [ -e "${d}/out.html" ]; then bad "$1" 'a refused build wrote a page'
+              else has "$1" "$(cat "${d}/err")" "$2"; fi; }
+
+  # The review's unsafe shape: the marker connects before anything is checked.
+  refused 'a switch marker that connects unconditionally is refused' \
+    'consulted somewhere other than the resume' \
+    'if (expected) return boot();' 'if (switched || expected) return boot();'
+  refused 'a resume branch that stops comparing the desktop is refused' \
+    'no longer compares the served desktop' \
+    'var same = !!served && served === knownInc;' 'var same = !!served;'
+  refused 'a resume branch that stops waiting for a hidden tab is refused' \
+    'no longer waits while the tab is hidden' \
+    'if (!document.hidden) return decide();' 'return decide();'
+  refused 'a marker taken after a connecting path is refused' \
+    'taken after a path that connects' \
+    '  var switched = takeSwitch();
+' '' \
+    'if (expected) return boot();' 'if (expected) return boot();
+  var switched = takeSwitch();'
+  refused 'a marker that is not deleted on read is refused' \
+    'no longer checks removeItem(SWITCH)' \
+    '      sessionStorage.removeItem(SWITCH);
+' ''
+  refused 'a marker without its own clock is refused' \
+    'no longer checks age <= SWITCH_TTL' \
+    ' && age <= SWITCH_TTL' ''
+  refused 'a marker written for a message from another window is refused' \
+    'event.source !== window' \
+    ' || event.source !== window' ''
+  refused 'a marker written for a page whose card is up is refused' \
+    '!gate.hidden' \
+    'if (SECONDARY || !booted || !gate.hidden) return;' \
+    'if (SECONDARY || !booted) return;'
+  refused 'a marker kept outside sessionStorage is refused' \
+    'not to sessionStorage' \
+    'sessionStorage.setItem(SWITCH' 'localStorage.setItem(SWITCH'
+  # And the guard cannot pass by failing to find what it checks.
+  refused 'a marker reader the guard cannot find is refused' \
+    'could not be found' \
+    'function takeSwitch(){' 'function takeSwitchNow(){' \
+    'var switched = takeSwitch();' 'var switched = takeSwitchNow();'
 )
 
 echo '== the fresh-desktop card tells the truth about how long the desktop lasts =='
@@ -4422,7 +4572,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=722   # update when tests are added; a wrong number is the point
+EXPECTED=740   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

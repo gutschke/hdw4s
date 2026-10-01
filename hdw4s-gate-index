@@ -82,6 +82,58 @@ if len(mods) != 1:
 src_attr = re.search(r'src=["\']([^"\']+)["\']', mods[0]).group(1)
 html = html.replace(mods[0], "<!-- hdw4s: module deferred behind the boot gate -->")
 
+# HOW LONG A TRANSPORT SWITCH MAY WAIT FOR ITS RELOAD, and the one home of the number:
+# it is baked into the page below and compared against upstream's delay here.
+SWITCH_TTL_MS = 10000
+
+def upstream_switch_reload(index_path, module_src):
+    """Does the client this page defers still reload by itself after a transport
+    switch, soon enough for the marker to be alive when the reload lands?
+
+    Read from the client sitting beside the index being gated, which is the copy
+    the browser will be served -- never from a source tree. Searched by STRING
+    LITERALS, which survive the bundler, never by function names, which do not:
+    the handler is the one that logs "Switching streaming mode to:" after testing
+    for a message of type "mode", and calls location.reload() from a setTimeout.
+    The entry module and the files it names beside itself are searched, because
+    the bundle loads the core as a separate chunk.
+
+    Returns (True, where) or (False, why). It cannot see whether the handler is
+    still REGISTERED for window messages beyond a listener existing in that file,
+    nor anything a browser decides at run time."""
+    base = os.path.dirname(os.path.abspath(index_path))
+    rel = module_src.split("?", 1)[0].split("#", 1)[0].lstrip("/")
+    entry = os.path.normpath(os.path.join(base, rel))
+    try:
+        text = open(entry, encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        return False, "cannot read the client module %s (%s)" % (module_src, e.strerror)
+    files = [(entry, text)]
+    for name in sorted(set(re.findall(r"""[`'"]\./([A-Za-z0-9._-]+\.js)[`'"]""", text))):
+        path = os.path.join(os.path.dirname(entry), name)
+        try:
+            files.append((path, open(path, encoding="utf-8", errors="replace").read()))
+        except OSError:
+            pass
+    handler = re.compile(
+        r"""type\s*===\s*([`'"])mode\1.{0,400}?Switching streaming mode to:"""
+        r""".{0,400}?setTimeout\(.{0,80}?location\.reload\(\).{0,40}?\}\s*,\s*"""
+        r"""([0-9.]+(?:e[0-9]+)?)\s*\)""", re.S)
+    listener = re.compile(r"""addEventListener\(\s*[`'"]message[`'"]""")
+    for path, body in files:
+        m = handler.search(body)
+        if m and listener.search(body):
+            delay = float(m.group(2))
+            where = os.path.relpath(path, base)
+            if delay > SWITCH_TTL_MS / 2:
+                return False, ("the client in %s reloads %g ms after a switch, too close "
+                               "to the marker's %d ms life" % (where, delay, SWITCH_TTL_MS))
+            return True, where
+    return False, ("no transport-switch handler that reloads was found in %s or the "
+                   "%d file(s) it names" % (module_src, len(files) - 1))
+
+SWITCH_UP, SWITCH_WHERE = upstream_switch_reload(src, src_attr)
+
 OVERLAY = r"""
 <style>
  /* The [hidden] rule MUST come with the display rule and MUST win. An author
@@ -196,6 +248,12 @@ __ACT__
   var KEY = 'hdw4s_booted_' + location.pathname;
   var EXPECT = KEY + ':expect-reload';
   var INC = KEY + ':incarnation';
+  // A TRANSPORT SWITCH THIS TAB JUST MADE; see AN UNWATCHED LOAD IS NOT AN ARRIVAL
+  // below for the only place it is read, and armSwitch() for the only place it is
+  // written. Per tab and per address because sessionStorage and KEY are.
+  var SWITCH = KEY + ':mode-switch';
+  var SWITCH_TTL = __SWITCHTTL__;
+  var SWITCH_UPSTREAM = __SWITCHUP__;
   // WHETHER ANYONE WAS LOOKING AT THIS TAB WHEN IT LOADED, read at the first
   // statement of the overlay and never again: by the time the arrival decision
   // is taken the answer may have changed, and the question is about the load.
@@ -512,6 +570,85 @@ __ACT__
     if (/superseded|disconnected/i.test(String(msg))) lost('alert');
     else { try { console.warn('hdw4s: suppressed alert:', msg); } catch(e){} }
   };
+
+  // A TRANSPORT SWITCH IS NOT AN ARRIVAL, AND THIS IS THE ONLY PLACE THAT SAYS SO.
+  //
+  // The client's side menu switches between WebRTC and websockets by POSTing
+  // /api/switch, then posting {type:'mode'} to this window; upstream's own listener
+  // stores the mode and calls location.reload() two seconds later. That reload landed
+  // on the card below, so every switch cost a Connect click for a tab that had been
+  // connected the whole time. The owner asked for the click to go, on the condition
+  // that nothing else the gate protects is weakened to get there.
+  //
+  // So this writes a MARKER and decides nothing. The marker is read once, at the top
+  // of the arrival decision, deleted on that read whatever happens next, and used in
+  // exactly one place: it may stand in for "nobody was looking" in the resume branch.
+  // Everything else that branch requires still has to hold -- this tab has been
+  // through the gate, the desktop being served is the one this tab connected to, and
+  // nothing connects while the tab is hidden. It never reaches an unconditional
+  // boot(). The build refuses a page where it does; see the guards at the bottom.
+  //
+  // WHY NOT SIMPLY SET EXPECT, which is what the product's own reload does. EXPECT
+  // is honoured before every other check, which is right for a reload performed in
+  // the same task that set it and wrong for one that happens two seconds later at
+  // upstream's discretion -- or never, if the switch is refused. An armed EXPECT
+  // would let the next load of this tab connect silently whatever caused it: F5, a
+  // crash and session restore, a load after logging out of the desktop. Reviewed
+  // 2026-09-30 and found unsafe; the conditions below are that review's.
+  //
+  // WHO MAY WRITE IT, every clause a refusal by default:
+  //   * a message from THIS window to itself (source and origin), naming one of the
+  //     two transports -- so a framing page or another window cannot arm it;
+  //   * a primary page that is connected with the card down -- a shared viewer or a
+  //     second display never resumes anybody's desktop;
+  //   * and only after THIS window watched its own POST /api/switch succeed, a few
+  //     seconds earlier. That is what makes a forged message, or one sent by a client
+  //     whose switch was refused, write nothing.
+  // And it is bound to the address, the fragment and the incarnation this tab holds
+  // when it is written, and expires on its own clock, so it does not depend on
+  // upstream reloading at all: if no reload comes, the marker is simply stale.
+  //
+  // WHAT IT LEAVES OPEN, accepted by the owner: in the seconds between the switch and
+  // the reload, another device that connects as the primary will be displaced by this
+  // tab's return without a card. The same holds today for a hidden tab resuming.
+  var switchPosted = 0;
+  var NativeFetch = window.fetch;
+  if (SWITCH_UPSTREAM && typeof NativeFetch === 'function') {
+    // OBSERVED, NEVER ALTERED: the caller gets back the very promise the browser
+    // made, and the look at the answer hangs off it on a branch of its own, so a
+    // fault in here cannot change what any fetch on this page returns.
+    window.fetch = function(input, init){
+      var p = NativeFetch.apply(window, arguments);
+      try {
+        var obj = (input && typeof input === 'object');
+        var url = (obj && 'url' in input) ? input.url : String(input);
+        var method = String((init && init.method) || (obj && input.method) || 'GET');
+        if (method.toUpperCase() === 'POST'
+            && /\/api\/switch$/.test(new URL(url, location.href).pathname)) {
+          p.then(function(r){ if (r && r.ok) switchPosted = Date.now(); },
+                 function(){});
+        }
+      } catch(e){}
+      return p;
+    };
+  }
+  function armSwitch(event){
+    try {
+      if (event.origin !== location.origin || event.source !== window) return;
+      var d = event.data;
+      if (!d || d.type !== 'mode' || (d.mode !== 'webrtc' && d.mode !== 'websockets')) return;
+      if (SECONDARY || !booted || !gate.hidden) return;
+      var since = Date.now() - switchPosted;
+      if (!switchPosted || since < 0 || since > SWITCH_TTL) return;
+      var inc = sessionStorage.getItem(INC);
+      if (!inc) return;
+      sessionStorage.setItem(SWITCH, JSON.stringify({
+        inc: inc, at: Date.now(), path: location.pathname, hash: location.hash}));
+      console.log('[hdw4s gate] transport switch to ' + d.mode + ': the reload that '
+                  + 'follows may reconnect this tab without the card');
+    } catch(e){}
+  }
+  if (SWITCH_UPSTREAM) window.addEventListener('message', armSwitch);
 
   // The socket is in a WORKER by default (socket_worker=true), where the WebSocket
   // patch above cannot see the KILL frame -- measured: the card came back in ~15 s via
@@ -1201,6 +1338,31 @@ __ACT__
                   {loadedHidden: LOADED_HIDDEN});
     } catch(e){}
   };
+  // THE SWITCH MARKER IS TAKEN HERE, BEFORE ANY PATH THAT CONNECTS, and deleted on
+  // this read whatever the outcome -- so every load of this tab spends it, including
+  // the loads that boot for some other reason below. Read anywhere later, a load that
+  // took an earlier exit would leave it armed for the next one. It answers true only
+  // for a marker this tab wrote moments ago, for this address and fragment, about the
+  // desktop this tab still believes it holds; anything else, including any failure to
+  // read it, is false. What true PERMITS is decided in exactly one place: the resume
+  // branch below, which still requires the served desktop to be that same one and
+  // still waits while the tab is hidden.
+  function takeSwitch(){
+    var raw = null;
+    try {
+      raw = sessionStorage.getItem(SWITCH);
+      sessionStorage.removeItem(SWITCH);
+    } catch(e){ return false; }
+    if (!raw) return false;
+    try {
+      var m = JSON.parse(raw), inc = sessionStorage.getItem(INC);
+      var age = Date.now() - m.at;
+      return !!inc && m.inc === inc && m.path === location.pathname
+          && m.hash === location.hash && typeof m.at === 'number'
+          && age >= 0 && age <= SWITCH_TTL;
+    } catch(e){ return false; }
+  }
+  var switched = takeSwitch();
   var expected=false;
   try {
     expected = sessionStorage.getItem(EXPECT)==='1';
@@ -1327,7 +1489,14 @@ __ACT__
   };
   var knownInc = null;
   try { knownInc = sessionStorage.getItem(INC); } catch(e){}
-  if (LOADED_HIDDEN && knownInc) {
+  // A TRANSPORT SWITCH THIS TAB JUST MADE stands in for condition 1 and for nothing
+  // else: the person was looking, but the load was the client's doing and not theirs.
+  // Conditions 2 and 3 and the wait while hidden are unchanged, which is why it joins
+  // this branch rather than getting one of its own -- the build refuses a page where
+  // the marker is consulted anywhere but in this condition.
+  if ((LOADED_HIDDEN || switched) && knownInc) {
+    var cause = LOADED_HIDDEN ? 'unwatched load' : 'transport switch';
+    window.__hdw4sResume.cause = cause;
     var decide = function(){
       fetchIncarnation(function(served){
         var same = !!served && served === knownInc;
@@ -1335,7 +1504,7 @@ __ACT__
         window.__hdw4sResume.verdict = same ? 'resumed' : 'refused';
         announce(same ? 'resumed silently: this tab owns the running desktop'
                       : 'card shown: the desktop is not the one this tab left',
-                 {served: !!served, knownIncarnation: !!knownInc});
+                 {served: !!served, knownIncarnation: !!knownInc, cause: cause});
         if (same) return boot();
         return (GATE === 'mint') ? show(MINT, MINT_GO) : show(COLD, COLD_GO);
       });
@@ -1479,6 +1648,8 @@ _gate_id = hashlib.sha256(
 OVERLAY = OVERLAY.replace("__SRC__", json.dumps(src_attr)) \
      .replace("__GATEID__", json.dumps(_gate_id)) \
      .replace("__CFG__", json.dumps(cfg)) \
+     .replace("__SWITCHTTL__", str(SWITCH_TTL_MS)) \
+     .replace("__SWITCHUP__", "true" if SWITCH_UP else "false") \
      .replace("__MORE__", MORE) \
      .replace("__ACT__", ACT) \
      .replace("__NAMES__", NAMES) \
@@ -1702,5 +1873,110 @@ if "hdw4sTitle.install(" not in html.split("</head>", 1)[0] and "</head>" in htm
     raise SystemExit("hdw4s-gate-index: the title keeper is not in the page's <head>, "
                      "so the client's own write would stand -- refusing to build")
 
+# A TRANSPORT SWITCH MAY SKIP ONE CHECK OF THE ARRIVAL DECISION AND NO OTHER, checked
+# on the bytes about to be written for the reason every guard above is.
+#
+# WHY A BUILD REFUSAL. The switch marker is a permission to connect without the card.
+# Reviewed 2026-09-30, the obvious version of it -- arm EXPECT on the switch message --
+# was found to let ANY later load of the tab connect silently: F5, a restored session,
+# a load after logging out of the desktop. The safe version differs from that by where
+# one variable is read, and every line of the difference looks like ceremony to
+# someone tidying up: hoisting the read next to its use, folding the condition into
+# the EXPECT check, dropping the delete. None of those changes anything a test on the
+# workstation could see, because the difference is only visible to a person pressing
+# F5 in a browser. So the page is refused at the moment one is made.
+#
+# WHAT EACH ONE HOLDS:
+#   1. the marker's verdict is consulted in exactly one place, the resume branch, so it
+#      can never reach a boot() that skips the incarnation check or the hidden wait;
+#   2. that branch still compares the served desktop with the one this tab holds, and
+#      still waits while the tab is hidden;
+#   3. the marker is taken before the first path that connects, so it is spent by
+#      every load and cannot outlive one;
+#   4. reading it deletes it before anything is decided about it, and it carries its
+#      own clock, address and incarnation;
+#   5. only this window, connected as the primary with the card down and after its own
+#      switch succeeded, writes it -- and only to sessionStorage.
+# WHAT THEY CANNOT SEE: whether any of it behaves as written in a browser. They check
+# the shape that the review found safe, not the run.
+def _refuse(why):
+    raise SystemExit("hdw4s-gate-index: %s -- refusing to build" % why)
+
+def _span(pattern, what):
+    m = re.search(pattern, html, re.S)
+    if m is None:
+        _refuse("%s could not be found in the page about to be written, so the guard "
+                "on the transport-switch marker cannot look at it" % what)
+    return m
+
+_RESUME = "if ((LOADED_HIDDEN || switched) && knownInc) {"
+_arrive = _span(r"go\.addEventListener\('click', boot\);(.*?)\n\}\)\(\);",
+                "the arrival decision").group(1)
+if "var switched = takeSwitch();" not in _arrive:
+    _refuse("the line that takes the transport-switch marker could not be found in the "
+            "arrival decision, so the guard on where it is used cannot look at it")
+_uses = re.findall(r"\bswitched\b", html)
+if len(_uses) != 2 or _arrive.count(_RESUME) != 1:
+    _refuse("the transport-switch verdict is consulted somewhere other than the resume "
+            "branch (%d uses of 'switched'; want its declaration and that one "
+            "condition). Anywhere else it can reach a boot() that skips the "
+            "incarnation check, and the next F5 connects silently" % len(_uses))
+_branch = _span(re.escape(_RESUME) + r"(.*?)\n  \}\n", "the resume branch").group(1)
+for _needle, _why in (
+        ("served === knownInc", "no longer compares the served desktop with the one "
+                                "this tab holds"),
+        ("if (same) return boot();", "connects without the comparison deciding"),
+        ("if (!document.hidden) return decide();", "no longer waits while the tab is "
+                                                   "hidden"),
+        ("'visibilitychange', onVisible", "no longer waits for the tab to be shown")):
+    if _needle not in _branch:
+        _refuse("the resume branch, which a transport switch may enter, %s" % _why)
+if _branch.count("boot()") != 1:
+    _refuse("the resume branch has a second way to boot() besides the incarnation "
+            "verdict")
+_first_boot = _arrive.find("boot()")
+if _first_boot < 0 or _arrive.find("var switched = takeSwitch();") > _first_boot:
+    _refuse("the transport-switch marker is taken after a path that connects, so a "
+            "load that takes that path leaves it armed for the next one")
+_take = _span(r"function takeSwitch\(\)\{(.*?)\n  \}", "takeSwitch()").group(1)
+if html.count("getItem(SWITCH)") != 1 or "getItem(SWITCH)" not in _take:
+    _refuse("the transport-switch marker is read somewhere other than takeSwitch()")
+for _needle in ("removeItem(SWITCH)", "m.inc === inc", "m.path === location.pathname",
+                "m.hash === location.hash", "age >= 0", "age <= SWITCH_TTL"):
+    if _needle not in _take:
+        _refuse("takeSwitch() no longer checks %s" % _needle)
+if _take.index("removeItem(SWITCH)") > _take.index("JSON.parse"):
+    _refuse("takeSwitch() decides about the marker before deleting it, so a marker it "
+            "throws on is never spent")
+_arm = _span(r"function armSwitch\(event\)\{(.*?)\n  \}", "armSwitch()").group(1)
+if html.count("setItem(SWITCH") != 1 or "sessionStorage.setItem(SWITCH" not in _arm:
+    _refuse("the transport-switch marker is written somewhere other than armSwitch(), "
+            "or not to sessionStorage")
+for _needle in ("event.origin !== location.origin", "event.source !== window",
+                "SECONDARY", "!booted", "!gate.hidden", "switchPosted",
+                "d.mode !== 'webrtc' && d.mode !== 'websockets'"):
+    if _needle not in _arm:
+        _refuse("armSwitch() no longer refuses unless %s holds" % _needle)
+for _body in (_take, _arm):
+    if "localStorage" in _body or "document.cookie" in _body:
+        _refuse("the transport-switch marker touches localStorage or a cookie; it is "
+                "per tab and must live in sessionStorage only")
+# AND THE PAGE SAYS WHAT WAS FOUND UPSTREAM, so the published flag and the search agree.
+if ("var SWITCH_UPSTREAM = %s;" % ("true" if SWITCH_UP else "false")) not in html:
+    _refuse("the page does not carry the result of the search for upstream's "
+            "transport-switch reload")
+
 open(dst, "w", encoding="utf-8").write(html)
 print("hdw4s-gate-index: built %s (deferred %s)" % (dst, src_attr))
+# NOT A REFUSAL, AND THE ASYMMETRY IS DELIBERATE. Everything above is about OUR code,
+# which the person running this build can fix. This is about upstream's, which arrives
+# with a Selkies update; refusing here would take every desktop down over a log line
+# being reworded. And the page built without it is exactly the page that shipped before
+# this feature: the reload after a switch shows the card. So it builds, says so on
+# stderr, and the switch costs a click again until somebody looks.
+if SWITCH_UP:
+    print("hdw4s-gate-index: a transport switch reconnects without the card "
+          "(upstream reload found in %s)" % SWITCH_WHERE)
+else:
+    sys.stderr.write("hdw4s-gate-index: WARNING: a transport switch will show the card "
+                     "again: %s\n" % SWITCH_WHERE)
