@@ -356,6 +356,10 @@ SESSION_TYPES='desktop ephemeral template'
 # "desktop", which is what every session was when it was written.
 type_of() {
   local t=''
+  # Answered from the table "list" read once, when it did; see list_preload.
+  if [ -n "${_LIST_PRELOADED:-}" ]; then
+    echo "${_LIST_TYPE[${1}]:-desktop}"; return 0
+  fi
   # -e and not -r is precisely "the table exists and I could not look at it".
   # A table that does not exist at all is a machine with no slots, and an
   # instance with no row there is untyped: "desktop" is information, not a guess.
@@ -677,8 +681,13 @@ setting_with_source() {
   # keeping a second copy of the unit's values here, which would be one more
   # thing able to disagree with it.
   if ephemeral_shaped "$(type_of "${inst}")"; then
-    v="$(systemctl show "$(unit_of "${inst}")" -p Environment --value 2>/dev/null |
-           tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n1)"
+    if [ -n "${_LIST_PRELOADED:-}" ]; then
+      v="$(printf '%s' "${_LIST_ENV[$(unit_of "${inst}")]:-}" |
+             tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n1)"
+    else
+      v="$(systemctl show "$(unit_of "${inst}")" -p Environment --value 2>/dev/null |
+             tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n1)"
+    fi
     [ -z "${v}" ] || { printf '%s\t%s' "${v}" "$(unit_of "${inst}")"; return 0; }
   fi
   for f in "${ETCDIR}/${inst}.conf" "${CONF}"; do
@@ -735,8 +744,40 @@ has_auth() {
   [ "$(setting_of "$1" HDW4S_AUTH none)" = 'basic' ]
 }
 
+# ONE QUESTION TO SYSTEMD FOR THE WHOLE TABLE, instead of three per row. "list"
+# took 4.2 s on a 33-row machine, 4.0 s of it in the kernel: about a hundred
+# systemctl processes, each paying for its own D-Bus connection, plus a slot-table
+# read per row. Owner, 2026-09-30: "bulk operations and better grouping". The
+# helpers keep answering exactly as before -- type_of and setting_with_source
+# consult these tables only when _LIST_PRELOADED is set, which only cmd_list
+# does -- so each rule still lives in one place.
+declare -gA _LIST_TYPE=() _LIST_STATE=() _LIST_ENV=()
+list_preload() {
+  local idx inst t units=() line cur=''
+  [ -r "${SLOTS}" ] || return 0
+  while read -r idx inst t _; do
+    case "${idx}" in ''|\#*) continue;; esac
+    _LIST_TYPE[${inst}]="${t:-desktop}"
+  done < "${SLOTS}"
+  _LIST_PRELOADED=1
+  for inst in "${!_LIST_TYPE[@]}"; do units+=("$(unit_of "${inst}")"); done
+  [ "${#units[@]}" -gt 0 ] || return 0
+  # Blocks of Id=/ActiveState=/Environment=, one per unit, in systemd's own
+  # property order -- so each line is keyed by the Id= of its block, never by
+  # position.
+  while IFS= read -r line; do
+    case "${line}" in
+      Id=*)          cur="${line#Id=}";;
+      ActiveState=*) [ -z "${cur}" ] || _LIST_STATE[${cur}]="${line#ActiveState=}";;
+      Environment=*) [ -z "${cur}" ] || _LIST_ENV[${cur}]="${line#Environment=}";;
+      '')            cur='';;
+    esac
+  done < <(systemctl show -p Id -p ActiveState -p Environment "${units[@]}" 2>/dev/null)
+}
+
 cmd_list() {
   local idx inst port state prof auth trans unprotected=0 orphaned=0 legacy=0
+  list_preload
   printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
     INSTANCE USER PORT AUTH PROFILE TRANSPORT STATE DISPLAY
   [ -r "${SLOTS}" ] || return 0
@@ -773,8 +814,7 @@ cmd_list() {
       orphaned=$(( orphaned + 1 ))
       continue
     fi
-    state="$(systemctl show -p ActiveState --value "$(unit_of "${inst}")" \
-             2>/dev/null || echo unknown)"
+    state="${_LIST_STATE[$(unit_of "${inst}")]:-unknown}"
     [ "$(setting_of "${inst}" HDW4S_ISOLATION none)" = 'profile' ] &&
       prof='yes' || prof='no'
     trans="$(setting_of "${inst}" HDW4S_TRANSPORT tcp)"
