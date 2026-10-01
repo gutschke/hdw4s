@@ -337,6 +337,54 @@ SWEEP = "hue"
 SWEEP_A = 0.55
 SWEEP_DRIFT = (+0.20, -0.22)
 SWEEP_ENDS = False
+SWEEP_CHROMA = 0.85                  # the ramp colours' chroma fraction
+
+# LIGHTNESS RELIEF: darker and lighter SECTIONS within one picture, placed at
+# random and blended softly, on top of everything else. The owner, on a sheet
+# that was light all over: "the brightness in general is not bad per se, but it
+# should be used as a tool for variation. add darker section and sections like
+# this randomly (and softly blending) in the same image."
+#
+# Nothing above can do that, which is why it is a layer and not a setting. The
+# ladder moves a WHOLE desktop's lightness; the shades are painted UNDER the hue
+# ramp, which repaints much of each edge -- measured on the round-2 winner, the
+# middle 90% of a picture's pixels span only 8.7 L* units. So a lightness
+# section has to be painted after the ramp, and it has to change lightness
+# without undoing the ramp's hue:
+#
+#   DARK sections MULTIPLY by a mid-lightness colour in the dye's hue, at
+#   RELIEF_DARK_L. Multiplying can only darken, and it keeps most of the hue of
+#   whatever is underneath, so a dark section over the blue side stays bluish.
+#   A NEUTRAL grey was tried first and looked at: it keeps the hue exactly but
+#   takes the chroma down with the lightness, and the dark sections read as dirt
+#   -- mud-brown over the warm side. Tinted by the dye they read as the same
+#   material in shadow. It costs about 3 degrees of within-picture hue spread.
+#
+#   LIGHT sections are painted source-over in the dye's own hue at RELIEF_LIGHT_L.
+#   A neutral SCREEN would keep the hue better but washes towards white -- the
+#   "pastel" the owner already called out -- and, worse, it has no ceiling: a
+#   lift can carry a pixel past the white-label limit. Source-over cannot. sRGB
+#   decoding is convex, so a gamma-space mix of two colours is never brighter
+#   than the brighter of them; with RELIEF_LIGHT_L at or under TOP_L the rendered
+#   field stays under the ceiling the rest of this file already keeps. The cost
+#   is that a light section leans towards the dye's hue where it is strong.
+#
+# ONE FIELD DECIDES BOTH, high for light and low for dark, so a light and a dark
+# section never sit on top of each other and the picture passes through its own
+# untouched colour between them -- that in-between is what makes it blend.
+#
+# RELIEF is the strength (0 = off, and then nothing is emitted at all: the
+# shipped picture is byte-for-byte what it was). RELIEF_SCALE is the size of a
+# section: at 1.0 one is a third to a half of the screen, smaller below 1.
+# RELIEF_LIGHT_L
+# None means TOP_L; setting it above TOP_L is for a deployment where no icon
+# label ever sits on the background, and SPEC_CEILING has to be raised with it
+# or "check" refuses -- deliberately, because that is the label ceiling.
+RELIEF = 0.0
+RELIEF_SCALE = 1.0
+RELIEF_DARK_L = 50.0                 # the multiplying colour; lower is darker
+RELIEF_LIGHT_L = None
+RELIEF_CHROMA = 0.80                 # both colours' chroma fraction
 
 
 def arc(t):
@@ -748,6 +796,20 @@ def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
         for i, (c, _f, _s, _o, _g, _b, a) in enumerate(spec["regions"]))
     sdefs, s_under, s_over = light_sweep(spec, units_w, units_h)
     defs += sdefs
+    relief = spec.get("relief")
+    if relief:
+        # LAST, after the hue ramp, or the ramp repaints the edges and the
+        # sections vanish exactly where the ramp is strong. See RELIEF.
+        f, sd, dark, light, a = relief
+        defs += veil("rlight", f, sd, 1, 4.0, 0.0)
+        defs += veil("rdark", f, sd, 1, -4.0, 0.0)
+        s_over += (
+            ' <!-- lighter and darker sections, softly -->\n'
+            ' <rect width="%d" height="%d" fill="%s" filter="url(#rdark)"'
+            ' opacity="%.3f" style="mix-blend-mode:multiply"/>\n'
+            ' <rect width="%d" height="%d" fill="%s" filter="url(#rlight)"'
+            ' opacity="%.3f"/>\n'
+            % (units_w, units_h, dark, a, units_w, units_h, light, a))
     if spec.get("sweep") == "strength":
         # The ramp paints nothing; it decides how much weathering survives.
         rects = ' <g mask="url(#lgmask)">\n%s </g>\n' % rects
@@ -1071,7 +1133,27 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
              (1.45 + pick(56, -0.30, 0.45)) / tw["grain_scale"],
              (seed >> 47) % 65536, 2, 2.30, 0.50, 0.22 * tw["micro_a"])
 
+    # LIGHTNESS RELIEF (see RELIEF). Its own seed, hashed from the layout seed
+    # rather than taken from more of its bits: every bit of the 64 is already
+    # spent on something above, and reusing one would tie the sections to a
+    # region's placement.
+    relief = None
+    if RELIEF > 0:
+        light_L = top if RELIEF_LIGHT_L is None else RELIEF_LIGHT_L
+        hottest = max(hottest, light_L)
+        rs = int.from_bytes(hashlib.sha256(
+            b"relief" + (seed % 2 ** 64).to_bytes(8, "big")).digest()[:4], "big")
+        # ONE OCTAVE AT ABOUT HALF THE REGIONS' FREQUENCY. At the regions' own
+        # 0.006-0.008 it was rendered and looked at: blotches in the middle
+        # band, the sprinkled-on look svg() warns about. Here a section is
+        # a third to a half of the screen.
+        relief = ((0.0040 + (rs >> 16) % 1000 / 1000.0 * 0.0015 - 0.00075)
+                  / RELIEF_SCALE, rs % 65536,
+                  col(RELIEF_DARK_L, h_dye, RELIEF_CHROMA),
+                  col(light_L, h_dye, RELIEF_CHROMA), min(1.0, RELIEF))
+
     return {
+        "relief": relief,
         "base": col(base_L, h_dye, BASE_CHROMA),
         "regions": regions,
         "grain": grain,
@@ -1085,8 +1167,9 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
                       1 - (seed >> 3) % 2, 1 - (seed >> 5) % 2),
         "sweep_colours": (
             col(min(top, base_L + 11.0),
-                arc_(1.0 if SWEEP_ENDS else t + SWEEP_DRIFT[0]), 0.85),
-            col(base_L, arc_(0.0 if SWEEP_ENDS else t + SWEEP_DRIFT[1]), 0.85)),
+                arc_(1.0 if SWEEP_ENDS else t + SWEEP_DRIFT[0]), SWEEP_CHROMA),
+            col(base_L, arc_(0.0 if SWEEP_ENDS else t + SWEEP_DRIFT[1]),
+                SWEEP_CHROMA)),
         "variant": tw["variant"],
         # The brightest lightness this field ACTUALLY uses, not the ceiling it
         # was allowed. A guard pointed at the limit rather than at the value can

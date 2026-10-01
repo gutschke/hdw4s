@@ -1507,6 +1507,22 @@ dyes = lambda: len({g.choose("hdw4s-ephemeral1", b"t%d" % i, "ephemeral")["base"
 print("rungs_distinct_le_40=%s" % (dyes() <= g.RUNGS * g.WEIGHTS))
 g.HUE_DRAW = g.WEIGHT_DRAW = "continuous"
 print("continuous_distinct_gt_40=%s" % (dyes() > g.RUNGS * g.WEIGHTS))
+pic = lambda: g.svg(g.choose("hdw4s-ephemeral1", tok, "ephemeral"))
+off = pic()
+print("relief_off_emits_nothing=%s" % ("rdark" not in off and "rlight" not in off))
+g.RELIEF = 0.8
+on = pic()
+print("relief_on_draws=%s" % ("rdark" in on and "rlight" in on and on != off))
+g.SWEEP_CHROMA = 1.0
+print("sweep_chroma=%s" % ("moved" if pic() != on else "ignored"))
+import contextlib, io
+def check():
+    with contextlib.redirect_stdout(io.StringIO()), \
+         contextlib.redirect_stderr(io.StringIO()):
+        return g.main(["check"])
+print("relief_at_ceiling_check=%d" % check())
+g.RELIEF_LIGHT_L = g.SPEC_CEILING + 5.0
+print("relief_above_ceiling_check=%d" % check())
 PY
 )"
   has 'an arc extension assigned after loading moves the dye' "${out}" 'extension=moved'
@@ -1514,6 +1530,13 @@ PY
   has 'the lightness ladder is read at call time too'         "${out}" 'ladder=moved'
   has 'the stepped draw has at most rungs x weights dyes'     "${out}" 'rungs_distinct_le_40=True'
   has 'the continuous draw is not stepped'                    "${out}" 'continuous_distinct_gt_40=True'
+  # Lightness relief: off by default draws nothing, on draws, and its light
+  # sections count against the white-label ceiling like every other colour.
+  has 'lightness relief at its default draws nothing'          "${out}" 'relief_off_emits_nothing=True'
+  has 'and switched on draws light and dark sections'          "${out}" 'relief_on_draws=True'
+  has 'the ramp chroma is read at call time'                   "${out}" 'sweep_chroma=moved'
+  has 'relief at the ceiling passes the ceiling check'         "${out}" 'relief_at_ceiling_check=0'
+  has 'relief brighter than the ceiling is refused'            "${out}" 'relief_above_ceiling_check=1'
   "${ROOT}/hdw4s-background" check >/dev/null 2>&1
   is 'the shipped field passes its own ceiling check' "$?" '0'
   "${ROOT}/hdw4s-background" check --top-lightness 45 >/dev/null 2>&1
@@ -5018,7 +5041,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=862   # update when tests are added; a wrong number is the point
+EXPECTED=867   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
