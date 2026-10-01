@@ -673,6 +673,30 @@ PY
   has   'it points at the command that sets one up' "${out}" 'hdw4s template edit'
 )
 
+echo '== a published Chrome forgets its extension service workers =='
+( set +e
+  # The worker database is not carried, so a record saying an extension's
+  # worker is registered stops Chrome registering it: uBlock Origin Lite showed
+  # an error in every new desktop until reloaded. Everything else is kept.
+  out="$(python3 - "${ROOT}/hdw4s-template" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tmpl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tmpl", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+p = {"extensions": {"settings": {
+        "a": {"path": "x", "service_worker_registration_info": {"version": "1"},
+              "has_started_service_worker": True, "serviceworkerevents": ["e"]},
+        "b": {"path": "y"}}}, "other": 1}
+print("removed=%d" % m.forget_extension_workers(p))
+print("a=%s b=%s other=%s" % (sorted(p["extensions"]["settings"]["a"]),
+                              sorted(p["extensions"]["settings"]["b"]), p["other"]))
+PY
+)"
+  has 'it removes the three worker records' "${out}" 'removed=3'
+  has 'and keeps everything else'          "${out}" "a=['path'] b=['path'] other=1"
+)
+
 echo '== the updater checks what it downloaded =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   eval "$(sed -n '/^verify_sha256() {/,/^}/p;/^asset_digest() {/,/^}/p' \
@@ -3848,7 +3872,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=617   # update when tests are added; a wrong number is the point
+EXPECTED=619   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

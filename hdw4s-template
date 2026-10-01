@@ -450,6 +450,34 @@ def drop_dotted(obj, dotted):
         obj.pop(bits[-1], None)
 
 
+# WHAT CHROME REMEMBERS ABOUT AN EXTENSION'S SERVICE WORKER, kept in the
+# unsigned Preferences and describing a database that is NOT carried: the
+# "Service Worker" directory holds every site's workers too, so it stays out
+# with the rest of the browsing state. Carried, these told every new desktop's
+# Chrome that a Manifest V3 extension's worker was already registered, so it
+# was never registered: uBlock Origin Lite showed its icon and an error until
+# the visitor reloaded it (measured 2026-09-30, a template published on one
+# machine and used on two). Dropped, Chrome registers the worker on first
+# start, as for a fresh install. Secure Preferences is not touched: it is
+# signed, and an edit there would make Chrome reset the extension instead.
+EXTENSION_WORKER_STATE = ("service_worker_registration_info",
+                          "has_started_service_worker", "serviceworkerevents")
+
+
+def forget_extension_workers(prefs):
+    """Remove EXTENSION_WORKER_STATE from every extension in PREFS (the parsed
+    unsigned Preferences). Returns how many entries it removed."""
+    n = 0
+    settings = prefs.get("extensions", {}).get("settings", {})
+    if isinstance(settings, dict):
+        for ext in settings.values():
+            if isinstance(ext, dict):
+                for k in EXTENSION_WORKER_STATE:
+                    if ext.pop(k, None) is not None:
+                        n += 1
+    return n
+
+
 def harvest_chrome(src, dst, notes):
     default = os.path.join(src, "Default")
     if not os.path.isdir(default):
@@ -470,6 +498,7 @@ def harvest_chrome(src, dst, notes):
             return
         for k in CHROME_PREF_DROP:
             drop_dotted(p, k)
+        forget_extension_workers(p)
         prof = p.setdefault("profile", {})
         prof["exit_type"] = "Normal"
         prof["exited_cleanly"] = True
