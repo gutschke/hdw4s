@@ -1,10 +1,10 @@
-hdw4s (2.4.7) unstable; urgency=medium
+hdw4s (2.4.8) unstable; urgency=medium
 
   * Visitor desktop backgrounds are livelier at full screen: smaller and
     stronger lighter and darker sections, more saturated colour, and the two
     colours of each picture further apart.
 
- -- Markus Gutschke <gutschke@users.noreply.github.com>  Thu, 01 Oct 2026 11:15:00 -0700
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Thu, 01 Oct 2026 11:07:58 -0700
 
 hdw4s (2.4.6) unstable; urgency=medium
 
@@ -25,7 +25,7 @@ hdw4s (2.4.6) unstable; urgency=medium
     seats, and "hdw4s pool size N" (at the size it had) followed by a reboot
     replaces them. Until then no visitor desktop starts.
 
- -- Markus Gutschke <gutschke@users.noreply.github.com>  Thu, 01 Oct 2026 12:00:00 -0700
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Thu, 01 Oct 2026 08:35:57 -0700
 
 hdw4s (2.4.5) unstable; urgency=medium
 
