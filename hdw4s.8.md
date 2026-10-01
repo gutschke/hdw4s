@@ -455,6 +455,15 @@ belongs to the copy of the streaming server, of which there is one.
     number other than 96 is still applied once when the session starts, so
     both files are written that once. Pinning 96 writes neither, ever.
 
+  * `HDW4S_SCREEN_LOCK`:
+    Whether a named desktop's user may lock its screen: `off` (the default) or
+    `on`. Off, locking is disabled and locked down -- Super+L, the menu entry
+    and idle locking all do nothing -- because locking a remote screen protects
+    little (the browser tab is the access control) and is one slip of a
+    ChromeOS launcher key away. The machine's own dconf profile is kept: this
+    adds one database beneath it rather than replacing it. Ephemeral desktops
+    never lock: nobody could unlock them. Takes effect at the next restart.
+
   * `HDW4S_INDEXING`:
     Whether the desktop's file indexer runs. Defaults to `off`, and takes
     effect only with `HDW4S_ISOLATION=profile`; without that the indexer is the

@@ -173,6 +173,7 @@ rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.se
 # The settings layer and the policy. Only our own profile and database are
 # touched; /etc/dconf/profile/user belongs to every session on the machine.
 rm -rf /etc/dconf/db/hdw4s-ephemeral.d /etc/dconf/db/hdw4s-ephemeral \
+       /etc/dconf/db/hdw4s-named.d /etc/dconf/db/hdw4s-named \
        /etc/dconf/db/hdw4s-template.d /etc/dconf/db/hdw4s-template \
        /etc/dconf/profile/hdw4s-author \
        /etc/dconf/profile/hdw4s-ephemeral /etc/hdw4s/chrome-policies \

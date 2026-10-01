@@ -34,7 +34,8 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-templat
          hdw4s-demux hdw4s-demux.socket hdw4s-demux.service
          hdw4s-firewall.service
          hdw4s-firewall-check.service hdw4s-firewall.timer
-         dconf/profile dconf/profile-author dconf/10-policy dconf/locks/10-policy
+         dconf/profile dconf/profile-author dconf/10-policy dconf/locks/10-policy \
+         dconf/named-lock dconf/locks/named-lock
          chrome-policies/hdw4s-ephemeral.json chrome-policies/hdw4s-author.json
          chrome-author-policy.json
          hdw4s-updater.{service,timer} hdw4s-reaper.{service,timer}
@@ -192,11 +193,14 @@ chmod 0644 "${dst}"/hdw4s-selkies-webrtc "${dst}"/*.service "${dst}"/*.timer "${
 # above them ("hdw4s template edit"), and an install that left a stale lockdown
 # in place would be the kind of difference nobody looks for.
 install -d -m0755 /etc/dconf/profile /etc/dconf/db/hdw4s-ephemeral.d/locks \
-                  /etc/dconf/db/hdw4s-template.d /etc/hdw4s/chrome-policies
+                  /etc/dconf/db/hdw4s-template.d /etc/dconf/db/hdw4s-named.d/locks \
+                  /etc/hdw4s/chrome-policies
 install -m0644 "${dst}/dconf/profile"         /etc/dconf/profile/hdw4s-ephemeral
 install -m0644 "${dst}/dconf/profile-author"  /etc/dconf/profile/hdw4s-author
 install -m0644 "${dst}/dconf/10-policy"       /etc/dconf/db/hdw4s-ephemeral.d/10-policy
 install -m0644 "${dst}/dconf/locks/10-policy" /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
+install -m0644 "${dst}/dconf/named-lock"       /etc/dconf/db/hdw4s-named.d/10-lock
+install -m0644 "${dst}/dconf/locks/named-lock" /etc/dconf/db/hdw4s-named.d/locks/10-lock
 install -m0644 "${dst}/chrome-policies/hdw4s-ephemeral.json" \
                /etc/hdw4s/chrome-policies/hdw4s-ephemeral.json
 install -m0644 "${dst}/chrome-policies/hdw4s-author.json" \

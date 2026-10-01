@@ -1044,6 +1044,26 @@ PY
   has 'an older one in the home is not'       "${out}" 'XDG_MUSIC_DIR="$HOME/Music"'
 )
 
+echo '== a named desktop gets a composed dconf profile unless it may lock =='
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  blk="$(sed -n '/^if \[ "${HDW4S_SESSION_TYPE:-}" != .ephemeral. \] &&$/,/^fi$/p' "${ROOT}/hdw4s-session")"
+  [ -n "${blk}" ] && ok 'the block is found in hdw4s-session' || bad 'the block is found in hdw4s-session' 'sed found nothing'
+  mkdir -p "${T}/run"
+  printf '# machine comment\nuser-db:user\nsystem-db:local\n' > "${T}/machine"
+  run() { env -i PATH="${PATH}" XDG_RUNTIME_DIR="${T}/run" "$@" bash -c "${blk}"'
+          printf "%s" "${DCONF_PROFILE:-unset}"'; }
+  rm -f "${T}/run/hdw4s-dconf-profile"
+  out="$(run DCONF_PROFILE="${T}/machine")"
+  is  'off by default: the profile is the composed one' "${out}" "${T}/run/hdw4s-dconf-profile"
+  is  'which keeps the machine'"'"'s layers and adds ours beneath' \
+      "$(cat "${T}/run/hdw4s-dconf-profile" | tr '\n' ' ')" 'user-db:user system-db:local system-db:hdw4s-named '
+  rm -f "${T}/run/hdw4s-dconf-profile"
+  out="$(run DCONF_PROFILE="${T}/machine" HDW4S_SCREEN_LOCK=on)"
+  is  'on: the machine'"'"'s profile is left as it is' "${out}" "${T}/machine"
+  out="$(run DCONF_PROFILE="${T}/machine" HDW4S_SESSION_TYPE=ephemeral)"
+  is  'an ephemeral desktop is left to its own profile' "${out}" "${T}/machine"
+)
+
 echo '== the updater checks what it downloaded =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   eval "$(sed -n '/^verify_sha256() {/,/^}/p;/^asset_digest() {/,/^}/p' \
@@ -4239,7 +4259,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=705   # update when tests are added; a wrong number is the point
+EXPECTED=710   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

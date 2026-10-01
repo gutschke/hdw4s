@@ -1,0 +1,12 @@
+# Read only by NAMED desktops whose HDW4S_SCREEN_LOCK is "off" (the default):
+# hdw4s-session composes a per-desktop dconf profile from the machine's own
+# profile with this database added beneath it, so nothing the machine's
+# administrator configured for every session is lost or changed.
+#
+# Locking a remote screen protects little -- the browser tab is the access
+# control -- and a locked screen is easy to reach by accident: a ChromeOS
+# keyboard sends its launcher key as Super, so Super+L is one slip away. Owner,
+# 2026-09-30: "it's generally not super useful to lock a remote screen, but
+# maybe some admins want it." HDW4S_SCREEN_LOCK=on leaves it as stock GNOME.
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true

@@ -1,0 +1,3 @@
+# Locked, so a person cannot turn locking back on for themselves: the
+# administrator decides with HDW4S_SCREEN_LOCK, per machine or per desktop.
+/org/gnome/desktop/lockdown/disable-lock-screen

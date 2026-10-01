@@ -40,6 +40,7 @@ if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
 # silently, with dpkg still listing the file as present and owned.
 rm -rf /etc/dconf/db/hdw4s-ephemeral.d /etc/dconf/db/hdw4s-ephemeral \
        /etc/dconf/db/hdw4s-template.d /etc/dconf/db/hdw4s-template \
+       /etc/dconf/db/hdw4s-named.d /etc/dconf/db/hdw4s-named \
        /etc/dconf/profile/hdw4s-author \
        /etc/dconf/profile/hdw4s-ephemeral
 rmdir --ignore-fail-on-non-empty /etc/opt/chrome/policies/managed \

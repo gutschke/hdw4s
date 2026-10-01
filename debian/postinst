@@ -129,11 +129,13 @@ if [ "$1" = 'configure' ]; then
   # that left a stale lockdown behind would be the kind of difference nobody
   # thinks to look for.
   mkdir -p /etc/dconf/profile /etc/dconf/db/hdw4s-ephemeral.d/locks \
-           /etc/dconf/db/hdw4s-template.d
+           /etc/dconf/db/hdw4s-template.d /etc/dconf/db/hdw4s-named.d/locks
   cp /usr/share/hdw4s/dconf/profile         /etc/dconf/profile/hdw4s-ephemeral
   cp /usr/share/hdw4s/dconf/profile-author  /etc/dconf/profile/hdw4s-author
   cp /usr/share/hdw4s/dconf/10-policy       /etc/dconf/db/hdw4s-ephemeral.d/10-policy
   cp /usr/share/hdw4s/dconf/locks/10-policy /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
+  cp /usr/share/hdw4s/dconf/named-lock       /etc/dconf/db/hdw4s-named.d/10-lock
+  cp /usr/share/hdw4s/dconf/locks/named-lock /etc/dconf/db/hdw4s-named.d/locks/10-lock
   # The template's settings half is the ADMINISTRATOR'S, kept with the rest of
   # the template in /var/lib/hdw4s-template; removing the package takes the
   # compiled copy, so reinstalling puts it back.
@@ -143,7 +145,9 @@ if [ "$1" = 'configure' ]; then
   fi
   chmod 0644 /etc/dconf/profile/hdw4s-ephemeral /etc/dconf/profile/hdw4s-author \
              /etc/dconf/db/hdw4s-ephemeral.d/10-policy \
-             /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy
+             /etc/dconf/db/hdw4s-ephemeral.d/locks/10-policy \
+             /etc/dconf/db/hdw4s-named.d/10-lock \
+             /etc/dconf/db/hdw4s-named.d/locks/10-lock
 
   # The mount point the ephemeral unit binds its Chrome policy over. It has to
   # exist or the namespace fails to build, and it has to stay EMPTY: a policy

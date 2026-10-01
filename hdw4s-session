@@ -597,4 +597,29 @@ case "${HDW4S_LANG}" in
 esac
 export LANG="${HDW4S_LANG}"
 
+# A NAMED DESKTOP CANNOT LOCK ITS SCREEN unless HDW4S_SCREEN_LOCK=on. Ephemeral
+# desktops get the same lockdown from their own dconf profile (the unit sets
+# DCONF_PROFILE); a named desktop has none of ours, and reads the machine's --
+# which carries whatever the machine's administrator set for every session, so
+# it is not replaced. A profile is composed for this desktop instead: the
+# machine's own, as it stands, with our one database (hdw4s-named: the lockdown
+# key, set and locked) beneath it. Written fresh at every start into the
+# desktop's runtime directory, so turning the setting on needs only a restart,
+# and nothing is left behind.
+if [ "${HDW4S_SESSION_TYPE:-}" != 'ephemeral' ] &&
+   [ "${HDW4S_SCREEN_LOCK:-off}" != 'on' ]; then
+  case "${DCONF_PROFILE:-user}" in
+    /*) base="${DCONF_PROFILE}" ;;                  # a path is used as given
+    *)  base="/etc/dconf/profile/${DCONF_PROFILE:-user}" ;;
+  esac
+  composed="${XDG_RUNTIME_DIR}/hdw4s-dconf-profile"
+  {
+    if [ -r "${base}" ]; then grep -v '^[[:space:]]*\(#\|$\)' "${base}"
+    else echo 'user-db:user'; fi
+    echo 'system-db:hdw4s-named'
+  } > "${composed}" && export DCONF_PROFILE="${composed}" ||
+    echo 'hdw4s-session: could not compose the dconf profile; this desktop' \
+         'can lock its screen.' >&2
+fi
+
 exec dbus-run-session -- /usr/lib/hdw4s/hdw4s-run-session "${instance}"

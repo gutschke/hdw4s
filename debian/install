@@ -38,6 +38,8 @@ dconf/profile            usr/share/hdw4s/dconf
 dconf/profile-author     usr/share/hdw4s/dconf
 dconf/10-policy          usr/share/hdw4s/dconf
 dconf/locks/10-policy    usr/share/hdw4s/dconf/locks
+dconf/named-lock         usr/share/hdw4s/dconf
+dconf/locks/named-lock   usr/share/hdw4s/dconf/locks
 chrome-policies/hdw4s-ephemeral.json  etc/hdw4s/chrome-policies
 chrome-policies/hdw4s-author.json     etc/hdw4s/chrome-policies
 chrome-author-policy.json etc/hdw4s
