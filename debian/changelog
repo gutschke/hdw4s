@@ -1,3 +1,39 @@
+hdw4s (2.4.5) unstable; urgency=medium
+
+  * Visitor desktops can start from a template the administrator prepares:
+    "hdw4s template edit" prints a one-time link to a desktop of its own, and
+    logging out of it publishes what was changed -- GNOME settings, extensions
+    and backgrounds, which folders a home shows, and Chrome's extensions,
+    bookmarks and preferences, never its browsing. "template keep" carries a
+    program's own settings too, "template reset" goes back to stock, and
+    "template copyfrom <host>" takes another machine's template.
+
+  * The pool of visitor desktops is managed as one thing. "hdw4s pool size N"
+    grows or shrinks it at once, without a reboot and without ending anybody's
+    desktop; "hdw4s pool set" configures every visitor desktop together; and
+    "hdw4s list" shows the people's desktops with one line for the pool
+    ("--seats" for each seat). Seats no longer use up port numbers.
+
+  * A visitor desktop leaves nothing behind when it ends: its log, crash
+    reports and the account records the system kept for it are removed, and it
+    can print only through the browser it is shown in.
+
+  * In a visitor desktop, ~/.config and its neighbours are where the settings
+    are, the Trash works, the screen can never lock (nobody could unlock it),
+    and no update prompts appear. Named desktops get no update prompts either,
+    and cannot lock their screen unless HDW4S_SCREEN_LOCK=on.
+
+  * Every desktop starts on WebSockets and can be switched to WebRTC from the
+    sidebar, without asking to connect again. If a streaming-server update
+    breaks WebRTC, desktops start without it instead of not at all, and
+    "hdw4s check" says so.
+
+  * The "your desktop is starting" card no longer covers a desktop that is
+    already streaming, and a desktop that briefly drops a page request while
+    it starts shows the starting page instead of an error.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Wed, 30 Sep 2026 22:30:00 -0700
+
 hdw4s (2.4.4) unstable; urgency=medium
 
   * The desktop instrumentation no longer slows the desktop it is measuring.
