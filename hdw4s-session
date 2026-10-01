@@ -221,6 +221,41 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   install -d -m0700 "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" \
                     "${XDG_STATE_HOME}" "${XDG_CACHE_HOME}"
 
+  # ~/.config AND ITS SIBLINGS POINT AT THE PROFILE, in a desktop whose home and
+  # profile are both its own and both thrown away. Owner, 2026-09-30, after
+  # hiding folders by editing ~/.config/user-dirs.dirs in the template editor
+  # and finding the edit ignored and no ~/.config in the next desktop: "just
+  # create .config as a symbolic link in ephemeral sessions ... that'll be less
+  # surprising". With the links, what a person (or a program that builds the
+  # path by hand instead of reading XDG_CONFIG_HOME) writes "the usual way" is
+  # what the desktop reads, and what the template editor publishes.
+  #
+  # NOT for a named desktop: its home is the person's real home, often on a
+  # shared filesystem, and ~/.config there is theirs -- the redirection exists
+  # precisely to keep this machine's settings OUT of it.
+  #
+  # A real directory already there -- from a template published before the
+  # links existed -- is merged into the profile first, the profile's own files
+  # winning, and then replaced; a link that is already right is left alone.
+  if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+    for pair in ".config:${XDG_CONFIG_HOME}" ".local/share:${XDG_DATA_HOME}" \
+                ".local/state:${XDG_STATE_HOME}" ".cache:${XDG_CACHE_HOME}"; do
+      link="${HOME}/${pair%%:*}"; target="${pair#*:}"
+      [ "$(readlink "${link}" 2>/dev/null)" = "${target}" ] && continue
+      if [ -d "${link}" ] && [ ! -L "${link}" ]; then
+        if ! cp -R --update=none "${link}/." "${target}/" ||
+           ! rm -rf "${link}"; then
+          echo "hdw4s-session: could not merge ~/${pair%%:*} into the profile;" \
+               'left as it is.' >&2
+          continue
+        fi
+      fi
+      rm -f "${link}" 2>/dev/null
+      mkdir -p "$(dirname "${link}")" && ln -s "${target}" "${link}" ||
+        echo "hdw4s-session: could not link ~/${pair%%:*} to the profile." >&2
+    done
+  fi
+
   # WHICH FOLDERS THE HOME HAS IS A FACT ABOUT THE HOME, not about this
   # machine's profile, so the home's own record of it wins. user-dirs.dirs
   # lives under ~/.config, which the redirection above hides from this

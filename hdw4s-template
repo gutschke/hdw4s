@@ -595,6 +595,22 @@ def normalise_keep(arg):
     return p
 
 
+# The home directories an ephemeral desktop links to its profile (hdw4s-session),
+# so a path under them IS the profile copy, already taken from there. Skipped
+# when they are links, silently: they are ours, not a symbolic link somebody
+# planted, and reporting them would bury the notes that matter.
+HOME_LINKED = (".config/", ".local/share/", ".local/state/", ".cache/")
+
+
+def home_linked(home, rel):
+    """True when REL lives under one of HOME_LINKED and that is a link here."""
+    for pre in HOME_LINKED:
+        if rel.startswith(pre) and \
+                os.path.islink(os.path.join(home, pre.rstrip("/"))):
+            return True
+    return False
+
+
 def locations(rel):
     """[(tree, path-in-tree)] where REL's contents may live in a session."""
     out = []
@@ -806,6 +822,8 @@ def harvest(author, home, inst):
     for rel in read_keep_list():
         found = False
         for tree, sub_ in locations(rel):
+            if tree == "home" and home_linked(home, sub_):
+                continue
             top = author if tree == "profile" else home
             src = os.path.join(top, sub_)
             if not os.path.lexists(src):
@@ -827,6 +845,27 @@ def harvest(author, home, inst):
                          "symbolic link" % rel)
             continue
         copy_entry(src, os.path.join(gen, "profile", rel))
+    # THE HOME'S user-dirs FILES WIN WHEN THE AUTHOR EDITED THEM THERE, as they
+    # do at every start of a named desktop (hdw4s-session). In this desktop
+    # ~/.config is NOT where settings live -- XDG_CONFIG_HOME points into the
+    # profile -- so an author who edited ~/.config/user-dirs.dirs to hide
+    # folders (owner, 2026-09-30) changed a file nothing reads, and the
+    # publish took the profile's untouched copy. Newer wins, so a later change
+    # made the supported way (Files, or xdg-user-dirs-update) still counts.
+    for f in ("user-dirs.dirs", "user-dirs.locale"):
+        h = os.path.join(home, ".config", f)
+        mine = os.path.join(author, "config", f)
+        if not os.path.isfile(h) or os.path.islink(h) or not inside(h, home):
+            continue
+        if os.path.isfile(mine) and \
+                os.path.getmtime(mine) >= os.path.getmtime(h):
+            continue
+        dst = os.path.join(gen, "profile", "config", f)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copyfile(h, dst)
+        notes.append("took ~/.config/%s from the home, where it was edited; "
+                     "inside a desktop the settings that count are in "
+                     "$XDG_CONFIG_HOME" % f)
     chrome = os.path.join(author, CHROME, "Default")
     if os.path.lexists(chrome) and not inside(chrome, author):
         notes.append("left out Chrome: its profile is reached through a "

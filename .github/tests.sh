@@ -697,6 +697,34 @@ PY
   has 'and keeps everything else'          "${out}" "a=['path'] b=['path'] other=1"
 )
 
+echo '== a user-dirs file edited in the home is published, if it is the newer =='
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  run() {
+    HDW4S_ETCDIR="${T}/etc" python3 - "${ROOT}/hdw4s-template" "${T}" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys, os
+l = importlib.machinery.SourceFileLoader("t", sys.argv[1])
+s = importlib.util.spec_from_loader("t", l); m = importlib.util.module_from_spec(s)
+l.exec_module(m); m.normalise = lambda tree: None
+T = sys.argv[2]
+gen, _, _ = m.harvest(T + "/author", T + "/home", "x")
+print(open(os.path.join(gen, "profile/config/user-dirs.dirs")).read())
+print("folders=" + ",".join(sorted(os.listdir(os.path.join(gen, "home")))))
+PY
+  }
+  mkdir -p "${T}/etc" "${T}/root" "${T}/author/config" "${T}/home/.config" \
+           "${T}/home/.Music" "${T}/home/Music" "${T}/home/Downloads"
+  echo "HDW4S_TEMPLATE_DIR=${T}/root" > "${T}/etc/hdw4s.conf"
+  printf 'XDG_MUSIC_DIR="$HOME/Music"\n' > "${T}/author/config/user-dirs.dirs"
+  printf 'XDG_MUSIC_DIR="$HOME/.Music"\n' > "${T}/home/.config/user-dirs.dirs"
+  touch -d '-1 hour' "${T}/author/config/user-dirs.dirs"
+  out="$(run)"
+  has 'the home'"'"'s newer file is published' "${out}" 'XDG_MUSIC_DIR="$HOME/.Music"'
+  has 'with the hidden folder it names'       "${out}" 'folders=.Music'
+  touch -d '-2 hours' "${T}/home/.config/user-dirs.dirs"
+  out="$(run)"
+  has 'an older one in the home is not'       "${out}" 'XDG_MUSIC_DIR="$HOME/Music"'
+)
+
 echo '== the updater checks what it downloaded =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   eval "$(sed -n '/^verify_sha256() {/,/^}/p;/^asset_digest() {/,/^}/p' \
@@ -3873,7 +3901,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=619   # update when tests are added; a wrong number is the point
+EXPECTED=622   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
