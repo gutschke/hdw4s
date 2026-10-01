@@ -816,6 +816,16 @@ single hostname for the whole pool and are given a session from it.
     holds the pool at one above it until that desktop ends; `hdw4s pool size`
     with no number shows which.
 
+  * **Seats are named `_hdw4s_0`, `_hdw4s_1`, ...** -- fixed, and a name no
+    person's account can have. Nobody types one: `pool size` chooses the
+    seats and `list --seats` shows them. Earlier versions called them
+    `ephemeral0`, `ephemeral1`, ... under `HDW4S_EPHEMERAL_PREFIX`, which is
+    retired and read by nothing. A slot table that still offers the old names
+    is refused rather than translated: at boot no seat is minted and
+    `hdw4s-ephemeral-slots.service` fails naming the rows, and `hdw4s check`
+    fails the same way. `hdw4s pool size N`, with the size the machine already
+    has, replaces them; then `systemctl start hdw4s-ephemeral-slots.service`.
+
   * **Settings belong to the pool, not to a seat.** `hdw4s pool set` writes
     the one file every ephemeral desktop reads; `set` with a seat's name is
     refused. A seat may still carry a setting of its own from an install

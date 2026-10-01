@@ -649,9 +649,9 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
   # asserts the refusal AND that nothing was written, because a refusal that
   # prints after the damage is the half-apply this tree has shipped before.
   NSDIR="${SB}/ns"
-  mkdir -p "${NSDIR}/eph0" "${NSDIR}/eph1" "${NSDIR}/tmpl"
-  : > "${NSDIR}/eph0/passwd"; : > "${NSDIR}/eph1/passwd"; : > "${NSDIR}/tmpl/passwd"
-  printf '%s\n' '# comment' '0 alice' '1 eph0 ephemeral' '2 tmpl template' \
+  mkdir -p "${NSDIR}/_hdw4s_0" "${NSDIR}/_hdw4s_1" "${NSDIR}/tmpl"
+  : > "${NSDIR}/_hdw4s_0/passwd"; : > "${NSDIR}/_hdw4s_1/passwd"; : > "${NSDIR}/tmpl/passwd"
+  printf '%s\n' '# comment' '0 alice' '1 _hdw4s_0 ephemeral' '2 tmpl template' \
     '3 root template' > "${SLOTS}"
   table="$(cat "${SLOTS}")"
   CALLS="${SB}/calls"; : > "${CALLS}"
@@ -661,13 +661,13 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
   # The seat's account is stood in for, as the minter would have made it. Without
   # it the enable died later, at the account lookup, and "nothing was written"
   # passed with the guard removed -- measured, by removing it.
-  seat() { getent() { printf 'eph0:x:60900:60900::/home/user:/bin/bash\n'; }; "$@"; }
-  out="$( (seat cmd_enable eph0) 2>&1 )"; rc=$?
+  seat() { getent() { printf '_hdw4s_0:x:60900:60900::/home/user:/bin/bash\n'; }; "$@"; }
+  out="$( (seat cmd_enable _hdw4s_0) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'enable refuses a pool seat' || bad 'enable refuses a pool seat' "rc ${rc}"
   has   'and says what it is'           "${out}" 'seat of the ephemeral pool'
   has   'and what to do instead'        "${out}" 'hdw4s enable <user>'
   is    'and writes no drop-in'         "$(find "${DROPIN}" -mindepth 1 | wc -l | tr -d ' ')" '0'
-  out="$( (cmd_enable eph1) 2>&1 )"; rc=$?
+  out="$( (cmd_enable _hdw4s_1) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'and a minted seat with no row yet' \
     || bad 'and a minted seat with no row yet' "rc ${rc}"
   out="$( (cmd_enable tmpl) 2>&1 )"; rc=$?
@@ -682,20 +682,20 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
         "${out}" 'hdw4s release --internal root'
   # Seats are added by "pool size" alone; the per-seat spelling is a usage error
   # from the real dispatcher, before anything is looked up or written.
-  HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" enable --ephemeral ephemeral3 >/dev/null 2>&1
+  HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" enable --ephemeral _hdw4s_3 >/dev/null 2>&1
   is    'enable --ephemeral is a usage error' "$?" '2'
   is    'no enable changed the table'   "$(cat "${SLOTS}")" "${table}"
 
-  out="$( (seat cmd_disable eph0) 2>&1 )"; rc=$?
+  out="$( (seat cmd_disable _hdw4s_0) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'disable refuses a pool seat' || bad 'disable refuses a pool seat' "rc ${rc}"
-  has   'and says how to end one desktop' "${out}" 'systemctl stop hdw4s-ephemeral@eph0.service'
+  has   'and says how to end one desktop' "${out}" 'systemctl stop hdw4s-ephemeral@_hdw4s_0.service'
   out="$( (cmd_disable tmpl) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'and the authoring slot' || bad 'and the authoring slot' "rc ${rc}"
-  out="$( (cmd_release eph0) 2>&1 )"; rc=$?
+  out="$( (cmd_release _hdw4s_0) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'release refuses a pool seat' || bad 'release refuses a pool seat' "rc ${rc}"
   has   'and names the command that sizes the pool' "${out}" 'hdw4s pool size <N>'
   hasnt 'and no longer offers a way past' "${out}" 'release --internal'
-  out="$( (cmd_release --internal eph0) 2>&1 )"; rc=$?
+  out="$( (cmd_release --internal _hdw4s_0) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'not even with --internal' || bad 'not even with --internal' "rc ${rc}"
   has   'which points at pool size too' "${out}" 'hdw4s pool size <N>'
   out="$( (cmd_release tmpl) 2>&1 )"; rc=$?
@@ -716,12 +716,12 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
   for f in tmpl.user 60999.user tmpl.group 60999.group; do
     printf '{"userName":"tmpl","uid":60999,"gid":60999}\n' > "${USERDB}/${f}"
   done
-  printf '{"userName":"eph1","uid":60901,"gid":60901}\n' > "${USERDB}/60901.user"
+  printf '{"userName":"_hdw4s_1","uid":60901,"gid":60901}\n' > "${USERDB}/60901.user"
   mkdir -p "${DROPIN}/hdw4s-ephemeral@tmpl.service.d"
   systemctl() { echo "systemctl $*" >> "${CALLS}"; [ "$1" != is-active ]; }
   (cmd_release --internal tmpl) >/dev/null 2>&1
   is    'release --internal removes the authoring slot' "$(slot_of tmpl)" ''
-  is    'and only that row' "$(slot_of alice):$(slot_of eph0)" '0:1'
+  is    'and only that row' "$(slot_of alice):$(slot_of _hdw4s_0)" '0:1'
   has   'and keeps the comments' "$(cat "${SLOTS}")" '# comment'
   is    'and the identity the minter made for it' \
         "$(find "${USERDB}" -mindepth 1 -printf '%f ')" '60901.user '
@@ -735,11 +735,11 @@ echo '== the pool'"'"'s settings are one thing, not one per seat =='
   # what a visitor got depend on a draw nobody could see -- and the never-reap
   # refusal used to recommend exactly that ("hdw4s set <seat> ..."). Per-seat
   # settings are refused now, and the pool has one file every seat reads.
-  NSDIR="${SB}/ns"; mkdir -p "${NSDIR}/eph1"; : > "${NSDIR}/eph1/passwd"
-  printf '%s\n' '0 dora' '1 eph0 ephemeral' '2 tmpl template' > "${SLOTS}"
-  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/eph0.conf"
+  NSDIR="${SB}/ns"; mkdir -p "${NSDIR}/_hdw4s_1"; : > "${NSDIR}/_hdw4s_1/passwd"
+  printf '%s\n' '0 dora' '1 _hdw4s_0 ephemeral' '2 tmpl template' > "${SLOTS}"
+  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/_hdw4s_0.conf"
   before="$(cd "${ETCDIR}" && find . -type f -exec md5sum {} + | sort)"
-  for who in eph0 eph1 tmpl; do
+  for who in _hdw4s_0 _hdw4s_1 tmpl; do
     out="$( (cmd_set "${who}" 'HDW4S_FRAMERATE=24') 2>&1 )"; rc=$?
     [ "${rc}" -ne 0 ] && ok "set refuses ${who}" || bad "set refuses ${who}" "rc ${rc}"
     has "and points at pool set" "${out}" 'hdw4s pool set KEY=VALUE'
@@ -759,7 +759,7 @@ echo '== the pool'"'"'s settings are one thing, not one per seat =='
   has 'pool set writes the pool'"'"'s file' "$(cat "$(pool_conf)")" 'HDW4S_FRAMERATE=20'
   has 'and says it applies to desktops that start from now on' "${out}" 'starts from now on'
   hasnt 'and tells nobody to restart a visitor'"'"'s desktop' "${out}" 'estart'
-  r="$(setting_with_source eph0 HDW4S_FRAMERATE x)"
+  r="$(setting_with_source _hdw4s_0 HDW4S_FRAMERATE x)"
   is 'a seat reads the pool'"'"'s value' "${r}" "20	$(pool_conf)"
   r="$(setting_with_source tmpl HDW4S_FRAMERATE x)"
   is 'so does the authoring desktop' "${r}" "20	$(pool_conf)"
@@ -768,14 +768,14 @@ echo '== the pool'"'"'s settings are one thing, not one per seat =='
   is 'a named desktop does not' "${r}" "30	${CONF}"
   # A seat configured one by one before this keeps its own value, and both
   # commands say so rather than leaving the admin to wonder why one seat differs.
-  printf 'HDW4S_TRANSPORT=unix\nHDW4S_FRAMERATE=60\n' > "${ETCDIR}/eph0.conf"
-  r="$(setting_with_source eph0 HDW4S_FRAMERATE x)"
-  is 'a seat'"'"'s own file still wins' "${r}" "60	${ETCDIR}/eph0.conf"
+  printf 'HDW4S_TRANSPORT=unix\nHDW4S_FRAMERATE=60\n' > "${ETCDIR}/_hdw4s_0.conf"
+  r="$(setting_with_source _hdw4s_0 HDW4S_FRAMERATE x)"
+  is 'a seat'"'"'s own file still wins' "${r}" "60	${ETCDIR}/_hdw4s_0.conf"
   out="$( (pool_set 'HDW4S_FRAMERATE=25') 2>&1 )"
-  has 'and pool set names the seat it does not reach' "${out}" 'Overridden on seat(s) eph0'
+  has 'and pool set names the seat it does not reach' "${out}" 'Overridden on seat(s) _hdw4s_0'
   out="$(pool_show_all 2>&1)"
-  has 'pool show lists the seat'"'"'s own setting' "${out}" 'eph0: HDW4S_FRAMERATE'
-  hasnt 'but not what hdw4s wrote there itself' "${out}" 'eph0: HDW4S_TRANSPORT'
+  has 'pool show lists the seat'"'"'s own setting' "${out}" '_hdw4s_0: HDW4S_FRAMERATE'
+  hasnt 'but not what hdw4s wrote there itself' "${out}" '_hdw4s_0: HDW4S_TRANSPORT'
   has 'and shows the pool'"'"'s value and where it came from' "${out}" "HDW4S_FRAMERATE              25                     $(pool_conf)"
   has 'and the built-in default where nothing says' "${out}" 'built-in default'
 
@@ -801,7 +801,7 @@ echo '== the pool'"'"'s settings are one thing, not one per seat =='
   has 'and says when it applies' "${out}" 'reboot to use it'
 
   (pool_unset 'HDW4S_FRAMERATE') >/dev/null 2>&1
-  r="$(setting_with_source eph1 HDW4S_FRAMERATE x)"
+  r="$(setting_with_source _hdw4s_1 HDW4S_FRAMERATE x)"
   is 'pool unset hands the pool the machine'"'"'s value again' "${r}" "30	${CONF}"
 
   # The proxy, as one thing too.
@@ -822,14 +822,14 @@ echo '== the pool'"'"'s settings are one thing, not one per seat =='
   # The router's reading, in the same order: seat, pool, machine.
   printf 'HDW4S_IDLE_DAYS=3h\n' > "$(pool_conf)"
   printf 'HDW4S_IDLE_DAYS=9h\n' > "${CONF}"
-  rm -f "${ETCDIR}/eph0.conf"
+  rm -f "${ETCDIR}/_hdw4s_0.conf"
   got="$(HDW4S_ETCDIR="${ETCDIR}" python3 - "${ROOT}/hdw4s-demux" <<'PY'
 import importlib.machinery, importlib.util, sys
 sys.dont_write_bytecode = True
 l = importlib.machinery.SourceFileLoader("demux", sys.argv[1])
 m = importlib.util.module_from_spec(importlib.util.spec_from_loader("demux", l))
 l.exec_module(m)
-print(m.read_idle_window("eph0")[0])
+print(m.read_idle_window("_hdw4s_0")[0])
 PY
 )"
   is 'the router reads the pool'"'"'s window before the machine'"'"'s' "${got}" '10800'
@@ -849,18 +849,18 @@ echo '== list sums the pool up in one line, and lists seats only when asked =='
   # is full.
   me="$(id -un)"
   RUNDIR="${SB}/run"; POOLDIR="${SB}/demux"; TEARDOWNDIR="${SB}/teardown"
-  mkdir -p "${RUNDIR}/hdw4s/eph1"; printf ':12\n' > "${RUNDIR}/hdw4s/eph1/display"
-  printf '%s\n' "0 ${me}" '1000 eph0 ephemeral' '1001 eph1 ephemeral' \
-    '1002 eph2 ephemeral' '1003 eph3 ephemeral' '1004 eph4 ephemeral' \
+  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_1"; printf ':12\n' > "${RUNDIR}/hdw4s/_hdw4s_1/display"
+  printf '%s\n' "0 ${me}" '1000 _hdw4s_0 ephemeral' '1001 _hdw4s_1 ephemeral' \
+    '1002 _hdw4s_2 ephemeral' '1003 _hdw4s_3 ephemeral' '1004 _hdw4s_4 ephemeral' \
     '1005 tmpl template' > "${SLOTS}"
   CALLS="${SB}/calls"; : > "${CALLS}"
   systemctl() { echo "systemctl $*" >> "${CALLS}"
     case "$*" in show*) for u in "${@:8}"; do
       printf 'Id=%s\nActiveState=%s\nEnvironment=\n\n' "${u}" \
-        "$(case "${u}" in *eph1*) echo active;; *) echo inactive;; esac)"; done;; esac; }
+        "$(case "${u}" in *_hdw4s_1*) echo active;; *) echo inactive;; esac)"; done;; esac; }
   out="$(cmd_list 2>/dev/null)"
   has   'the person'"'"'s desktop is listed' "${out}" "${me}"
-  hasnt 'no seat is listed as a desktop'   "${out}" 'eph0 '
+  hasnt 'no seat is listed as a desktop'   "${out}" '_hdw4s_0 '
   hasnt 'nor the authoring slot'           "${out}" 'tmpl'
   has   'the pool is one line'             "${out}" 'Ephemeral pool: 5 seat(s), 1 in use.'
   hasnt 'and is not called nearly full at 1 of 5' "${out}" 'Nearly full'
@@ -871,17 +871,17 @@ echo '== list sums the pool up in one line, and lists seats only when asked =='
   # 80%, and the other kinds of busy the pool's own sizing reads: a fresh
   # reservation and a teardown make 3 of 5, which is not yet 80%; a fourth is.
   mkdir -p "${POOLDIR}/reserved" "${TEARDOWNDIR}"
-  : > "${POOLDIR}/reserved/eph2"; : > "${TEARDOWNDIR}/eph3"
+  : > "${POOLDIR}/reserved/_hdw4s_2"; : > "${TEARDOWNDIR}/_hdw4s_3"
   out="$(cmd_list 2>/dev/null)"
   has   'every kind of busy counts'           "${out}" '5 seat(s), 3 in use.'
   hasnt 'and 60% is not nearly full'          "${out}" 'Nearly full'
-  mkdir -p "${RUNDIR}/hdw4s/eph4"
+  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_4"
   out="$(cmd_list 2>/dev/null)"
   has   'at 80% it says the pool is nearly full' "${out}" 'Nearly full'
   has   'and how to add seats'                    "${out}" 'hdw4s pool size <N>'
   # --seats: every seat and the authoring slot, with display and what holds it.
   out="$(cmd_list --seats 2>/dev/null)"
-  has   'list --seats shows each seat'          "${out}" 'eph0'
+  has   'list --seats shows each seat'          "${out}" '_hdw4s_0'
   has   'and the authoring slot'                "${out}" 'tmpl               template'
   has   'and a seat'"'"'s display and why it is held' "${out}" ':12      a desktop is running in it'
   hasnt 'and not the person'"'"'s desktop'      "${out}" "${me} "
@@ -946,16 +946,16 @@ MINT
 
   # GROWING, live: the setting first, then each seat minted, then its row.
   (pool_resize 3) >/dev/null 2>&1
-  is  'growing offers the new seats' "$(rows)" 'ephemeral0 ephemeral1 ephemeral2 '
+  is  'growing offers the new seats' "$(rows)" '_hdw4s_0 _hdw4s_1 _hdw4s_2 '
   is  'and writes the setting the next boot reads' \
       "$(grep '^HDW4S_EPHEMERAL_SLOTS=' "${CONF}")" 'HDW4S_EPHEMERAL_SLOTS=3'
   has 'and the setting was written BEFORE a seat was minted' \
-      "$(cat "${CALLS}")" 'minted ephemeral0 when the file said HDW4S_EPHEMERAL_SLOTS=3'
+      "$(cat "${CALLS}")" 'minted _hdw4s_0 when the file said HDW4S_EPHEMERAL_SLOTS=3'
   # Mint, then row, for every seat: a row before its identity is the one
   # disagreement that costs a visitor a desktop.
   is  'and every seat was minted before its row was written' \
       "$(command grep -E '^(minted|enable_slot)' "${CALLS}" | cut -d' ' -f1-3 | tr '\n' ';')" \
-      'minted ephemeral0 when;enable_slot ephemeral ephemeral0;minted ephemeral1 when;enable_slot ephemeral ephemeral1;minted ephemeral2 when;enable_slot ephemeral ephemeral2;'
+      'minted _hdw4s_0 when;enable_slot ephemeral _hdw4s_0;minted _hdw4s_1 when;enable_slot ephemeral _hdw4s_1;minted _hdw4s_2 when;enable_slot ephemeral _hdw4s_2;'
   # Again with the same number changes nothing.
   : > "${CALLS}"
   (pool_resize 3) >/dev/null 2>&1
@@ -963,67 +963,67 @@ MINT
   out="$(pool_show)"
   has 'pool size with no number reports the size' "${out}" 'has 3 seat(s); 0 in use'
 
-  # SHRINKING PAST A VISITOR. ephemeral2 has a desktop running, whoever is or
+  # SHRINKING PAST A VISITOR. _hdw4s_2 has a desktop running, whoever is or
   # is not looking at it: nothing may be taken, and the command says so.
-  mkdir -p "${RUNDIR}/hdw4s/ephemeral2"
+  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_2"
   out="$( (pool_resize 1) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'shrinking past a busy seat fails' || bad 'shrinking past a busy seat fails' "rc ${rc}"
-  is  'and takes no seat' "$(rows)" 'ephemeral0 ephemeral1 ephemeral2 '
-  is  'and leaves its identity' "$([ -f "${NSDIR}/ephemeral2/passwd" ] && echo kept)" 'kept'
-  has 'and names the seat and why' "${out}" 'ephemeral2: a desktop is running in it'
-  has 'and how to end it, if that is the decision' "${out}" 'systemctl stop hdw4s-ephemeral@ephemeral2.service'
-  hasnt 'and stopped no desktop' "$(cat "${CALLS}")" 'stop hdw4s-ephemeral@ephemeral2'
+  is  'and takes no seat' "$(rows)" '_hdw4s_0 _hdw4s_1 _hdw4s_2 '
+  is  'and leaves its identity' "$([ -f "${NSDIR}/_hdw4s_2/passwd" ] && echo kept)" 'kept'
+  has 'and names the seat and why' "${out}" '_hdw4s_2: a desktop is running in it'
+  has 'and how to end it, if that is the decision' "${out}" 'systemctl stop hdw4s-ephemeral@_hdw4s_2.service'
+  hasnt 'and stopped no desktop' "$(cat "${CALLS}")" 'stop hdw4s-ephemeral@_hdw4s_2'
   is  'and the setting still says 3' "$(grep '^HDW4S_EPHEMERAL_SLOTS=' "${CONF}")" 'HDW4S_EPHEMERAL_SLOTS=3'
-  has 'pool size shows it in use' "$(pool_show)" 'ephemeral2       a desktop is running in it'
+  has 'pool size shows it in use' "$(pool_show)" '_hdw4s_2         a desktop is running in it'
 
   # A busy seat LOWER down holds the pool one above it; seats above it go.
-  rmdir "${RUNDIR}/hdw4s/ephemeral2"; mkdir -p "${RUNDIR}/hdw4s/ephemeral1"
+  rmdir "${RUNDIR}/hdw4s/_hdw4s_2"; mkdir -p "${RUNDIR}/hdw4s/_hdw4s_1"
   : > "${CALLS}"
   out="$( (pool_resize 0) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a busy seat lower down still fails the command' \
     || bad 'a busy seat lower down still fails the command' "rc ${rc}"
-  is  'the seats above it go, the seats below it stay' "$(rows)" 'ephemeral0 ephemeral1 '
+  is  'the seats above it go, the seats below it stay' "$(rows)" '_hdw4s_0 _hdw4s_1 '
   is  'and the setting says what the pool is' "$(grep '^HDW4S_EPHEMERAL_SLOTS=' "${CONF}")" 'HDW4S_EPHEMERAL_SLOTS=2'
-  is  'and the identity of the seat that went is gone' "$([ -e "${NSDIR}/ephemeral2" ] && echo left || echo gone)" 'gone'
-  has 'and its own unit was stopped, by name' "$(cat "${CALLS}")" 'stop hdw4s-proxy@ephemeral2.service hdw4s-ephemeral@ephemeral2.service'
-  has 'and its watchers' "$(cat "${CALLS}")" 'stop hdw4s-teardown@ephemeral2.path hdw4s-start@ephemeral2.path'
+  is  'and the identity of the seat that went is gone' "$([ -e "${NSDIR}/_hdw4s_2" ] && echo left || echo gone)" 'gone'
+  has 'and its own unit was stopped, by name' "$(cat "${CALLS}")" 'stop hdw4s-proxy@_hdw4s_2.service hdw4s-ephemeral@_hdw4s_2.service'
+  has 'and its watchers' "$(cat "${CALLS}")" 'stop hdw4s-teardown@_hdw4s_2.path hdw4s-start@_hdw4s_2.path'
   has 'and it says it is 2, not 0' "${out}" 'has 2 seat(s)'
-  rmdir "${RUNDIR}/hdw4s/ephemeral1"
+  rmdir "${RUNDIR}/hdw4s/_hdw4s_1"
 
   # THE OTHER THREE KINDS OF BUSY. A fresh reservation is a visitor on the way;
   # a stale one is not. A unit starting has no runtime directory yet.
-  touch "${POOLDIR}/reserved/ephemeral1"
+  touch "${POOLDIR}/reserved/_hdw4s_1"
   out="$( (pool_resize 1) 2>&1 )"
-  is  'a fresh reservation holds its seat' "$(rows)" 'ephemeral0 ephemeral1 '
+  is  'a fresh reservation holds its seat' "$(rows)" '_hdw4s_0 _hdw4s_1 '
   has 'and says so' "${out}" 'a visitor has just been handed it'
-  touch -d '-1 hour' "${POOLDIR}/reserved/ephemeral1"
-  is  'a stale one does not' "$(seat_busy ephemeral1)" ''
+  touch -d '-1 hour' "${POOLDIR}/reserved/_hdw4s_1"
+  is  'a stale one does not' "$(seat_busy _hdw4s_1)" ''
   systemctl() { echo "systemctl $*" >> "${CALLS}"
-                case "$*" in *'ActiveState'*ephemeral1*) echo activating;; esac
+                case "$*" in *'ActiveState'*_hdw4s_1*) echo activating;; esac
                 [ "$1" != is-active ]; }
   out="$( (pool_resize 1) 2>&1 )"
-  is  'a starting unit holds its seat' "$(rows)" 'ephemeral0 ephemeral1 '
+  is  'a starting unit holds its seat' "$(rows)" '_hdw4s_0 _hdw4s_1 '
   has 'and says so' "${out}" 'its desktop is activating'
   systemctl() { echo "systemctl $*" >> "${CALLS}"; [ "$1" != is-active ]; }
-  mkdir -p "${TEARDOWNDIR}/ending"; : > "${TEARDOWNDIR}/ending/ephemeral1"
+  mkdir -p "${TEARDOWNDIR}/ending"; : > "${TEARDOWNDIR}/ending/_hdw4s_1"
   out="$( (pool_resize 1) 2>&1 )"
-  is  'a seat being torn down holds too' "$(rows)" 'ephemeral0 ephemeral1 '
-  rm -f "${TEARDOWNDIR}/ending/ephemeral1"
+  is  'a seat being torn down holds too' "$(rows)" '_hdw4s_0 _hdw4s_1 '
+  rm -f "${TEARDOWNDIR}/ending/_hdw4s_1"
 
   # THE ROUTER LETTING A SEAT WHILE IT IS BEING TAKEN. The row goes first, then
   # the wait, then a second look: a letting that read the table before the row
   # went shows up as a reservation, and the seat goes back on offer as it was.
-  before="$(grep ephemeral1 "${SLOTS}")"
-  sleep() { touch "${POOLDIR}/reserved/ephemeral1"; }
+  before="$(grep _hdw4s_1 "${SLOTS}")"
+  sleep() { touch "${POOLDIR}/reserved/_hdw4s_1"; }
   out="$( (pool_resize 1) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a seat let during the wait fails the command' \
     || bad 'a seat let during the wait fails the command' "rc ${rc}"
-  is  'and its row is put back exactly' "$(grep ephemeral1 "${SLOTS}")" "${before}"
-  is  'and its identity is kept' "$([ -f "${NSDIR}/ephemeral1/passwd" ] && echo kept)" 'kept'
+  is  'and its row is put back exactly' "$(grep _hdw4s_1 "${SLOTS}")" "${before}"
+  is  'and its identity is kept' "$([ -f "${NSDIR}/_hdw4s_1/passwd" ] && echo kept)" 'kept'
   sleep() { :; }
-  rm -f "${POOLDIR}/reserved/ephemeral1"
+  rm -f "${POOLDIR}/reserved/_hdw4s_1"
   (pool_resize 1) >/dev/null 2>&1
-  is  'once it is idle, it goes' "$(rows)" 'ephemeral0 '
+  is  'once it is idle, it goes' "$(rows)" '_hdw4s_0 '
 
   # ONE AT A TIME: a second run is refused while the first holds the lock, and
   # changes nothing.
@@ -1031,42 +1031,62 @@ MINT
   [ "${rc}" -ne 0 ] && ok 'a second pool size at once is refused' \
     || bad 'a second pool size at once is refused' "rc ${rc}"
   has 'and says why' "${out}" 'another "hdw4s pool size" is running'
-  is  'and changed nothing' "$(rows)" 'ephemeral0 '
+  is  'and changed nothing' "$(rows)" '_hdw4s_0 '
 
   # LARGER THAN THE MINTER CAN MAKE: refused before anything is written.
   out="$( (POOL_MAX=2 pool_resize 3) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a size beyond the uid window is refused' \
     || bad 'a size beyond the uid window is refused' "rc ${rc}"
-  is  'and nothing was written' "$(rows):$(grep '^HDW4S_EPHEMERAL_SLOTS=' "${CONF}")" 'ephemeral0 :HDW4S_EPHEMERAL_SLOTS=1'
+  is  'and nothing was written' "$(rows):$(grep '^HDW4S_EPHEMERAL_SLOTS=' "${CONF}")" '_hdw4s_0 :HDW4S_EPHEMERAL_SLOTS=1'
 
   # A SEAT THAT CANNOT BE MINTED (a real account by that name, say) ends the
   # growth there, and the setting comes back down: left at the larger number,
   # the boot's minter would die on it and take every seat with it.
-  out="$( (MINT_FAILS=ephemeral2 pool_resize 4) 2>&1 )"; rc=$?
+  out="$( (MINT_FAILS=_hdw4s_2 pool_resize 4) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a failed mint fails the command' || bad 'a failed mint fails the command' "rc ${rc}"
-  is  'the seats before it are offered' "$(rows)" 'ephemeral0 ephemeral1 '
+  is  'the seats before it are offered' "$(rows)" '_hdw4s_0 _hdw4s_1 '
   is  'and the setting matches them' "$(grep '^HDW4S_EPHEMERAL_SLOTS=' "${CONF}")" 'HDW4S_EPHEMERAL_SLOTS=2'
   has 'and says where it stopped' "${out}" 'stopped growing at 2'
   # And a row above it with no identity -- what the old procedure could leave --
   # is not left offered with nothing behind it.
-  printf '%s\n' '9 ephemeral3 ephemeral' >> "${SLOTS}"
-  out="$( (MINT_FAILS=ephemeral2 pool_resize 4) 2>&1 )"
-  is  'a row above the stop with no identity is taken back' "$(rows)" 'ephemeral0 ephemeral1 '
+  printf '%s\n' '9 _hdw4s_3 ephemeral' >> "${SLOTS}"
+  out="$( (MINT_FAILS=_hdw4s_2 pool_resize 4) 2>&1 )"
+  is  'a row above the stop with no identity is taken back' "$(rows)" '_hdw4s_0 _hdw4s_1 '
 
   # AN INSTALL SIZED THE OLD WAY, half done: rows above the setting, a row the
   # minter never makes, a seat minted with no row. "pool size" reports it and
   # the same number settles it.
-  printf '%s\n' '0 alice' '1 ephemeral0 ephemeral' '2 ephemeral1 ephemeral' \
-    '3 ephemeral2 ephemeral' '4 ephemeral3 ephemeral' '5 oddseat ephemeral' > "${SLOTS}"
+  printf '%s\n' '0 alice' '1 _hdw4s_0 ephemeral' '2 _hdw4s_1 ephemeral' \
+    '3 _hdw4s_2 ephemeral' '4 _hdw4s_3 ephemeral' '5 oddseat ephemeral' > "${SLOTS}"
   printf 'HDW4S_EPHEMERAL_SLOTS=2\n' > "${CONF}"; HDW4S_EPHEMERAL_SLOTS=2
-  mkdir -p "${NSDIR}/ephemeral5"; : > "${NSDIR}/ephemeral5/passwd"
+  mkdir -p "${NSDIR}/_hdw4s_5"; : > "${NSDIR}/_hdw4s_5/passwd"
   out="$(pool_show)"
-  has 'pool size reports rows the next boot will not mint' "${out}" 'ephemeral2 ephemeral3 oddseat'
+  has 'pool size reports rows the next boot will not mint' "${out}" '_hdw4s_2 _hdw4s_3 oddseat'
   has 'and the command that settles it' "${out}" 'hdw4s pool size 2'
   (pool_resize 2) >/dev/null 2>&1
-  is  'and settling it leaves exactly the seats' "$(rows)" 'ephemeral0 ephemeral1 '
+  is  'and settling it leaves exactly the seats' "$(rows)" '_hdw4s_0 _hdw4s_1 '
   is  'and a person'"'"'s desktop alone' "$(slot_of alice)" '0'
-  is  'and the identity above the size is gone' "$([ -e "${NSDIR}/ephemeral5" ] && echo left || echo gone)" 'gone'
+  is  'and the identity above the size is gone' "$([ -e "${NSDIR}/_hdw4s_5" ] && echo left || echo gone)" 'gone'
+
+  # AN UPGRADED TABLE, still offering the retired names. Not translated by
+  # anything automatic; "pool size" with the same number replaces them, because
+  # a row that is not a seat is the first thing it takes away -- and that is
+  # the repair the boot's refusal and "hdw4s check" both name.
+  printf '%s\n' '0 alice' '1 ephemeral0 ephemeral' '2 ephemeral1 ephemeral' > "${SLOTS}"
+  printf 'HDW4S_EPHEMERAL_SLOTS=2\n' > "${CONF}"; HDW4S_EPHEMERAL_SLOTS=2
+  rm -rf "${NSDIR:?}"/*; : > "${CALLS}"
+  out="$(pool_show)"
+  has 'pool size names the retired rows' "${out}" 'not minted at the next boot: ephemeral0 ephemeral1'
+  has 'and says what seats are called now' "${out}" 'Seats are named _hdw4s_0, _hdw4s_1, ...'
+  (pool_resize 2) >/dev/null 2>&1
+  is  'and the same size replaces them with seats' "$(rows)" '_hdw4s_0 _hdw4s_1 '
+  has 'and the old seats'"'"' units were stopped by name' "$(cat "${CALLS}")" \
+      'stop hdw4s-proxy@ephemeral0.service hdw4s-ephemeral@ephemeral0.service'
+  is  'and a person'"'"'s desktop is left alone' "$(slot_of alice)" '0'
+  # The CLI's own reading of a name, both ways round.
+  is  'an old name is no seat' "$(seat_index ephemeral0)" ''
+  is  'a new one is' "$(seat_index _hdw4s_7)" '7'
+  is  'and the authoring slot is not one' "$(seat_index _hdw4s_author)" ''
 
   # The real dispatcher: a word other than "size" is a usage error.
   HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" pool grow 3 >/dev/null 2>&1
@@ -1083,23 +1103,112 @@ echo '== the minter mints one seat only inside the configured pool =='
   is  'the largest pool keeps one uid for the authoring slot' "$(m --pool-max)" '99'
   printf '%s\n' '0 a template' '1 b template' > "${SB}/etc/instances"
   is  'and one per template row' "$(m --pool-max)" '98'
-  out="$(m --seat ephemeral3)"; rc=$?
+  out="$(m --seat _hdw4s_3)"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a seat beyond the setting is refused' || bad 'a seat beyond the setting is refused' "rc ${rc}"
   has 'and says to raise the setting first' "${out}" 'raise the'
-  out="$(m --seat ephemeral01)"; rc=$?
+  out="$(m --seat _hdw4s_01)"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a seat number written another way is refused' \
     || bad 'a seat number written another way is refused' "rc ${rc}"
   out="$(m --seat alice)"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a name that is not a seat is refused' || bad 'a name that is not a seat is refused' "rc ${rc}"
   printf 'HDW4S_EPHEMERAL_SLOTS=99\n' > "${SB}/etc/hdw4s.conf"
-  out="$(m --seat ephemeral98)"; rc=$?
+  out="$(m --seat _hdw4s_98)"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a pool grown into the template uids is refused' \
     || bad 'a pool grown into the template uids is refused' "rc ${rc}"
   has 'and names the largest it can be' "${out}" 'largest pool here is'
   # A pool of zero is a machine that serves only named desktops.
   printf 'HDW4S_EPHEMERAL_SLOTS=0\n' > "${SB}/etc/hdw4s.conf"
-  out="$(m --seat ephemeral0)"
+  out="$(m --seat _hdw4s_0)"
   has 'zero is a size, and has no seats' "${out}" 'beyond HDW4S_EPHEMERAL_SLOTS=0'
+)
+
+echo '== the boot run refuses a table that still offers the retired seat names =='
+# THE OWNER'S RULING, 2026-09-30: the seats are _hdw4s_0 .. _hdw4s_N-1 and there is
+# no automatic upgrade path, so an install whose table still says "ephemeral0" must
+# fail LOUDLY rather than half-work -- the router offering rows nothing mints, while
+# the new seats are minted for nobody. The whole boot run is executed here, in a
+# sandbox: every path it writes is a variable pointed below ${SB}, and the three
+# commands that would reach the machine are functions exported over the real ones
+# (bash prefers a function to anything on the PATH the script pins). A pool of ZERO
+# keeps the minting loop empty, so the one thing that varies between the arms below
+# is the table.
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  mkdir -p "${SB}/etc" "${SB}/dconf"
+  printf 'HDW4S_EPHEMERAL_SLOTS=0\n' > "${SB}/etc/hdw4s.conf"
+  systemctl() { echo "systemctl $*" >> "${SB}/calls"; }
+  getent() { [ "$1 $2" = 'group hdw4s-relay' ] && echo 'hdw4s-relay:x:999:' && return 0
+             command getent "$@"; }
+  # The real install, without the group: an unprivileged caller cannot chgrp.
+  install() { local args=(); while [ $# -gt 0 ]; do
+                case "$1" in -g) shift 2;; *) args+=("$1"); shift;; esac; done
+              command install "${args[@]}"; }
+  export -f systemctl getent install
+  boot() { HDW4S_ETCDIR="${SB}/etc" HDW4S_USERDB_DIR="${SB}/userdb" \
+           HDW4S_NS_DIR="${SB}/ns" HDW4S_PROFILE_ROOT="${SB}/profile" \
+           HDW4S_DROPIN_DIR="${SB}/system" HDW4S_PROXY_RUNDIR="${SB}/proxy" \
+           HDW4S_TEARDOWN_DIR="${SB}/teardown" HDW4S_START_DIR="${SB}/start" \
+           HDW4S_INVITE_DIR="${SB}/invite" HDW4S_INCARNATION_DIR="${SB}/incarn" \
+           HDW4S_STREAM_DIR="${SB}/stream" HDW4S_DCONF_DB_DIR="${SB}/no-dconf" \
+           "${1:-${ROOT}/hdw4s-ephemeral-slots}" 2>&1; }
+
+  # THE CONTROL: the same run, a table with only a person and a seat-shaped row.
+  printf '%s\n' '0 alice' '1 _hdw4s_0 ephemeral' > "${SB}/etc/instances"
+  out="$(boot)"; rc=$?
+  is  'a table of seats boots' "${rc}" '0'
+  has 'and says what it minted' "${out}" 'minted 0 ephemeral slot(s) from _hdw4s_0'
+
+  # THE OLD NAMES, as an upgraded install has them.
+  printf '%s\n' '0 alice' '1 ephemeral0 ephemeral' '2 ephemeral1 ephemeral' \
+    '3 _hdw4s_01 ephemeral' > "${SB}/etc/instances"
+  rm -f "${SB}/calls"
+  out="$(boot)"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a table with the retired names fails the boot run' \
+    || bad 'a table with the retired names fails the boot run' "rc ${rc}: ${out}"
+  has 'and names every row that is not a seat' "${out}" 'never mints: ephemeral0 ephemeral1 _hdw4s_01'
+  has 'and what the seats are called now' "${out}" 'named _hdw4s_0, _hdw4s_1, ...'
+  has 'and the command that replaces them' "${out}" 'hdw4s pool size 0'
+  has 'and how to start the pool after' "${out}" 'systemctl start hdw4s-ephemeral-slots.service'
+  hasnt 'and does not claim to have minted anything' "${out}" 'minted 0 ephemeral'
+  # Everything that is the WHOLE MACHINE'S was still done: named desktops need
+  # the run directories and the slice's brake whatever the pool's state.
+  is  'but the run directories were made first' \
+    "$([ -d "${SB}/stream" ] && [ -d "${SB}/proxy" ] && echo made)" 'made'
+  is  'and the slice memory brake was still written' \
+    "$([ -s "${SB}/system/hdw4s.slice.d/10-memory-high.conf" ] && echo written)" 'written'
+
+  # NOTHING OF THE POOL IS MINTED while the old rows are there: on a machine
+  # upgraded without a reboot the old seats still hold the same uids.
+  printf 'HDW4S_EPHEMERAL_SLOTS=2\n' > "${SB}/etc/hdw4s.conf"
+  printf '%s\n' '1 ephemeral0 ephemeral' > "${SB}/etc/instances"
+  out="$(boot)"
+  is  'and no seat identity is written beside them' \
+    "$(n=0; for f in "${SB}"/ns/_hdw4s_* "${SB}"/userdb/_hdw4s_*; do
+         [ ! -e "${f}" ] || n=$(( n + 1 )); done; echo "${n}")" '0'
+  has 'and the size it names is the configured one' "${out}" 'hdw4s pool size 2'
+
+  # RED ARM: the refusal taken out, the same table boots quietly -- the
+  # half-working shape this exists to stop.
+  # shellcheck disable=SC2016  # the pattern names the script's own ${RETIRED}
+  sed 's|^  \[ -z "\${RETIRED}" \] \|\| i=|  : \|\| i=|; s|^elif \[ -n "\${RETIRED}" \]; then$|elif false; then|' \
+    "${ROOT}/hdw4s-ephemeral-slots" > "${SB}/red-minter"
+  chmod +x "${SB}/red-minter"
+  is  'RED ARM: the edit took' "$(grep -c 'elif false; then' "${SB}/red-minter")" '1'
+  printf 'HDW4S_EPHEMERAL_SLOTS=0\n' > "${SB}/etc/hdw4s.conf"
+  printf '%s\n' '1 ephemeral0 ephemeral' > "${SB}/etc/instances"
+  boot "${SB}/red-minter" >/dev/null; rc=$?
+  is  'RED ARM: without the refusal the same table boots silently' "${rc}" '0'
+
+  # The --seat path, which "pool size" uses, and the CLI's own reading of a name.
+  out="$(boot "${ROOT}/hdw4s-ephemeral-slots" 2>&1; HDW4S_ETCDIR="${SB}/etc" \
+         "${ROOT}/hdw4s-ephemeral-slots" --seat ephemeral0 2>&1)"
+  has 'the minter refuses to mint an old name as a seat' "${out}" \
+    'ephemeral0 is not a seat of this pool; seats are _hdw4s_0, _hdw4s_1'
+
+  # TWO COPIES OF ONE NAME, because "hdw4s" has no other way to know it: held
+  # together here, so that editing one turns this red.
+  cli="$(sed -n "s/^SEAT_PREFIX=//p" "${ROOT}/hdw4s")"
+  is  'the CLI spells the seat prefix' "${cli}" "'_hdw4s_'"
+  is  'and the minter spells it the same' "$(sed -n "s/^SEAT_PREFIX=//p" "${ROOT}/hdw4s-ephemeral-slots")" "${cli}"
 )
 
 echo '== template edit needs no prior step, and a failed mint leaves no row =='
@@ -1114,12 +1223,12 @@ echo '== template edit needs no prior step, and a failed mint leaves no row =='
   provision_template >/dev/null
   is 'a fresh install gets the reserved authoring slot' "$(cat "${CALLS}")" "template ${TEMPLATE_SLOT}"
   : > "${CALLS}"
-  printf '%s\n' '0 alice' '1 eph0 ephemeral' > "${SLOTS}"
+  printf '%s\n' '0 alice' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
   provision_template >/dev/null
   is 'so does one with only people and seats' "$(cat "${CALLS}")" "template ${TEMPLATE_SLOT}"
   # AN UPGRADE: a row the retired "enable --template" made is used as it is.
   : > "${CALLS}"
-  printf '%s\n' '0 alice' '1 author template' '2 eph0 ephemeral' > "${SLOTS}"
+  printf '%s\n' '0 alice' '1 author template' '2 _hdw4s_0 ephemeral' > "${SLOTS}"
   provision_template >/dev/null
   is 'an existing template row is kept, not replaced' "$(cat "${CALLS}")" ''
   unset -f enable_slot
@@ -1636,7 +1745,7 @@ NFT
 
   # A seat of the pool and the authoring slot have no port, and their index is
   # numbered from far above the block on purpose: not counted, not "uncovered".
-  printf '0 alice\n1000 eph0 ephemeral\n1001 tmpl template\n' > "${SLOTS}"
+  printf '0 alice\n1000 _hdw4s_0 ephemeral\n1001 tmpl template\n' > "${SLOTS}"
   out="$(cmd_check 2>&1)"
   has 'rows with no port are not counted as sessions on a port' \
       "${out}" 'sessions    1, all within the loaded range 7300-7303'
@@ -1714,16 +1823,16 @@ echo '== an install rewrites every file that names the payload path =='
 
 echo '== a slot records what kind of session it is =='
 ( set +e; sandbox; . "${SB}/setup.sh"
-  printf '%s\n' '# comment' '0 alice' '1 eph0 ephemeral' > "${SLOTS}"
+  printf '%s\n' '# comment' '0 alice' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
   # A row written before the type existed has two fields, and every session was
   # a desktop when it was written -- so that is what it must still mean.
   is 'a two-field row means desktop'   "$(type_of alice)"  'desktop'
-  is 'a three-field row is read'       "$(type_of eph0)"   'ephemeral'
+  is 'a three-field row is read'       "$(type_of _hdw4s_0)"   'ephemeral'
   is 'an unknown instance defaults'    "$(type_of nobody)" 'desktop'
   is 'the desktop unit'   "$(unit_of alice)" 'hdw4s@alice.service'
-  is 'the ephemeral unit' "$(unit_of eph0)"  'hdw4s-ephemeral@eph0.service'
-  is 'drop-ins follow the unit' "$(dropin_of eph0)" \
-     "${DROPIN}/hdw4s-ephemeral@eph0.service.d"
+  is 'the ephemeral unit' "$(unit_of _hdw4s_0)"  'hdw4s-ephemeral@_hdw4s_0.service'
+  is 'drop-ins follow the unit' "$(dropin_of _hdw4s_0)" \
+     "${DROPIN}/hdw4s-ephemeral@_hdw4s_0.service.d"
 
   # -- the fourth type ------------------------------------------------------
   #
@@ -1733,7 +1842,7 @@ echo '== a slot records what kind of session it is =='
   # named-desktop arm. The damage was never in one place, so neither is the
   # check: what is asserted below is that each reader asks one of the two
   # NAMED questions, and that the two questions give different answers.
-  printf '%s\n' '# comment' '0 alice' '1 eph0 ephemeral' '2 tmpl template' \
+  printf '%s\n' '# comment' '0 alice' '1 _hdw4s_0 ephemeral' '2 tmpl template' \
     > "${SLOTS}"
   is 'the template row is read'   "$(type_of tmpl)" 'template'
   # The whole point: it runs the ephemeral unit, so it gets the tmpfs home at
@@ -1802,7 +1911,7 @@ echo '== a slot records what kind of session it is =='
     # measurement of the ENVIRONMENT rather than as a result about the code.
     printf '  --   %s\n' 'reading as root; the unreadable-table arm needs a non-root run'
   else
-    is 'an unreadable table is not "desktop"' "$(type_of eph0)" 'unreadable'
+    is 'an unreadable table is not "desktop"' "$(type_of _hdw4s_0)" 'unreadable'
 
     # THE ARM THE BRANCH SHIPPED WITHOUT, AND WHAT IT ACTUALLY GUARDS.
     #
@@ -1827,7 +1936,7 @@ echo '== a slot records what kind of session it is =='
     # wrong reason on the first cut. An arm that goes red for a different cause
     # proves nothing, which is why the two message assertions are here rather
     # than a bare status check.
-    out="$( ( HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" show eph0 ) 2>&1 )"; rc=$?
+    out="$( ( HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" show _hdw4s_0 ) 2>&1 )"; rc=$?
     is 'an unreadable table refuses before any command runs' "${rc}" '1'
     # Matching the SENTENCE rather than the path: the harness and the binary
     # derive ETCDIR separately, so asserting the exact filename here tests
@@ -1874,15 +1983,15 @@ echo '== a slot records what kind of session it is =='
 
   # An ephemeral slot takes settings from its unit, which the conf files cannot
   # see. Stubbed, because the real answer needs a loaded unit.
-  printf '%s\n' '1 eph0 ephemeral' '0 alice' > "${SLOTS}"
+  printf '%s\n' '1 _hdw4s_0 ephemeral' '0 alice' > "${SLOTS}"
   printf 'HDW4S_ISOLATION=none\n' > "${CONF}"
   # Stubbed: the real answer needs a loaded unit. Reached through the function
   # under test, not called directly.
   # shellcheck disable=SC2317
   systemctl() { echo 'HDW4S_ISOLATION=profile HDW4S_PROFILE_DIR=/run/hdw4s'; }
-  r="$(setting_with_source eph0 HDW4S_ISOLATION none)"
-  is 'an ephemeral slot is always profile-isolated' "${r%%$'\t'*}" 'profile'
-  is 'and says the session fixes it, not a file or the unit' "${r#*$'\t'}" \
+  r="$(setting_with_source _hdw4s_0 HDW4S_ISOLATION none)"
+  is 'an ephemeral slot is always profile-isolated' "${r%%$'	'*}" 'profile'
+  is 'and says the session fixes it, not a file or the unit' "${r#*$'	'}" \
      'hdw4s-session (fixed for this kind of desktop)'
   r="$(setting_with_source alice HDW4S_ISOLATION none)"
   is 'a desktop session still reads its files' "${r%%$'\t'*}" 'none'
@@ -1984,13 +2093,13 @@ echo '== a slot table written by an older version still works =='
   # required, by showing what the old two-variable form does to a three-field
   # row: it does not drop the type, it appends it to the name, so the slot is
   # indexed under a session that does not exist.
-  printf '%s\n' '3 eph0 ephemeral' >> "${SLOTS}"
+  printf '%s\n' '3 _hdw4s_0 ephemeral' >> "${SLOTS}"
   old_form="$(while read -r idx inst; do [ "${idx}" = '3' ] && echo "${inst}"; done < "${SLOTS}")"
   new_form="$(while read -r idx inst _; do [ "${idx}" = '3' ] && echo "${inst}"; done < "${SLOTS}")"
-  is 'the old reader shape corrupts the name' "${old_form}" 'eph0 ephemeral'
-  is 'and the shape the readers use does not' "${new_form}" 'eph0'
+  is 'the old reader shape corrupts the name' "${old_form}" '_hdw4s_0 ephemeral'
+  is 'and the shape the readers use does not' "${new_form}" '_hdw4s_0'
   is 'a mixed table still answers for the old rows' "$(unit_of alice)" 'hdw4s@alice.service'
-  is 'and for the new one'                          "$(unit_of eph0)" 'hdw4s-ephemeral@eph0.service'
+  is 'and for the new one'                          "$(unit_of _hdw4s_0)" 'hdw4s-ephemeral@_hdw4s_0.service'
 )
 
 echo '== the relay names no session unit, and enable supplies one =='
@@ -2153,8 +2262,8 @@ echo '== what the reaper tells someone whose session it just stopped =='
   # for half the session types for as long as both types existed.
   unset JOURNAL_STREAM
   RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
-  printf '%s\n' '0 dora' '1 eph0 ephemeral' > "${SLOTS}"
-  mkdir -p "${RUNDIR}/hdw4s/dora" "${RUNDIR}/hdw4s/eph0" "${REAPDIR}"
+  printf '%s\n' '0 dora' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
+  mkdir -p "${RUNDIR}/hdw4s/dora" "${RUNDIR}/hdw4s/_hdw4s_0" "${REAPDIR}"
 
   # Nobody is connected: ss reports nothing, and the proxy exists, so that
   # "nothing" means "nobody there" rather than "we could not look".
@@ -2178,7 +2287,7 @@ echo '== what the reaper tells someone whose session it just stopped =='
   # A slot still inside its window is the control: if this one is stopped too,
   # the group says nothing about selection.
   back="$(( $(date +%s) - 86400 ))"
-  printf '%s\n' "${back}" > "${REAPDIR}/eph0"
+  printf '%s\n' "${back}" > "${REAPDIR}/_hdw4s_0"
   printf '%s\n' "${back}" > "${REAPDIR}/dora"
   out="$(cmd_reap 2>/dev/null)"
   is 'a session inside its window is left alone' "${out}" ''
@@ -2186,10 +2295,10 @@ echo '== what the reaper tells someone whose session it just stopped =='
 
   # Now past the window, set per instance -- never on the site default, which
   # would move every session at once.
-  printf 'HDW4S_IDLE_DAYS=1\n' > "${SB}/etc/eph0.conf"
+  printf 'HDW4S_IDLE_DAYS=1\n' > "${SB}/etc/_hdw4s_0.conf"
   out="$(cmd_reap 2>/dev/null)"
-  has   'the ephemeral slot is now selected'  "${out}" 'stopping eph0'
-  has   'and its unit is the one stopped'     "$(cat "${STOPPED}")" 'hdw4s-ephemeral@eph0.service'
+  has   'the ephemeral slot is now selected'  "${out}" 'stopping _hdw4s_0'
+  has   'and its unit is the one stopped'     "$(cat "${STOPPED}")" 'hdw4s-ephemeral@_hdw4s_0.service'
   hasnt 'the desktop beside it is left alone' "${out}" 'stopping dora'
 
   # The defect itself. Read out of what the run printed, never grepped out of
@@ -2204,7 +2313,7 @@ echo '== what the reaper tells someone whose session it just stopped =='
   printf 'HDW4S_IDLE_DAYS=1\n' > "${SB}/etc/dora.conf"
   out="$(cmd_reap 2>/dev/null)"
   has 'both kinds are reported in one run' "${out}" 'stopping dora'
-  has 'and the ephemeral one still is too' "${out}" 'stopping eph0'
+  has 'and the ephemeral one still is too' "${out}" 'stopping _hdw4s_0'
   is  'two sessions stopped'               "$(wc -l < "${STOPPED}")" '4'
 
   # That combined transcript carries both messages, so an assertion against it
@@ -2329,7 +2438,7 @@ echo '== never reaping is a choice for a named session and a leak for a slot =='
   # tells nothing -- so 0 means unattended desktops accumulate until the pool is
   # full and every visitor after that is refused, from one configuration line
   # with nothing anywhere reporting why.
-  printf '%s\n' '0 dora' '1 eph0 ephemeral' > "${SLOTS}"
+  printf '%s\n' '0 dora' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
 
   # The pool is told as one thing, so it is refused there -- and per seat it is
   # refused for every setting (the group on per-seat settings), so no seat can
@@ -2383,8 +2492,8 @@ echo '== the reaper works in seconds, and refuses to guess =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   unset JOURNAL_STREAM
   RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
-  printf '%s\n' '0 dora' '1 eph0 ephemeral' > "${SLOTS}"
-  mkdir -p "${RUNDIR}/hdw4s/dora" "${RUNDIR}/hdw4s/eph0" "${REAPDIR}"
+  printf '%s\n' '0 dora' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
+  mkdir -p "${RUNDIR}/hdw4s/dora" "${RUNDIR}/hdw4s/_hdw4s_0" "${REAPDIR}"
   ss() { :; }
   STOPPED="${SB}/stopped"; : > "${STOPPED}"
   systemctl() {
@@ -2400,12 +2509,12 @@ echo '== the reaper works in seconds, and refuses to guess =='
   # setting the tool accepted did nothing whatever.
   back="$(( $(date +%s) - 3600 ))"
   printf '%s\n' "${back}" > "${REAPDIR}/dora"
-  printf '%s\n' "${back}" > "${REAPDIR}/eph0"
+  printf '%s\n' "${back}" > "${REAPDIR}/_hdw4s_0"
   printf 'HDW4S_IDLE_DAYS=30m\n' > "${SB}/etc/dora.conf"
-  printf 'HDW4S_IDLE_DAYS=2h\n'  > "${SB}/etc/eph0.conf"
+  printf 'HDW4S_IDLE_DAYS=2h\n'  > "${SB}/etc/_hdw4s_0.conf"
   out="$(cmd_reap 2>/dev/null)"
   has   'a window shorter than a day fires'  "${out}" 'stopping dora'
-  hasnt 'and one still inside it does not'   "${out}" 'stopping eph0'
+  hasnt 'and one still inside it does not'   "${out}" 'stopping _hdw4s_0'
   # Read back out of the message, so the arithmetic is asserted and not just the
   # selection: "1 hour", never "0 days".
   has   'and the age is reported in its own unit' "${out}" 'for 1 hour'
@@ -2418,7 +2527,7 @@ echo '== the reaper works in seconds, and refuses to guess =='
   # session on a guess.
   : > "${STOPPED}"
   printf 'HDW4S_IDLE_DAYS=30sec\n' > "${SB}/etc/dora.conf"
-  rm -f "${SB}/etc/eph0.conf"
+  rm -f "${SB}/etc/_hdw4s_0.conf"
   printf '%s\n' "$(( $(date +%s) - 864000 ))" > "${REAPDIR}/dora"
   out="$(cmd_reap 2>/dev/null)"
   hasnt 'an unreadable window does not fall back to a week' "${out}" 'stopping dora'
@@ -2430,10 +2539,10 @@ echo '== the reaper works in seconds, and refuses to guess =='
   # pool filling up has no other symptom to trace back to a configuration line.
   : > "${STOPPED}"
   rm -f "${SB}/etc/dora.conf"
-  printf 'HDW4S_IDLE_DAYS=0\n' > "${SB}/etc/eph0.conf"
-  printf '%s\n' "$(( $(date +%s) - 864000 ))" > "${REAPDIR}/eph0"
+  printf 'HDW4S_IDLE_DAYS=0\n' > "${SB}/etc/_hdw4s_0.conf"
+  printf '%s\n' "$(( $(date +%s) - 864000 ))" > "${REAPDIR}/_hdw4s_0"
   out="$(cmd_reap 2>/dev/null)"
-  hasnt 'a slot set to 0 is not reaped'      "${out}" 'stopping eph0'
+  hasnt 'a slot set to 0 is not reaped'      "${out}" 'stopping _hdw4s_0'
   has   'but the reaper says it never will be' "${out}" 'never be freed'
 )
 
@@ -2452,8 +2561,8 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
   unset JOURNAL_STREAM
   RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
   POOLDIR="${SB}/run/hdw4s-demux"
-  printf '%s\n' '1 eph0 ephemeral' > "${SLOTS}"
-  mkdir -p "${RUNDIR}/hdw4s/eph0" "${REAPDIR}" "${POOLDIR}/last-request"
+  printf '%s\n' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
+  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_0" "${REAPDIR}" "${POOLDIR}/last-request"
   ss() { :; }
   STOPPED="${SB}/stopped"; : > "${STOPPED}"
   systemctl() {
@@ -2463,48 +2572,48 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
       'stop '*)     printf '%s\n' "$2" >> "${STOPPED}";;
     esac
   }
-  printf 'HDW4S_IDLE_DAYS=1h\n' > "${SB}/etc/eph0.conf"
+  printf 'HDW4S_IDLE_DAYS=1h\n' > "${SB}/etc/_hdw4s_0.conf"
   now="$(date +%s)"
   stale="$(( now - 86400 ))"
-  rstamp="${POOLDIR}/last-request/eph0"
+  rstamp="${POOLDIR}/last-request/_hdw4s_0"
 
   # POSITIVE CONTROL FIRST. Without it every "not reaped" below is satisfied by
   # a reaper that no longer reaps anything, and the whole block would be green
   # on a pool that never frees a slot.
-  printf '%s\n' "${stale}" > "${REAPDIR}/eph0"
+  printf '%s\n' "${stale}" > "${REAPDIR}/_hdw4s_0"
   rm -f "${rstamp}"
   out="$(cmd_reap 2>/dev/null)"
-  has 'a stale slot with no router record is still reaped' "${out}" 'stopping eph0'
+  has 'a stale slot with no router record is still reaped' "${out}" 'stopping _hdw4s_0'
   # Which is also the arm that matters when the router is DOWN: it contributes
   # nothing to the maximum, so the reaper falls back to its own sample rather
   # than treating silence as "nobody connected". Absence is no opinion.
 
   # THE FIX. Same stale sample, and a router that saw somebody a minute ago.
   : > "${STOPPED}"
-  printf '%s\n' "${stale}" > "${REAPDIR}/eph0"
+  printf '%s\n' "${stale}" > "${REAPDIR}/_hdw4s_0"
   printf '%s\n' "$(( now - 60 ))" > "${rstamp}"
   out="$(cmd_reap 2>/dev/null)"
-  hasnt 'a request the poll missed keeps the desktop alive' "${out}" 'stopping eph0'
+  hasnt 'a request the poll missed keeps the desktop alive' "${out}" 'stopping _hdw4s_0'
   is    'and nothing was stopped' "$(wc -l < "${STOPPED}")" '0'
 
   # AND IT MAY ONLY EXTEND. An old router record against a fresh sample must not
   # pull the deadline forward: this witness is a reason to believe somebody was
   # here, never a reason to believe nobody was.
   : > "${STOPPED}"
-  printf '%s\n' "$(( now - 60 ))" > "${REAPDIR}/eph0"
+  printf '%s\n' "$(( now - 60 ))" > "${REAPDIR}/_hdw4s_0"
   printf '%s\n' "${stale}" > "${rstamp}"
   out="$(cmd_reap 2>/dev/null)"
-  hasnt 'an old router record does not shorten a life' "${out}" 'stopping eph0'
+  hasnt 'an old router record does not shorten a life' "${out}" 'stopping _hdw4s_0'
 
   # A record in the future is a fault, not an observation. Clamping it to now
   # would re-clamp on every later run and the slot would never reap again, with
   # no other symptom -- so it is dropped, and said out loud because a slot that
   # stops reaping has nothing else to trace it back to.
   : > "${STOPPED}"
-  printf '%s\n' "${stale}" > "${REAPDIR}/eph0"
+  printf '%s\n' "${stale}" > "${REAPDIR}/_hdw4s_0"
   printf '%s\n' "$(( now + 86400 ))" > "${rstamp}"
   out="$(cmd_reap 2>/dev/null)"
-  has 'a router record in the future is ignored' "${out}" 'stopping eph0'
+  has 'a router record in the future is ignored' "${out}" 'stopping _hdw4s_0'
   has 'and the reaper says so'                   "${out}" 'in the future'
 
   # Not a timestamp. Guessing at one on the destruction side is how a desktop
@@ -2512,7 +2621,7 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
   : > "${STOPPED}"
   printf 'yesterday\n' > "${rstamp}"
   out="$(cmd_reap 2>/dev/null)"
-  has 'an unreadable router record is ignored' "${out}" 'stopping eph0'
+  has 'an unreadable router record is ignored' "${out}" 'stopping _hdw4s_0'
   has 'and the reaper says so'                 "${out}" 'not a timestamp'
 
   # A symlink is refused outright. The router only ever os.replace()s a regular
@@ -2526,7 +2635,7 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
   rm -f "${rstamp}"; ln -s "${secret}" "${rstamp}"
   out="$(cmd_reap 2>/dev/null)"
   has   'a symlinked router record is refused' "${out}" 'symlink'
-  has   'and the slot is reaped on the sample alone' "${out}" 'stopping eph0'
+  has   'and the slot is reaped on the sample alone' "${out}" 'stopping _hdw4s_0'
   hasnt 'and nothing of what it pointed at is printed' "${out}" 'verysecret'
 )
 
@@ -3408,7 +3517,7 @@ echo '== a desktop is never named after its slot, and a browser numbers its own 
   # it produces must be free of digits. A loop that produced nothing would pass that,
   # so the number of rows is asserted first.
   labels() {
-    ( HDW4S_EPHEMERAL_SLOTS=20 HDW4S_EPHEMERAL_PREFIX=ephemeral HDW4S_EPHEMERAL_UID_BASE=900
+    ( HDW4S_EPHEMERAL_SLOTS=20 SEAT_PREFIX=_hdw4s_ HDW4S_EPHEMERAL_UID_BASE=900 ETCDIR=/nonexistent
       eval "$(sed -n "/^  SLOT_SPECS=''\$/,/^  done\$/p" "$1")"
       printf '%s' "${SLOT_SPECS}" | cut -f3 )
   }
@@ -3620,12 +3729,12 @@ echo '== the installed app is never named upstream, on either kind of desktop ==
     "$(field "${d}/web/named2/app.webmanifest" name)" 'Desktop|Desktop'
   is 'and the packaged one beside it' \
     "$(field "${d}/web/named2/manifest.json" name)" 'Desktop|Desktop'
-  run build --directory ephemeral0 "${d}/web/ephemeral0" Desktop \
+  run build --directory _hdw4s_0 "${d}/web/_hdw4s_0" Desktop \
     || bad 'a pool slot builds' "$(cat "${d}/err")"
   is 'a pool desktop'"'"'s app too' \
-    "$(field "${d}/web/ephemeral0/app.webmanifest" name)" 'Desktop|Desktop'
+    "$(field "${d}/web/_hdw4s_0/app.webmanifest" name)" 'Desktop|Desktop'
   is 'and its icon is upstream'"'"'s, untouched' \
-    "$(field "${d}/web/ephemeral0/app.webmanifest" icons)" \
+    "$(field "${d}/web/_hdw4s_0/app.webmanifest" icons)" \
     '[{"src": "icon-512.png", "type": "image/png", "sizes": "512x512"}]'
 
   # Seen refusing: a manifest the tree does not hold cannot be rewritten, so the
@@ -3646,11 +3755,11 @@ echo '== our own pages carry the session page'"'"'s icon, and ask for nothing ==
 # page's apple-touch-icon (a different file) must not be the one taken.
 (
   d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
-  mkdir -p "${d}/web/ephemeral0"
+  mkdir -p "${d}/web/_hdw4s_0"
   printf '<html><head><link rel="apple-touch-icon" href="big.png"><link rel="icon" type="image/png" href="icon.png" /></head></html>' \
-    > "${d}/web/ephemeral0/index.html"
-  printf 'the-small-icon' > "${d}/web/ephemeral0/icon.png"
-  printf 'the-big-icon' > "${d}/web/ephemeral0/big.png"
+    > "${d}/web/_hdw4s_0/index.html"
+  printf 'the-small-icon' > "${d}/web/_hdw4s_0/icon.png"
+  printf 'the-big-icon' > "${d}/web/_hdw4s_0/big.png"
   want="<link rel=\"icon\" href=\"data:image/png;base64,$(printf 'the-small-icon' | base64 -w0)\">"
   pages() {
     HDW4S_WEBROOT_DIR="$1" python3 - "${ROOT}/hdw4s-demux" <<'PY'
@@ -3899,7 +4008,7 @@ echo '== a credential is refused where it can exclude nobody =='
   # stub's silence.
   # shellcheck disable=SC2317
   make_credential() { echo 'stub-secret'; }
-  printf '%s\n' '0 eph0 ephemeral' '1 alice' '2 bob' > "${SLOTS}"
+  printf '%s\n' '0 _hdw4s_0 ephemeral' '1 alice' '2 bob' > "${SLOTS}"
 
   # The positive control FIRST, because a guard that refuses everything looks
   # exactly like one that refuses the right thing. A session on the network is
@@ -3919,27 +4028,27 @@ echo '== a credential is refused where it can exclude nobody =='
   hasnt 'and the secret never reaches the user' "${out}" 'stub-secret'
 
   # Now the refusal.
-  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/eph0.conf"
-  out="$( ( cmd_auth eph0 ) 2>&1 )"; rc=$?
+  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/_hdw4s_0.conf"
+  out="$( ( cmd_auth _hdw4s_0 ) 2>&1 )"; rc=$?
   is 'a session on a filesystem socket may not' "${rc}" '1'
   has 'and is told why the secret would keep nobody out' \
       "${out}" 'nothing can present a credential to it'
   # The assertion this replaced required the message to contain
-  # "hdw4s transport eph0 tcp" -- a command this same suite asserts exits 1 for
+  # "hdw4s transport _hdw4s_0 tcp" -- a command this same suite asserts exits 1 for
   # an ephemeral slot, about 470 lines above. Two green groups jointly
   # certifying a dead end: the tool printed an instruction it refuses to obey,
   # and the tests held it in place. The refusal must offer no remedy it will
   # then refuse.
   hasnt 'and offers no remedy the tool itself refuses' \
-        "${out}" 'hdw4s transport eph0 tcp'
+        "${out}" 'hdw4s transport _hdw4s_0 tcp'
   has 'and says a named desktop is a different case' \
       "${out}" 'A named desktop is a different thing'
   # A refusal, not a diagnostic printed on the way through. This is the whole
   # defect: the message would have been fine, the written line is what 401s.
   hasnt 'and nothing was written to its file' \
-        "$(cat "${ETCDIR}/eph0.conf")" 'HDW4S_AUTH'
+        "$(cat "${ETCDIR}/_hdw4s_0.conf")" 'HDW4S_AUTH'
 
-  # THE ARM THAT SEPARATES THE TWO REASONS. Above, eph0 is BOTH ephemeral and on
+  # THE ARM THAT SEPARATES THE TWO REASONS. Above, _hdw4s_0 is BOTH ephemeral and on
   # a filesystem socket, so its refusal cannot say which fact caused it -- and
   # the code used to key on the transport, which made a NAMED session on a
   # socket refuse too.
@@ -3983,8 +4092,8 @@ echo '== a credential is refused where it can exclude nobody =='
   printf 'HDW4S_TRANSPORT=unix\n' > "${CONF}"
   out="$( ( cmd_auth alice ) 2>&1 )"; rc=$?
   is 'a site-wide socket default does not refuse a named session' "${rc}" '0'
-  rm -f "${ETCDIR}/eph0.conf"
-  out="$( ( cmd_auth eph0 ) 2>&1 )"; rc=$?
+  rm -f "${ETCDIR}/_hdw4s_0.conf"
+  out="$( ( cmd_auth _hdw4s_0 ) 2>&1 )"; rc=$?
   is 'CONTROL: the ephemeral slot still refuses under that same default' "${rc}" '1'
 )
 
@@ -4005,8 +4114,8 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   RUNDIR="${SB}/run"
   HDW4S_INCARNATION_DIR="${SB}/run/hdw4s-incarnation"
   HDW4S_WEBROOT_DIR="${SB}/webroot"
-  mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}/eph0" \
-           "${HDW4S_WEBROOT_DIR}/eph1" "${HDW4S_WEBROOT_DIR}/alice"
+  mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}/_hdw4s_0" \
+           "${HDW4S_WEBROOT_DIR}/_hdw4s_1" "${HDW4S_WEBROOT_DIR}/alice"
   # A running NAMED desktop in the table throughout, and it IS the census now.
   #
   # This group used to assert the opposite: that alice was skipped, because
@@ -4022,7 +4131,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # them is reported broken at once, and a check that is always red is read as
   # noise. The difference is that those rows are now TRUE and a restart repairs
   # them. The arms below assert both directions on alice for exactly that reason.
-  printf '%s\n' '0 eph0 ephemeral' '1 eph1 ephemeral' '2 alice desktop' > "${SLOTS}"
+  printf '%s\n' '0 _hdw4s_0 ephemeral' '1 _hdw4s_1 ephemeral' '2 alice desktop' > "${SLOTS}"
 
   # THE POOL AROUND THE SESSIONS, stood in for so this group can go on being
   # about incarnation tokens. "hdw4s check" now asks first whether the machine
@@ -4032,7 +4141,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # constant in a comparison is a claim: the doors, the front-door port and the
   # failed-unit list are ASSUMED sound in this group and are exercised, in both
   # directions, in the group that follows.
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/eph0.sock ${RUNDIR}/hdw4s-proxy/eph1.sock"
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
   STUB_PORT='7280'
   STUB_FAILED=''
   STUB_SLOTS='active'
@@ -4064,10 +4173,10 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 
   # The positive control first: a check that cannot pass proves nothing when it
   # fails. Both slots sound.
-  printf '%s\n' 'aaaa' > "${HDW4S_WEBROOT_DIR}/eph0/hdw4s-incarnation"
-  printf '%s\n' 'aaaa' > "${HDW4S_INCARNATION_DIR}/eph0"
-  printf '%s\n' 'bbbb' > "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation"
-  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  printf '%s\n' 'aaaa' > "${HDW4S_WEBROOT_DIR}/_hdw4s_0/hdw4s-incarnation"
+  printf '%s\n' 'aaaa' > "${HDW4S_INCARNATION_DIR}/_hdw4s_0"
+  printf '%s\n' 'bbbb' > "${HDW4S_WEBROOT_DIR}/_hdw4s_1/hdw4s-incarnation"
+  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/_hdw4s_1"
   printf '%s\n' 'cccc' > "${HDW4S_WEBROOT_DIR}/alice/hdw4s-incarnation"
   printf '%s\n' 'cccc' > "${HDW4S_INCARNATION_DIR}/alice"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
@@ -4115,12 +4224,12 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   is  'and passes again once it has WebRTC' "${rc}" '0'
 
   # The defect itself: a live slot publishing nothing.
-  rm -f "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation" "${HDW4S_INCARNATION_DIR}/eph1"
+  rm -f "${HDW4S_WEBROOT_DIR}/_hdw4s_1/hdw4s-incarnation" "${HDW4S_INCARNATION_DIR}/_hdw4s_1"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is    'a live slot with no token fails'   "${rc}" '1'
-  has   'and the message names the slot'    "${out}" 'eph1 is running and publishes no incarnation token'
-  has   'and names the repair'              "${out}" 'systemctl restart hdw4s-ephemeral@eph1.service'
-  hasnt 'and does not accuse the sound one' "${out}" 'eph0 is running and publishes'
+  has   'and the message names the slot'    "${out}" '_hdw4s_1 is running and publishes no incarnation token'
+  has   'and names the repair'              "${out}" 'systemctl restart hdw4s-ephemeral@_hdw4s_1.service'
+  hasnt 'and does not accuse the sound one' "${out}" '_hdw4s_0 is running and publishes'
   # Which way it fails is the property. It reports; it does not restart, because
   # a check that repairs what it finds is one nobody reads, and the fact worth
   # having is that a slot ran for two hours without a publisher.
@@ -4132,29 +4241,29 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # check alone left every assertion above this one green, because both halves
   # were absent together and the second branch caught what the first no longer
   # did. One sufficient cause is not the cause.
-  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/_hdw4s_1"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'a missing served token fails on its own' "${rc}" '1'
   has 'and is named as the published half'      "${out}" 'publishes no incarnation token'
 
   # An empty file is not a token, and is the shape a truncating write leaves
   # behind for as long as it takes to finish.
-  : > "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation"
-  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  : > "${HDW4S_WEBROOT_DIR}/_hdw4s_1/hdw4s-incarnation"
+  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/_hdw4s_1"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is 'an empty published file is not a token' "${rc}" '1'
 
   # Serving a value nobody recorded is its own failure: it is what a slot looks
   # like when the previous session's token was left in a rebuilt web root.
-  printf '%s\n' 'bbbb' > "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation"
-  rm -f "${HDW4S_INCARNATION_DIR}/eph1"
+  printf '%s\n' 'bbbb' > "${HDW4S_WEBROOT_DIR}/_hdw4s_1/hdw4s-incarnation"
+  rm -f "${HDW4S_INCARNATION_DIR}/_hdw4s_1"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'a served token this start did not record fails' "${rc}" '1'
   has 'and says which half is missing' "${out}" 'recorded no incarnation token'
 
   # And a mismatch, which is the same bug one step further along: the tab is
   # told this is the desktop it had, and it is not.
-  printf '%s\n' 'cccc' > "${HDW4S_INCARNATION_DIR}/eph1"
+  printf '%s\n' 'cccc' > "${HDW4S_INCARNATION_DIR}/_hdw4s_1"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'a token that does not match the record fails' "${rc}" '1'
   has 'and says so in those terms' "${out}" 'did not publish'
@@ -4162,7 +4271,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # A slot that is not running is not this command's business: it publishes
   # nothing because nothing is there to publish, and reporting it would bury
   # the one row that matters.
-  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/eph1"
+  printf '%s\n' 'bbbb' > "${HDW4S_INCARNATION_DIR}/_hdw4s_1"
   STUB_STATE='inactive'
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'an IDLE pool with its doors open passes' "${rc}" '0'
@@ -4202,9 +4311,9 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   trap - ERR
   trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
   SLOTS="${HDW4S_ETCDIR}/instances"; RUNDIR="${SB}/run"
-  printf '%s\n' '0 eph0 ephemeral' '1 eph1 ephemeral' > "${SLOTS}"
+  printf '%s\n' '0 _hdw4s_0 ephemeral' '1 _hdw4s_1 ephemeral' > "${SLOTS}"
 
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/eph0.sock ${RUNDIR}/hdw4s-proxy/eph1.sock"
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
   STUB_PORT='7280'; STUB_FAILED=''; STUB_SLOTS='active'
   # shellcheck disable=SC2317
   ss() {
@@ -4246,11 +4355,11 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
 
   # One door shut. Not a capacity shortfall: the router mints a visitor onto the
   # name and the request fails with the slot consumed.
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/eph0.sock"
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'one slot with no listener fails'  "${rc}" '1'
-  has 'and names WHICH slot'             "${out}" 'Not listening: eph1'
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/eph0.sock ${RUNDIR}/hdw4s-proxy/eph1.sock"
+  has 'and names WHICH slot'             "${out}" 'Not listening: _hdw4s_1'
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
 
   # The front door. Asked of the kernel, not of systemd: a socket unit can be
   # active while nothing is bound.
@@ -4262,10 +4371,10 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
 
   # A latched unit. This is the shape the pool fails into when a relay's start
   # limit fires, and it stays that way until somebody clears it.
-  STUB_FAILED='hdw4s-ephemeral@eph0.service failed failed'
+  STUB_FAILED='hdw4s-ephemeral@_hdw4s_0.service failed failed'
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'a latched pool unit fails the check' "${rc}" '1'
-  has 'and names the unit'                  "${out}" 'hdw4s-ephemeral@eph0.service'
+  has 'and names the unit'                  "${out}" 'hdw4s-ephemeral@_hdw4s_0.service'
   has 'and names the repair'                "${out}" 'reset-failed'
   STUB_FAILED=''
 
@@ -4276,6 +4385,26 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   is  'unminted slot identities fail' "${rc}" '1'
   has 'and say what breaks'           "${out}" '217/USER'
   STUB_SLOTS='active'
+
+  # A TABLE STILL OFFERING THE RETIRED NAMES, as an upgraded install has it.
+  # Everything else about the pool is sound here -- doors listening, the
+  # minter active -- so the only thing this arm can be red about is the names.
+  printf '%s\n' '0 ephemeral0 ephemeral' '1 _hdw4s_1 ephemeral' > "${SLOTS}"
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/ephemeral0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
+  HDW4S_EPHEMERAL_SLOTS=2
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a row under a retired name fails the check' "${rc}" '1'
+  has 'and names it' "${out}" 'seats this version never mints: ephemeral0'
+  hasnt 'and not the seat beside it' "$(printf '%s\n' "${out}" | grep 'never mints')" '_hdw4s_1'
+  has 'and the repair, at the configured size' "${out}" 'hdw4s pool size 2'
+  printf '%s\n' '0 _hdw4s_0 ephemeral' '1 _hdw4s_1 ephemeral' > "${SLOTS}"
+  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
+  # The retired setting is said, and is not a failure: it changes nothing.
+  HDW4S_EPHEMERAL_PREFIX=ephemeral
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  unset HDW4S_EPHEMERAL_PREFIX
+  is  'a leftover HDW4S_EPHEMERAL_PREFIX does not fail the check' "${rc}" '0'
+  has 'but is named as read by nothing' "${out}" 'HDW4S_EPHEMERAL_PREFIX is set, and nothing reads it'
 
   # A table that EXISTS and cannot be read is not "no sessions to check": the
   # router answers every arrival 503 in exactly that state.
@@ -4769,32 +4898,32 @@ echo '== the teardown ends a desktop that is still starting =='
   # One run of the script against a fresh stand-in, in STATE. Prints what it said.
   teardown_in() {
     rm -rf "${d}/req" "${d}/cg"; : > "${d}/log"
-    mkdir -p "${d}/req" "${d}/cg/hdw4s-ephemeral0.slice"
-    echo 999999999 > "${d}/cg/hdw4s-ephemeral0.slice/cgroup.procs"
-    : > "${d}/cg/hdw4s-ephemeral0.slice/cgroup.kill"
+    mkdir -p "${d}/req" "${d}/cg/hdw4s-_hdw4s_0.slice"
+    echo 999999999 > "${d}/cg/hdw4s-_hdw4s_0.slice/cgroup.procs"
+    : > "${d}/cg/hdw4s-_hdw4s_0.slice/cgroup.kill"
     STUB_LOG="${d}/log" STUB_STATE="$1" \
       HDW4S_TEARDOWN_DIR="${d}/req" HDW4S_SESSION_CGROUP_ROOT="${d}/cg" \
-      bash "${2:-${ROOT}/hdw4s-teardown}" ephemeral0 2>&1
+      bash "${2:-${ROOT}/hdw4s-teardown}" _hdw4s_0 2>&1
   }
-  killed() { cat "${d}/cg/hdw4s-ephemeral0.slice/cgroup.kill"; }
+  killed() { cat "${d}/cg/hdw4s-_hdw4s_0.slice/cgroup.kill"; }
 
   # THE CONTROL FIRST: an active desktop is ended, so the rig can see an ending.
   out="$(teardown_in active)"
   is 'an active desktop is ended through its own cgroup' "$(killed)" '1'
-  has 'and its unit is stopped' "$(cat "${d}/log")" 'stop hdw4s-ephemeral@ephemeral0.service'
+  has 'and its unit is stopped' "$(cat "${d}/log")" 'stop hdw4s-ephemeral@_hdw4s_0.service'
 
   # THE DEFECT: an activating desktop is ended too.
   out="$(teardown_in activating)"
   hasnt 'an activating desktop is not "nothing to end"' "${out}" 'nothing to end'
   is 'an activating desktop is ended through its own cgroup' "$(killed)" '1'
-  has 'and its start is cancelled by a stop' "$(cat "${d}/log")" 'stop hdw4s-ephemeral@ephemeral0.service'
+  has 'and its start is cancelled by a stop' "$(cat "${d}/log")" 'stop hdw4s-ephemeral@_hdw4s_0.service'
 
   # THE PERMIT ARM: a unit that is not running is not killed, but any start still
   # queued for it is replaced by a stop.
   out="$(teardown_in inactive)"
   has 'an inactive desktop is nothing to end' "${out}" 'nothing to end'
   is 'and nothing is killed' "$(killed)" ''
-  has 'but a pending start is still cancelled' "$(cat "${d}/log")" 'stop --no-block hdw4s-ephemeral@ephemeral0.service'
+  has 'but a pending start is still cancelled' "$(cat "${d}/log")" 'stop --no-block hdw4s-ephemeral@_hdw4s_0.service'
 
   # RED ARM: the defect put back -- only "active" is worth ending -- must lose the
   # activating desktop, or the arms above are not about this line.
@@ -4851,7 +4980,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=824   # update when tests are added; a wrong number is the point
+EXPECTED=855   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

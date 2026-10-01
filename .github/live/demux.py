@@ -744,7 +744,7 @@ class Rig:
         self.windows = windows
         self.instances = os.path.join(self.etc, "instances")
         names = ([n for n, _ in windows] if windows is not None
-                 else ["ephemeral%d" % i for i in range(nslots)])
+                 else ["_hdw4s_%d" % i for i in range(nslots)])
         with open(self.instances, "w") as f:
             for i, name in enumerate(names):
                 f.write("%d %s ephemeral\n" % (i, name))
@@ -795,7 +795,7 @@ class Rig:
         self._watching = True
         self.slots = []
         for i in range(nslots):
-            name = "ephemeral%d" % i
+            name = "_hdw4s_%d" % i
             s = Slot(os.path.join(self.rundir, name + ".sock"), name,
                      os.path.join(self.hdw4s_rundir, "hdw4s", name),
                      webroot=self.webroot, stream=self.streams.get(name))
@@ -1328,7 +1328,7 @@ def test_a_visitor_can_discard_their_own_session(rig):
         "ending a desktop recorded %r rather than one request" % (left,)
     # The request names the SLOT, because that is what a teardown acts on, and
     # it must be the slot this visitor's session is actually in.
-    assert left[0].startswith("ephemeral"), \
+    assert left[0].startswith("_hdw4s_"), \
         "the teardown request was not named after a slot: %r" % left
 
     # And the list then says so rather than offering the button again.
@@ -2296,8 +2296,8 @@ def test_exhaustion(rig):
 
 def slot_named(rig, name):
     """The stand-in backend a name refers to. DERIVED from the name the router
-    reported, never indexed off the end of the string: "ephemeral10" would have
-    reaped ephemeral0, and the test would still have gone red -- for the wrong
+    reported, never indexed off the end of the string: "_hdw4s_10" would have
+    reaped _hdw4s_0, and the test would still have gone red -- for the wrong
     reason, which is the failure that looks most like success."""
     for s in rig.slots:
         if s.name == name:
@@ -3047,7 +3047,7 @@ def test_a_slot_that_is_never_reaped_is_reported_at_start():
     outlive any identity however long. The derivation cannot fix that and must
     not pretend to; it says so at start, where somebody can act on it.
     """
-    rig = Rig(nslots=1, windows=[("ephemeral0", 0)])
+    rig = Rig(nslots=1, windows=[("_hdw4s_0", 0)])
     try:
         text = rig.stderr_text()
         assert "never reaped" in text, \
@@ -3102,7 +3102,7 @@ def test_a_sub_day_window_is_not_read_as_never(rig):
     assert "never reaped" not in text, (
         "a twelve-hour window was reported as never reaped -- the window was "
         "truncated to whole days:\n%s" % text)
-    assert "ephemeral0=12h" in text, (
+    assert "_hdw4s_0=12h" in text, (
         "the router did not state a twelve-hour window as twelve hours:\n%s"
         % text)
 
@@ -3427,11 +3427,11 @@ def test_identity_lifetime_is_rechecked_without_a_refusal(rig=None):
 
     # A correct pool is silent from cold. Without this the arm below could be
     # satisfied by something that complains about everything.
-    _, quiet = poll(set(), [("ephemeral0", 7 * 86400)])
+    _, quiet = poll(set(), [("_hdw4s_0", 7 * 86400)])
     assert not quiet, "an ordinary pool produced a warning: %r" % quiet
 
     # REFUSE ARM: a window widened past the pinned identity, nobody refused.
-    seen, said = poll(set(), [("ephemeral0", 45 * 86400)])
+    seen, said = poll(set(), [("_hdw4s_0", 45 * 86400)])
     assert any("not shorter than" in s for s in said), (
         "an idle window longer than the pinned identity went unreported with "
         "no refusal to trigger it: %r" % said)
@@ -3439,19 +3439,19 @@ def test_identity_lifetime_is_rechecked_without_a_refusal(rig=None):
         "the line does not say why it appeared, so a reader cannot act on it"
 
     # THE ANTI-SPAM ARM. Same state, same answer, and it must be silent.
-    seen, again = poll(seen, [("ephemeral0", 45 * 86400)])
+    seen, again = poll(seen, [("_hdw4s_0", 45 * 86400)])
     assert not again, (
         "a standing complaint was restated: four lines an hour for as long as "
         "the condition lasts is how a check gets disabled: %r" % again)
 
     # A NEW slot going bad must not be hidden behind the standing one.
-    seen, more = poll(seen, [("ephemeral0", 45 * 86400), ("ephemeral1", 0)])
+    seen, more = poll(seen, [("_hdw4s_0", 45 * 86400), ("_hdw4s_1", 0)])
     assert any("never reaped" in s for s in more), \
         "a second slot went bad and was hidden by the first: %r" % more
 
     # And the question is closed by the instrument that raised it.
-    seen, cleared = poll(seen, [("ephemeral0", 7 * 86400),
-                                ("ephemeral1", 7 * 86400)])
+    seen, cleared = poll(seen, [("_hdw4s_0", 7 * 86400),
+                                ("_hdw4s_1", 7 * 86400)])
     assert any("no longer applies" in s for s in cleared), (
         "the condition cleared and the log still carries two warnings: a "
         "warning nobody ever retracts teaches a reader to ignore them")
@@ -3511,7 +3511,7 @@ def test_a_socket_outside_the_table_is_never_minted(rig):
     c = rig.client()
     _, body = arrive(rig, c)
     got = body.split("SLOT=")[1].split()[0]
-    assert got == "ephemeral0", \
+    assert got == "_hdw4s_0", \
         "the control visitor did not reach the one pool slot: %s" % got
 
     c2 = rig.client()
@@ -3739,7 +3739,7 @@ def test_the_row_says_when_the_desktop_goes_by_itself(rig=None):
     them -- which is also the spelling that a "%d" fixture could not express
     and that let a duration defect ship once already.
     """
-    rig = Rig(windows=[("ephemeral0", "30d"), ("ephemeral1", "15m")])
+    rig = Rig(windows=[("_hdw4s_0", "30d"), ("_hdw4s_1", "15m")])
     try:
         a, b = rig.client(), rig.client()
         arrive(rig, a)
@@ -4715,7 +4715,7 @@ def concurrent_lettings(path, entry, nslots, nvisitors):
     import io
     m = load_demux_from(path)
     tmp = tempfile.mkdtemp(prefix="demux-concurrent-")
-    pool = ["ephemeral%d" % i for i in range(nslots)]
+    pool = ["_hdw4s_%d" % i for i in range(nslots)]
     m.ephemeral_slots = lambda table=None: list(pool)
     m.occupancy_readable = lambda rundir=None: False
     m.listening_paths = lambda *a, **kw: None
@@ -4882,7 +4882,7 @@ def reclaim_holds_the_letting(path):
     def request(instance):
         seen.append(own.letting.locked())
         return None
-    m.reclaim_slot(own, "0" * 32, {"instance": "ephemeral0"}, "a test",
+    m.reclaim_slot(own, "0" * 32, {"instance": "_hdw4s_0"}, "a test",
                    request=request)
     assert seen, "reclaim_slot() never asked for a teardown, so nothing was tested"
     return seen[0]
@@ -6271,10 +6271,10 @@ def test_a_table_with_lettings_that_ended_unseen_is_settled_at_start(rig=None):
         return {"identity": ident, "instance": inst, "minted": minted,
                 "live": True, "incarnation": "i%d" % int(minted),
                 "ended": ended, "ended_at": None}
-    rows = {"a" * 32: row("x" * 32, "ephemeral0", now - 900),
-            "b" * 32: row("y" * 32, "ephemeral0", now - 600),
-            "c" * 32: row("z" * 32, "ephemeral0", now - 300),
-            "d" * 32: row("w" * 32, "ephemeral1", now - 800)}
+    rows = {"a" * 32: row("x" * 32, "_hdw4s_0", now - 900),
+            "b" * 32: row("y" * 32, "_hdw4s_0", now - 600),
+            "c" * 32: row("z" * 32, "_hdw4s_0", now - 300),
+            "d" * 32: row("w" * 32, "_hdw4s_1", now - 800)}
     with open(path, "w") as f:
         json.dump({"version": 1, "sessions": rows}, f)
     try:
@@ -6284,7 +6284,7 @@ def test_a_table_with_lettings_that_ended_unseen_is_settled_at_start(rig=None):
                          "c" * 32: False, "d" * 32: False}, (
             "the lettings a later letting of their slot superseded were not "
             "settled at start (True = ended): %r" % ended)
-        assert own.holders_of("ephemeral0", besides="c" * 32) == [], \
+        assert own.holders_of("_hdw4s_0", besides="c" * 32) == [], \
             "a settled letting still counts as holding its slot"
         with open(path) as f:
             written = json.load(f)["sessions"]
@@ -6479,7 +6479,7 @@ def grace_edge(path):
     for d in ("run/hdw4s", "reserved", "start", "teardown"):
         os.makedirs(os.path.join(tmp, d))
     m.log = lambda msg: None
-    m.ephemeral_slots = lambda table=None: ["ephemeral0"]
+    m.ephemeral_slots = lambda table=None: ["_hdw4s_0"]
     m.SESSION_RUNDIR = os.path.join(tmp, "run", "hdw4s")
     m.RESERVE_DIR = os.path.join(tmp, "reserved")
     m.START_DIR = os.path.join(tmp, "start")
@@ -6580,17 +6580,17 @@ def main():
     # answer has to be given a window long enough to beat it.
     configured = [
         (test_cookie_max_age_is_the_derived_lifetime,
-         dict(nslots=1, windows=[("ephemeral0", 40)])),
+         dict(nslots=1, windows=[("_hdw4s_0", 40)])),
         (test_derivation_complains_when_a_window_outgrows_the_pinned_lifetime,
-         dict(nslots=1, windows=[("ephemeral0", 1)])),
+         dict(nslots=1, windows=[("_hdw4s_0", 1)])),
         # Written the way an administrator writes them, which the fixture
         # could not express until it stopped formatting windows with "%d".
         (test_a_suffixed_window_is_honoured,
-         dict(nslots=1, windows=[("ephemeral0", "30d")])),
+         dict(nslots=1, windows=[("_hdw4s_0", "30d")])),
         (test_a_sub_day_window_is_not_read_as_never,
-         dict(nslots=1, windows=[("ephemeral0", "12h")])),
+         dict(nslots=1, windows=[("_hdw4s_0", "12h")])),
         (test_an_unreadable_window_is_loud_and_is_not_a_default,
-         dict(nslots=1, windows=[("ephemeral0", "30x")])),
+         dict(nslots=1, windows=[("_hdw4s_0", "30x")])),
         # UNPINNED gate, because the question is what the SHIPPED arm does with
         # a returning visitor whose desktop is gone. Under the pinned mint arm
         # the front door mints a fresh session and the test passes while saying

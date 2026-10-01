@@ -29,7 +29,7 @@ After=hdw4s-ephemeral-slots.service
 # wrote -- and that catches the unit failing, the unit writing nothing, the unit being
 # skipped, and the file being removed afterwards. Requires= would catch one of those
 # four and charge a stop-propagation footgun for it: stopping a dead RemainAfterExit=no
-# oneshot still propagates, so "systemctl stop hdw4s-incarnation@ephemeral0" -- which
+# oneshot still propagates, so "systemctl stop hdw4s-incarnation@_hdw4s_0" -- which
 # reads as a no-op -- would take down a live desktop.
 #
 # After= is what actually orders it. Type=oneshot means systemd will not run this unit's
@@ -84,7 +84,7 @@ UMask=0077
 # are what the machine schedules; they are not what the session is shown.
 #
 # Hiding the name is cosmetic, and says so plainly: a session that learned it
-# was "ephemeral3" could do nothing with the knowledge, because the isolation is
+# was "_hdw4s_3" could do nothing with the knowledge, because the isolation is
 # the uid, the namespace and the empty /home, none of which a name unlocks.
 #
 # The fixed HOME is not cosmetic. A profile used as a template encodes absolute

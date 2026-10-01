@@ -735,9 +735,9 @@ def choose(instance, token, kind=None):
       hashing having no digits to find.
 
     The kind is inferred from the name when the caller does not say: a trailing
-    number is a slot, anything else is a person's. The prefix is an
-    administrator setting, so it is the TRAILING digits that identify a slot and
-    never a fixed-length prefix.
+    number is a slot (_hdw4s_3), anything else is a person's. It is the
+    TRAILING digits that identify a slot and never a fixed-length prefix, so the
+    hue does not depend on how the seats happen to be spelled.
     """
     n = slot_number(instance)
     if kind is None:

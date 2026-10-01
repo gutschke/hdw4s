@@ -5,9 +5,10 @@
 # unprivileged user and only for the few actions that rule is about, so it must
 # be cheap and must never guess yes.
 #
-# THE EVIDENCE IS AN ARTEFACT ONLY THE MINTER MAKES, not the name: pool slots
-# follow a prefix but template rows are named by the administrator, and a
-# pattern would either miss those or catch a real person called "ephemeral3".
+# THE EVIDENCE IS AN ARTEFACT ONLY THE MINTER MAKES, not the name: pool seats
+# are _hdw4s_<n>, but a template row made by an older version carries whatever
+# name the administrator gave it, and a pattern would miss it -- or, written
+# loosely enough to catch it, catch a real person too.
 # hdw4s-ephemeral-slots writes the slot's own passwd view under
 # /run/hdw4s-ns/<name>/ as root, for slots and nothing else, and /run is empty
 # after every boot, so a stale answer cannot outlive the slot table.

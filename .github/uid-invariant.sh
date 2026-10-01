@@ -527,7 +527,7 @@ check_clean() {
 # selftest uses to plant a world-writable one without touching /run. When it is
 # set, the answer is about that directory and the report says so.
 check_rundir() {
-  local slot="${1:-ephemeral0}" id row parent dir fixture='' probe own msg
+  local slot="${1:-_hdw4s_0}" id row parent dir fixture='' probe own msg
   row="$(getent passwd "${slot}" 2>/dev/null || true)"
   if [ -z "${row}" ]; then skip "rundir ${slot}" 'no such identity'; return; fi
   row="${row#*:}"; row="${row#*:}"; id="${row%%:*}"
@@ -741,12 +741,12 @@ check_selftest() {
   expect green 'static, drop-in restored' "${self}" static "${tmp}"
 
   # The comparison in "distinct", against a map it cannot have produced itself.
-  printf 'hdw4s-ephemeral@ephemeral0.service 60900 60900\nhdw4s-ephemeral@ephemeral1.service 60901 60901\n' \
+  printf 'hdw4s-ephemeral@_hdw4s_0.service 60900 60900\nhdw4s-ephemeral@_hdw4s_1.service 60901 60901\n' \
     > "${tmp}/ok.map"
-  printf 'hdw4s-ephemeral@ephemeral0.service 60900 60900\nhdw4s-ephemeral@ephemeral1.service 60900 60900\n' \
+  printf 'hdw4s-ephemeral@_hdw4s_0.service 60900 60900\nhdw4s-ephemeral@_hdw4s_1.service 60900 60900\n' \
     > "${tmp}/dup.map"
-  printf 'hdw4s-ephemeral@ephemeral0.service 60900 60901\n' > "${tmp}/euid.map"
-  printf 'hdw4s-ephemeral@ephemeral0.service 0 0\n' > "${tmp}/root.map"
+  printf 'hdw4s-ephemeral@_hdw4s_0.service 60900 60901\n' > "${tmp}/euid.map"
+  printf 'hdw4s-ephemeral@_hdw4s_0.service 0 0\n' > "${tmp}/root.map"
   HDW4S_UID_FIXTURE="${tmp}/ok.map"   expect green 'distinct, two different uids' "${self}" distinct
   HDW4S_UID_FIXTURE="${tmp}/dup.map"  expect red   'distinct, one uid twice'      "${self}" distinct
   HDW4S_UID_FIXTURE="${tmp}/euid.map" expect red   'distinct, euid != uid'        "${self}" distinct
@@ -766,9 +766,9 @@ check_selftest() {
   # "clean" is proved against the real machine or not at all: it reads ipcs, the
   # process table and the filesystem, and a fixture for those would be a check of
   # the fixture. Where there is no parked slot to ask about, say so.
-  if [ "$(id -u)" = '0' ] && getent passwd ephemeral0 >/dev/null 2>&1 &&
-     [ "$(systemctl is-active hdw4s-ephemeral@ephemeral0.service 2>/dev/null || true)" != 'active' ]; then
-    local id; id="$(getent passwd ephemeral0 | cut -d: -f3)"
+  if [ "$(id -u)" = '0' ] && getent passwd _hdw4s_0 >/dev/null 2>&1 &&
+     [ "$(systemctl is-active hdw4s-ephemeral@_hdw4s_0.service 2>/dev/null || true)" != 'active' ]; then
+    local id; id="$(getent passwd _hdw4s_0 | cut -d: -f3)"
 
     expect green 'distinct, before the evasion is planted' "${self}" distinct
     cat > /run/systemd/system/hdw4s-ephemeral@zzselftest.service <<EOF
@@ -776,7 +776,7 @@ check_selftest() {
 Description=uid-invariant selftest: holds the uid openly
 [Service]
 Type=simple
-User=ephemeral0
+User=_hdw4s_0
 ExecStart=/bin/sleep 30
 EOF
     cat > /run/systemd/system/hdw4s@zzselftest.service <<EOF
@@ -804,16 +804,16 @@ EOF
     systemctl daemon-reload
     expect green 'distinct, evasion removed again' "${self}" distinct
 
-    expect green 'clean, parked slot as it stands' "${self}" clean ephemeral0
-    install -d -m 0700 -o "${id}" -g "${id}" /run/hdw4s/ephemeral0
-    expect red 'clean, runtime directory planted' "${self}" clean ephemeral0
-    rm -rf /run/hdw4s/ephemeral0
+    expect green 'clean, parked slot as it stands' "${self}" clean _hdw4s_0
+    install -d -m 0700 -o "${id}" -g "${id}" /run/hdw4s/_hdw4s_0
+    expect red 'clean, runtime directory planted' "${self}" clean _hdw4s_0
+    rm -rf /run/hdw4s/_hdw4s_0
     : > /tmp/.uid-invariant-selftest && chown "${id}:${id}" /tmp/.uid-invariant-selftest
     EXPECT_MATCH="uid   /tmp/.uid-invariant-selftest" \
-      expect red 'clean, one owned file planted' "${self}" clean ephemeral0
+      expect red 'clean, one owned file planted' "${self}" clean _hdw4s_0
     unset EXPECT_MATCH
     rm -f /tmp/.uid-invariant-selftest
-    expect green 'clean, both removed again' "${self}" clean ephemeral0
+    expect green 'clean, both removed again' "${self}" clean _hdw4s_0
 
     # The three arms below are the rewrite of 2026-09-23, and they are planted
     # with setfacl, chmod and touch -- never by editing this script. An earlier
@@ -828,7 +828,7 @@ EOF
     : > "${aclf}"; chmod 0640 "${aclf}"   # root-owned on purpose: NOT chowned
     if command -v setfacl >/dev/null 2>&1 && setfacl -m "u:${id}:r--" "${aclf}" 2>/dev/null; then
       EXPECT_MATCH="acl   user:${id}:" \
-        expect red 'clean, root-owned file granting the uid by ACL' "${self}" clean ephemeral0
+        expect red 'clean, root-owned file granting the uid by ACL' "${self}" clean _hdw4s_0
       unset EXPECT_MATCH
     else
       # Not a silent pass. setfacl refuses a uid outside the container's uid map
@@ -845,7 +845,7 @@ EOF
     local namef="/tmp/.uid-invariant-selftest-user-${id}.journal"
     : > "${namef}"; chmod 0640 "${namef}"
     EXPECT_MATCH="name  ${namef}" \
-      expect red 'clean, a path naming the uid' "${self}" clean ephemeral0
+      expect red 'clean, a path naming the uid' "${self}" clean _hdw4s_0
     unset EXPECT_MATCH
 
     # Third, and it is the one that keeps the arm usable: the SAME file, world
@@ -854,15 +854,15 @@ EOF
     # still be switched on in a year.
     chmod 0644 "${namef}"
     expect green 'clean, a world-readable path naming the uid is not a finding' \
-      "${self}" clean ephemeral0
+      "${self}" clean _hdw4s_0
     rm -f "${namef}"
 
     # And then the real one, which is the measurement rather than the proof of
     # the comparison. It skips where there is no /run/hdw4s to ask about, and a
     # skip is not a pass -- it says so on its own line.
-    expect green 'rundir, the real parent as it stands' "${self}" rundir ephemeral0
+    expect green 'rundir, the real parent as it stands' "${self}" rundir _hdw4s_0
   else
-    skip 'selftest clean' 'needs root and a parked ephemeral0 on this machine'
+    skip 'selftest clean' 'needs root and a parked _hdw4s_0 on this machine'
   fi
 
   # "rundir", against a FABRICATED parent. These arms need root -- setpriv, and
@@ -874,7 +874,7 @@ EOF
   # exactly that reason: folded in with "clean", four arms that need nothing of
   # the sort would skip on every box with a session running, which is most of
   # them.
-  if [ "$(id -u)" = '0' ] && getent passwd ephemeral0 >/dev/null 2>&1; then
+  if [ "$(id -u)" = '0' ] && getent passwd _hdw4s_0 >/dev/null 2>&1; then
     local fake="${tmp}/parent"
     # The SCRATCH DIRECTORY has to be traversable, and finding that out is the
     # best thing these arms have done so far. mktemp -d makes 0700 root-owned,
@@ -896,7 +896,7 @@ EOF
     install -d -m 0755 -o root -g root "${fake}"
     HDW4S_RUNDIR_PARENT="${fake}" \
       expect green 'rundir, a root-owned 0755 parent refuses the slot uid' \
-      "${self}" rundir ephemeral0
+      "${self}" rundir _hdw4s_0
 
     # THE ARM THIS ASSERTION EXISTS FOR. If systemd ever hands the intermediate
     # component to the session user -- which is what two readers disagreed about
@@ -904,7 +904,7 @@ EOF
     chmod 0777 "${fake}"
     EXPECT_MATCH='mkdir sibling' \
       HDW4S_RUNDIR_PARENT="${fake}" \
-      expect red 'rundir, a world-writable parent' "${self}" rundir ephemeral0
+      expect red 'rundir, a world-writable parent' "${self}" rundir _hdw4s_0
     unset EXPECT_MATCH
 
     # And the CONTROL has to be seen failing too, or a green line could be three
@@ -916,25 +916,25 @@ EOF
     EXPECT_MATCH='control' \
       HDW4S_RUNDIR_PARENT="${fake}" \
       expect red 'rundir, the identity control cannot write its own directory' \
-      "${self}" rundir ephemeral0
+      "${self}" rundir _hdw4s_0
     unset EXPECT_MATCH
 
     chmod 0755 "${fake}"
     HDW4S_RUNDIR_PARENT="${fake}" \
       expect green 'rundir, the fabricated parent restored' \
-      "${self}" rundir ephemeral0
+      "${self}" rundir _hdw4s_0
     chmod 0700 "${tmp}"
   else
-    skip 'selftest rundir' 'needs root and an ephemeral0 identity on this machine'
+    skip 'selftest rundir' 'needs root and an _hdw4s_0 identity on this machine'
   fi
 }
 
 case "${1:-}" in
   static)   check_static "${2:-.}" ;;
   distinct) check_distinct ;;
-  clean)    shift; [ "$#" -gt 0 ] || set -- ephemeral0
+  clean)    shift; [ "$#" -gt 0 ] || set -- _hdw4s_0
             for s in "$@"; do check_clean "${s}"; done ;;
-  rundir)   check_rundir "${2:-ephemeral0}" ;;
+  rundir)   check_rundir "${2:-_hdw4s_0}" ;;
   selftest) check_selftest "${2:-.}" ;;
   *) echo "usage: $0 static [<tree>] | distinct | clean <slot>... | rundir [<slot>] | selftest [<tree>]" >&2
      exit 2 ;;

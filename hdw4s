@@ -362,8 +362,8 @@ SESSION_TYPES='desktop ephemeral template'
 
 # What kind of session an instance is. Recorded in the table rather than guessed
 # from the name, because six readers need the answer long after "hdw4s enable"
-# has exited, and a name prefix would make a configurable string load-bearing in
-# all of them. A row written by an older version has two fields and means
+# has exited, and a name pattern would make the spelling of a name load-bearing
+# in all of them. A row written by an older version has two fields and means
 # "desktop", which is what every session was when it was written.
 type_of() {
   local t=''
@@ -431,15 +431,35 @@ in_ephemeral_pool() {
 # wrote a row that later turned their own desktop into an authoring slot.
 #
 # A LEADING UNDERSCORE, because it cannot collide with a person. adduser's
-# default NAME_REGEX refuses it for an ordinary account, the pool's names are
-# HDW4S_EPHEMERAL_PREFIX -- lowercase letters only -- plus a number, and systemd
-# accepts it unchanged as an instance name, a userdb record and a journal
-# namespace. "-" was the other candidate and is wrong: "%I" unescapes it to "/".
+# default NAME_REGEX refuses it for an ordinary account, and systemd accepts it
+# unchanged as an instance name, a userdb record and a journal namespace. "-"
+# was the other candidate and is wrong: "%I" unescapes it to "/", and in
+# "hdw4s-%i.slice" it would nest the slot's slice one level further down.
 #
 # An install whose table already has a row typed "template" keeps using THAT row
 # -- see provision_template -- so this name is what a fresh install gets, not a
 # rename imposed on an existing one.
 TEMPLATE_SLOT='_hdw4s_author'
+
+# WHAT EVERY SEAT OF THE EPHEMERAL POOL IS CALLED: this, and its number --
+# _hdw4s_0, _hdw4s_1, ... -- for the reason the authoring slot is called what it
+# is. The seats used to be "ephemeral0", "ephemeral1", ..., under a prefix the
+# administrator could change, and a name like that is one a person can have:
+# it read as somebody's account in "hdw4s list", in a process listing and in
+# the journal, and a real "ephemeral3" could not be told from seat 3 by name.
+#
+# FIXED, AND NOT A SETTING. HDW4S_EPHEMERAL_PREFIX is retired: a configurable
+# spelling of a name nobody ever types is an internal detail the administrator
+# was made to own, and every reader that had to agree on it was a reader that
+# could disagree. Spelled again, literally, in hdw4s-ephemeral-slots, which
+# mints the seats; .github/tests.sh holds the two copies together.
+#
+# A TABLE STILL CARRYING THE OLD NAMES IS REFUSED, NOT TRANSLATED. Nothing mints
+# an identity for them any more, so each is a door onto a desktop that cannot
+# start. The boot run of the minter refuses to mint the pool while one is there
+# and "hdw4s check" fails on it; "hdw4s pool size" replaces them, because a row
+# that is not a seat is the first thing it takes away.
+SEAT_PREFIX='_hdw4s_'
 
 # Where hdw4s-ephemeral-slots writes each minted slot's own passwd view. The
 # same variable the minter reads, so a test that points one somewhere disposable
@@ -1156,12 +1176,13 @@ cmd_check() {
   # and the authority for that question is the router's own records, not this
   # command's reading of systemd. That state needs an instrument that belongs to
   # the router; pretending this arm covers it would be worse than the silence.
-  local slot_total=0 doors=0 shut='' listen port
+  local slot_total=0 doors=0 shut='' listen port retired=''
   while read -r idx inst _; do
     case "${idx}" in ''|\#*) continue;; esac
     case "${inst}" in *:*) continue;; esac
     [ "$(type_of "${inst}")" = 'ephemeral' ] || continue
     slot_total=$(( slot_total + 1 ))
+    [ -n "$(seat_index "${inst}")" ] || retired="${retired} ${inst}"
     if unix_listener "${RUNDIR}/hdw4s-proxy/${inst}.sock"; then
       doors=$(( doors + 1 ))
     else
@@ -1169,7 +1190,36 @@ cmd_check() {
     fi
   done < <(sort -n "${SLOTS}")
 
+  # THE RETIRED SETTING, said and not counted: nothing reads it any more, so a
+  # line still carrying it changes nothing -- which is exactly why it is worth
+  # a sentence. An administrator who set it expects it to mean something.
+  if [ -n "${HDW4S_EPHEMERAL_PREFIX+set}" ]; then
+    printf '%s\n' \
+      'hdw4s: HDW4S_EPHEMERAL_PREFIX is set, and nothing reads it any more.' \
+      "  The pool's seats are always named ${SEAT_PREFIX}0, ${SEAT_PREFIX}1, ...;" \
+      "  delete the line from ${CONF}." >&2
+  fi
+
   if [ "${slot_total}" -gt 0 ]; then
+    # ROWS UNDER NAMES THAT ARE NOT SEATS -- after an upgrade, the retired
+    # "ephemeral0", "ephemeral1", ... (see SEAT_PREFIX). FIRST, because it is
+    # the cause of most of what the arms below would then report: the boot
+    # minter refuses to mint the pool while one is there, so the unit is
+    # failed and every door below leads nowhere. Said once, here, with the
+    # repair, rather than left to be inferred from four symptoms.
+    if [ -n "${retired}" ]; then
+      printf '%s\n' \
+        "hdw4s: the slot table offers visitors seats this version never mints:${retired}" \
+        "  Seats of the ephemeral pool are named ${SEAT_PREFIX}0, ${SEAT_PREFIX}1, ...; the" \
+        '  ephemeral0, ephemeral1, ... of earlier versions are retired, and nothing' \
+        '  makes an account for them, so a visitor sent to one gets a desktop that' \
+        '  cannot start. The boot refuses to mint the pool until they are gone.' \
+        '  Replace them with seats under the new names, then start the pool:' \
+        "    hdw4s pool size ${HDW4S_EPHEMERAL_SLOTS:-1}" \
+        '    systemctl start hdw4s-ephemeral-slots.service' >&2
+      pool_bad=$(( pool_bad + 1 ))
+    fi
+
     # The accounts the slots run as are minted at boot into a tmpfs. Without
     # them User= does not resolve and every start dies 217/USER, which reads as
     # a broken service rather than as a missing account.
@@ -3703,7 +3753,7 @@ provision_template() {
 # reader:
 #
 #   HDW4S_EPHEMERAL_SLOTS   what the NEXT BOOT mints identities for: seats
-#                           <prefix>0 .. <prefix>N-1, a prefix and nothing else
+#                           _hdw4s_0 .. _hdw4s_N-1, from 0 with no gaps
 #   the minted identities   what can start NOW (/run, gone at every boot)
 #   the rows in the table   what the router OFFERS, re-read on every arrival
 #
@@ -3716,10 +3766,10 @@ provision_template() {
 # command again with the same number finishes whatever was interrupted, because
 # it compares all three against the number rather than applying a difference.
 #
-# WHY SEATS GO FROM THE TOP. The setting describes a prefix, so a seat taken out
+# WHY SEATS GO FROM THE TOP. The setting describes seats 0..N-1, so a seat taken out
 # of the middle is one the next boot mints again: rows and identities would then
 # disagree in the harmless direction, and "how big is the pool" would have three
-# answers. Highest first keeps it a prefix. The cost is that one busy seat high
+# answers. Highest first keeps it unbroken. The cost is that one busy seat high
 # up holds the pool at its size even while lower seats are idle; the output
 # says which seat, and why.
 
@@ -3729,11 +3779,11 @@ provision_template() {
 POOL_MINT_GRACE=180
 TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
 
-# The seat's number if NAME is a seat of this pool -- <prefix> and a number
+# The seat's number if NAME is a seat of this pool -- SEAT_PREFIX and a number
 # written the one way the minter writes it -- else nothing.
 seat_index() {
-  local prefix="${HDW4S_EPHEMERAL_PREFIX:-ephemeral}" n
-  n="${1#"${prefix}"}"
+  local n
+  n="${1#"${SEAT_PREFIX}"}"
   case "${n}" in "$1"|''|*[!0-9]*|0?*) return 0 ;; esac
   echo "${n}"
 }
@@ -3799,7 +3849,7 @@ seat_busy() {
 # Print the pool: its size, which seats are in use, and anything that does not
 # agree. Reads only.
 pool_show() {
-  local conf="${HDW4S_EPHEMERAL_SLOTS:-1}" prefix="${HDW4S_EPHEMERAL_PREFIX:-ephemeral}"
+  local conf="${HDW4S_EPHEMERAL_SLOTS:-1}" prefix="${SEAT_PREFIX}"
   local rows inst why busy=0 n=0 i inuse='' missing='' strays=''
   rows=" $(pool_rows | tr '\n' ' ')"
   for inst in ${rows}; do
@@ -3825,6 +3875,12 @@ pool_show() {
     echo "HDW4S_EPHEMERAL_SLOTS is ${conf}, and the seats visitors are offered do not match it:"
     [ -z "${missing}" ] || echo "  not offered:${missing}"
     [ -z "${strays}" ] || echo "  offered, and not minted at the next boot:${strays}"
+    # The one way an upgraded install gets here without anybody sizing it by
+    # hand, so it is named: the seats were renamed, and a row under an old name
+    # is not a seat any more. "pool size" takes such a row away first.
+    [ -z "${strays}" ] || printf '%s\n' \
+      "  Seats are named ${prefix}0, ${prefix}1, ...; a row under any other name --" \
+      '  such as the ephemeral0, ephemeral1, ... of earlier versions -- is never minted.'
     echo '  To make them agree, say which size you want:'
     echo "    hdw4s pool size ${conf}"
   fi
@@ -3854,7 +3910,7 @@ restore_rows() {
 
 # "hdw4s pool size N": make the pool N seats, now, without a reboot.
 pool_resize() {
-  local want="$1" prefix="${HDW4S_EPHEMERAL_PREFIX:-ephemeral}" lock max
+  local want="$1" prefix="${SEAT_PREFIX}" lock max
   local minter="${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-ephemeral-slots"
   local cands=() inst i why blocked='' line taken=() saved=() keep_from=-1
   local achieved
@@ -3914,7 +3970,7 @@ pool_resize() {
   done
 
   # FIRST PASS: take each idle seat off the offer, stopping at the first busy
-  # one -- every seat below it stays, so that the pool is still a prefix.
+  # one -- every seat below it stays, so that the pool still has no gaps.
   for inst in "${cands[@]+"${cands[@]}"}"; do
     why="$(seat_busy "${inst}")"
     if [ -n "${why}" ]; then blocked="${inst}: ${why}"; break; fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Two ephemeral sessions at once, and the wall between them.
 
-  isolation.py --a ephemeral0 --b ephemeral1
+  isolation.py --a _hdw4s_0 --b _hdw4s_1
 
 The reviewer journey in journey.py drives ONE session and asks whether the
 product works. This asks the question that only exists once there is more than
@@ -400,13 +400,13 @@ def id_verdict(line):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--a", default="ephemeral0")
-    ap.add_argument("--b", default="ephemeral1")
+    ap.add_argument("--a", default="_hdw4s_0")
+    ap.add_argument("--b", default="_hdw4s_1")
     ap.add_argument("--front-a", type=int, default=7303)
     ap.add_argument("--front-b", type=int, default=7304)
     ap.add_argument("--session-a", type=int, default=7367)
     ap.add_argument("--session-b", type=int, default=7368)
-    ap.add_argument("--cred-a", default="/etc/hdw4s/ephemeral0.auth.cred")
+    ap.add_argument("--cred-a", default="/etc/hdw4s/_hdw4s_0.auth.cred")
     ap.add_argument("--cred-b", default="")
     ap.add_argument("--display-base", type=int, default=90,
                     help="the harness starts one Xvfb per browser, at this "

@@ -1540,17 +1540,17 @@ def assert_ownership_keying(factory=Ownership):
     assert a != b, "two identities minted the same value"
 
     # A owns a session on a slot.
-    sid_a = probe.mint_session(a, "ephemeral0")
+    sid_a = probe.mint_session(a, "_hdw4s_0")
 
     # PERMIT ARM. A's own sid must still resolve to A's session. Without this a
     # guard that simply refused everything would pass the arm below.
     rec = probe.lookup(sid_a)
-    assert rec and rec["identity"] == a and rec["instance"] == "ephemeral0", \
+    assert rec and rec["identity"] == a and rec["instance"] == "_hdw4s_0", \
         "the owner of a live session was not routed to it"
 
     # The session is reaped and the SLOT is recycled to B.
     probe.forget(sid_a)
-    sid_b = probe.mint_session(b, "ephemeral0")
+    sid_b = probe.mint_session(b, "_hdw4s_0")
 
     # REFUSE ARM. A returns with its cookie and its old address.
     assert probe.lookup(sid_a) is None, \
@@ -2169,10 +2169,10 @@ def assert_reservation_only_refuses(reserve=None, reserved=None, release=None,
             "an empty reservation directory reported slots as held"
 
         # HOLD ARM.
-        reserve("ephemeral0", now, d)
-        assert "ephemeral0" in reserved(now, d), \
+        reserve("_hdw4s_0", now, d)
+        assert "_hdw4s_0" in reserved(now, d), \
             "a slot that was just let is not held"
-        assert "ephemeral1" not in reserved(now, d), \
+        assert "_hdw4s_1" not in reserved(now, d), \
             "a slot nobody let is held"
 
         # EXPIRY ARM, asked of the rule rather than by sleeping: a guard that
@@ -2187,8 +2187,8 @@ def assert_reservation_only_refuses(reserve=None, reserved=None, release=None,
             "a reservation dated in the future holds its slot forever"
 
         # RELEASE ARM.
-        release("ephemeral0", d)
-        assert "ephemeral0" not in reserved(now, d), \
+        release("_hdw4s_0", d)
+        assert "_hdw4s_0" not in reserved(now, d), \
             "a released reservation still holds its slot"
 
         # AND THE ONE THAT MATTERS MOST: this thing has no way to permit. It
@@ -2197,7 +2197,7 @@ def assert_reservation_only_refuses(reserve=None, reserved=None, release=None,
         # somebody a desktop. Asserted as a TYPE rather than as a value,
         # because the day someone makes it return a record is the day it
         # becomes capable of the failure it was built to avoid.
-        reserve("ephemeral2", now, d)
+        reserve("_hdw4s_2", now, d)
         held = reserved(now, d)
         assert isinstance(held, set) and all(isinstance(n, str) for n in held), \
             "the reservation reader answers something richer than slot names"
@@ -3174,55 +3174,55 @@ def assert_occupancy_is_read_not_created(occupied=slot_occupied,
         #    here" are the same shape and must not be the same answer.
         assert not readable(rundir), \
             "an authority that does not exist reported itself present"
-        assert replaced(LIVE(None), "ephemeral0", rundir=rundir, webroot=web) is None, \
+        assert replaced(LIVE(None), "_hdw4s_0", rundir=rundir, webroot=web) is None, \
             "a missing authority was spent as a verdict rather than withheld"
 
         os.makedirs(rundir)
         assert readable(rundir), "a present authority reported itself missing"
 
         # 2. READING MUST NOT CREATE. The property the whole design rests on.
-        assert not occupied("ephemeral0", rundir), \
+        assert not occupied("_hdw4s_0", rundir), \
             "an unoccupied slot reported occupied"
-        assert not os.path.exists(os.path.join(rundir, "ephemeral0")), \
+        assert not os.path.exists(os.path.join(rundir, "_hdw4s_0")), \
             "ASKING whether a slot was occupied CREATED its runtime directory:" \
             " the reader is acting on the pool instead of observing it, which" \
             " is how a connect() probe started a desktop on every slot"
 
         # 3. PERMIT ARM. A running session with a matching token resumes.
-        os.makedirs(os.path.join(rundir, "ephemeral0"))
-        os.makedirs(os.path.join(web, "ephemeral0"))
-        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+        os.makedirs(os.path.join(rundir, "_hdw4s_0"))
+        os.makedirs(os.path.join(web, "_hdw4s_0"))
+        with open(os.path.join(web, "_hdw4s_0", "hdw4s-incarnation"), "w") as f:
             f.write("aaaa\n")
-        assert occupied("ephemeral0", rundir), \
+        assert occupied("_hdw4s_0", rundir), \
             "a slot with a live runtime directory reported free"
-        assert replaced(LIVE("aaaa"), "ephemeral0", rundir=rundir, webroot=web) is None, \
+        assert replaced(LIVE("aaaa"), "_hdw4s_0", rundir=rundir, webroot=web) is None, \
             "a live session with its own token was refused to its owner"
 
         # 4. REFUSE ARM, occupancy. The sweep stops the desktop.
-        shutil.rmtree(os.path.join(rundir, "ephemeral0"))
-        assert replaced(LIVE("aaaa"), "ephemeral0", rundir=rundir, webroot=web), \
+        shutil.rmtree(os.path.join(rundir, "_hdw4s_0"))
+        assert replaced(LIVE("aaaa"), "_hdw4s_0", rundir=rundir, webroot=web), \
             "a reaped desktop still resolved for the visitor who held it --" \
             " they are routed to whatever starts on that slot next"
 
         # 5. REFUSE ARM, token. Reaped AND re-let: occupancy is true again, and
         #    only the token can tell that it is somebody else's desktop.
-        os.makedirs(os.path.join(rundir, "ephemeral0"))
-        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+        os.makedirs(os.path.join(rundir, "_hdw4s_0"))
+        with open(os.path.join(web, "_hdw4s_0", "hdw4s-incarnation"), "w") as f:
             f.write("bbbb\n")
-        assert replaced(LIVE("aaaa"), "ephemeral0", rundir=rundir, webroot=web), \
+        assert replaced(LIVE("aaaa"), "_hdw4s_0", rundir=rundir, webroot=web), \
             "a slot reaped and re-let to somebody else was resumed by the" \
             " previous holder: the token is not being compared"
 
         # 6. ABSENT IS NOT EQUAL, both ways round. A rebuilt web root publishes
         #    no token for a running session, and a slot that published none at
         #    mint may publish one later. Neither is a match.
-        os.unlink(os.path.join(web, "ephemeral0", "hdw4s-incarnation"))
-        assert replaced(LIVE("aaaa"), "ephemeral0", rundir=rundir, webroot=web), \
+        os.unlink(os.path.join(web, "_hdw4s_0", "hdw4s-incarnation"))
+        assert replaced(LIVE("aaaa"), "_hdw4s_0", rundir=rundir, webroot=web), \
             "a token that has VANISHED was read as unchanged -- absent is not" \
             " equal, and it is the ordinary state of a rebuilt web root"
-        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+        with open(os.path.join(web, "_hdw4s_0", "hdw4s-incarnation"), "w") as f:
             f.write("cccc\n")
-        assert replaced(LIVE(None), "ephemeral0", rundir=rundir, webroot=web), \
+        assert replaced(LIVE(None), "_hdw4s_0", rundir=rundir, webroot=web), \
             "a token APPEARING where none was recorded was read as unchanged"
 
         # 6b. THE WINDOW BETWEEN A MINT AND ITS SESSION. A slot handed out a
@@ -3230,24 +3230,24 @@ def assert_occupancy_is_read_not_created(occupied=slot_occupied,
         #     followed, and following it is what starts one. Refusing there
         #     refuses every visitor at the instant of arrival, which is what
         #     the first version of this did to the whole suite at once.
-        shutil.rmtree(os.path.join(rundir, "ephemeral0"))
-        assert replaced(PENDING(time.time()), "ephemeral0",
+        shutil.rmtree(os.path.join(rundir, "_hdw4s_0"))
+        assert replaced(PENDING(time.time()), "_hdw4s_0",
                         rundir=rundir, webroot=web) is None, \
             "a slot minted moments ago was gated for having no desktop yet --" \
             " the mint precedes the session, so this refuses on arrival"
         # And the window CLOSES. A slot handed out long ago with nothing ever
         # behind it is a dead address, and holding it costs the pool a slot for
         # the life of the process.
-        assert replaced(PENDING(time.time() - 10 * MINT_GRACE), "ephemeral0",
+        assert replaced(PENDING(time.time() - 10 * MINT_GRACE), "_hdw4s_0",
                         rundir=rundir, webroot=web), \
             "a slot minted long ago with no desktop on it was held anyway"
-        os.makedirs(os.path.join(rundir, "ephemeral0"))
+        os.makedirs(os.path.join(rundir, "_hdw4s_0"))
 
         # 7. AND WHERE NO SLOT PUBLISHES ONE AT ALL, the token has no opinion
         #    and occupancy alone decides. Demanding a token nobody publishes
         #    would gate every visitor on a pool that has none.
         shutil.rmtree(web)
-        assert replaced(LIVE(None), "ephemeral0", rundir=rundir, webroot=web) is None, \
+        assert replaced(LIVE(None), "_hdw4s_0", rundir=rundir, webroot=web) is None, \
             "a pool that publishes no tokens gated a live session anyway"
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -3510,18 +3510,18 @@ def assert_reclaim_needs_a_letting(judge=None, factory=None):
     try:
         rundir = os.path.join(d, "run")
         web = os.path.join(d, "web")
-        os.makedirs(os.path.join(rundir, "ephemeral0"))
-        os.makedirs(os.path.join(web, "ephemeral0"))
+        os.makedirs(os.path.join(rundir, "_hdw4s_0"))
+        os.makedirs(os.path.join(web, "_hdw4s_0"))
 
         def publish(token):
-            with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"),
+            with open(os.path.join(web, "_hdw4s_0", "hdw4s-incarnation"),
                       "w") as f:
                 f.write(token + "\n")
 
         def let(live_as=None):
             """A letting, minted the way the front door mints one."""
             own = factory()
-            sid = own.mint_session("visitor", "ephemeral0")
+            sid = own.mint_session("visitor", "_hdw4s_0")
             if live_as is not None:
                 own.attach(sid, live_as)
             return own, sid
@@ -3546,7 +3546,7 @@ def assert_reclaim_needs_a_letting(judge=None, factory=None):
         own2, sid2 = let(live_as="FIRST")
         stale = own2.lookup(sid2)
         own2.forget(sid2)
-        own2.mint_session("a different visitor", "ephemeral0")
+        own2.mint_session("a different visitor", "_hdw4s_0")
         assert judge(own2, sid2, stale, rundir=rundir, webroot=web), \
             "a slot re-let to somebody else was reclaimed out from under them"
 
@@ -3565,17 +3565,17 @@ def assert_reclaim_needs_a_letting(judge=None, factory=None):
             "a slot still running the desktop it was let for was reclaimed"
 
         # 6. NOTHING RUNNING. Nothing to end, so nothing is claimed to be.
-        shutil.rmtree(os.path.join(rundir, "ephemeral0"))
+        shutil.rmtree(os.path.join(rundir, "_hdw4s_0"))
         assert judge(own, sid, own.lookup(sid), rundir=rundir, webroot=web), \
             "a slot with no desktop in it produced a teardown request"
-        os.makedirs(os.path.join(rundir, "ephemeral0"))
+        os.makedirs(os.path.join(rundir, "_hdw4s_0"))
 
         # 7. NO TOKEN TO COMPARE. A pool that publishes nothing cannot tell the
         #    two desktops apart, and must not guess in the destroying direction.
         shutil.rmtree(web)
         assert judge(own, sid, own.lookup(sid), rundir=rundir, webroot=web), \
             "a slot was reclaimed on a comparison that could not be made"
-        os.makedirs(os.path.join(web, "ephemeral0"))
+        os.makedirs(os.path.join(web, "_hdw4s_0"))
         publish("SECOND")
 
         # 8. THE INSTRUMENT MISSING. "I could not look" is spent as neither a
@@ -3614,8 +3614,8 @@ def assert_door_only_refuses_what_it_measured(paths=None, door=None,
     d = tempfile.mkdtemp(prefix="hdw4s-door-")
     try:
         root = os.path.join(d, "stream")
-        mine = stream_socket_path("ephemeral0", root)
-        other = stream_socket_path("ephemeral1", root)
+        mine = stream_socket_path("_hdw4s_0", root)
+        other = stream_socket_path("_hdw4s_1", root)
 
         head = "Num       RefCount Protocol Flags    Type St Inode Path\n"
         LISTENING, BOUND = "00010000", "00000000"
@@ -3652,39 +3652,39 @@ def assert_door_only_refuses_what_it_measured(paths=None, door=None,
 
         # 4. THE DOOR ITSELF, three-valued, and about THIS slot only: another
         #    slot listening does not open this one's door.
-        assert door("ephemeral0", listening=paths(f2), root=root) is True
-        assert door("ephemeral0", listening=paths(f1), root=root) is False, \
+        assert door("_hdw4s_0", listening=paths(f2), root=root) is True
+        assert door("_hdw4s_0", listening=paths(f1), root=root) is False, \
             "another slot's listener, or this slot's bound-but-shut socket, " \
             "opened this slot's door"
-        assert door("ephemeral0", listening=None, root=root) is None, \
+        assert door("_hdw4s_0", listening=None, root=root) is None, \
             "a table that could not be read answered a question nobody could " \
             "ask -- a missing instrument must never refuse"
         # 5. AND IN session_replaced, WHERE IT COSTS SOMETHING. The door may
         #    only speak for a record whose desktop already answered us.
         rundir = os.path.join(d, "run")
         web = os.path.join(d, "web")
-        os.makedirs(os.path.join(rundir, "ephemeral0"))
-        os.makedirs(os.path.join(web, "ephemeral0"))
-        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+        os.makedirs(os.path.join(rundir, "_hdw4s_0"))
+        os.makedirs(os.path.join(web, "_hdw4s_0"))
+        with open(os.path.join(web, "_hdw4s_0", "hdw4s-incarnation"), "w") as f:
             f.write("TOKEN\n")
 
         LIVE = {"live": True, "incarnation": "TOKEN", "minted": 0.0}
         PENDING = {"live": False, "incarnation": None, "minted": time.time()}
         SHUT, OPEN, CANNOT = (lambda i: False), (lambda i: True), (lambda i: None)
 
-        why = replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web, door=SHUT)
+        why = replaced(LIVE, "_hdw4s_0", rundir=rundir, webroot=web, door=SHUT)
         assert why and "own stream socket" in why, \
             "a session that had stopped answering was routed to anyway, which " \
             "is a wasted connection the relay refuses: %r" % why
-        assert replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web,
+        assert replaced(LIVE, "_hdw4s_0", rundir=rundir, webroot=web,
                         door=OPEN) is None, \
             "a healthy session was gated by the door check"
-        assert replaced(LIVE, "ephemeral0", rundir=rundir, webroot=web,
+        assert replaced(LIVE, "_hdw4s_0", rundir=rundir, webroot=web,
                         door=CANNOT) is None, \
             "a door that could not be asked was spent as a refusal"
         # THE ONE THAT COSTS EVERY VISITOR IF IT IS WRONG. A session that is
         # starting has a runtime directory and is not listening yet.
-        assert replaced(PENDING, "ephemeral0", rundir=rundir, webroot=web,
+        assert replaced(PENDING, "_hdw4s_0", rundir=rundir, webroot=web,
                         door=SHUT) is None, \
             "a session that was still STARTING was gated for not listening " \
             "yet -- that gates every visitor at the instant they arrive"
@@ -3945,7 +3945,7 @@ def assert_invite_is_single_use(spend=None):
     admitted -- so a spender that refused everything fails here too."""
     import tempfile
     spend = spend_invite if spend is None else spend
-    table = [("tmpl", "template"), ("ephemeral0", "ephemeral")]
+    table = [("tmpl", "template"), ("_hdw4s_0", "ephemeral")]
     with tempfile.TemporaryDirectory() as d:
         marks = os.path.join(d, "spent")
         def plant(token, inst, expires):
@@ -3962,7 +3962,7 @@ def assert_invite_is_single_use(spend=None):
         plant("b" * 32, "tmpl", now - 1)
         assert spend("b" * 32, **kw) is None, \
             "an expired template invite was admitted"
-        plant("c" * 32, "ephemeral0", now + 60)
+        plant("c" * 32, "_hdw4s_0", now + 60)
         assert spend("c" * 32, **kw) is None, \
             "a template invite onto a pool slot was admitted"
         assert spend("../" + "d" * 29, **kw) is None, \
@@ -5213,9 +5213,9 @@ def row_html(r):
 
     THE NAME IS READ FROM THE DESKTOP'S OWN PAGE, not computed here, and that is
     the part worth defending. The obvious version derives a number from the
-    instance name -- ephemeral1 is "desktop 1" -- and it is WRONG: the slots are
+    instance name -- _hdw4s_1 is "desktop 1" -- and it is WRONG: the slots are
     named from zero and the card the session puts on itself is written
-    "$(( i + 1 )) - Desktop", so the row would have called ephemeral1 "1" while
+    "$(( i + 1 )) - Desktop", so the row would have called _hdw4s_1 "1" while
     the desktop it opens says "2". Two numbers for one thing, disagreeing, on
     the screen where somebody chooses which desktop to end. Computing i+1 here
     instead would agree today and would be a second copy of a rule that lives in
@@ -6808,26 +6808,26 @@ def assert_an_ended_letting_is_never_proxied(factory=Ownership,
     try:
         rundir = os.path.join(d, "run", "hdw4s")
         web = os.path.join(d, "web")
-        os.makedirs(os.path.join(rundir, "ephemeral0"))
-        os.makedirs(os.path.join(web, "ephemeral0"))
-        with open(os.path.join(web, "ephemeral0", "hdw4s-incarnation"), "w") as f:
+        os.makedirs(os.path.join(rundir, "_hdw4s_0"))
+        os.makedirs(os.path.join(web, "_hdw4s_0"))
+        with open(os.path.join(web, "_hdw4s_0", "hdw4s-incarnation"), "w") as f:
             f.write("same-token")
         open_door = lambda inst: True
 
         def rec(ended=None):
             return {"live": True, "incarnation": "same-token", "minted": 0.0,
-                    "instance": "ephemeral0", "ended": ended}
+                    "instance": "_hdw4s_0", "ended": ended}
 
         # PERMIT ARM, first, so a gate that refuses everything cannot satisfy
         # this function by passing the arm below.
-        why = replaced(rec(), "ephemeral0", rundir=rundir, webroot=web,
+        why = replaced(rec(), "_hdw4s_0", rundir=rundir, webroot=web,
                        door=open_door)
         assert why is None, \
             "a live letting was gated although nothing about it had ended: %r" % why
 
         # REFUSE ARM. The same record, the same healthy world, and the one thing
         # that differs is the act we performed ourselves.
-        why = replaced(rec("the visitor discarded it"), "ephemeral0",
+        why = replaced(rec("the visitor discarded it"), "_hdw4s_0",
                        rundir=rundir, webroot=web, door=open_door)
         assert why is not None, \
             "a DISCARDED letting was permitted to proxy. The next request for" \
@@ -6838,7 +6838,7 @@ def assert_an_ended_letting_is_never_proxied(factory=Ownership,
         # this answer precedes the world: with the occupancy authority absent --
         # where every other reason withholds itself, correctly -- the act must
         # still speak.
-        why = replaced(rec("the visitor discarded it"), "ephemeral0",
+        why = replaced(rec("the visitor discarded it"), "_hdw4s_0",
                        rundir=os.path.join(d, "no-such-rundir"), webroot=web,
                        door=open_door)
         assert why is not None, \
@@ -6851,19 +6851,19 @@ def assert_an_ended_letting_is_never_proxied(factory=Ownership,
         # minted onto the slot while the previous one was still being torn down.
         tdir = os.path.join(d, "teardown")
         os.makedirs(os.path.join(tdir, "ending"))
-        pool = ["ephemeral0", "ephemeral1"]
-        seen = asked("ephemeral1", root=tdir)
+        pool = ["_hdw4s_0", "_hdw4s_1"]
+        seen = asked("_hdw4s_1", root=tdir)
         assert seen is False, \
             "a slot with no teardown marker was reported as being torn down"
-        open(os.path.join(tdir, "ending", "ephemeral1"), "w").close()
-        assert asked("ephemeral1", root=tdir) is True, \
+        open(os.path.join(tdir, "ending", "_hdw4s_1"), "w").close()
+        assert asked("_hdw4s_1", root=tdir) is True, \
             "the in-progress marker hdw4s-teardown leaves for the WHOLE of a" \
             " teardown was not seen; the only thing this router could see was" \
             " the request file, which the teardown clears before it does any work"
         # AND IT EXPIRES, because the marker is cleared by another process and a
         # marker that outlived a SIGKILL would take the slot out of the pool
         # until the next reboot.
-        assert asked("ephemeral1", root=tdir,
+        assert asked("_hdw4s_1", root=tdir,
                      now=time.time() + TEARDOWN_MARKER_MAX + 1) is False, \
             "the in-progress marker never expires, so one killed teardown" \
             " retires a slot permanently"

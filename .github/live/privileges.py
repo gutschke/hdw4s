@@ -92,7 +92,7 @@ def run_under(bounding_set, user, argv, timeout=15):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--user", default="ephemeral0",
+    ap.add_argument("--user", default="_hdw4s_0",
                     help="the account to run as; use a slot, never a real person")
     ap.add_argument("--set", action="append", dest="sets",
                     help="a bounding set to test; repeat for a matrix")

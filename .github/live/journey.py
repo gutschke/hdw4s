@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The journey a junior QA technician does first, driven end to end.
 
-  journey.py --instance ephemeral0 --front 7303 --session 7367 \
-             --cred /etc/hdw4s/ephemeral0.auth.cred
+  journey.py --instance _hdw4s_0 --front 7303 --session 7367 \
+             --cred /etc/hdw4s/_hdw4s_0.auth.cred
 
 Open the URL, get a desktop, SEE A PICTURE, open a second tab, see what
 happened to the first, click the recovery control, confirm recovery -- and
