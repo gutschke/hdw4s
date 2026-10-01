@@ -287,10 +287,21 @@ WEIGHTS = 5
 # They were literals inside spec_for(), which left a rating sheet able to vary
 # only the arc's two ends -- and moving the ends turned out not to be what the
 # owner was reacting to. A change of default is a design change, made and
-# argued on its own. The defaults below are the sheet the owner chose from three
-# rounds of blind rating ("relief-darker"): continuous draws, a darker and wider
-# ladder, a two-sided ramp, the AA ceiling and lightness relief. Before them
-# this drew exactly what 2.4.5 did.
+# argued on its own. 2.4.6 shipped the sheet the owner chose from three rounds
+# of blind rating ("relief-darker"): continuous draws, a darker and wider
+# ladder, a two-sided ramp, the AA ceiling and lightness relief.
+#
+# THE RATING WAS DONE AT THE WRONG SCALE, and these defaults correct for it.
+# The sheets showed a desktop as a quarter-width tile; a desktop is the whole
+# screen, about four times larger, and nothing in the picture shrinks with it.
+# Live, relief-darker read as a calm, uncontroversial gradient (owner: "pleasant
+# but very uncontroversial and with considerably less liveliness") although it
+# measured the same as its tiles -- and the same as Chrome's rendering, and the
+# same through the stream. So the sheets dismissed as too busy AT TILE SIZE are
+# the ones this takes from: strong relief with deeper darks ("relief-strong"),
+# smaller sections ("relief-small", 0.6), more saturation ("rich") and the
+# ramp's two colours further apart ("everything", +-0.55). Judged live, on the
+# owner's desktops, not on a sheet.
 #
 # HOW A DESKTOP'S HUE AND WEIGHT ARE DRAWN. "rungs" is RUNGS evenly spaced hues
 # and WEIGHTS evenly spaced lightnesses, picked from the token. "continuous"
@@ -329,7 +340,7 @@ TINT_CHROMA = 1.0
 TINT_OPACITY = 1.0
 TINT_CENTRE = 0.40
 TINT_CONTRAST = 8.0
-BASE_CHROMA = 0.82
+BASE_CHROMA = 0.92
 
 # THE SHADES: (lightness as a fraction toward the ceiling, or, negative, toward
 # black; opacity), and their chroma fraction at the dye's own hue.
@@ -337,7 +348,7 @@ SHADES = (
     (-0.42, 0.62),
     (+0.92, 0.58),
 )
-SHADE_CHROMA = 0.38
+SHADE_CHROMA = 0.55
 
 # THE WHOLE-CANVAS RAMP (see light_sweep). SWEEP_DRIFT is where its two colours
 # sit, as offsets from the dye along the arc. SWEEP_ENDS replaces those with the
@@ -345,9 +356,9 @@ SHADE_CHROMA = 0.38
 # warmest on the other, whatever its dye.
 SWEEP = "hue"
 SWEEP_A = 0.7
-SWEEP_DRIFT = (+0.45, -0.45)
+SWEEP_DRIFT = (+0.55, -0.55)
 SWEEP_ENDS = False
-SWEEP_CHROMA = 0.85                  # the ramp colours' chroma fraction
+SWEEP_CHROMA = 0.95                  # the ramp colours' chroma fraction
 
 # LIGHTNESS RELIEF: darker and lighter SECTIONS within one picture, placed at
 # random and blended softly, on top of everything else. The owner, on a sheet
@@ -390,9 +401,9 @@ SWEEP_CHROMA = 0.85                  # the ramp colours' chroma fraction
 # None means TOP_L; setting it above TOP_L is for a deployment where no icon
 # label ever sits on the background, and SPEC_CEILING has to be raised with it
 # or "check" refuses -- deliberately, because that is the label ceiling.
-RELIEF = 0.8
-RELIEF_SCALE = 1.0
-RELIEF_DARK_L = 50.0                 # the multiplying colour; lower is darker
+RELIEF = 1.0
+RELIEF_SCALE = 0.6
+RELIEF_DARK_L = 40.0                 # the multiplying colour; lower is darker
 RELIEF_LIGHT_L = None
 RELIEF_CHROMA = 0.80                 # both colours' chroma fraction
 
@@ -867,33 +878,20 @@ def slot_number(instance):
 
 
 def choose(instance, token, kind=None, tweak=None):
-    """WHAT DIFFERS BETWEEN TWO DESKTOPS, AND WHAT STAYS PUT ACROSS A RESTART.
+    """WHAT DIFFERS BETWEEN TWO DESKTOPS: everything, drawn from the token.
 
-    Two questions, two answers, and the two kinds of session get DIFFERENT
-    answers on purpose:
+    An ephemeral desktop's hue, lightness and layout all come from its
+    incarnation token, which is fresh at every start, so the next occupant of a
+    slot never inherits the last one's picture. Plain random, on purpose -- see
+    below for the rejection scheme that was declined.
 
-    * AN EPHEMERAL SLOT lives minutes to days and is handed to a stranger when
-      its last occupant is gone. Its HUE is the slot's own, taken from the
-      instance name, so two slots that are up at the same time are apart BY
-      CONSTRUCTION -- no birthday collisions, no randomness to be unlucky with.
-      Its LAYOUT -- where the three colours sit, how big they are -- comes from
-      the incarnation token, which is fresh at every start. So a slot keeps a
-      recognisable colour while it is running, and the next occupant of that
-      slot does not inherit the last one's picture.
+    This said the HUE was the slot's own, taken from the instance name so that
+    concurrent slots were apart by construction. It has not been true since the
+    draw became random; a reason that no longer exists is still read.
 
-    * A NAMED DESKTOP is one person's, for months. Everything about it is
-      derived from the INSTANCE NAME and nothing from the token, so it looks the
-      same tomorrow as it does today. A background that reshuffled itself at
-      every restart would be worse than none: the whole point is that a person
-      recognises their own desktop, and that only works if it holds still. It
-      also repairs a real defect in the previous table, which keyed on trailing
-      digits and so gave EVERY named desktop the same colour, name-derived
-      hashing having no digits to find.
-
-    The kind is inferred from the name when the caller does not say: a trailing
-    number is a slot (_hdw4s_3), anything else is a person's. It is the
-    TRAILING digits that identify a slot and never a fixed-length prefix, so the
-    hue does not depend on how the seats happen to be spelled.
+    A named desktop gets nothing (refused below). The kind is inferred from the
+    name when the caller does not say: trailing digits are a slot (_hdw4s_3),
+    anything else is a person's.
     """
     n = slot_number(instance)
     if kind is None:
