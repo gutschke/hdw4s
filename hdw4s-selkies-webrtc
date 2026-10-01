@@ -1,8 +1,9 @@
 """Start Selkies with WebRTC signalling carried over the stream's unix socket.
 
 Run as "/opt/selkies/bin/python /usr/lib/hdw4s/hdw4s-selkies-webrtc <selkies args>"
-by hdw4s-run-session, and ONLY for a session with HDW4S_WEBRTC=yes. A session on
-websockets alone runs upstream's own entry point with nothing of ours in between.
+by hdw4s-run-session, and ONLY for a session with HDW4S_WEBRTC=yes (the default).
+A session set to "no" runs upstream's own entry point with nothing of ours in
+between.
 
 WHY THIS EXISTS. A session's streaming server listens on a unix socket
 (--unix-socket; hdw4s-stream-dir says why never a port). Selkies' WebRTC mode then
@@ -29,8 +30,29 @@ THREE OUTCOMES, per the project's rule for changes it would offer upstream:
     separately would stand this down onto the TCP path. That condition is part of
     what we offer upstream, not an assumption to make about what they merge;
   * the code is still the code this was written against: apply;
-  * anything else: REFUSE TO START, loudly. Running stock here is not a safe
-    degradation -- it is the squattable TCP connection with the token on it.
+  * anything else: DEGRADE, loudly, to a desktop on websockets alone. Running stock
+    WITH WebRTC is not a safe degradation -- it is the squattable TCP connection
+    with the token on it -- so the WebRTC half is taken away rather than left to
+    upstream: dual mode is relocked off and the start mode pinned to websockets,
+    which is exactly what HDW4S_WEBRTC=no asks for. Nothing then ever creates the
+    signalling client this adapter exists to reroute.
+
+WHY DEGRADE AND NOT REFUSE. This used to refuse to start the session, which was
+right while WebRTC was an opt-in: the administrator who set it would read why.
+Once "yes" is the default, refusing means every desktop on every machine stops
+starting at the next streaming server version raise, for the sake of a transport
+nobody is using until they ask for it. A websockets-only desktop is the
+configuration every session ran for most of this package's life; losing the
+optional transport is the proportionate cost. What is NOT given up is being told:
+the reason goes to the session journal on every start, and into the session's
+runtime directory, where "hdw4s check" reads it and fails.
+
+WHY THE REWRITE CAN BE TRUSTED. The arguments are hdw4s-run-session's own, every
+spelling of the two settings that could reach WebRTC is removed rather than
+matched exactly, the replacement is appended last, and the SELKIES_ environment
+spellings are dropped, which the server ranks below the command line anyway. The
+TURN pin (turn host, random secret, ice-lite, rtc-config path) stays on the
+command line untouched, so it would still hold if anything did reach WebRTC.
 """
 
 import sys
@@ -71,10 +93,74 @@ def module_source_problem(src):
     return None
 
 
+class NotAdaptable(Exception):
+    """The installed streaming server is not the code this adapts."""
+
+
 def refuse(why):
-    print("hdw4s-selkies-webrtc: %s -- refusing to start WebRTC signalling over TCP. "
-          "Set HDW4S_WEBRTC=no, or update hdw4s." % why, file=sys.stderr)
-    sys.exit(1)
+    raise NotAdaptable(why)
+
+
+# The two settings through which a session can come to serve WebRTC: the mode it
+# starts in, and whether a client may switch it later. Upstream's defaults are
+# "websockets" and TRUE, so leaving either unsaid is not the same as saying no.
+DEGRADED = ["--enable-dual-mode=false|locked", "--mode=websockets"]
+DEGRADED_NAMES = ("enable_dual_mode", "mode")
+
+
+def websockets_only(argv):
+    """argv with every way of asking for WebRTC replaced by a refusal of it.
+
+    WHAT MAKES IT HOLD is that the refusal is APPENDED: the server parses with
+    argparse, where the last occurrence of a setting wins, so ours decides
+    whatever came before it -- an abbreviation argparse would also accept
+    included. Removing the earlier copies is so that the command line says one
+    thing; it is not what the guarantee rests on.
+
+    Removal still has to be careful, because a bool flag given bare means
+    "true" and does NOT consume the next token: "--enable-dual-mode
+    --webrtc-ice-lite=true|locked" is two settings, and eating the second would
+    drop a pin. So a following token is taken as the value only when it is not
+    itself a flag. Everything else, the TURN pin included, passes unchanged.
+    """
+    out = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        i += 1
+        if a.startswith("--"):
+            name = a[2:].split("=", 1)[0].replace("-", "_")
+            if name in DEGRADED_NAMES:
+                if "=" not in a and i < len(argv) and not argv[i].startswith("-"):
+                    i += 1
+                continue
+        out.append(a)
+    return out + DEGRADED
+
+
+def degrade(why, environ, marker_dir):
+    """Say why WebRTC is off for this session, as loudly as a session can."""
+    msg = ("hdw4s-selkies-webrtc: WEBRTC IS OFF FOR THIS SESSION. %s, so "
+           "WebRTC signalling cannot be kept off TCP. The desktop starts on "
+           "websockets alone with the transport switch locked off. Update hdw4s, "
+           "or set HDW4S_WEBRTC=no to silence this." % why)
+    print(msg, file=sys.stderr)
+    for k in ("SELKIES_ENABLE_DUAL_MODE", "SELKIES_MODE"):
+        environ.pop(k, None)
+    if marker_dir:
+        try:
+            with open(marker_dir + "/" + MARKER_FILE, "w") as fh:
+                fh.write(why + "\n")
+        except OSError as e:
+            print("hdw4s-selkies-webrtc: could not record this for 'hdw4s check' "
+                  "(%s); the journal line above is the only record." % e,
+                  file=sys.stderr)
+
+
+# In the session's runtime directory, which systemd creates empty for each start
+# and removes at the end of it, so a stale copy cannot outlive the session that
+# wrote it. "hdw4s check" reads it under the same name.
+MARKER_FILE = "webrtc-degraded"
 
 
 def unix_socket_from_argv(argv):
@@ -134,10 +220,31 @@ def adapt(path):
 
 
 def main():
-    path = unix_socket_from_argv(sys.argv[1:])
-    if not path:
-        refuse("no --unix-socket was given")
-    print("hdw4s-selkies-webrtc: %s" % adapt(path), file=sys.stderr)
+    import os
+    args = sys.argv[1:]
+    marker_dir = os.environ.get("XDG_RUNTIME_DIR", "")
+    try:
+        path = unix_socket_from_argv(args)
+        if not path:
+            refuse("no --unix-socket was given")
+        print("hdw4s-selkies-webrtc: %s" % adapt(path), file=sys.stderr)
+    # ANY failure, not only the ones named above: an import that no longer
+    # exists, an attribute that moved. adapt() changes nothing until its last
+    # line, so whatever was raised before it, nothing has been rerouted and the
+    # only safe thing left is not to serve WebRTC at all.
+    except Exception as e:  # noqa: BLE001 -- every failure degrades the same way
+        why = str(e) if isinstance(e, NotAdaptable) else \
+            "the adapter failed (%s: %s)" % (type(e).__name__, e)
+        degrade(why, os.environ, marker_dir)
+        args = websockets_only(args)
+    else:
+        # A previous run of the server in this same session may have degraded.
+        if marker_dir:
+            try:
+                os.unlink(marker_dir + "/" + MARKER_FILE)
+            except OSError:
+                pass
+    sys.argv[1:] = args
     sys.argv[0] = "selkies"
     from selkies.__main__ import main as selkies_main
     sys.exit(selkies_main())

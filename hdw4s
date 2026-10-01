@@ -886,6 +886,9 @@ cmd_check() {
   # while the arm itself was working perfectly. A reader chasing that sentence
   # looks at the session and finds nothing wrong with it.
   local slice_bad=0
+  # A fourth, for the same reason: a session without WebRTC can also fail the
+  # token arm, and one counter would then report two failures of one session.
+  local webrtc_bad=0
   local incarn="${HDW4S_INCARNATION_DIR:-${RUNDIR}/hdw4s-incarnation}"
   local webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}"
   local readable='yes'
@@ -1144,6 +1147,32 @@ cmd_check() {
     [ "${state}" = 'active' ] || continue
     live=$(( live + 1 ))
 
+    # A desktop that was asked to offer WebRTC and could not do it safely.
+    # hdw4s-selkies-webrtc writes this when the installed streaming server is no
+    # longer the code it adapts; rather than refuse to start the desktop, it
+    # starts it on websockets alone with the switch locked off. That is the safe
+    # outcome and still a fault: typically every such session on the machine
+    # lacks the transport it was configured for from the moment a streaming
+    # server update landed, and the only other trace is one line per start in
+    # the journal. Counted, so the timer goes red, and checked before the token
+    # arms below because those "continue" past everything after them.
+    #
+    # The file lives in the session's runtime directory, which is the session
+    # user's: its occupant can delete it, and loses only the transport this
+    # reports as missing. The journal line is the record that cannot be taken
+    # back from inside.
+    if [ -r "${RUNDIR}/hdw4s/${inst}/webrtc-degraded" ]; then
+      printf '%s\n' \
+        "hdw4s: ${inst} is running WITHOUT WebRTC, although it is configured to" \
+        '  offer it. The signalling adapter does not recognise the installed' \
+        '  streaming server, so the desktop started on websockets alone with the' \
+        '  transport switch locked off. Reason given:' \
+        "    $(head -n1 "${RUNDIR}/hdw4s/${inst}/webrtc-degraded" 2>/dev/null || :)" \
+        '  Update hdw4s to a version that knows this streaming server, or set' \
+        "  HDW4S_WEBRTC=no for ${inst} and restart it to stop this report." >&2
+      webrtc_bad=$(( webrtc_bad + 1 ))
+    fi
+
     served=''
     [ ! -r "${webroot}/${inst}/hdw4s-incarnation" ] ||
       served="$(head -n1 "${webroot}/${inst}/hdw4s-incarnation" 2>/dev/null || :)"
@@ -1199,7 +1228,8 @@ cmd_check() {
     fi
   done < <(sort -n "${SLOTS}")
 
-  if [ "${bad}" -gt 0 ] || [ "${pool_bad}" -gt 0 ] || [ "${slice_bad}" -gt 0 ]; then
+  if [ "${bad}" -gt 0 ] || [ "${pool_bad}" -gt 0 ] || [ "${slice_bad}" -gt 0 ] ||
+     [ "${webrtc_bad}" -gt 0 ]; then
     [ "${bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${bad} of ${live} running session(s) failed this check." >&2
     [ "${pool_bad}" -eq 0 ] || printf '%s\n' '' \
@@ -1208,6 +1238,9 @@ cmd_check() {
     # pool; a machine with no pool at all still has this slice.
     [ "${slice_bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: the memory limit on hdw4s.slice cannot apply on this machine." >&2
+    [ "${webrtc_bad}" -eq 0 ] || printf '%s\n' '' \
+      "hdw4s: ${webrtc_bad} of ${live} running session(s) started without the WebRTC" \
+      '  they are configured to offer.' >&2
     trap '' INT TERM QUIT HUP EXIT ERR
     exit 1
   fi

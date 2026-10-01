@@ -198,6 +198,123 @@ PY
   has 'RED: aiohttp under another name is refused'  "${out}" 'alias True'
 )
 
+echo '== an adapter that does not recognise Selkies degrades to websockets alone =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  # Every desktop that offers WebRTC starts through the adapter. It used to
+  # REFUSE TO START when Selkies moved the code it adapts, which, with WebRTC
+  # offered by default, takes every desktop down at the next version raise. It now starts the
+  # desktop with WebRTC unreachable instead. What has to hold on that path is
+  # that NOTHING can reach WebRTC -- the TCP signalling connection the adapter
+  # exists to prevent is made only by WebRTC -- and that the TURN pin is still
+  # on the command line anyway.
+  #
+  # A stand-in Selkies, because the real one cannot be imported here: a package
+  # whose signalling client is shaped like a FUTURE release (a second
+  # ClientSession), and whose entry point records the argv and environment it
+  # was handed instead of starting a server. The adapter, its checks and its
+  # rewrite are the real ones.
+  mkdir -p "${SB}/py/selkies" "${SB}/py/aiohttp" "${SB}/run"
+  : > "${SB}/py/selkies/__init__.py"
+  cat > "${SB}/py/selkies/webrtc_signaling_client.py" <<'PY'
+import aiohttp
+from aiohttp import ClientWebSocketResponse, WSMsgType
+class WebRTCSignalingClient:
+    session: "aiohttp.ClientSession" = None
+    async def connect_and_listen(self):
+        self.session = aiohttp.ClientSession()
+        self.other = aiohttp.ClientSession()
+        await self.session.ws_connect(self.url)
+PY
+  cat > "${SB}/py/selkies/webrtc_mode.py" <<'PY'
+class WebRTCService:
+    def create_signaling_client(self):
+        return f"ws://localhost:{self.args.port}/api/ws"
+PY
+  cat > "${SB}/py/selkies/__main__.py" <<'PY'
+import json, os, sys
+def main():
+    with open(os.environ["STUB_OUT"], "w") as fh:
+        json.dump({"argv": sys.argv[1:],
+                   "env": sorted(k for k in os.environ if k.startswith("SELKIES_"))}, fh)
+    return 0
+PY
+  # An aiohttp stand-in too, so the group does not depend on one being
+  # installed. Only the names the adapter and the stand-in module touch.
+  printf '%s\n' 'class ClientSession: pass' 'class ClientWebSocketResponse: pass' \
+    'class WSMsgType: pass' 'class UnixConnector:' \
+    '    def __init__(self, path): self.path = path' > "${SB}/py/aiohttp/__init__.py"
+
+  # The arguments hdw4s-run-session hands the adapter for HDW4S_WEBRTC=yes, read
+  # out of the script rather than retyped, so a change to that arm reaches this
+  # test. Only the case arm's array; the rest of the command line does not bear
+  # on what this asserts.
+  args="$(sed -n '/^  yes)$/,/^    ;;$/p' "${ROOT}/hdw4s-run-session" |
+          command grep -o -- "--[a-z-]*='[^']*'" | tr -d "'")"
+  has 'the run-session yes arm was found'        "${args}" '--enable-dual-mode=true|locked'
+  has 'and carries the ice-lite pin'             "${args}" '--webrtc-ice-lite=true|locked'
+  # Then a bare flag, an underscore spelling and an explicit start mode, which
+  # nothing passes today: the rewrite has to remove what the parser would read
+  # and leave everything else, and a bare bool does NOT consume the next token.
+  # shellcheck disable=SC2086
+  set -- ${args} --turn-host=turn.invalid --unix-socket="${SB}/run/s.sock" \
+         --enable-dual-mode '--webrtc-ice-lite=true|locked' \
+         '--enable_dual_mode=true|locked' --mode webrtc
+  run() {
+    STUB_OUT="${SB}/out.json" XDG_RUNTIME_DIR="${SB}/run" PYTHONPATH="${SB}/py" \
+    SELKIES_ENABLE_DUAL_MODE='true' SELKIES_MODE='webrtc' \
+      python3 "${ROOT}/hdw4s-selkies-webrtc" "$@" 2>&1
+  }
+  rm -f "${SB}/out.json"
+  out="$(run "$@")"; rc=$?
+  is  'the desktop STARTS'                       "${rc}" '0'
+  has 'and the journal is told, loudly'          "${out}" 'WEBRTC IS OFF FOR THIS SESSION'
+  has 'with the reason'                          "${out}" 'ClientSession 3 time(s)'
+  got="$(python3 - "${SB}/out.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+a = d["argv"]
+def all_of(name):
+    return [x for x in a if x.startswith("--")
+            and x[2:].split("=", 1)[0].replace("-", "_") == name]
+print("dual", all_of("enable_dual_mode"))
+print("mode", all_of("mode"))
+print("last", a[-2:])
+print("pin", "--turn-host=turn.invalid" in a, a.count("--webrtc-ice-lite=true|locked"))
+print("stray", "webrtc" in a)
+print("env", d["env"])
+PY
+)"
+  has 'dual mode is locked OFF, once'            "${got}" "dual ['--enable-dual-mode=false|locked']"
+  has 'the start mode is websockets, once'       "${got}" "mode ['--mode=websockets']"
+  has 'and both come last, where the parser takes them' \
+      "${got}" "last ['--enable-dual-mode=false|locked', '--mode=websockets']"
+  has 'the TURN pin and both ice-lite pins survive' "${got}" 'pin True 2'
+  has 'no stray value is left to read as a flag' "${got}" 'stray False'
+  has 'the environment cannot ask for WebRTC'    "${got}" 'env []'
+  is  'and hdw4s check is told' \
+      "$(cat "${SB}/run/webrtc-degraded" 2>/dev/null)" \
+      "Selkies' signalling client module is not the code this adapts: it names ClientSession 3 time(s), not 2"
+
+  # The positive control: the shape the adapter knows applies, keeps dual mode,
+  # and clears a report left by an earlier start of the server in this session.
+  # Without it, a rewrite that fired on EVERY start would pass everything above.
+  sed -i '/self.other/d' "${SB}/py/selkies/webrtc_signaling_client.py"
+  out="$(run "$@")"; rc=$?
+  is  'a recognised Selkies starts too'          "${rc}" '0'
+  has 'and is adapted'                           "${out}" 'WebRTC signalling goes through'
+  hasnt 'and nothing says WebRTC is off'         "${out}" 'WEBRTC IS OFF'
+  has 'dual mode is left as configured'          "$(cat "${SB}/out.json")" '--enable-dual-mode=true|locked'
+  [ ! -e "${SB}/run/webrtc-degraded" ] && ok 'and the stale report is gone' \
+    || bad 'and the stale report is gone' 'still there'
+
+  # A failure that is not one of the named refusals -- here the module is gone
+  # -- degrades the same way rather than taking the desktop down.
+  rm -f "${SB}/py/selkies/webrtc_signaling_client.py"
+  out="$(run "$@")"; rc=$?
+  is  'an adapter that cannot even import still starts the desktop' "${rc}" '0'
+  has 'on websockets alone' "$(cat "${SB}/out.json")" '--enable-dual-mode=false|locked'
+)
+
 echo '== a session counts as protected only when both halves are there =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   # "hdw4s enable" decides whether to generate a credential by asking this, and
@@ -3164,6 +3281,25 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'and passes again once it publishes one' "${rc}" '0'
 
+  # A desktop that started without the WebRTC it is configured for. The adapter
+  # no longer refuses to start it -- as the default, that would take every
+  # desktop down at the next streaming server update -- so this report is what
+  # turns "it quietly lost a transport" into a red timer.
+  mkdir -p "${RUNDIR}/hdw4s/alice"
+  printf '%s\n' 'it names ClientSession 3 time(s), not 2' \
+    > "${RUNDIR}/hdw4s/alice/webrtc-degraded"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a desktop that degraded to websockets FAILS the check' "${rc}" '1'
+  has 'and is named'                        "${out}" 'alice is running WITHOUT WebRTC'
+  has 'and carries the reason it was given' "${out}" 'ClientSession 3 time(s)'
+  # Its own count, because it is not the token arm's failure and the same
+  # session can fail both: one counter would report two failures of one session.
+  has 'and has its own summary' "${out}" '1 of 3 running session(s) started without the WebRTC'
+  hasnt 'and is not counted as a token failure' "${out}" 'failed this check'
+  rm -f "${RUNDIR}/hdw4s/alice/webrtc-degraded"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'and passes again once it has WebRTC' "${rc}" '0'
+
   # The defect itself: a live slot publishing nothing.
   rm -f "${HDW4S_WEBROOT_DIR}/eph1/hdw4s-incarnation" "${HDW4S_INCARNATION_DIR}/eph1"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
@@ -3901,7 +4037,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=622   # update when tests are added; a wrong number is the point
+EXPECTED=647   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
