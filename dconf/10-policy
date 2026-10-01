@@ -14,6 +14,17 @@
 lock-enabled=false
 idle-activation-enabled=false
 
+# And not by hand either. lock-enabled only stops the AUTOMATIC lock; Super+L
+# and the menu's Lock still locked, and a ChromeOS keyboard sends its launcher
+# key as Super -- so reaching for the ChromeOS clipboard (launcher+V) in a
+# desktop landed on GNOME's own shortcuts and, once, on a lock screen asking
+# for a password that does not exist (owner, 2026-09-30: "i should not ever be
+# able to get myself into a lockscreen"). The lockdown key is the one
+# gnome-shell checks before locking at all, and it also takes Lock out of the
+# menu.
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true
+
 [org/gnome/desktop/session]
 idle-delay=uint32 0
 

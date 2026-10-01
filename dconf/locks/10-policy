@@ -32,6 +32,9 @@
 # makes this different from the six background keys that used to sit below.
 /org/gnome/desktop/screensaver/lock-enabled
 /org/gnome/desktop/screensaver/idle-activation-enabled
+# The same clause, for locking by hand (Super+L, the menu): see the key's
+# comment in ../10-policy.
+/org/gnome/desktop/lockdown/disable-lock-screen
 /org/gnome/desktop/session/idle-delay
 
 # WHAT USED TO BE HERE AND IS DELIBERATELY GONE: six background keys, locked
