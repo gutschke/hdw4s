@@ -48,9 +48,16 @@ import wsprobe  # noqa: E402
 # required to be "overridden": the point is to catch a control that stopped
 # being applied, not merely one whose value looks safe today.
 EXPECTED = {
-    # Serve one transport. Dual mode also stands up the WebRTC stack, which is
-    # a second signalling surface with its own peer handling and its own bugs.
-    "enable_dual_mode": (False, True),
+    # WebRTC is offered by default (HDW4S_WEBRTC=yes): sessions start on
+    # websockets and the person in the session may switch. This was (False,
+    # True) while it was an opt-in, and changing it here was deliberate. Still
+    # LOCKED either way: a client must not be able to move it. A session set to
+    # "no" is read from its own command line by adopt_configured(); a session
+    # whose adapter fell back to websockets alone reports False here although
+    # its command line says true, and FAILS -- which is right, because it is
+    # running without a transport it was configured for. "hdw4s check" and the
+    # session journal say why.
+    "enable_dual_mode": (True, True),
     # No STUN/TURN lookups to third parties from the user's session.
     "webrtc_ice_lite": (True, True),
     # Files move both ways, scoped to the account's Downloads folder by
@@ -417,8 +424,11 @@ def check_defeat_wire_verb(base, unit, probe_file):
     setting -- the one built from the command line, which "_ebc" cannot reach.
     That gate is what this asserts, because it is the one whose removal would
     matter: it exists only in the websocket transport, and the WebRTC transport
-    has no equivalent check at all. Today that is academic because dual mode is
-    locked off. It stops being academic the moment it is not.
+    has no equivalent check at all. Dual mode is now on by default, so a session
+    can be switched onto that transport; what keeps that harmless today is that
+    binary clipboard is configured ON, so the gate has nothing to refuse. The
+    day it is configured off, a session switched to WebRTC is not covered by
+    this gate, and that has to be closed first.
 
     The precondition is established here rather than assumed: the clipboard is
     loaded, over the same socket, with a uri-list naming a real file. Without
@@ -526,12 +536,18 @@ def adopt_configured(unit):
     if argv is None:
         return
     for flag, name in (("--microphone-enabled=", "microphone_enabled"),
-                       ("--webcam-enabled=", "webcam_enabled")):
+                       ("--webcam-enabled=", "webcam_enabled"),
+                       ("--enable-dual-mode=", "enable_dual_mode")):
         raw = next((a.split("=", 1)[1] for a in argv if a.startswith(flag)), None)
         if raw is None:
             continue
         value = raw.split("|", 1)[0] == "true"
         locked = raw.endswith("|locked")
+        # The transport switch is locked whichever way it is set: only its VALUE
+        # is the operator's (HDW4S_WEBRTC). Adopting the lock from the command
+        # line would let a dropped "|locked" pass as policy.
+        if name == "enable_dual_mode":
+            locked = True
         if value != EXPECTED[name][0] or locked != EXPECTED[name][1]:
             EXPECTED[name] = (value, locked)
             # Turned on, these are deliberately NOT locked: the dashboard hides

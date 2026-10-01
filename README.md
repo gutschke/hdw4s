@@ -230,8 +230,8 @@ session exists.
 
 The streaming server offers more than a desktop if you let it. Out of the box it
 also serves a file manager over the user's `Desktop` directory, accepts uploads
-into it, lets any caller restart the media stack in WebRTC mode, and admits
-extra viewers and gamepad players to a live session. hdw4s turns all of that off
+into it, and admits extra viewers and gamepad players to a live session. hdw4s
+turns all of that off
 at the server, by name, rather than relying on a default -- and not at the proxy,
 because those routes share a prefix with the stream and cannot be separated
 there. If you re-enable any of them, the sentence above stops being the whole

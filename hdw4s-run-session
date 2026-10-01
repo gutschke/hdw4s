@@ -18,7 +18,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_SESSION:=gnome-session}"
 : "${HDW4S_MICROPHONE:=no}"
 : "${HDW4S_WEBCAM:=no}"
-: "${HDW4S_WEBRTC:=no}"
+: "${HDW4S_WEBRTC:=yes}"
 : "${HDW4S_TURN_HOST:=}"
 : "${HDW4S_TURN_PORT:=3478}"
 : "${HDW4S_FRAMERATE:=30,8-60}"
@@ -846,12 +846,13 @@ fi
 # here controls, silently, as a default. Passed empty so it falls back to its
 # own STUN-only configuration.
 #
-# These are not settings. A relay needs credentials, and there is nowhere to
-# put them: hdw4s-session sources the configuration files as the session user,
-# so anything written there is readable by every desktop on the machine.
-# Supporting a relay properly means sealing its secret the way "hdw4s auth"
-# seals the proxy credential, and until that exists, offering a knob that
-# cannot be used safely would be worse than offering nothing.
+# Blanked here, before anything else, so that nothing inherited reaches the
+# server under these names. They are not how a relay is configured: a session
+# that offers WebRTC is given its TURN settings on the command line further down
+# (see "WebRTC, and the reason turning it on is not simply a flag"), where
+# HDW4S_TURN_HOST names a relay of the administrator's own and its absence pins
+# a host that cannot resolve. The secret is the one value that travels in the
+# environment, and it is set there, not here.
 export SELKIES_TURN_HOST=''
 export SELKIES_TURN_PORT=''
 export SELKIES_TURN_SHARED_SECRET=''
@@ -872,14 +873,18 @@ export SELKIES_RTC_CONFIG_JSON=''
 # subclass to stand up. Everything this package wants from the server is asked
 # for on the command line below.
 stream=(/opt/selkies/bin/selkies)
-# EXCEPT WITH WebRTC. Selkies' WebRTC mode connects to its own signalling endpoint
-# as a client, over TCP to localhost whatever the listener is, carrying the
-# session's credential and the server's master token -- and nothing of ours
-# listens on that port any more, so whoever binds it first would be answering.
-# hdw4s-selkies-webrtc sends that one connection through the stream's unix socket
-# instead, and refuses to start rather than fall back if it no longer recognises
-# the code it adapts. Only here: a websockets-only session keeps nothing of ours
-# between the unit and the server.
+# EXCEPT WITH WebRTC, which is the default. Selkies' WebRTC mode connects to its
+# own signalling endpoint as a client, over TCP to localhost whatever the
+# listener is, carrying the session's credential and the server's master token --
+# and nothing of ours listens on that port any more, so whoever binds it first
+# would be answering. hdw4s-selkies-webrtc sends that one connection through the
+# stream's unix socket instead. If it no longer recognises the code it adapts, it
+# does not fall back to TCP: it rewrites the arguments below to the "no" branch's
+# -- dual mode locked off, start mode websockets -- and the desktop starts with no
+# way to reach WebRTC, saying so in this journal and to "hdw4s check". It used to
+# refuse to start the session instead, which as a default would have taken every
+# desktop down at the next streaming server update. Only here: a session set to
+# "no" keeps nothing of ours between the unit and the server.
 if [ "${HDW4S_WEBRTC}" = 'yes' ]; then
   stream=(/opt/selkies/bin/python /usr/lib/hdw4s/hdw4s-selkies-webrtc)
 fi
@@ -1033,6 +1038,12 @@ esac
 # happens to be off is not a pin.
 rtc_config_none='/usr/lib/hdw4s/rtc-config.disabled'
 
+# Sessions START on websockets either way: no --mode is passed for "yes", and
+# upstream's start mode is websockets. "yes" lets the person in the session
+# switch to WebRTC from the side menu and back. The pin above is process
+# arguments and environment, and a switch reuses the process's own settings, so
+# it holds after a switch exactly as it would at a start. The adapter's fallback
+# keeps every argument below and overrides only the two that reach WebRTC.
 case "${HDW4S_WEBRTC}" in
   yes)
     webrtc=(--enable-dual-mode='true|locked' --webrtc-ice-lite='true|locked'

@@ -837,9 +837,8 @@ running desktop away from the person at it.
 
 And the streaming server offers more than a desktop unless it is told not to.
 Its own defaults serve a file manager over the user's `Desktop` directory,
-accept uploads into it, let any caller restart the media stack in WebRTC mode,
-and admit extra viewers and gamepad players to a live session. hdw4s turns each
-of those off at the server, by name rather than by relying on a default, because
+accept uploads into it, and admit extra viewers and gamepad players to a live
+session. hdw4s turns each of those off at the server, by name rather than by relying on a default, because
 they share a URL prefix with the stream and a proxy cannot separate them. Two
 endpoints, `/api/status` and `/api/health`, answer before any authentication
 runs and always will.
@@ -1062,6 +1061,15 @@ publisher unit first ran, and never restarted, goes on running without it and is
 reported `active` by everything that looks. A restart fixes one; the check is
 what notices the next one.
 
+The same pass reports any running session that started without the WebRTC it is
+configured to offer. With `HDW4S_WEBRTC=yes`, the default, a session starts
+through an adapter that keeps the streaming server's WebRTC signalling off TCP.
+When an update moves the code that adapter changes, it does not refuse to start
+the desktop, and it does not let WebRTC run unadapted: the desktop starts on the
+WebSocket alone with the transport switch locked off, exactly as with
+`HDW4S_WEBRTC=no`, and says why in the session's journal and here. Update hdw4s,
+or set `HDW4S_WEBRTC=no` for the session, to clear it.
+
 It is run every fifteen minutes by `hdw4s-check.timer`, which marks
 `hdw4s-check.service` failed when it finds anything, so `systemctl --failed` names
 it. Run as root: the record it compares against is readable by root only, and
@@ -1073,12 +1081,22 @@ home directory, so it disappears with the session instead of accumulating.
 
 ## LIMITATIONS
 
-There is no way to configure STUN or TURN, and nothing left for one to
-configure. A session serves a single WebSocket: dual mode is locked off, so the
-WebRTC stack never starts, no UDP socket is opened, no connection candidates
-are gathered and no STUN server is contacted. Checked rather than assumed --
-the streaming server's process owns one listener, a filesystem socket, and no
-UDP socket at all.
+There is no way to configure STUN. A session starts on a single WebSocket and
+opens no UDP socket until the person in it switches to WebRTC from the side
+menu, which `HDW4S_WEBRTC=yes` (the default) offers. From then on the browser
+must reach the machine directly; with `HDW4S_MEDIA_PORTS=proxied` the firewall
+admits that only from the proxy addresses, so elsewhere the switch fails to
+connect. The server runs ICE-lite and contacts no STUN server itself.
+
+TURN is a relay of your own or none: `HDW4S_TURN_HOST` and `HDW4S_TURN_SECRET`
+name one, and without them a session is pinned to a host that cannot resolve.
+The secret is readable by every account with a desktop on that machine, because
+the streaming server runs as that account and has to hold it to sign each
+browser's credential.
+
+A viewer joined to a shared session can switch its transport, restarting the
+stream for everyone. The streaming server does not yet confine the switch to
+the session's own user; `HDW4S_WEBRTC=no` locks it off.
 
 Under 1.6 this was not true, and the reasons it mattered are worth keeping: the
 server appended its own default STUN server unless one was named exactly, so a
@@ -1087,10 +1105,6 @@ session told a third party the machine's address and when it started. TURN was
 disabled outright because the server otherwise used a relay belonging to a
 third party with a shared secret published in its own source, which would have
 carried the desktop's video, keystrokes and clipboard.
-Enabling a relay you run yourself needs somewhere to keep its credentials that
-a session cannot read, which does not exist yet: the configuration files are
-read by the session as the desktop user, so a secret in them is readable by
-every account with a desktop on that machine.
 
 
 An account gets one desktop per machine. The same account having desktops on

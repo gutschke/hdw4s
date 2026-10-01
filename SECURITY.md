@@ -33,9 +33,23 @@ reach a session to a set of addresses. An address is a weak thing to rely on by
 itself: it can be spoofed unless the network prevents it, and on a shared
 network anything on that network can present it. Treat it as a second lock,
 never the first. The nftables rules also close the ephemeral range a WebRTC
-media path would scatter sockets across -- which, since dual mode is locked
-off, is now a second line rather than the first. See the note on the media
-chain below for how, and for what it does and does not cover.
+media path scatters sockets across, from everything but the proxy addresses.
+Sessions start on a WebSocket and open none of those sockets until somebody in
+the session switches to WebRTC. See the note on the media chain below for how,
+and for what it does and does not cover.
+
+**WebRTC never uses a relay nobody chose.** The streaming server ships with a
+third party's TURN relay and a shared secret published in its own source. A
+session that offers WebRTC -- the default, `HDW4S_WEBRTC=yes` -- is always given
+a TURN host on its command line: the administrator's own (`HDW4S_TURN_HOST`), or
+a `.invalid` name that cannot resolve, signed with a random secret. The ICE
+override file the server would otherwise read from the session's own `/tmp` is
+pinned to a path under `/usr` that cannot exist, and the server runs ICE-lite,
+so it contacts no STUN server itself. These are process arguments, and a switch
+between transports reuses them. If the adapter that keeps WebRTC signalling off
+TCP does not recognise an updated streaming server, the session starts with the
+switch locked off rather than starting WebRTC without it, and `hdw4s check`
+reports it.
 
 **A session's account can become root if `sudoers` says it can.** `sudo` inside
 a session behaves as it does on any other machine: `sudoers` and PAM decide who
@@ -82,13 +96,23 @@ stays in the journal for its retention period, so `hdw4s auth` does not retract
 one that has already been logged; and rotating a credential does not shorten
 that window.
 
-The nftables `media` chain closes the sockets a WebRTC media path would open.
-Under 2.0 there are none to close: the session serves one WebSocket, dual mode
-is locked off so the WebRTC stack never starts, and the streaming server's
-process owns one TCP listener on loopback and no UDP socket at all -- checked,
-not assumed. The chain stays because what it constrains is broader than that
-one program, as the rest of this note explains, and because a future release
-that reached for a media path should find the door already shut.
+**A viewer of a shared session can switch its transport.** With WebRTC offered,
+the switch is open to whoever is connected, and the streaming server does not
+yet hold a viewer joined to a shared session to the user's own choice: such a
+viewer can move the session to WebRTC or back, restarting the stream under
+everyone. It reaches no relay and nothing the user could not, but it is a
+control a viewer should not have. This is the streaming server's to fix; until
+then, `HDW4S_WEBRTC=no` locks the switch off for everyone.
+
+The nftables `media` chain closes the sockets a WebRTC media path opens. A
+session starts on one WebSocket and opens candidate sockets only once somebody
+in it switches to WebRTC. With the switch locked off the server process was
+measured to own no UDP socket at all; with it offered, the server registers its
+WebRTC service at startup but does not start it, so the same is expected and
+has been read, not yet measured. From then on the chain is what stands between them and the network,
+which is also why a browser that is not on the proxy list cannot complete the
+switch unless `HDW4S_MEDIA_PORTS=direct`. It also constrains more than that one
+program, as the rest of this note explains.
 
 Where the kernel allows it, it matches the cgroup that owns each
 socket, which means it constrains sockets **by what created them, not by which
