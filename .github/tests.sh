@@ -1068,21 +1068,24 @@ echo '== a named desktop gets a composed dconf profile unless it may lock =='
   is  'an ephemeral desktop is left to its own profile' "${out}" "${T}/machine"
 )
 
-echo '== the trash is linked onto the home'"'"'s filesystem =='
+echo '== a named desktop'"'"'s trash is linked to the home'"'"'s own =='
 # shellcheck disable=SC2016  # matched as literal text in hdw4s-session
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
-  # From the marker comment to the second closing "  fi" after it: the choice
-  # of directory, then the link.
-  blk="$(awk '/THE TRASH LIVES/{f=1} f{print; if ($0 ~ /^  fi$/ && ++n == 2) exit}' \
+  # From the marker comment to the end of its one if-block.
+  blk="$(awk '/A NAMED DESKTOP.S TRASH/{f=1} f{print; if ($0 ~ /^  fi$/) exit}' \
          "${ROOT}/hdw4s-session")"
   has 'the block is found in hdw4s-session' "${blk}" 'ln -s "${trash}"'
-  mkdir -p "${T}/home/.local" "${T}/data/Trash/files"
-  HOME="${T}/home" XDG_DATA_HOME="${T}/data" HDW4S_SESSION_TYPE=ephemeral bash -c "${blk}" 2>/dev/null
-  is  'an empty profile Trash becomes a link into the home' \
-      "$(readlink "${T}/data/Trash")" "${T}/home/.local/Trash"
+  mkdir -p "${T}/home" "${T}/data/Trash/files"
+  HOME="${T}/home" XDG_DATA_HOME="${T}/data" bash -c "${blk}" 2>/dev/null
+  is  'a named desktop'"'"'s empty profile Trash becomes a link to ~/.local/share/Trash' \
+      "$(readlink "${T}/data/Trash")" "${T}/home/.local/share/Trash"
   rm -rf "${T}/data/Trash"; mkdir -p "${T}/data/Trash/files"; : > "${T}/data/Trash/files/kept"
-  HOME="${T}/home" XDG_DATA_HOME="${T}/data" HDW4S_SESSION_TYPE=ephemeral bash -c "${blk}" 2>/dev/null
+  HOME="${T}/home" XDG_DATA_HOME="${T}/data" bash -c "${blk}" 2>/dev/null
   is  'a Trash holding files is left alone' "$([ -L "${T}/data/Trash" ] && echo link || echo dir)" 'dir'
+  rm -rf "${T}/data/Trash"; mkdir -p "${T}/data/Trash/files"
+  HOME="${T}/home" XDG_DATA_HOME="${T}/data" HDW4S_SESSION_TYPE=ephemeral bash -c "${blk}" 2>/dev/null
+  is  'an ephemeral desktop gets no link: its data is in its home' \
+      "$([ -L "${T}/data/Trash" ] && echo link || echo dir)" 'dir'
 )
 
 echo '== a published Chrome keeps no rule checksum without its rules =='
@@ -4610,7 +4613,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=745   # update when tests are added; a wrong number is the point
+EXPECTED=746   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
