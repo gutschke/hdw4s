@@ -1,3 +1,13 @@
+hdw4s (2.4.10) unstable; urgency=medium
+
+  * Installs Selkies 2.0.0, the first final release of the 2.0 series
+    (https://github.com/selkies-project/selkies/releases/tag/2.0.0), in place
+    of 2.0.0rc1. Installing this package fetches it in the background;
+    idle sessions restart onto it, and sessions in use pick it up when
+    they next start.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Thu, 01 Oct 2026 14:16:54 -0700
+
 hdw4s (2.4.9) unstable; urgency=medium
 
   * Visitor desktop backgrounds vary more in brightness within one picture:
