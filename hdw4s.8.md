@@ -18,7 +18,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `seed` <instance> [`--only` <path>]...<br>
 `hdw4s` `keyring` <instance><br>
 `hdw4s` `reap`<br>
-`hdw4s` `pool` `size` [<N>]<br>
+`hdw4s` `pool` `size` [<N>]|`show`|`set` <KEY>=<VALUE>...|`unset` <KEY>|`proxy`<br>
 `hdw4s` `template` `edit` [`--yes`]|`keep` [<path>...]|`forget` <path>...|`reset`|`show`<br>
 `hdw4s` `firewall` `--apply`|`--check`|`--print`|`--restore`<br>
 `hdw4s` `--version`
@@ -112,7 +112,9 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
   * `proxy` <instance>:
     Print an nginx configuration for this session, matching whichever
-    transport and authentication it is set up for.
+    transport and authentication it is set up for. Refused for a seat of the
+    ephemeral pool and for the template-authoring slot, which are reached
+    through the pool's one hostname: `pool proxy` prints that.
 
   * `pool size` [<N>]:
     With no number, print how many seats the ephemeral pool has, which of them
@@ -128,6 +130,40 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     non-zero. Running it again later with the same number finishes the job, and
     so does running it again after it was interrupted.
 
+  * `pool show`:
+    What `pool size` prints, then every setting an ephemeral desktop starts
+    with, its value, and the file it came from. Also lists any seat that still
+    has a setting of its own -- left by configuring seats one by one before
+    `pool set` existed -- since that seat's visitors get something the others
+    do not.
+
+  * `pool set` <KEY>=<VALUE>...:
+    Change a setting for every ephemeral desktop, and for the
+    template-authoring desktop, so that a template is made on the desktop
+    visitors get. Written to `/etc/hdw4s/_hdw4s_pool.conf`, which those
+    desktops read after `hdw4s.conf` and which wins over it; named desktops do
+    not read it. It applies to each desktop that starts afterwards: one a
+    visitor has open keeps what it started with until it ends, and nothing
+    tells you to restart it.
+
+    The settings read once for the whole machine rather than by each desktop
+    -- the `HDW4S_EPHEMERAL_*` sizes, background and URL -- are written to
+    `hdw4s.conf`, where they are read, and the command says when they apply.
+    Refused: settings a pool desktop has a fixed answer to (`HDW4S_ISOLATION`,
+    `HDW4S_PROFILE_DIR`, `HDW4S_TRANSPORT`, `HDW4S_AUTH`,
+    `HDW4S_PROXY_GROUP`), settings that apply to the whole machine (use `set`),
+    `HDW4S_EPHEMERAL_SLOTS` (use `pool size`), and an `HDW4S_IDLE_DAYS` of `0`, which
+    would never free a seat.
+
+  * `pool unset` <KEY>:
+    Comment a pool setting out, so the machine's value applies to the pool
+    again. Refused for `HDW4S_IDLE_DAYS` while the machine's value is `0`,
+    since the pool would then never be reaped.
+
+  * `pool proxy`:
+    Print the nginx configuration for the pool: one hostname, pointed at the
+    pool's front door. See **THE EPHEMERAL POOL**.
+
   * `set` [<instance>] <KEY>=<VALUE>...:
     Change a setting without opening an editor. With an instance, writes to
     that session's file; without one, to the defaults. The edit is deliberately
@@ -137,7 +173,10 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     still applies; otherwise the setting is appended. Nothing else in the file
     is touched, and anything not offered here can still be edited by hand.
     `HDW4S_EPHEMERAL_SLOTS` is refused, here and by `unset`: it is written by
-    `pool size`, which changes the seats along with it.
+    `pool size`, which changes the seats along with it. A seat of the ephemeral
+    pool and the template-authoring slot are refused as an instance, here and
+    by `unset`: a visitor is handed whichever seat is free, so the pool's
+    desktops are configured together, with `pool set`.
 
   * `unset` [<instance>] <KEY>:
     Comment a setting out so the default applies again. The line is commented
@@ -404,14 +443,16 @@ belongs to the copy of the streaming server, of which there is one.
     slot, because a visitor who closes the tab tells nothing. With no window,
     unattended desktops accumulate until the pool is full and every visitor
     after that is refused, from one configuration line and with nothing
-    reporting why. To let one slot sit longer without moving every session, set
-    a longer window in `/etc/hdw4s/`<slot>`.conf`:
+    reporting why. To let the pool's desktops sit longer without moving every
+    session, give the pool a longer window of its own:
 
-        hdw4s set <slot> HDW4S_IDLE_DAYS=30d
+        hdw4s pool set HDW4S_IDLE_DAYS=30d
 
-    Setting 0 without an instance name is refused too, but only on a machine
-    that has ephemeral slots, since that value reaches them as well. Set 0 on
-    the named sessions that should never be stopped instead.
+    Setting 0 without an instance name is refused too, on a machine that has
+    ephemeral slots, since that value reaches them as well -- unless the pool
+    has a window of its own, which it reads instead. Set 0 on the named
+    sessions that should never be stopped, or give the pool its own window
+    first.
 
   * `HDW4S_MEDIA_PORTS`:
     Either `proxied`, the default, or `direct`. The streaming server scatters
@@ -757,6 +798,13 @@ single hostname for the whole pool and are given a session from it.
     holds the pool at one above it until that desktop ends; `hdw4s pool size`
     with no number shows which.
 
+  * **Settings belong to the pool, not to a seat.** `hdw4s pool set` writes
+    the one file every ephemeral desktop reads; `set` with a seat's name is
+    refused. A seat may still carry a setting of its own from an install
+    configured seat by seat, and it still wins for that seat: `pool show` lists
+    each one, and removing the line from `/etc/hdw4s/<seat>.conf` hands the
+    seat back to the pool.
+
   * **The credential belongs to the pool, not to a slot.** A reverse proxy
     presents one credential to reach the pool; individual slots have none and
     cannot be given one, which is why `auth` refuses for a slot.
@@ -785,8 +833,7 @@ the pool. It reads the credential once, at startup, so a file changed underneath
 a running pool changes nothing until then, and the proxy will be refused with
 `401` in the meantime.
 
-Run `proxy` against any slot to print the reverse-proxy configuration for the
-pool. It is the same for every slot.
+`hdw4s pool proxy` prints the reverse-proxy configuration for the pool.
 
 The pool is served by a unit named `hdw4s-demux`, which is where it appears in
 `systemctl` output and in the journal. Nothing else requires that name.

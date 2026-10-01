@@ -135,7 +135,13 @@ InaccessiblePaths=-/run/cups
 Environment=USER=user
 Environment=LOGNAME=user
 
+# The pool's own settings ("hdw4s pool set") between the machine's and the
+# seat's: every desktop of the pool reads the same file, so a visitor gets the
+# same desktop whichever seat they are handed. The seat's own file is still
+# read, last, for what hdw4s writes there itself and for what an install
+# configured seat by seat before; "hdw4s pool show" lists any such setting.
 EnvironmentFile=-/etc/hdw4s/hdw4s.conf
+EnvironmentFile=-/etc/hdw4s/_hdw4s_pool.conf
 EnvironmentFile=-/etc/hdw4s/%i.conf
 
 # The same reasoning as the base unit: not /run/user/<uid>, which belongs to

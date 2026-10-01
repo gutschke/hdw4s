@@ -76,6 +76,20 @@ if [ -r "${CONF}" ]; then
   # false, which is not an error worth dying over.
   . "${CONF}" || :
 fi
+# The pool's own settings, for a desktop of the pool, between the two -- the
+# order hdw4s-ephemeral@.service reads them in. That unit also hides /etc/hdw4s
+# from the session, so there it is the unit's reading that counts; this keeps
+# the two from disagreeing about the order if that ever changes.
+pool_conf='/etc/hdw4s/_hdw4s_pool.conf'
+# shellcheck source=/dev/null
+if [ "${HDW4S_SESSION_TYPE}" = 'ephemeral' ] && [ -r "${pool_conf}" ]; then
+  bash -n "${pool_conf}" || {
+    echo "hdw4s: ${pool_conf} has a syntax error (above); refusing to run on a" >&2
+    echo '  configuration that would be applied only as far as the error.' >&2
+    exit 1
+  }
+  . "${pool_conf}" || :
+fi
 # shellcheck source=/dev/null
 if [ -r "/etc/hdw4s/${instance}.conf" ]; then
   f="/etc/hdw4s/${instance}.conf"

@@ -34,7 +34,7 @@
 .br
 \fBhdw4s\fR \fBreap\fR
 .br
-\fBhdw4s\fR \fBpool\fR \fBsize\fR [\fIN\fR]
+\fBhdw4s\fR \fBpool\fR \fBsize\fR [\fIN\fR]|\fBshow\fR|\fBset\fR \fIKEY\fR=\fIVALUE\fR\|\.\|\.\|\.|\fBunset\fR \fIKEY\fR|\fBproxy\fR
 .br
 \fBhdw4s\fR \fBtemplate\fR \fBedit\fR [\fB\-\-yes\fR]|\fBkeep\fR [\fIpath\fR\|\.\|\.\|\.]|\fBforget\fR \fIpath\fR\|\.\|\.\|\.|\fBreset\fR|\fBshow\fR
 .br
@@ -84,15 +84,29 @@ Require the proxy to present a secret as well as an acceptable address\. Generat
 Refused for an ephemeral slot, where a credential excludes nobody: the socket is group\-owned by the reverse proxy and open to nothing else, so the only caller that can reach it is the one that would be given the secret\. What it would do instead is answer that proxy with 401 until the proxy is configured with it, so one session refuses connections its neighbours accept for a reason no listing explains\.
 .TP
 \fBproxy\fR \fIinstance\fR
-Print an nginx configuration for this session, matching whichever transport and authentication it is set up for\.
+Print an nginx configuration for this session, matching whichever transport and authentication it is set up for\. Refused for a seat of the ephemeral pool and for the template\-authoring slot, which are reached through the pool's one hostname: \fBpool proxy\fR prints that\.
 .TP
 \fBpool size\fR [\fIN\fR]
 With no number, print how many seats the ephemeral pool has, which of them are in use and why, and anything about the pool that does not agree with \fBHDW4S_EPHEMERAL_SLOTS\fR\. With a number, make the pool that size \fBnow\fR, with no reboot: new seats are set up and offered to visitors at once, and seats are taken away from the highest\-numbered down\. See \fBTHE EPHEMERAL POOL\fR\.
 .IP
 A seat a visitor is using is never taken away, whether or not anybody is looking at it at the moment\. The pool then stops one above it, the command says which seat held it there and how to end that desktop, and it exits non\-zero\. Running it again later with the same number finishes the job, and so does running it again after it was interrupted\.
 .TP
+\fBpool show\fR
+What \fBpool size\fR prints, then every setting an ephemeral desktop starts with, its value, and the file it came from\. Also lists any seat that still has a setting of its own \-\- left by configuring seats one by one before \fBpool set\fR existed \-\- since that seat's visitors get something the others do not\.
+.TP
+\fBpool set\fR \fIKEY\fR=\fIVALUE\fR\|\.\|\.\|\.
+Change a setting for every ephemeral desktop, and for the template\-authoring desktop, so that a template is made on the desktop visitors get\. Written to \fB/etc/hdw4s/_hdw4s_pool\.conf\fR, which those desktops read after \fBhdw4s\.conf\fR and which wins over it; named desktops do not read it\. It applies to each desktop that starts afterwards: one a visitor has open keeps what it started with until it ends, and nothing tells you to restart it\.
+.IP
+The settings read once for the whole machine rather than by each desktop \-\- the \fBHDW4S_EPHEMERAL_*\fR sizes, background and URL \-\- are written to \fBhdw4s\.conf\fR, where they are read, and the command says when they apply\. Refused: settings a pool desktop has a fixed answer to (\fBHDW4S_ISOLATION\fR, \fBHDW4S_PROFILE_DIR\fR, \fBHDW4S_TRANSPORT\fR, \fBHDW4S_AUTH\fR, \fBHDW4S_PROXY_GROUP\fR), settings that apply to the whole machine (use \fBset\fR), \fBHDW4S_EPHEMERAL_SLOTS\fR (use \fBpool size\fR), and an \fBHDW4S_IDLE_DAYS\fR of \fB0\fR, which would never free a seat\.
+.TP
+\fBpool unset\fR \fIKEY\fR
+Comment a pool setting out, so the machine's value applies to the pool again\. Refused for \fBHDW4S_IDLE_DAYS\fR while the machine's value is \fB0\fR, since the pool would then never be reaped\.
+.TP
+\fBpool proxy\fR
+Print the nginx configuration for the pool: one hostname, pointed at the pool's front door\. See \fBTHE EPHEMERAL POOL\fR\.
+.TP
 \fBset\fR [\fIinstance\fR] \fIKEY\fR=\fIVALUE\fR\|\.\|\.\|\.
-Change a setting without opening an editor\. With an instance, writes to that session's file; without one, to the defaults\. The edit is deliberately conservative: an existing assignment is changed where it stands, keeping its indentation and any note written after it on the same line; otherwise the documented default is uncommented in place, so the explanation above it still applies; otherwise the setting is appended\. Nothing else in the file is touched, and anything not offered here can still be edited by hand\. \fBHDW4S_EPHEMERAL_SLOTS\fR is refused, here and by \fBunset\fR: it is written by \fBpool size\fR, which changes the seats along with it\.
+Change a setting without opening an editor\. With an instance, writes to that session's file; without one, to the defaults\. The edit is deliberately conservative: an existing assignment is changed where it stands, keeping its indentation and any note written after it on the same line; otherwise the documented default is uncommented in place, so the explanation above it still applies; otherwise the setting is appended\. Nothing else in the file is touched, and anything not offered here can still be edited by hand\. \fBHDW4S_EPHEMERAL_SLOTS\fR is refused, here and by \fBunset\fR: it is written by \fBpool size\fR, which changes the seats along with it\. A seat of the ephemeral pool and the template\-authoring slot are refused as an instance, here and by \fBunset\fR: a visitor is handed whichever seat is free, so the pool's desktops are configured together, with \fBpool set\fR\.
 .TP
 \fBunset\fR [\fIinstance\fR] \fIKEY\fR
 Comment a setting out so the default applies again\. The line is commented rather than deleted, so the value that was there stays visible\.
@@ -226,14 +240,14 @@ The shortest window is 120 seconds\. An ephemeral session takes up to 91 seconds
 .IP
 Set it to 0 to never reap\. That is a choice for a named session, where stopping one is a nap: its files and settings stay and the next connection starts it again\.
 .IP
-\fBIt is refused for an ephemeral slot\.\fR The same clock governs one, but stopping it is not reversible \(em the home and the profile are held in memory and go with the session \(em and reaping is the only thing that ever frees the slot, because a visitor who closes the tab tells nothing\. With no window, unattended desktops accumulate until the pool is full and every visitor after that is refused, from one configuration line and with nothing reporting why\. To let one slot sit longer without moving every session, set a longer window in \fB/etc/hdw4s/\fR\fIslot\fR\fB\.conf\fR:
+\fBIt is refused for an ephemeral slot\.\fR The same clock governs one, but stopping it is not reversible \(em the home and the profile are held in memory and go with the session \(em and reaping is the only thing that ever frees the slot, because a visitor who closes the tab tells nothing\. With no window, unattended desktops accumulate until the pool is full and every visitor after that is refused, from one configuration line and with nothing reporting why\. To let the pool's desktops sit longer without moving every session, give the pool a longer window of its own:
 .IP "" 4
 .nf
-hdw4s set <slot> HDW4S_IDLE_DAYS=30d
+hdw4s pool set HDW4S_IDLE_DAYS=30d
 .fi
 .IP "" 0
 .IP
-Setting 0 without an instance name is refused too, but only on a machine that has ephemeral slots, since that value reaches them as well\. Set 0 on the named sessions that should never be stopped instead\.
+Setting 0 without an instance name is refused too, on a machine that has ephemeral slots, since that value reaches them as well \-\- unless the pool has a window of its own, which it reads instead\. Set 0 on the named sessions that should never be stopped, or give the pool its own window first\.
 .IP "\[ci]" 4
 \fBHDW4S_MEDIA_PORTS\fR: Either \fBproxied\fR, the default, or \fBdirect\fR\. The streaming server scatters connection candidates across the ephemeral port range on every address the machine has\. \fBproxied\fR drops new inbound connections to that range, which closes them; \fBdirect\fR leaves them reachable, which is needed only when a browser reaches the streaming server without a proxy in between\.
 .IP "\[ci]" 4
@@ -370,6 +384,8 @@ An idle slot costs an entry under \fB/run\fR and nothing else\. An occupied one 
 .IP "\[ci]" 4
 \fBChanging the size\.\fR \fBhdw4s pool size N\fR, and nothing else\. Three things describe the pool \-\- \fBHDW4S_EPHEMERAL_SLOTS\fR, which the next boot mints identities from; the identities themselves, under \fB/run\fR; and one row per seat in the slot table, which is what visitors are offered \-\- and the command changes all three, in an order that an interruption cannot turn into a seat that is offered and cannot start\. Seats go from the top because the setting describes seats \fB0\fR to \fBN\-1\fR\. A seat a visitor is using holds the pool at one above it until that desktop ends; \fBhdw4s pool size\fR with no number shows which\.
 .IP "\[ci]" 4
+\fBSettings belong to the pool, not to a seat\.\fR \fBhdw4s pool set\fR writes the one file every ephemeral desktop reads; \fBset\fR with a seat's name is refused\. A seat may still carry a setting of its own from an install configured seat by seat, and it still wins for that seat: \fBpool show\fR lists each one, and removing the line from \fB/etc/hdw4s/<seat>\.conf\fR hands the seat back to the pool\.
+.IP "\[ci]" 4
 \fBThe credential belongs to the pool, not to a slot\.\fR A reverse proxy presents one credential to reach the pool; individual slots have none and cannot be given one, which is why \fBauth\fR refuses for a slot\.
 .IP "" 0
 .SS "The pool's credential"
@@ -388,7 +404,7 @@ Nothing reads the user name except the comparison, so it may be anything that do
 .P
 \fBRotating it takes three steps and the third is the one people forget\.\fR Write the new value here, put the matching pair in the reverse proxy, and then restart the pool\. It reads the credential once, at startup, so a file changed underneath a running pool changes nothing until then, and the proxy will be refused with \fB401\fR in the meantime\.
 .P
-Run \fBproxy\fR against any slot to print the reverse\-proxy configuration for the pool\. It is the same for every slot\.
+\fBhdw4s pool proxy\fR prints the reverse\-proxy configuration for the pool\.
 .P
 The pool is served by a unit named \fBhdw4s\-demux\fR, which is where it appears in \fBsystemctl\fR output and in the journal\. Nothing else requires that name\.
 .SH "TRANSPORTS"

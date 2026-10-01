@@ -199,6 +199,11 @@ Usage: hdw4s <command> [arguments]
   pool size [<N>]         how many visitors can have a desktop at once; with N,
                           change it now -- hdw4s chooses the seats, and never
                           takes one a visitor is using
+  pool show               the pool's size, what is in use, and the settings
+                          every ephemeral desktop starts with
+  pool set K=V            change a setting for every ephemeral desktop
+  pool unset K            the machine's value applies to the pool again
+  pool proxy              print an nginx configuration for the pool
   template edit           change what every new ephemeral desktop starts from:
                           prints a one-time link to the authoring desktop, and
                           asks whether to publish the changes when you log out
@@ -439,6 +444,26 @@ TEMPLATE_SLOT='_hdw4s_author'
 NSDIR="${HDW4S_NS_DIR:-/run/hdw4s-ns}"
 USERDB="${HDW4S_USERDB_DIR:-/run/userdb}"
 
+# THE POOL'S OWN SETTINGS FILE: what every ephemeral desktop reads after
+# hdw4s.conf and before its seat's own file. One file, because a visitor is
+# handed whichever seat is free, and a setting that differs between seats makes
+# what a visitor gets depend on a draw nobody can see -- which is what "hdw4s set
+# <seat> ..." used to produce, and what this tree's own advice once recommended.
+#
+# The name starts with the reserved "_hdw4s_" for the reason the authoring
+# slot's does: every other <name>.conf here belongs to the desktop of that name,
+# and "pool.conf" would be the settings file of a person called "pool". adduser
+# refuses a leading underscore for a person, so no desktop can ever own this one.
+#
+# A function and not a path, so that it follows ETCDIR wherever a test points
+# it. Spelled out literally in hdw4s-ephemeral@.service, hdw4s-session and
+# hdw4s-demux, which have no ETCDIR of their own to derive it from;
+# .github/tests.sh reads all four.
+POOL_CONF_NAME='_hdw4s_pool.conf'
+pool_conf() {
+  echo "${ETCDIR}/${POOL_CONF_NAME}"
+}
+
 # Is this name one of OURS -- a seat of the ephemeral pool or the authoring slot
 # -- rather than a person's desktop? Prints "pool", "template", or nothing.
 #
@@ -490,7 +515,7 @@ refuse_internal_slot() {
     printf '%s\n' \
       "hdw4s: ${inst} is a seat of the ephemeral pool, not a person's desktop." \
       '  Visitors are handed whichever seat is free, so the pool is managed as' \
-      '  one thing: its seats are not enabled, disabled or released one by one.' >&2
+      '  one thing: its seats are not configured or managed one by one.' >&2
     case "${verb}" in
       enable)
         printf '%s\n' \
@@ -510,6 +535,17 @@ refuse_internal_slot() {
           '  To make the pool smaller, say how many seats it should have and' \
           '  hdw4s takes idle ones off the top:' \
           '    hdw4s pool size <N>' >&2 ;;
+      set|unset)
+        printf '%s\n' \
+          '  A setting on one seat makes what a visitor gets depend on which seat' \
+          '  they happened to be handed. Settings for every ephemeral desktop:' \
+          "    hdw4s pool ${verb} $( [ "${verb}" = set ] && echo 'KEY=VALUE' || echo 'KEY')" \
+          '    hdw4s pool show' >&2 ;;
+      proxy)
+        printf '%s\n' \
+          '  Visitors reach the pool at one hostname, and the pool picks the seat.' \
+          '  The reverse-proxy configuration for it:' \
+          '    hdw4s pool proxy' >&2 ;;
     esac
   else
     printf '%s\n' \
@@ -525,6 +561,14 @@ refuse_internal_slot() {
                              '  To remove the slot anyway -- the next "template edit"' \
                              '  provisions a fresh one:' \
                              "    hdw4s release --internal ${inst}" >&2 ;;
+      # It reads the pool's settings, so a template is authored on the desktop
+      # visitors will get; a setting of its own would make the two differ.
+      set|unset) printf '%s\n' '  It reads the pool'"'"'s settings, so the template is made on' \
+                             '  the desktop visitors get. To change those:' \
+                             "    hdw4s pool ${verb} $( [ "${verb}" = set ] && echo 'KEY=VALUE' || echo 'KEY')" >&2 ;;
+      proxy)   printf '%s\n' '  It is reached through the one-time link "hdw4s template edit"' \
+                             '  prints, at the pool'"'"'s hostname. The configuration for that:' \
+                             '    hdw4s pool proxy' >&2 ;;
     esac
     # THE ROW AN EARLIER VERSION COULD LEAVE ON A PERSON'S NAME. "enable
     # --template <name>" wrote its row before minting, so a name that was
@@ -671,6 +715,15 @@ port_of() {
 # won is the single most common source of confusion in a layered
 # configuration, so the answer is computed once, here, and both the plain
 # lookup and "show" read it from the same place.
+# The last assignment of KEY in one file, as every reader here takes it: a
+# trailing comment is not part of the value, and quotes are stripped. Empty when
+# the file does not say, or cannot be read.
+conf_value() {
+  [ -r "$1" ] || return 0
+  sed -n "s/^[[:space:]]*${2}=[\"']\{0,1\}\([^\"'#]*\).*/\1/p" "$1" |
+    tail -n1 | sed 's/[[:space:]]*$//'
+}
+
 setting_with_source() {
   local inst="$1" key="$2" fallback="$3" v=''
   local f
@@ -692,10 +745,15 @@ setting_with_source() {
     fi
     [ -z "${v}" ] || { printf '%s\t%s' "${v}" "$(unit_of "${inst}")"; return 0; }
   fi
-  for f in "${ETCDIR}/${inst}.conf" "${CONF}"; do
-    [ -r "${f}" ] || continue
-    v="$(sed -n "s/^[[:space:]]*${key}=[\"']\{0,1\}\([^\"'#]*\).*/\1/p" \
-         "${f}" | tail -n1 | sed 's/[[:space:]]*$//')"
+  # The pool's file sits between, for exactly the desktops whose unit reads it
+  # (hdw4s-ephemeral@.service): after the seat's own, before the machine's.
+  local files=("${ETCDIR}/${inst}.conf")
+  # Not $(pool_conf): "list" asks this for every row, and a fork each is what made
+  # it slow before.
+  ! ephemeral_shaped "$(type_of "${inst}")" || files+=("${ETCDIR}/${POOL_CONF_NAME}")
+  files+=("${CONF}")
+  for f in "${files[@]}"; do
+    v="$(conf_value "${f}" "${key}")"
     [ -z "${v}" ] || { printf '%s\t%s' "${v}" "${f}"; return 0; }
   done
   printf '%s\t' "${fallback}"
@@ -1981,30 +2039,31 @@ has_ephemeral_slots() {
 # Refused rather than warned about: a warning at "set" time is read once, by
 # somebody who has already decided.
 guard_never_reap() {
-  local inst="$1" value="$2"
+  local inst="$1" value="$2" own
   # A value this cannot parse is somebody else's refusal; say nothing twice.
   idle_seconds "${value}" || return 0
   [ "${IDLE_SECONDS}" -eq 0 ] || return 0
 
-  if [ -n "${inst}" ]; then
-    # in_ephemeral_pool() and NOT ephemeral_shaped(), and the reason is the
-    # sentence below: the refusal is about CAPACITY. "Never reap" is incoherent
-    # for a slot a stranger is waiting for and merely unwise for the authoring
-    # slot, which has no next visitor -- nobody is ever minted onto it. An
-    # administrator who wants an authoring session to sit until they come back
-    # to it is asking for something coherent, and this used to refuse it purely
-    # because the test was spelled "is it ephemeral".
-    in_ephemeral_pool "$(type_of "${inst}")" || return 0
-    die "hdw4s: ${inst} is an ephemeral slot, and 0 would never free it." \
-        '  Reaping is the only thing that ever frees a slot: a visitor who' \
-        '  closes the tab tells nothing, so with no window the slot stays' \
-        '  occupied until the machine reboots. Once every slot is held, the' \
+  # THE POOL'S OWN FILE, which every seat reads and nothing else does -- so 0
+  # there is never reaping a single desktop of the pool, and nothing else.
+  # "hdw4s pool set" passes ":pool" here: a colon separates the fields of
+  # /etc/passwd, so no person's desktop can be called that.
+  if [ "${inst}" = ':pool' ]; then
+    die 'hdw4s: 0 would never free a desktop of the ephemeral pool.' \
+        '  Reaping is the only thing that ever frees one: a visitor who' \
+        '  closes the tab tells nothing, so with no window a seat stays' \
+        '  occupied until the machine reboots. Once every seat is held, the' \
         '  next visitor gets a 503 and nothing anywhere reports why.' \
         '  Set a long window instead of none:' \
-        "    hdw4s set ${inst} HDW4S_IDLE_DAYS=30d" \
+        '    hdw4s pool set HDW4S_IDLE_DAYS=30d' \
         '  0 is still accepted for a named session, where stopping one is a' \
         '  nap and the next connection starts it again.'
   fi
+
+  # A named session: "never" is a choice somebody may make. A seat cannot reach
+  # here -- "hdw4s set <seat>" is refused before this -- and the authoring slot
+  # is not capacity either.
+  [ -z "${inst}" ] || return 0
 
   # Machine-wide, and only on a machine that has a pool: without one, 0 is the
   # named-session choice above and there is nothing to protect. Derived from
@@ -2012,15 +2071,22 @@ guard_never_reap() {
   # rule does not apply to -- a check that fails on a correct state is a check
   # somebody turns off.
   has_ephemeral_slots || return 0
-  die 'hdw4s: 0 here would stop this machine reaping its ephemeral slots.' \
-      '  This value is read by every session, including the slots of the' \
+  # Nor when the pool has a window of its own: its file is read after this one,
+  # so "never" here then reaches only named sessions -- which is the setting an
+  # administrator wanting it machine-wide meant.
+  own="$(conf_value "$(pool_conf)" HDW4S_IDLE_DAYS)"
+  if [ -n "${own}" ] && idle_seconds "${own}" && [ "${IDLE_SECONDS}" -gt 0 ]; then
+    return 0
+  fi
+  die 'hdw4s: 0 here would stop this machine reaping its ephemeral desktops.' \
+      '  This value is read by every session, including the desktops of the' \
       '  ephemeral pool, and reaping is the only thing that ever frees one.' \
       '  With no window they fill up and stay full, and every visitor after' \
       '  that gets a 503 with nothing reporting why.' \
-      '  Set it on the named sessions that should never be stopped:' \
-      '    hdw4s set <session> HDW4S_IDLE_DAYS=0' \
-      '  or give the whole machine a long window instead of none:' \
-      '    hdw4s set HDW4S_IDLE_DAYS=30d'
+      '  Give the pool a window of its own first, and this is then accepted:' \
+      '    hdw4s pool set HDW4S_IDLE_DAYS=1d' \
+      '  or set it on the named sessions that should never be stopped:' \
+      '    hdw4s set <session> HDW4S_IDLE_DAYS=0'
 }
 
 check_value() {
@@ -2154,6 +2220,9 @@ cmd_set() {
   local inst='' file key value pair
   if [ "$#" -gt 1 ] && [ "${1#*=}" = "$1" ]; then
     inst="$1"; shift
+    # Before the account lookup: a seat's account is minted, so it resolves, and
+    # the write would land in a file only that one seat reads.
+    refuse_internal_slot "${inst}" set || fail
     split_instance "${inst}"
   fi
   [ "$#" -gt 0 ] || die 'hdw4s: nothing to set'
@@ -2227,8 +2296,12 @@ cmd_set() {
 }
 
 cmd_unset() {
-  local inst='' file key tmp
-  if [ "$#" -gt 1 ]; then inst="$1"; shift; split_instance "${inst}" || fail; fi
+  local inst='' file key
+  if [ "$#" -gt 1 ]; then
+    inst="$1"; shift
+    refuse_internal_slot "${inst}" unset || fail
+    split_instance "${inst}" || fail
+  fi
   [ "$#" -eq 1 ] || die 'hdw4s: unset takes one setting'
   key="$1"
   file="$(config_file "${inst}")"
@@ -2255,6 +2328,14 @@ cmd_unset() {
         "  Use 'hdw4s ${OWNED_BY[${key}]}' so that the drop-in it writes is" \
         '  brought back into agreement with the setting.'
 
+  config_comment_out "${file}" "${key}"
+  set_hint "${inst}" "${key}="
+}
+
+# Comment KEY out of FILE, keeping the line. The key must already have been
+# checked to be a name: it goes into an awk regular expression.
+config_comment_out() {
+  local file="$1" key="$2" tmp
   tmp="$(mktemp "${file}.XXXXXX")"
   chmod 0644 "${tmp}"
   KEY="${key}" awk '
@@ -2268,7 +2349,6 @@ cmd_unset() {
     mv "${tmp}" "${file}"
     echo "${file}: ${key} commented out; the default applies again"
   fi
-  set_hint "${inst}" "${key}="
 }
 
 # Say what has to happen for a change to take effect. Silently writing a value
@@ -2936,65 +3016,30 @@ demux_port() {
   case "${v}" in ''|*[!0-9]*) echo 'THE_FRONT_DOOR_PORT';; *) echo "${v}";; esac
 }
 
-cmd_proxy() {
-  local inst="$1" idx port cred user pw
-  split_instance "${inst}" || fail
-
-  # BEFORE the slot lookup, deliberately. A slot that has been minted but not
-  # yet enabled has no row, and that is exactly the machine whose operator most
-  # needs this answer -- so looking the row up first would kill the command on
-  # the only occasion it matters.
-  #
-  # And this is a REDIRECTION, not a refusal. What it used to print was a
-  # working server block that proxy_pass'd straight at one slot's socket,
-  # bypassing the front door that picks slots and enforces the arrival rule,
-  # together with the instruction to add nginx's user to the group that owns
-  # it -- the precise change that opens the bypass. That text was correct when
-  # a session's socket was the only kind there was; it became a recipe the day
-  # the pool shipped, and nothing failed and no test noticed.
-  # type_of() reads the slot table, so it cannot answer for a slot that has been
-  # minted and not yet enabled -- which is the very case this branch was moved up
-  # to serve. So ask the MACHINE as well: minting creates a runtime profile
-  # directory per slot, and that exists before any row does.
-  local looks_ephemeral='no' whatitis
-  ! ephemeral_shaped "$(type_of "${inst}")" || looks_ephemeral='yes'
-  [ ! -d "/run/hdw4s-profile/${inst}" ] || looks_ephemeral='yes'
-  # What it IS, derived from the row, because the guidance below is the same for
-  # both and the first sentence is not: an authoring slot is reached through the
-  # pool's front door and still is not one slot of the pool. Saying it is would
-  # be a comment in a generated file asserting something untrue about the very
-  # slot it was generated for.
-  # Keyed on "template" itself rather than on the negation of pool membership,
-  # because looks_ephemeral is also set by the runtime-profile probe above for a
-  # slot minted and not yet enabled -- which is typed "desktop" and is not the
-  # authoring slot. A negation would have called that one a template.
-  if [ "$(type_of "${inst}")" = 'template' ]; then
-    whatitis="is the template-authoring slot, reached through the same front door
-# as the pool and never handed to a visitor, so it is not configured slot by slot
-# either"
-  else
-    whatitis="is one slot of the ephemeral pool, and a pool is not configured slot
-# by slot"
-  fi
-  if [ "${looks_ephemeral}" = 'yes' ]; then
-    cat <<EOF
-# ${inst} ${whatitis}. Visitors arrive at ONE hostname for the whole pool; the pool chooses
-# which slot each visitor gets, and gives a returning visitor back the session
-# they already have. A block pointing nginx at this slot's own socket would bypass
-# that -- every visitor would land on ${inst}, and the arrival rule that decides
-# whether to resume, gate or mint would never run.
+# The reverse-proxy block for the pool: ONE hostname, pointed at the pool's front
+# door and at nothing else. "hdw4s proxy <seat>" used to print it, for any seat,
+# which taught that seats were things to configure one by one; the block never
+# named a seat, and now no command asks for one.
 #
-# So the configuration below is for the POOL. It is the same for every slot, and
-# running this command against a different slot prints the same thing.
+# What it must never be is a block pointing nginx at one seat's own socket. That
+# is what "proxy" printed before the pool shipped, with the instruction to add
+# nginx's user to the group that owns the socket -- the precise change that
+# bypasses the front door, which picks seats and enforces the arrival rule.
+pool_proxy() {
+  cat <<EOF
+# nginx configuration for the ephemeral pool. Visitors arrive at ONE hostname
+# for the whole pool; the pool chooses which seat each visitor gets, and gives a
+# returning visitor back the session they already have. The template-authoring
+# desktop is reached the same way, through the link "hdw4s template edit" prints.
 #
 # The facts behind it, which outlive this block:
 #
-#   * one hostname serves the whole pool; slots have no hostnames of their own
+#   * one hostname serves the whole pool; seats have no hostnames of their own
 #   * the pool answers on 127.0.0.1:$(demux_port), and that is the ONLY
 #     address a visitor may be sent to
-#   * the credential belongs to the pool, not to a slot; slots have none and
+#   * the credential belongs to the pool, not to a seat; seats have none and
 #     cannot be given one
-#   * a slot's own socket under /run/hdw4s-proxy must NOT be reached directly,
+#   * a seat's own socket under /run/hdw4s-proxy must NOT be reached directly,
 #     by nginx or by anything else
 #
 # See hdw4s(8), "THE EPHEMERAL POOL".
@@ -3038,8 +3083,20 @@ server {
     }
 }
 EOF
-    return 0
-  fi
+}
+
+cmd_proxy() {
+  local inst="$1" idx port cred user pw
+  refuse_internal_slot "${inst}" proxy || fail
+  split_instance "${inst}" || fail
+
+  # A seat minted and not yet in the table has no row for refuse_internal_slot
+  # to read, and minting makes its runtime profile directory before any row
+  # exists. The machine says what it is, so the same redirection applies.
+  [ ! -d "/run/hdw4s-profile/${inst}" ] ||
+    die "hdw4s: ${inst} is a seat of the ephemeral pool, not a person's desktop." \
+        '  The reverse-proxy configuration for the pool:' \
+        '    hdw4s pool proxy'
 
   idx="$(slot_of "${inst}")"
   [ -n "${idx}" ] || die "hdw4s: ${inst} has no slot."
@@ -3054,13 +3111,6 @@ EOF
   [ ! -r "${ETCDIR}/${inst}.conf" ] ||
     transport="$(sed -n "s/^[[:space:]]*HDW4S_TRANSPORT=[\"']\{0,1\}\([a-z]*\).*/\1/p" \
                  "${ETCDIR}/${inst}.conf" | tail -n1)"
-  # An ephemeral slot has no other answer -- "hdw4s transport" refuses to put
-  # one on TCP -- so it is decided here rather than read, and it overrides the
-  # file rather than defaulting under it. Two cases the file gets wrong: a slot
-  # minted but not yet enabled has no file at all, and one enabled by an older
-  # version has a file still saying "tcp". Either would print a port block for
-  # a session that does not listen on one.
-  ! ephemeral_shaped "$(type_of "${inst}")" || transport='unix'
   if [ "${transport}" = 'unix' ]; then
     upstream="        # A filesystem socket: who may connect is a question of
         # permissions, not of source address. Add nginx's user to the group
@@ -3171,8 +3221,9 @@ EOF
 
         # This session has no credential of its own, so the firewall is the
         # only thing protecting it. Run "hdw4s auth" on this session to add
-        # one. (An ephemeral slot never reaches this line: it cannot be given
-        # a credential, and its configuration is printed above instead.)
+        # one. (A seat of the ephemeral pool never reaches this line: it
+        # cannot be given a credential, and "hdw4s pool proxy" prints the
+        # pool's configuration.)
 EOF
   fi
   cat <<'EOF'
@@ -3909,13 +3960,206 @@ pool_stop_at() {
   echo "  HDW4S_EPHEMERAL_SLOTS is now $1, so the next boot makes the same pool." >&2
 }
 
-cmd_pool() {
-  shift   # "size", checked by the dispatcher
-  if [ "$#" -eq 0 ]; then
-    pool_show
-  else
-    pool_resize "$1" || fail
+# --- the pool's settings, as one thing ---------------------------------------
+#
+# WHERE A POOL SETTING IS WRITTEN IS DECIDED BY WHO READS IT, not by the key's
+# name. Three kinds:
+#
+#   read by each desktop as it starts  -> the pool's file (pool_conf), which
+#                                         hdw4s-ephemeral@.service and
+#                                         hdw4s-session read after hdw4s.conf
+#   read by the minter or by "template -> hdw4s.conf, the one file those read;
+#   edit", once for the machine           a copy in the pool's file would be
+#                                         read by nothing and look like it worked
+#   meaningless for a pool desktop     -> refused, with the reason
+#
+# The second kind is still "the pool's" to the administrator -- a seat's home
+# size is a property of the pool -- so "pool set" takes it and says where it
+# went, rather than sending them to a different command for half the pool.
+
+# Read once for the machine, by something other than a desktop: where the value
+# is read, and so where "pool set" writes it.
+declare -A POOL_MACHINE=(
+  [HDW4S_EPHEMERAL_HOME_SIZE]=1 [HDW4S_EPHEMERAL_PROFILE_SIZE]=1
+  [HDW4S_EPHEMERAL_SHM_SIZE]=1 [HDW4S_EPHEMERAL_BACKGROUND]=1
+  [HDW4S_EPHEMERAL_URL]=1
+)
+
+# Settings a pool desktop has a fixed answer to, and why. Each would be read --
+# hdw4s-session sources the pool's file -- and could only make a visitor's
+# desktop less of what the pool promises.
+declare -A POOL_FIXED=(
+  [HDW4S_ISOLATION]='every ephemeral desktop keeps its settings in memory, apart from every other, and loses them when it ends'
+  [HDW4S_PROFILE_DIR]='an ephemeral desktop keeps its profile in memory, so that nothing of it is left on disk when it ends'
+  [HDW4S_TRANSPORT]='the pool is reached only through its front door, over filesystem sockets nothing else may open'
+  [HDW4S_AUTH]='the pool has one front door; a credential per desktop would keep out only that door'
+  [HDW4S_PROXY_GROUP]='nothing but the pool'"'"'s own front door connects to a pool desktop'
+)
+
+# Keys a seat's own file carries because hdw4s wrote them there, and which are
+# therefore not a setting somebody made on one seat.
+POOL_SEAT_OWN='HDW4S_TRANSPORT HDW4S_AUTH'
+
+# Seats whose own file sets KEY, which wins over the pool's file for that seat.
+# What an install configured seat by seat, before "pool set", is left with.
+seat_overrides() {
+  local key="$1" inst t f out=''
+  [ -r "${SLOTS}" ] || return 0
+  while read -r _ inst t _; do
+    case "${t}" in ephemeral) ;; *) continue ;; esac
+    f="${ETCDIR}/${inst}.conf"
+    command grep -qs "^[[:space:]]*${key}=" "${f}" && out="${out} ${inst}"
+  done < <(awk '$1 !~ /^#/' "${SLOTS}")
+  printf '%s' "${out# }"
+}
+
+# "hdw4s pool set K=V ...".
+pool_set() {
+  local pair key value file before
+  [ "$#" -gt 0 ] || die 'hdw4s: nothing to set'
+  for pair in "$@"; do
+    case "${pair}" in
+      *=*) :;;
+      *) die "hdw4s: '${pair}' is not KEY=VALUE";;
+    esac
+    key="${pair%%=*}"
+    value="${pair#*=}"
+    refuse_pool_setting "${key}"
+    [ -n "${SETTABLE[${key}]+set}" ] ||
+      die "hdw4s: ${key} cannot be set from the command line." \
+          "  Anything else can still be edited in $(pool_conf)."
+    [ -z "${POOL_FIXED[${key}]+set}" ] ||
+      die "hdw4s: ${key} is not a setting of the ephemeral pool:" \
+          "  ${POOL_FIXED[${key}]}."
+    if [ -n "${POOL_MACHINE[${key}]+set}" ]; then
+      file="${CONF}"
+    elif [ -n "${GLOBAL_ONLY[${key}]+set}" ]; then
+      die "hdw4s: ${key} applies to the whole machine, not only to the pool:" \
+          "    hdw4s set ${key}=${value}"
+    else
+      file="$(pool_conf)"
+    fi
+    check_value "${key}" "${value}"
+    [ "${key}" != 'HDW4S_IDLE_DAYS' ] || guard_never_reap ':pool' "${value}"
+    if [ "${file}" != "${CONF}" ] && [ ! -e "${file}" ]; then
+      install -d -m0755 "${ETCDIR}"
+      printf '%s\n' \
+        '# Settings for every ephemeral desktop, and for the template-authoring' \
+        "# desktop. Read after ${CONF}, and wins over it." \
+        '# Edit by hand, or with "hdw4s pool set".' \
+        '' > "${file}"
+      chmod 0644 "${file}"
+    fi
+    config_write "${file}" "${key}" "$(quote_value "${value}")"
+    echo "${file}: ${key}=${value}"
+    before="$(seat_overrides "${key}")"
+    [ -z "${before}" ] || {
+      echo "  Overridden on seat(s) ${before}, whose own file also sets it -- left from"
+      echo '  configuring seats one by one. Remove the line there to use this one.'
+    }
+  done
+  pool_hint "$@"
+}
+
+# "hdw4s pool unset K".
+pool_unset() {
+  local key="$1" file
+  case "${key}" in
+    ''|*[!A-Za-z0-9_]*) die "hdw4s: '${key}' is not a setting name." ;;
+  esac
+  refuse_pool_setting "${key}"
+  if [ -n "${POOL_MACHINE[${key}]+set}" ]; then file="${CONF}"; else file="$(pool_conf)"; fi
+  # Unsetting the pool's window hands it the machine's, which may be "never".
+  # The same refusal "set" makes, from the other side.
+  if [ "${key}" = 'HDW4S_IDLE_DAYS' ] && [ "${file}" != "${CONF}" ] &&
+     [ "$(setting_with_source '' HDW4S_IDLE_DAYS 7 | cut -f1)" = '0' ] &&
+     has_ephemeral_slots; then
+    die 'hdw4s: the machine-wide HDW4S_IDLE_DAYS is 0, so without its own window' \
+        '  the pool would never be reaped, and would fill and stay full.' \
+        '  Change the pool'"'"'s window instead of removing it:' \
+        '    hdw4s pool set HDW4S_IDLE_DAYS=1d'
   fi
+  if [ ! -e "${file}" ]; then
+    echo "${file}: ${key} was not set"
+    return 0
+  fi
+  config_comment_out "${file}" "${key}"
+  pool_hint "${key}="
+}
+
+# What has to happen for a pool setting to take effect.
+pool_hint() {
+  local pair machine=() desk=''
+  for pair in "$@"; do
+    if [ -n "${POOL_MACHINE[${pair%%=*}]+set}" ]; then machine+=("${pair}"); else desk='yes'; fi
+  done
+  [ "${#machine[@]}" -eq 0 ] || set_hint '' "${machine[@]}"
+  # NOT "restart": every running desktop of the pool is a visitor's, and ending
+  # it is not a configuration step. The unit reads the file as it starts.
+  [ -z "${desk}" ] ||
+    echo '  Applies to each ephemeral desktop that starts from now on; desktops'
+  [ -z "${desk}" ] ||
+    echo '  running now keep what they started with until they end.'
+}
+
+# One setting as the pool sees it: the pool's file, then hdw4s.conf. Value and
+# source, tab-separated, as setting_with_source answers.
+pool_setting_with_source() {
+  local key="$1" fallback="$2" f v
+  for f in "$(pool_conf)" "${CONF}"; do
+    v="$(conf_value "${f}" "${key}")"
+    [ -z "${v}" ] || { printf '%s\t%s' "${v}" "${f}"; return 0; }
+  done
+  printf '%s\t' "${fallback}"
+}
+
+# "hdw4s pool show": the size and seats, then every setting a pool desktop
+# starts with and where it came from.
+pool_show_all() {
+  local sk skey sdef r v src k t inst f extra=''
+  pool_show
+  echo
+  echo 'Settings for every ephemeral desktop: effective value, and where it came from'
+  for sk in "${SESSION_SETTINGS[@]}" 'HDW4S_LANG:' \
+            'HDW4S_EPHEMERAL_HOME_SIZE:' 'HDW4S_EPHEMERAL_PROFILE_SIZE:' \
+            'HDW4S_EPHEMERAL_SHM_SIZE:' 'HDW4S_EPHEMERAL_BACKGROUND:' \
+            'HDW4S_EPHEMERAL_URL:'; do
+    skey="${sk%%:*}"; sdef="${sk#*:}"
+    [ -z "${POOL_FIXED[${skey}]+set}" ] || continue
+    r="$(pool_setting_with_source "${skey}" "${sdef}")"
+    v="${r%%$'\t'*}"; src="${r#*$'\t'}"
+    printf '  %-28s %-22s %s\n' "${skey}" "${v:--}" "${src:-built-in default}"
+  done
+  # A seat whose own file sets something the pool's file does not decide for it.
+  [ -r "${SLOTS}" ] || return 0
+  while read -r _ inst t _; do
+    [ "${t}" = 'ephemeral' ] || continue
+    f="${ETCDIR}/${inst}.conf"
+    [ -r "${f}" ] || continue
+    while read -r k; do
+      case " ${POOL_SEAT_OWN} " in *" ${k} "*) continue ;; esac
+      extra="${extra}    ${inst}: ${k}"$'\n'
+    done < <(sed -n 's/^[[:space:]]*\([A-Z0-9_]*\)=.*/\1/p' "${f}" | sort -u)
+  done < <(awk '$1 !~ /^#/' "${SLOTS}")
+  [ -z "${extra}" ] || {
+    echo
+    echo 'These seats have a setting of their own, which wins over the pool'"'"'s, so a'
+    echo 'visitor gets something different depending on the seat they are handed:'
+    printf '%s' "${extra}"
+    echo "  Move each into the pool with 'hdw4s pool set', then remove the line from"
+    echo "  ${ETCDIR}/<seat>.conf."
+  }
+}
+
+cmd_pool() {
+  local sub="$1"; shift   # checked by the dispatcher
+  case "${sub}" in
+    size)  if [ "$#" -eq 0 ]; then pool_show; else pool_resize "$1" || fail; fi ;;
+    show)  pool_show_all ;;
+    set)   pool_set "$@" ;;
+    unset) pool_unset "$1" ;;
+    proxy) pool_proxy ;;
+  esac
 }
 
 # REFUSE AN UNREADABLE SLOT TABLE HERE, ONCE, BEFORE ANY COMMAND RUNS.
@@ -3980,9 +4224,16 @@ case "${1:-}" in
   # rather than by the first write into /etc half way through. Showing the size
   # reads only, and needs nothing.
   pool)     shift
-            case "$#:${1:-}" in 1:size|2:size) ;; *) usage_error;; esac
-            [ "$#" -ne 2 ] || [ "${EUID}" -eq 0 ] ||
-              die 'hdw4s pool size: changing it needs root.'
+            case "$#:${1:-}" in
+              1:size|2:size|1:show|1:proxy|2:unset) ;;
+              1:set|0:*) usage_error;;
+              *:set) ;;
+              *) usage_error;;
+            esac
+            case "$#:$1" in
+              2:size|*:set|*:unset)
+                [ "${EUID}" -eq 0 ] || die "hdw4s pool $1: changing the pool needs root." ;;
+            esac
             cmd_pool "$@";;
   firewall) shift; exec /usr/lib/hdw4s/hdw4s-firewall "$@";;
   # "edit" needs a slot to run the authoring desktop in, and makes one here, in

@@ -729,6 +729,118 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
   is    'and its drop-ins' "$(find "${DROPIN}" -mindepth 1 | wc -l | tr -d ' ')" '0'
 )
 
+echo '== the pool'"'"'s settings are one thing, not one per seat =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # A visitor is handed whichever seat is free, so a setting on one seat made
+  # what a visitor got depend on a draw nobody could see -- and the never-reap
+  # refusal used to recommend exactly that ("hdw4s set <seat> ..."). Per-seat
+  # settings are refused now, and the pool has one file every seat reads.
+  NSDIR="${SB}/ns"; mkdir -p "${NSDIR}/eph1"; : > "${NSDIR}/eph1/passwd"
+  printf '%s\n' '0 dora' '1 eph0 ephemeral' '2 tmpl template' > "${SLOTS}"
+  printf 'HDW4S_TRANSPORT=unix\n' > "${ETCDIR}/eph0.conf"
+  before="$(cd "${ETCDIR}" && find . -type f -exec md5sum {} + | sort)"
+  for who in eph0 eph1 tmpl; do
+    out="$( (cmd_set "${who}" 'HDW4S_FRAMERATE=24') 2>&1 )"; rc=$?
+    [ "${rc}" -ne 0 ] && ok "set refuses ${who}" || bad "set refuses ${who}" "rc ${rc}"
+    has "and points at pool set" "${out}" 'hdw4s pool set KEY=VALUE'
+    out="$( (cmd_unset "${who}" 'HDW4S_FRAMERATE') 2>&1 )"; rc=$?
+    [ "${rc}" -ne 0 ] && ok "unset refuses ${who}" || bad "unset refuses ${who}" "rc ${rc}"
+    has "and points at pool unset" "${out}" 'hdw4s pool unset KEY'
+  done
+  is 'no refusal wrote anything' "$(cd "${ETCDIR}" && find . -type f -exec md5sum {} + | sort)" "${before}"
+  # CONTROL: a person's desktop is still set one by one.
+  (cmd_set dora 'HDW4S_FRAMERATE=24') >/dev/null 2>&1
+  has 'a named desktop is still set one by one' "$(cat "${ETCDIR}/dora.conf" 2>/dev/null)" 'HDW4S_FRAMERATE=24'
+
+  # pool set writes the pool's file, and every seat -- not a named desktop --
+  # reads it, between the machine's file and its own.
+  printf 'HDW4S_FRAMERATE=30\n' > "${CONF}"
+  out="$( (pool_set 'HDW4S_FRAMERATE=20') 2>&1 )"
+  has 'pool set writes the pool'"'"'s file' "$(cat "$(pool_conf)")" 'HDW4S_FRAMERATE=20'
+  has 'and says it applies to desktops that start from now on' "${out}" 'starts from now on'
+  hasnt 'and tells nobody to restart a visitor'"'"'s desktop' "${out}" 'estart'
+  r="$(setting_with_source eph0 HDW4S_FRAMERATE x)"
+  is 'a seat reads the pool'"'"'s value' "${r}" "20	$(pool_conf)"
+  r="$(setting_with_source tmpl HDW4S_FRAMERATE x)"
+  is 'so does the authoring desktop' "${r}" "20	$(pool_conf)"
+  rm -f "${ETCDIR}/dora.conf"
+  r="$(setting_with_source dora HDW4S_FRAMERATE x)"
+  is 'a named desktop does not' "${r}" "30	${CONF}"
+  # A seat configured one by one before this keeps its own value, and both
+  # commands say so rather than leaving the admin to wonder why one seat differs.
+  printf 'HDW4S_TRANSPORT=unix\nHDW4S_FRAMERATE=60\n' > "${ETCDIR}/eph0.conf"
+  r="$(setting_with_source eph0 HDW4S_FRAMERATE x)"
+  is 'a seat'"'"'s own file still wins' "${r}" "60	${ETCDIR}/eph0.conf"
+  out="$( (pool_set 'HDW4S_FRAMERATE=25') 2>&1 )"
+  has 'and pool set names the seat it does not reach' "${out}" 'Overridden on seat(s) eph0'
+  out="$(pool_show_all 2>&1)"
+  has 'pool show lists the seat'"'"'s own setting' "${out}" 'eph0: HDW4S_FRAMERATE'
+  hasnt 'but not what hdw4s wrote there itself' "${out}" 'eph0: HDW4S_TRANSPORT'
+  has 'and shows the pool'"'"'s value and where it came from' "${out}" "HDW4S_FRAMERATE              25                     $(pool_conf)"
+  has 'and the built-in default where nothing says' "${out}" 'built-in default'
+
+  # Settings a pool desktop has a fixed answer to are refused, with the reason,
+  # and write nothing; machine-wide ones point at "set"; the size at "size".
+  before="$(cat "$(pool_conf)" "${CONF}")"
+  out="$( (pool_set 'HDW4S_PROFILE_DIR=/var/tmp') 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a profile directory for the pool is refused' \
+    || bad 'a profile directory for the pool is refused' "rc ${rc}"
+  has 'and says why' "${out}" 'nothing of it is left on disk'
+  out="$( (pool_set 'HDW4S_PROXIES=10.0.0.1') 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a machine-wide setting is refused' \
+    || bad 'a machine-wide setting is refused' "rc ${rc}"
+  has 'and names the command for it' "${out}" 'hdw4s set HDW4S_PROXIES=10.0.0.1'
+  out="$( (pool_set 'HDW4S_EPHEMERAL_SLOTS=4') 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'so is the size' || bad 'so is the size' "rc ${rc}"
+  has 'which names pool size' "${out}" 'hdw4s pool size <N>'
+  is 'none of them wrote anything' "$(cat "$(pool_conf)" "${CONF}")" "${before}"
+  # Read once for the machine: written where its reader reads it.
+  out="$( (pool_set 'HDW4S_EPHEMERAL_HOME_SIZE=2G') 2>&1 )"
+  has 'a seat'"'"'s home size goes where the minter reads it' "$(cat "${CONF}")" 'HDW4S_EPHEMERAL_HOME_SIZE=2G'
+  hasnt 'and not into a file the minter never reads' "$(cat "$(pool_conf)")" 'HOME_SIZE'
+  has 'and says when it applies' "${out}" 'reboot to use it'
+
+  (pool_unset 'HDW4S_FRAMERATE') >/dev/null 2>&1
+  r="$(setting_with_source eph1 HDW4S_FRAMERATE x)"
+  is 'pool unset hands the pool the machine'"'"'s value again' "${r}" "30	${CONF}"
+
+  # The proxy, as one thing too.
+  out="$( (cmd_proxy tmpl) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'proxy refuses the authoring slot' || bad 'proxy refuses the authoring slot' "rc ${rc}"
+  has 'and points at the pool'"'"'s block' "${out}" 'hdw4s pool proxy'
+
+  # The other readers of the same file, which have no ETCDIR to derive it from
+  # and spell it out. One name in four places: each is read here, and the unit's
+  # ORDER is asserted, because the file wins only by coming between.
+  name="$(sed -n "s/^POOL_CONF_NAME='\(.*\)'$/\1/p" "${ROOT}/hdw4s")"
+  is 'the tool names the file' "${name}" '_hdw4s_pool.conf'
+  is 'the unit reads it between the machine'"'"'s and the seat'"'"'s' \
+     "$(sed -n 's/^EnvironmentFile=-//p' "${ROOT}/hdw4s-ephemeral@.service" | tr '\n' ' ')" \
+     "/etc/hdw4s/hdw4s.conf /etc/hdw4s/${name} /etc/hdw4s/%i.conf "
+  has 'the session sources it' "$(cat "${ROOT}/hdw4s-session")" "pool_conf='/etc/hdw4s/${name}'"
+  has 'the router reads it'    "$(cat "${ROOT}/hdw4s-demux")" "POOL_CONF_NAME = \"${name}\""
+  # The router's reading, in the same order: seat, pool, machine.
+  printf 'HDW4S_IDLE_DAYS=3h\n' > "$(pool_conf)"
+  printf 'HDW4S_IDLE_DAYS=9h\n' > "${CONF}"
+  rm -f "${ETCDIR}/eph0.conf"
+  got="$(HDW4S_ETCDIR="${ETCDIR}" python3 - "${ROOT}/hdw4s-demux" <<'PY'
+import importlib.machinery, importlib.util, sys
+sys.dont_write_bytecode = True
+l = importlib.machinery.SourceFileLoader("demux", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("demux", l))
+l.exec_module(m)
+print(m.read_idle_window("eph0")[0])
+PY
+)"
+  is 'the router reads the pool'"'"'s window before the machine'"'"'s' "${got}" '10800'
+
+  # The real dispatcher: each sub-command's shape.
+  HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" pool set >/dev/null 2>&1
+  is 'pool set with nothing is a usage error' "$?" '2'
+  HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" pool proxy extra >/dev/null 2>&1
+  is 'pool proxy takes nothing' "$?" '2'
+)
+
 echo '== the pool is sized as one thing, and never takes a visitor'"'"'s seat =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   # "hdw4s pool size N" replaced a reboot and a seat-by-seat procedure. What it
@@ -1714,7 +1826,8 @@ echo '== an ephemeral slot cannot be put on the network =='
     ok 'and gets its listener drop-in' ||
     bad 'and gets its listener drop-in' 'nothing was written'
 
-  # And "hdw4s proxy" must describe the POOL for a slot, never that slot.
+  # And "hdw4s proxy" must never describe one seat: it is refused, and points at
+  # the pool's block, which describes the POOL.
   #
   # The assertion this replaced required the block to contain
   # "proxy_pass http://unix:" -- pointing nginx straight at one slot's socket,
@@ -1726,16 +1839,15 @@ echo '== an ephemeral slot cannot be put on the network =='
   # absent, or may say "tcp" because an older version wrote it.
   printf '%s\n' "0 ${me} ephemeral" > "${SLOTS}"
   printf 'HDW4S_TRANSPORT=tcp\n' > "${ETCDIR}/${me}.conf"
-  out="$( ( cmd_proxy "${me}" ) 2>&1 )"
-  hasnt 'the block does NOT point nginx at a slot socket' \
+  out="$( ( cmd_proxy "${me}" ) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'proxy refuses a seat of the pool' || bad 'proxy refuses a seat of the pool' "rc ${rc}"
+  has   'and points at the pool'"'"'s block' "${out}" 'hdw4s pool proxy'
+  hasnt 'and prints no block for the seat' "${out}" 'server {'
+  out="$(pool_proxy)"
+  hasnt 'the pool block does NOT point nginx at a seat socket' \
         "${out}" "proxy_pass http://unix:"
-  hasnt 'and no longer names a port'       "${out}" "HOST_RUNNING_HDW4S"
-  # One line, not a phrase that spans one. The first version of this assertion
-  # searched for "a pool is not configured slot by slot", which the block wraps
-  # across a newline -- so it could never match, and the failure read as the
-  # branch not firing rather than as the search being wrong.
-  has 'and says it is one slot of a pool' \
-      "${out}" 'is one slot of the ephemeral pool'
+  hasnt 'and names no port'                "${out}" "HOST_RUNNING_HDW4S"
+  hasnt 'and names no seat'                "${out}" "${me}"
   has 'and speaks of the pool, not our internals' "${out}" 'the pool chooses'
 )
 
@@ -2109,18 +2221,21 @@ echo '== never reaping is a choice for a named session and a leak for a slot =='
   # with nothing anywhere reporting why.
   printf '%s\n' '0 dora' '1 eph0 ephemeral' > "${SLOTS}"
 
-  ( cmd_set 'eph0' 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
-    && bad 'a slot may not be told never to reap' \
-    || ok  'a slot may not be told never to reap'
-  out="$( ( cmd_set 'eph0' 'HDW4S_IDLE_DAYS=0' ) 2>&1 )"
+  # The pool is told as one thing, so it is refused there -- and per seat it is
+  # refused for every setting (the group on per-seat settings), so no seat can
+  # be given a window the others do not have.
+  ( pool_set 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
+    && bad 'the pool may not be told never to reap' \
+    || ok  'the pool may not be told never to reap'
+  out="$( ( pool_set 'HDW4S_IDLE_DAYS=0' ) 2>&1 )"
   has 'and the refusal says what would happen' "${out}" '503'
   # The remedy has to be a command that works, not a sentence that reads well.
-  has 'and names a longer window instead'      "${out}" 'HDW4S_IDLE_DAYS=30d'
-  ( cmd_set 'eph0' 'HDW4S_IDLE_DAYS=30d' ) >/dev/null 2>&1 \
+  has 'and names a longer window instead'      "${out}" 'hdw4s pool set HDW4S_IDLE_DAYS=30d'
+  hasnt 'and nothing was written' "$(cat "$(pool_conf)" 2>/dev/null)" 'HDW4S_IDLE_DAYS=0'
+  ( pool_set 'HDW4S_IDLE_DAYS=30d' ) >/dev/null 2>&1 \
     && ok  'and that command is accepted' \
     || bad 'and that command is accepted'
-  # The refusal must leave nothing behind, or the value it refused is in force.
-  hasnt 'and nothing was written' "$(cat "${SB}/etc/eph0.conf" 2>/dev/null)" 'HDW4S_IDLE_DAYS=0'
+  has 'into the pool'"'"'s own file' "$(cat "$(pool_conf)")" 'HDW4S_IDLE_DAYS=30d'
 
   # The control, and it is the point of keying this on type rather than banning
   # the value: a named session may still be told never to stop.
@@ -2128,32 +2243,30 @@ echo '== never reaping is a choice for a named session and a leak for a slot =='
     && ok  'a named session still may' \
     || bad 'a named session still may'
 
-  # And so may the authoring slot, which is the whole reason this guard asks
-  # in_ephemeral_pool() rather than "is it ephemeral". Every sentence in the
-  # refusal above is about the NEXT VISITOR -- the pool filling, the 503 -- and
-  # nobody is ever minted onto a template row. Refusing it would be this
-  # project's own recurring shape: a guard firing on a resemblance rather than
-  # on the property it was written for.
-  printf '%s\n' '0 dora' '1 eph0 ephemeral' '2 tmpl template' > "${SLOTS}"
-  ( cmd_set 'tmpl' 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
-    && ok  'and so may the template-authoring slot' \
-    || bad 'and so may the template-authoring slot' 'it was refused'
-  # CONTROL, in the same table, so the permit above cannot be a broken guard:
-  # the pooled row beside it must still be refused.
-  ( cmd_set 'eph0' 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
-    && bad 'CONTROL: the pooled slot beside it is still refused' 'it was accepted' \
-    || ok  'CONTROL: the pooled slot beside it is still refused'
-
-  # Machine-wide, the value reaches the slots too, so it is refused -- but only
-  # on a machine that HAS slots. A check that fails on a correct state is one
+  # Machine-wide, the value reaches the pool too, so it is refused -- unless the
+  # pool has a window of its own, which it reads after the machine's. Only on a
+  # machine that HAS a pool: a check that fails on a correct state is one
   # somebody turns off.
+  rm -f "$(pool_conf)"
   ( cmd_set 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
     && bad 'machine-wide is refused where there is a pool' \
     || ok  'machine-wide is refused where there is a pool'
-  printf '%s\n' '0 dora' > "${SLOTS}"
+  out="$( ( cmd_set 'HDW4S_IDLE_DAYS=0' ) 2>&1 )"
+  has 'and says how to give the pool its own window' "${out}" 'hdw4s pool set HDW4S_IDLE_DAYS=1d'
+  ( pool_set 'HDW4S_IDLE_DAYS=1d' ) >/dev/null 2>&1
   ( cmd_set 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
-    && ok  'and allowed where there is not' \
-    || bad 'and allowed where there is not'
+    && ok  'and accepted once the pool has its own' \
+    || bad 'and accepted once the pool has its own'
+  # The other side of the same rule: taking the pool's window away now would
+  # hand it the machine's "never".
+  ( pool_unset 'HDW4S_IDLE_DAYS' ) >/dev/null 2>&1 \
+    && bad 'the pool'"'"'s window cannot then be unset' \
+    || ok  'the pool'"'"'s window cannot then be unset'
+  has 'and it is still there' "$(cat "$(pool_conf)")" $'\nHDW4S_IDLE_DAYS=1d'
+  printf '%s\n' '0 dora' > "${SLOTS}"; : > "${CONF}"
+  ( cmd_set 'HDW4S_IDLE_DAYS=0' ) >/dev/null 2>&1 \
+    && ok  'and allowed where there is no pool' \
+    || bad 'and allowed where there is no pool'
 )
 
 echo '== the reaper works in seconds, and refuses to guess =='
@@ -4628,7 +4741,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=746   # update when tests are added; a wrong number is the point
+EXPECTED=798   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

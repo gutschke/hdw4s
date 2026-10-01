@@ -383,6 +383,11 @@ MINT_GRACE = 180.0
 
 ETC_DIR = os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s")
 SITE_CONF = os.path.join(ETC_DIR, "hdw4s.conf")
+# Every ephemeral desktop's settings ("hdw4s pool set"), read after SITE_CONF and
+# before a seat's own file -- the order hdw4s-ephemeral@.service reads them in.
+# A name joined to ETC_DIR where it is read, so that whatever points ETC_DIR
+# somewhere else takes this file with it.
+POOL_CONF_NAME = "_hdw4s_pool.conf"
 SLOTS_FILE = os.path.join(ETC_DIR, "instances")
 
 
@@ -554,11 +559,12 @@ def read_idle_window(inst):
     the difference is the whole of the defect this replaced -- which answered
     a confident seven days to both.
     """
-    path = os.path.join(ETC_DIR, inst + ".conf")
-    v = conf_value(path, "HDW4S_IDLE_DAYS")
-    if v is None:
-        path = SITE_CONF
+    v = None
+    for path in (os.path.join(ETC_DIR, inst + ".conf"),
+                 os.path.join(ETC_DIR, POOL_CONF_NAME), SITE_CONF):
         v = conf_value(path, "HDW4S_IDLE_DAYS")
+        if v is not None:
+            break
     if v is None:
         # The one value that is not written down anywhere, and it is the
         # documented default rather than a fallback: hdw4s.conf documents 7,
