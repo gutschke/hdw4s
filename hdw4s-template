@@ -1308,8 +1308,9 @@ def cmd_copyfrom(src):
     normalise(dst)
     publish(dst)
     os.close(lockfd)
-    say("\nPublished here: new desktops start from %s's template; running "
-        "ones keep what they started with." % src)
+    say("\nPublished here: new desktops start from %s; running ones keep "
+        "what they started with."
+        % (("the template in " + src) if is_file else (src + "'s template")))
     return 0
 
 
