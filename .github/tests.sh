@@ -841,6 +841,73 @@ PY
   is 'pool proxy takes nothing' "$?" '2'
 )
 
+echo '== list sums the pool up in one line, and lists seats only when asked =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # The people table used to carry every seat of the pool as if it were a person
+  # called "ephemeral3", and said nothing about how full the pool was -- the one
+  # thing about it an administrator acts on, and only in time if told before it
+  # is full.
+  me="$(id -un)"
+  RUNDIR="${SB}/run"; POOLDIR="${SB}/demux"; TEARDOWNDIR="${SB}/teardown"
+  mkdir -p "${RUNDIR}/hdw4s/eph1"; printf ':12\n' > "${RUNDIR}/hdw4s/eph1/display"
+  printf '%s\n' "0 ${me}" '1000 eph0 ephemeral' '1001 eph1 ephemeral' \
+    '1002 eph2 ephemeral' '1003 eph3 ephemeral' '1004 eph4 ephemeral' \
+    '1005 tmpl template' > "${SLOTS}"
+  CALLS="${SB}/calls"; : > "${CALLS}"
+  systemctl() { echo "systemctl $*" >> "${CALLS}"
+    case "$*" in show*) for u in "${@:8}"; do
+      printf 'Id=%s\nActiveState=%s\nEnvironment=\n\n' "${u}" \
+        "$(case "${u}" in *eph1*) echo active;; *) echo inactive;; esac)"; done;; esac; }
+  out="$(cmd_list 2>/dev/null)"
+  has   'the person'"'"'s desktop is listed' "${out}" "${me}"
+  hasnt 'no seat is listed as a desktop'   "${out}" 'eph0 '
+  hasnt 'nor the authoring slot'           "${out}" 'tmpl'
+  has   'the pool is one line'             "${out}" 'Ephemeral pool: 5 seat(s), 1 in use.'
+  hasnt 'and is not called nearly full at 1 of 5' "${out}" 'Nearly full'
+  has   'and says how to see the seats'    "${out}" 'hdw4s list --seats'
+  # FAST: one question to systemd for the whole table, seats included. The pool
+  # line asks whether each seat is busy, and must not ask systemd again per seat.
+  is    'one systemctl call for the whole listing' "$(command grep -c '^systemctl' "${CALLS}")" '1'
+  # 80%, and the other kinds of busy the pool's own sizing reads: a fresh
+  # reservation and a teardown make 3 of 5, which is not yet 80%; a fourth is.
+  mkdir -p "${POOLDIR}/reserved" "${TEARDOWNDIR}"
+  : > "${POOLDIR}/reserved/eph2"; : > "${TEARDOWNDIR}/eph3"
+  out="$(cmd_list 2>/dev/null)"
+  has   'every kind of busy counts'           "${out}" '5 seat(s), 3 in use.'
+  hasnt 'and 60% is not nearly full'          "${out}" 'Nearly full'
+  mkdir -p "${RUNDIR}/hdw4s/eph4"
+  out="$(cmd_list 2>/dev/null)"
+  has   'at 80% it says the pool is nearly full' "${out}" 'Nearly full'
+  has   'and how to add seats'                    "${out}" 'hdw4s pool size <N>'
+  # --seats: every seat and the authoring slot, with display and what holds it.
+  out="$(cmd_list --seats 2>/dev/null)"
+  has   'list --seats shows each seat'          "${out}" 'eph0'
+  has   'and the authoring slot'                "${out}" 'tmpl               template'
+  has   'and a seat'"'"'s display and why it is held' "${out}" ':12      a desktop is running in it'
+  hasnt 'and not the person'"'"'s desktop'      "${out}" "${me} "
+  HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" list --bogus >/dev/null 2>&1
+  is    'list takes only --seats' "$?" '2'
+)
+
+echo '== seats take no index from the port block =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # A pool of 70 failed at its 64th seat with "all 64 session slots are in use",
+  # on a machine with no named desktops at all: every seat took an index from
+  # the block although no seat ever listens on a port.
+  rm -f "${SLOTS}"; HDW4S_BLOCK_SIZE=4
+  for i in $(seq 0 69); do alloc_slot "eph${i}" ephemeral >/dev/null 2>&1 || break; done
+  is  'seventy seats fit beside a block of four' "$(awk '$3 == "ephemeral"' "${SLOTS}" | wc -l | tr -d ' ')" '70'
+  is  'and none is numbered inside the block' \
+      "$(awk '$1 !~ /^#/ && $1 < 4' "${SLOTS}" | wc -l | tr -d ' ')" '0'
+  alloc_slot tmpl template >/dev/null 2>&1
+  is  'nor is the authoring slot' "$(slot_of tmpl)" '1070'
+  for p in a b c d; do alloc_slot "${p}" desktop >/dev/null 2>&1; done
+  is  'a person'"'"'s desktop still takes the block, from the bottom' "$(slot_of a):$(slot_of d)" '0:3'
+  alloc_slot e desktop >/dev/null 2>&1; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'and a fifth is refused at a block of four' \
+    || bad 'and a fifth is refused at a block of four' "rc ${rc}"
+)
+
 echo '== the pool is sized as one thing, and never takes a visitor'"'"'s seat =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   # "hdw4s pool size N" replaced a reboot and a seat-by-seat procedure. What it
@@ -1531,6 +1598,13 @@ NFT
   printf '# comment\n0 alice\n1 bob\n' > "${SLOTS}"
   out="$(cmd_check 2>&1)"
   has 'counts the sessions it found' "${out}" 'sessions    2, all within the loaded range 7300-7303'
+
+  # A seat of the pool and the authoring slot have no port, and their index is
+  # numbered from far above the block on purpose: not counted, not "uncovered".
+  printf '0 alice\n1000 eph0 ephemeral\n1001 tmpl template\n' > "${SLOTS}"
+  out="$(cmd_check 2>&1)"
+  has 'rows with no port are not counted as sessions on a port' \
+      "${out}" 'sessions    1, all within the loaded range 7300-7303'
 
   printf '# comment\n0 alice\n9 carol\n' > "${SLOTS}"
   out="$(cmd_check 2>&1)"
@@ -4741,7 +4815,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=798   # update when tests are added; a wrong number is the point
+EXPECTED=820   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

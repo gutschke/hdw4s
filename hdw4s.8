@@ -4,7 +4,7 @@
 .SH "NAME"
 \fBhdw4s\fR \- headless GNOME desktop streamed to a web browser
 .SH "SYNOPSIS"
-\fBhdw4s\fR \fBlist\fR
+\fBhdw4s\fR \fBlist\fR [\fB\-\-seats\fR]
 .br
 \fBhdw4s\fR \fBcheck\fR
 .br
@@ -49,8 +49,10 @@ Each session is a systemd unit that runs, as that user, an X server on the \fBdu
 Sessions are expected to sit behind a reverse proxy that terminates TLS and identifies the user\. The streaming server itself runs with authentication switched off, so that a user who is already known to the proxy lands on their desktop without a second login\. See \fBREVERSE PROXY AND SECURITY\fR\.
 .SH "COMMANDS"
 .TP
-\fBlist\fR
-Print every configured session with its user, port, whether it has a credential of its own, whether it keeps its settings apart from the home directory, its transport, its unit state and its current display\.
+\fBlist\fR [\fB\-\-seats\fR]
+Print every person's desktop with its user, port, whether it has a credential of its own, whether it keeps its settings apart from the home directory, its transport, its unit state and its current display\. The ephemeral pool is one line under the table: how many seats it has and how many are in use, with a warning once 80% of them are, while there is still time to add seats before a visitor is turned away\.
+.IP
+With \fB\-\-seats\fR, list the pool's seats and the template\-authoring slot instead: each one's unit state, its display, and what is holding it \-\- for finding out what is wrong with the pool, not for configuring it\.
 .TP
 \fBcheck\fR
 Report any running session that is not publishing the identity a returning browser tab compares itself against, whether the machine can hand anybody a desktop at all, and whether the memory limit on the desktop slice is a number this machine can actually reach\. Exit non\-zero if any of those is wrong\. Nothing is restarted: the point is that somebody is told which session and why\. See DIAGNOSTICS\.
@@ -375,6 +377,8 @@ The pool is configured as \fBone thing\fR, not slot by slot\. Visitors arrive at
 \fBThe pool chooses, and remembers\.\fR A returning visitor is given back the session they already have rather than a new desktop on every arrival, and where that cannot be decided safely the visitor is asked rather than acted on\. Reaching a slot directly skips that decision entirely\.
 .IP "\[ci]" 4
 \fBA slot must not be reached directly\.\fR Not by a reverse proxy, not by anything else\. The sockets under \fB/run/hdw4s\-proxy/\fR belong to the pool\.
+.IP "\[ci]" 4
+\fBSeats have no port\.\fR They are reached over filesystem sockets, so they take nothing from the \fBHDW4S_BLOCK_SIZE\fR port block, which is for named desktops; their rows in the slot table are numbered from 1000\. Seats created by an earlier version keep the number they have\.
 .IP "\[ci]" 4
 \fBHow many slots\.\fR A fresh install mints \fBone\fR and offers none until the pool is given a size; one is the number that is safe on a machine the package knows nothing about\. The ceiling is \fB99\fR, and it is the user\-id window rather than a policy: slots take consecutive ids from \fBHDW4S_EPHEMERAL_UID_BASE\fR inside 60900\-60999, and the top of that window is kept for the template\-authoring slot\. \fBpool size\fR refuses a number beyond it before changing anything\.
 .IP

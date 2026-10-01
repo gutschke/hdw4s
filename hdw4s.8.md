@@ -3,7 +3,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 
 ## SYNOPSIS
 
-`hdw4s` `list`<br>
+`hdw4s` `list` [`--seats`]<br>
 `hdw4s` `check`<br>
 `hdw4s` `show` <instance><br>
 `hdw4s` `enable` <instance><br>
@@ -42,10 +42,17 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
 ## COMMANDS
 
-  * `list`:
-    Print every configured session with its user, port, whether it has a
+  * `list` [`--seats`]:
+    Print every person's desktop with its user, port, whether it has a
     credential of its own, whether it keeps its settings apart from the home
-    directory, its transport, its unit state and its current display.
+    directory, its transport, its unit state and its current display. The
+    ephemeral pool is one line under the table: how many seats it has and how
+    many are in use, with a warning once 80% of them are, while there is still
+    time to add seats before a visitor is turned away.
+
+    With `--seats`, list the pool's seats and the template-authoring slot
+    instead: each one's unit state, its display, and what is holding it --
+    for finding out what is wrong with the pool, not for configuring it.
 
   * `check`:
     Report any running session that is not publishing the identity a returning
@@ -762,6 +769,11 @@ single hostname for the whole pool and are given a session from it.
 
   * **A slot must not be reached directly.** Not by a reverse proxy, not by
     anything else. The sockets under `/run/hdw4s-proxy/` belong to the pool.
+
+  * **Seats have no port.** They are reached over filesystem sockets, so they
+    take nothing from the `HDW4S_BLOCK_SIZE` port block, which is for named
+    desktops; their rows in the slot table are numbered from 1000. Seats
+    created by an earlier version keep the number they have.
 
   * **How many slots.** A fresh install mints **one** and offers none until
     the pool is given a size; one is the number that is safe on a machine the

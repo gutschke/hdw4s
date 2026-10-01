@@ -595,9 +595,14 @@ cmd_check() {
     echo "            session-port rule; run 'hdw4s firewall --apply'"
     rc=1
   elif [ -r "${SLOTS}" ]; then
-    while read -r idx inst _; do
+    while read -r idx inst type _; do
       case "${idx}" in ''|\#*) continue;; esac
       case "${idx}" in *[!0-9]*) continue;; esac
+      # A seat of the pool and the authoring slot have no port: they are
+      # reached over filesystem sockets, and their index is numbered from far
+      # above the block on purpose (hdw4s alloc_slot). Counting one here would
+      # report a port nothing listens on as uncovered.
+      case "${type}" in ephemeral|template) continue;; esac
       n_sessions=$(( n_sessions + 1 ))
       p=$(( HDW4S_BASE_PORT + idx ))
       if [ "${p}" -lt "${sfirst}" ] || [ "${p}" -gt "${slast}" ]; then
