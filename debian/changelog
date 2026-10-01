@@ -1,3 +1,24 @@
+hdw4s (2.4.6) unstable; urgency=medium
+
+  * Visitor desktops get more visibly different backgrounds: each one draws
+    its colour and lightness from the whole Ubuntu range rather than a few
+    fixed steps, and has softly blended lighter and darker sections of its
+    own, so two desktops open side by side are easy to tell apart. White icon
+    labels on the desktop keep at least the contrast WCAG asks of body text.
+
+  * A template can be moved between machines that cannot reach each other:
+    "hdw4s template export <file>" writes it to one archive, and "hdw4s
+    template copyfrom" takes that file as well as a host name.
+
+  * Visitor desktop seats are now named _hdw4s_0, _hdw4s_1, ... so that they
+    can never be mistaken for a person's account, and the
+    HDW4S_EPHEMERAL_PREFIX setting is gone. A machine upgraded from an earlier
+    version has to be told its pool size once: "hdw4s check" names the old
+    seats, and "hdw4s pool size N" (at the size it had) followed by a reboot
+    replaces them. Until then no visitor desktop starts.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Thu, 01 Oct 2026 12:00:00 -0700
+
 hdw4s (2.4.5) unstable; urgency=medium
 
   * Visitor desktops can start from a template the administrator prepares:
