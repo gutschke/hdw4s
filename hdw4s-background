@@ -406,6 +406,16 @@ RELIEF_SCALE = 0.6
 RELIEF_DARK_L = 40.0                 # the multiplying colour; lower is darker
 RELIEF_LIGHT_L = None
 RELIEF_CHROMA = 0.80                 # both colours' chroma fraction
+# How sharply a section's mask rises from nothing to full strength. The noise
+# behind it sits close to its midpoint, so at 4 a section reaches full strength
+# only where the noise is extreme: measured, the light sections topped out 2 to
+# 15 L* under the ceiling they are allowed, and the picture's brightness range
+# was set by that rather than by the ceiling. At 8 the brightness range within
+# one picture goes from 17.6 to 28.6 L* (p5-p95, mean of 12 draws) with no pixel
+# over the label ceiling -- the light colour is the ceiling and is painted, not
+# screened, so it cannot be exceeded. At 10 the sections' edges harden into
+# blobs, which the owner has rejected before.
+RELIEF_CONTRAST = 8.0
 
 
 def arc(t):
@@ -820,8 +830,8 @@ def svg(spec, w=1920, hgt=1080, units_w=480, units_h=270):
         # LAST, after the hue ramp, or the ramp repaints the edges and the
         # sections vanish exactly where the ramp is strong. See RELIEF.
         f, sd, dark, light, a = relief
-        defs += veil("rlight", f, sd, 1, 4.0, 0.0)
-        defs += veil("rdark", f, sd, 1, -4.0, 0.0)
+        defs += veil("rlight", f, sd, 1, RELIEF_CONTRAST, 0.0)
+        defs += veil("rdark", f, sd, 1, -RELIEF_CONTRAST, 0.0)
         s_over += (
             ' <!-- lighter and darker sections, softly -->\n'
             ' <rect width="%d" height="%d" fill="%s" filter="url(#rdark)"'
