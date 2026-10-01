@@ -214,7 +214,8 @@ Usage: hdw4s <command> [arguments]
   template forget <path>  stop carrying one
   template reset          new ephemeral desktops start from the stock desktop
   template show           list what the template carries
-  template copyfrom <host> publish another machine's template here (rsync)
+  template copyfrom <host|file> publish another machine's template here
+  template export <file>  write this machine's template to one archive
   --version               print the version
   firewall --apply        rewrite the package's nftables table
   firewall --check        report whether every session port is protected

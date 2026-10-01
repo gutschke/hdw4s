@@ -287,13 +287,19 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
   * `template show`:
     List the settings and files the template carries.
 
-  * `template copyfrom` [<user>`@`]<host>:
-    Publish another hdw4s machine's template here: one `rsync` pulls the
-    files it has published, and they are published as an edit here would be,
-    including this machine's settings database. The `rsync` command is printed
-    before it runs, so a failure can be retried or debugged by hand. It needs
-    root on both machines; arranging that (keys, an agent, a `sudo` wrapper on
-    the other side) is left to the administrator.
+  * `template copyfrom` [<user>`@`]<host> | <file>:
+    Publish another hdw4s machine's template here, as an edit here would be,
+    including this machine's settings database. Given a host, one `rsync`
+    pulls what that machine has published; the command is printed before it
+    runs, so a failure can be retried or debugged by hand, and reaching the
+    other machine as root is left to the administrator. Given a file, it is an
+    archive `template export` wrote: the route for machines that cannot reach
+    each other. The archive is unpacked refusing absolute paths, `..`, device
+    files and links that lead outside it.
+
+  * `template export` <file>:
+    Write the template published here to one archive, for `template copyfrom`
+    on another machine. An existing file is never overwritten.
 
   * `firewall --apply`:
     Rewrite the package's nftables table and the kernel's reserved-port list

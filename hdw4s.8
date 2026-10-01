@@ -159,8 +159,11 @@ Remove the template: new ephemeral desktops start from the stock desktop\. The w
 \fBtemplate show\fR
 List the settings and files the template carries\.
 .TP
-\fBtemplate copyfrom\fR [\fIuser\fR\fB@\fR]\fIhost\fR
-Publish another hdw4s machine's template here: one \fBrsync\fR pulls the files it has published, and they are published as an edit here would be, including this machine's settings database\. The \fBrsync\fR command is printed before it runs, so a failure can be retried or debugged by hand\. It needs root on both machines; arranging that (keys, an agent, a \fBsudo\fR wrapper on the other side) is left to the administrator\.
+\fBtemplate copyfrom\fR [\fIuser\fR\fB@\fR]\fIhost\fR | \fIfile\fR
+Publish another hdw4s machine's template here, as an edit here would be, including this machine's settings database\. Given a host, one \fBrsync\fR pulls what that machine has published; the command is printed before it runs, so a failure can be retried or debugged by hand, and reaching the other machine as root is left to the administrator\. Given a file, it is an archive \fBtemplate export\fR wrote: the route for machines that cannot reach each other\. The archive is unpacked refusing absolute paths, \fB\.\.\fR, device files and links that lead outside it\.
+.TP
+\fBtemplate export\fR \fIfile\fR
+Write the template published here to one archive, for \fBtemplate copyfrom\fR on another machine\. An existing file is never overwritten\.
 .TP
 \fBfirewall \-\-apply\fR
 Rewrite the package's nftables table and the kernel's reserved\-port list from the current configuration\. Run this after changing \fBHDW4S_PROXIES\fR, \fBHDW4S_BASE_PORT\fR or \fBHDW4S_BLOCK_SIZE\fR\.

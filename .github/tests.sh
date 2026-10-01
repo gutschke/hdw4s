@@ -1338,6 +1338,41 @@ PY
   hasnt 'not at the author'"'"'s home'                        "${out}" 'uri=.*home/user'
 )
 
+echo '== a template goes across as one archive, and a doctored one is refused =='
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  mkdir -p "${T}/etc" "${T}/root/gen-1/dconf" "${T}/root/gen-1/home/Downloads"
+  echo "HDW4S_TEMPLATE_DIR=${T}/root" > "${T}/etc/hdw4s.conf"
+  echo '[org/gnome/x]' > "${T}/root/gen-1/dconf/50-template"
+  ln -s gen-1 "${T}/root/current"
+  out="$(HDW4S_ETCDIR="${T}/etc" python3 - "${ROOT}/hdw4s-template" "${T}" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys, os, tarfile, io
+l = importlib.machinery.SourceFileLoader("t", sys.argv[1])
+s = importlib.util.spec_from_loader("t", l); m = importlib.util.module_from_spec(s)
+l.exec_module(m); T = sys.argv[2]
+m.cmd_export(T + "/t.tgz")
+try:
+    m.cmd_export(T + "/t.tgz"); print("second export: written")
+except SystemExit: print("second export: refused")
+m.fetch_from_file(T + "/t.tgz", T + "/stage")
+print("roundtrip=%s" % sorted(os.path.relpath(os.path.join(d, f), T + "/stage")
+                              for d, ds, fs in os.walk(T + "/stage") for f in fs + ds))
+bad = io.BytesIO()
+with tarfile.open(fileobj=bad, mode="w:gz") as t:
+    data = b"x"; i = tarfile.TarInfo("../escape.txt"); i.size = 1
+    t.addfile(i, io.BytesIO(data))
+open(T + "/bad.tgz", "wb").write(bad.getvalue())
+try:
+    m.fetch_from_file(T + "/bad.tgz", T + "/stage2"); print("doctored: unpacked")
+except SystemExit: print("doctored: refused")
+print("escaped=%s stage2=%s" % (os.path.exists(T + "/escape.txt"), os.path.exists(T + "/stage2")))
+PY
+)"
+  has 'an existing archive is not overwritten' "${out}" 'second export: refused'
+  has 'the archive carries the template'       "${out}" "roundtrip=['dconf', 'dconf/50-template', 'home', 'home/Downloads']"
+  has 'an archive reaching outside is refused' "${out}" 'doctored: refused'
+  has 'and wrote nothing, outside or staged'   "${out}" 'escaped=False stage2=False'
+)
+
 echo '== the updater checks what it downloaded =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   eval "$(sed -n '/^verify_sha256() {/,/^}/p;/^asset_digest() {/,/^}/p' \
@@ -4815,7 +4850,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=820   # update when tests are added; a wrong number is the point
+EXPECTED=824   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

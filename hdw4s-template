@@ -6,7 +6,8 @@
     hdw4s template forget <path>...
     hdw4s template reset
     hdw4s template show
-    hdw4s template copyfrom [<user>@]<host>
+    hdw4s template copyfrom [<user>@]<host> | <file>
+    hdw4s template export <file>
 
 "edit" starts the template-authoring desktop (the slot table's row typed
 "template", which "hdw4s template edit" sets up the first time), prints a
@@ -35,13 +36,14 @@ is worked out here.
 "reset" returns every NEW session to the stock desktop. Running sessions keep
 what they started with.
 
-"copyfrom" publishes another machine's template here: one rsync pulls the
-files it has published into a staging directory, and they are published
-exactly as an edit here would be -- the settings database is rebuilt here,
-which copying the files alone would not do. The rsync is printed before it
-runs, so a failure can be retried or debugged by hand. Reaching the other
-machine as root -- keys, an agent, "sudo rsync" on its side -- is the
-administrator's to arrange; nothing here holds a credential.
+"copyfrom" publishes another machine's template here, exactly as an edit here
+would be (the settings database is rebuilt here, which copying the files alone
+would not do). Given a host, one rsync pulls what that machine has published,
+and the command is printed before it runs so a failure can be retried by hand;
+reaching it as root is the administrator's to arrange. Given a file, it is an
+archive "export" wrote on the other machine -- for machines that cannot reach
+each other, the file goes across by whatever route the administrator has.
+"export" writes the template published here to one such file.
 """
 
 import fcntl
@@ -56,6 +58,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import hashlib
@@ -1223,16 +1226,31 @@ def cmd_edit(yes):
         _ = committed
 
 
-def cmd_copyfrom(src):
-    """Publish SRC's ([user@]host) current template here."""
-    if src.startswith("-") or ":" in src or "/" in src:
-        die("usage: hdw4s template copyfrom [<user>@]<host> -- a host, not a "
-            "path", 2)
-    lockfd = take_lock()
-    gen = "gen-%d" % time.time_ns()
-    stage = os.path.join(ROOT, gen + ".incoming")
-    os.makedirs(ROOT, mode=0o755, exist_ok=True)
-    say("Copying the template published on %s to this machine." % src)
+def cmd_export(path):
+    """Write the template published here to PATH, one archive, for "copyfrom"
+    on a machine this one cannot reach."""
+    if not os.path.isdir(CURRENT):
+        die("there is no template here to export (hdw4s template edit makes one).")
+    gen = os.path.realpath(CURRENT)
+    # Never over an existing file: an archive that silently replaced another
+    # one is a template nobody can get back.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        die("%s already exists; choose another name or remove it first." % path)
+    except OSError as e:
+        die("cannot write %s: %s" % (path, e.strerror))
+    with os.fdopen(fd, "wb") as f, tarfile.open(fileobj=f, mode="w:gz") as t:
+        t.add(gen, arcname=".")
+    say("Wrote the template published here (%s, %s of files) to %s."
+        % (os.path.basename(gen), human(du(gen)), path))
+    say("On the other machine, after copying the file there:\n"
+        "    hdw4s template copyfrom %s" % shlex.quote(path))
+    return 0
+
+
+def fetch_from_host(src, stage):
+    """rsync SRC's published template into STAGE, printing the command."""
     # "current/" with the slash: rsync follows the link on the other side and
     # copies the generation it names, which is what that machine publishes. As
     # root here, -a keeps the files root's; they are re-normalised anyway.
@@ -1244,11 +1262,47 @@ def cmd_copyfrom(src):
         shutil.rmtree(stage, ignore_errors=True)
         die("that command failed (exit %d); nothing was published here."
             % r.returncode)
+
+
+def fetch_from_file(path, stage):
+    """Unpack an archive "template export" wrote into STAGE.
+
+    THE "data" FILTER, because an archive is input from elsewhere and this runs
+    as root: it refuses absolute paths, "..", device files and links that point
+    outside the staging directory, and drops setuid bits -- so a doctored archive
+    cannot write anywhere but STAGE. Ownership is normalised afterwards anyway."""
+    os.makedirs(stage, mode=0o755)
+    try:
+        with tarfile.open(path, "r:*") as t:
+            t.extractall(stage, filter="data")
+    except (OSError, tarfile.TarError) as e:
+        shutil.rmtree(stage, ignore_errors=True)
+        die("could not unpack %s: %s; nothing was published here." % (path, e))
+
+
+def cmd_copyfrom(src):
+    """Publish another machine's template here: from SRC as a host
+    ([user@]host, over rsync) or as a file "template export" wrote."""
+    is_file = os.path.isfile(src)
+    if not is_file and ("/" in src or src.endswith((".tar", ".tgz", ".gz"))):
+        die("%s: no such file." % src, 2)
+    if not is_file and (src.startswith("-") or ":" in src):
+        die("usage: hdw4s template copyfrom [<user>@]<host> | <file>", 2)
+    lockfd = take_lock()
+    gen = "gen-%d" % time.time_ns()
+    stage = os.path.join(ROOT, gen + ".incoming")
+    os.makedirs(ROOT, mode=0o755, exist_ok=True)
+    if is_file:
+        say("Publishing the template in %s on this machine." % src)
+        fetch_from_file(src, stage)
+    else:
+        say("Copying the template published on %s to this machine." % src)
+        fetch_from_host(src, stage)
     if not os.path.isfile(os.path.join(stage, "dconf", KEYFILE)):
         shutil.rmtree(stage, ignore_errors=True)
-        die("%s sent no settings file, so it has no published template "
-            "(hdw4s template edit makes one there); nothing was published "
-            "here." % src)
+        die("%s holds no settings file, so it is not a published template "
+            "(hdw4s template edit makes one, and template export writes it); "
+            "nothing was published here." % src)
     dst = os.path.join(ROOT, gen)
     os.rename(stage, dst)
     normalise(dst)
@@ -1338,8 +1392,11 @@ def main(argv):
         return cmd_show()
     if cmd == "copyfrom" and len(rest) == 1:
         return cmd_copyfrom(rest[0])
+    if cmd == "export" and len(rest) == 1:
+        return cmd_export(rest[0])
     die("usage: hdw4s template edit [--yes] | keep [<path>...] | "
-        "forget <path>... | reset | show | copyfrom [<user>@]<host>", 2)
+        "forget <path>... | reset | show | copyfrom <host>|<file> | "
+        "export <file>", 2)
 
 
 if __name__ == "__main__":
