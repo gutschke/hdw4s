@@ -1,6 +1,10 @@
 #!/bin/bash -e
 export LC_ALL='C'
 set -o nounset -o pipefail
+# No bytecode in the tree: its python checks import the scripts, and a cache
+# left behind is a generated file one "git add ." away from public history (a
+# committed .pyc once carried the build path there). tests.sh does the same.
+export PYTHONDONTWRITEBYTECODE=1
 
 # Every check CI runs, in the order CI runs them. Run this before pushing and
 # there should be no surprises afterwards; that is the entire point of it being
