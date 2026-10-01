@@ -1914,14 +1914,15 @@ echo '== the fresh-mint marker is spelled the same in the router and the page ==
     *)  ok  'the router names the marker' ;;
   esac
 
-  # EVERY SITE, counted rather than eyeballed. There are exactly three -- the front
-  # door's mint, the directory's create, and the directory's Resume -- and a marker
-  # attached at fewer brings the second click back on whichever path was missed,
-  # with nothing going red; one attached at MORE is a silent connect somewhere
-  # nobody asked for.
+  # EVERY SITE, counted rather than eyeballed. There are exactly four -- the front
+  # door's mint, the directory's create, the directory's Resume, and the press on
+  # a template invite (a single-use link the administrator was handed, minting
+  # the authoring desktop nobody else is in) -- and a marker attached at fewer
+  # brings the second click back on whichever path was missed, with nothing going
+  # red; one attached at MORE is a silent connect somewhere nobody asked for.
   sites="$(grep -c 'asked_marker_header(' "${ROOT}/hdw4s-demux")"
-  is 'the router attaches it at its three sites (and defines it once)' \
-    "${sites}" '4'
+  is 'the router attaches it at its four sites (and defines it once)' \
+    "${sites}" '5'
   has 'the page reads the same name' "$(cat "${d}/out.html")" "'${name}'"
   # And it is read from the address the page is serving rather than taken on trust, so
   # it cannot authorise an arrival at a desktop somebody else may be watching.

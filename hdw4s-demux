@@ -6513,7 +6513,13 @@ def serve(sock, own, expected_b64):
                     tsid = own.mint_session(identity, inst)
                 log("admitted a template invite: %s let to visitor %s"
                     % (inst, visitor_tag(identity)))
-                respond(wf, 303, b"", [("Location", "/s/%s/" % tsid)] +
+                # The marker the other two mints carry, for the same reason:
+                # this browser asked for this desktop in this very request
+                # (the press on the invite card), so the gate's Connect card
+                # would be a second click for one decision. Without it the
+                # template editor took two clicks to reach.
+                respond(wf, 303, b"", [("Location", "/s/%s/" % tsid),
+                                       asked_marker_header(tsid)] +
                         refresh_headers(own, identity, new_identity))
                 continue
 
