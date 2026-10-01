@@ -132,6 +132,13 @@ CHROME_KEEP = [
     "Bookmarks",
     "Extensions",
     "Managed Extension Settings",
+    # An extension's DYNAMIC declarativeNetRequest rules -- blocking rules, not
+    # browsing data. Preferences records a checksum for them, and without the
+    # rules beside it Chrome reported "The extension failed to load properly. It
+    # might not be able to intercept network requests" for uBlock Origin Lite in
+    # every new desktop until it was reloaded (owner, 2026-09-30). See also
+    # forget_missing_dnr_rules().
+    "DNR Extension Rules",
     "Preferences",
     "Secure Preferences",
 ]
@@ -478,6 +485,24 @@ def forget_extension_workers(prefs):
     return n
 
 
+def forget_missing_dnr_rules(prefs, default):
+    """Drop each extension's dnr_dynamic_ruleset record when its rules are not
+    under DEFAULT/DNR Extension Rules/<id>. A checksum with nothing beside it is
+    a load failure Chrome reports in every new desktop; with the record gone,
+    Chrome starts that extension with no dynamic rules, as for a fresh install.
+    Returns how many records it dropped."""
+    n = 0
+    settings = prefs.get("extensions", {}).get("settings", {})
+    if isinstance(settings, dict):
+        for eid, ext in settings.items():
+            if isinstance(ext, dict) and "dnr_dynamic_ruleset" in ext and \
+                    not os.path.isdir(os.path.join(default, "DNR Extension Rules",
+                                                   eid)):
+                del ext["dnr_dynamic_ruleset"]
+                n += 1
+    return n
+
+
 def harvest_chrome(src, dst, notes):
     default = os.path.join(src, "Default")
     if not os.path.isdir(default):
@@ -499,6 +524,7 @@ def harvest_chrome(src, dst, notes):
         for k in CHROME_PREF_DROP:
             drop_dotted(p, k)
         forget_extension_workers(p)
+        forget_missing_dnr_rules(p, os.path.join(dst, "Default"))
         prof = p.setdefault("profile", {})
         prof["exit_type"] = "Normal"
         prof["exited_cleanly"] = True

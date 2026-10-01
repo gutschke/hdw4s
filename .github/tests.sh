@@ -1080,6 +1080,26 @@ echo '== the trash is linked onto the home'"'"'s filesystem =='
   is  'a Trash holding files is left alone' "$([ -L "${T}/data/Trash" ] && echo link || echo dir)" 'dir'
 )
 
+echo '== a published Chrome keeps no rule checksum without its rules =='
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  mkdir -p "${T}/Default/DNR Extension Rules/kept"
+  out="$(python3 - "${ROOT}/hdw4s-template" "${T}/Default" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys
+l = importlib.machinery.SourceFileLoader("t", sys.argv[1])
+s = importlib.util.spec_from_loader("t", l); m = importlib.util.module_from_spec(s)
+l.exec_module(m)
+p = {"extensions": {"settings": {
+        "kept": {"dnr_dynamic_ruleset": {"checksum": 1}, "path": "a"},
+        "gone": {"dnr_dynamic_ruleset": {"checksum": 2}, "path": "b"}}}}
+print("dropped=%d" % m.forget_missing_dnr_rules(p, sys.argv[2]))
+print("kept=%s gone=%s" % (sorted(p["extensions"]["settings"]["kept"]),
+                           sorted(p["extensions"]["settings"]["gone"])))
+PY
+)"
+  has 'a checksum whose rules are missing is dropped' "${out}" 'dropped=1'
+  has 'and one whose rules are carried is kept'       "${out}" "kept=['dnr_dynamic_ruleset', 'path'] gone=['path']"
+)
+
 echo '== the updater checks what it downloaded =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   eval "$(sed -n '/^verify_sha256() {/,/^}/p;/^asset_digest() {/,/^}/p' \
@@ -4275,7 +4295,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=713   # update when tests are added; a wrong number is the point
+EXPECTED=715   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
