@@ -752,23 +752,24 @@ conf_value() {
 setting_with_source() {
   local inst="$1" key="$2" fallback="$3" v=''
   local f
-  # An ephemeral slot takes several of its settings from its unit rather than
-  # from a conf file -- the profile directory and the isolation mode among them
-  # -- and Environment= in the unit beats the EnvironmentFile= lines above it, so
-  # that is the value in force. Reading only the conf files made this command
-  # report a profile under /var/lib/hdw4s that has never existed for such a
-  # session, and an isolation mode it does not run with. Ask systemd rather than
-  # keeping a second copy of the unit's values here, which would be one more
-  # thing able to disagree with it.
+  # TWO SETTINGS OF AN EPHEMERAL DESKTOP ARE NOT SETTINGS: hdw4s-session forces
+  # HDW4S_ISOLATION=profile and the profile directory after the files are read,
+  # because EnvironmentFile= overrides Environment= whatever order they appear
+  # in (measured again 2026-09-30, systemd 255: the file's value won both ways
+  # round). This used to ask the unit's Environment= first and say "the unit
+  # wins" -- the opposite of the measurement, and the unit no longer sets either
+  # key, so a file's value was reported for something the session overrides.
   if ephemeral_shaped "$(type_of "${inst}")"; then
-    if [ -n "${_LIST_PRELOADED:-}" ]; then
-      v="$(printf '%s' "${_LIST_ENV[$(unit_of "${inst}")]:-}" |
-             tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n1)"
-    else
-      v="$(systemctl show "$(unit_of "${inst}")" -p Environment --value 2>/dev/null |
-             tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -n1)"
-    fi
-    [ -z "${v}" ] || { printf '%s\t%s' "${v}" "$(unit_of "${inst}")"; return 0; }
+    case "${key}" in
+      HDW4S_ISOLATION)
+        printf '%s\t%s' profile 'hdw4s-session (fixed for this kind of desktop)'
+        return 0;;
+      HDW4S_PROFILE_DIR)
+        local root=/run/hdw4s-profile
+        [ "$(type_of "${inst}")" != template ] || root=/run/hdw4s-author
+        printf '%s\t%s' "${root}" 'hdw4s-session (fixed for this kind of desktop)'
+        return 0;;
+    esac
   fi
   # The pool's file sits between, for exactly the desktops whose unit reads it
   # (hdw4s-ephemeral@.service): after the seat's own, before the machine's.
@@ -836,7 +837,7 @@ has_auth() {
 # helpers keep answering exactly as before -- type_of and setting_with_source
 # consult these tables only when _LIST_PRELOADED is set, which only cmd_list
 # does -- so each rule still lives in one place.
-declare -gA _LIST_TYPE=() _LIST_STATE=() _LIST_ENV=()
+declare -gA _LIST_TYPE=() _LIST_STATE=()
 list_preload() {
   local idx inst t units=() line cur=''
   [ -r "${SLOTS}" ] || return 0
@@ -847,17 +848,16 @@ list_preload() {
   _LIST_PRELOADED=1
   for inst in "${!_LIST_TYPE[@]}"; do units+=("$(unit_of "${inst}")"); done
   [ "${#units[@]}" -gt 0 ] || return 0
-  # Blocks of Id=/ActiveState=/Environment=, one per unit, in systemd's own
+  # Blocks of Id=/ActiveState=, one per unit, in systemd's own
   # property order -- so each line is keyed by the Id= of its block, never by
   # position.
   while IFS= read -r line; do
     case "${line}" in
       Id=*)          cur="${line#Id=}";;
       ActiveState=*) [ -z "${cur}" ] || _LIST_STATE[${cur}]="${line#ActiveState=}";;
-      Environment=*) [ -z "${cur}" ] || _LIST_ENV[${cur}]="${line#Environment=}";;
       '')            cur='';;
     esac
-  done < <(systemctl show -p Id -p ActiveState -p Environment "${units[@]}" 2>/dev/null)
+  done < <(systemctl show -p Id -p ActiveState "${units[@]}" 2>/dev/null)
 }
 
 # "list --seats": the pool's seats and the authoring slot, one row each -- for

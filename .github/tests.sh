@@ -1881,8 +1881,9 @@ echo '== a slot records what kind of session it is =='
   # shellcheck disable=SC2317
   systemctl() { echo 'HDW4S_ISOLATION=profile HDW4S_PROFILE_DIR=/run/hdw4s'; }
   r="$(setting_with_source eph0 HDW4S_ISOLATION none)"
-  is 'the unit wins for an ephemeral slot' "${r%%$'\t'*}" 'profile'
-  is 'and is attributed to the unit' "${r#*$'\t'}" 'hdw4s-ephemeral@eph0.service'
+  is 'an ephemeral slot is always profile-isolated' "${r%%$'\t'*}" 'profile'
+  is 'and says the session fixes it, not a file or the unit' "${r#*$'\t'}" \
+     'hdw4s-session (fixed for this kind of desktop)'
   r="$(setting_with_source alice HDW4S_ISOLATION none)"
   is 'a desktop session still reads its files' "${r%%$'\t'*}" 'none'
 )
