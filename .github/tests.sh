@@ -1048,6 +1048,7 @@ PY
 )
 
 echo '== a named desktop gets a composed dconf profile unless it may lock =='
+# shellcheck disable=SC2016  # matched as literal text in hdw4s-session
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
   blk="$(sed -n '/^if \[ "${HDW4S_SESSION_TYPE:-}" != .ephemeral. \] &&$/,/^fi$/p' "${ROOT}/hdw4s-session")"
   [ -n "${blk}" ] && ok 'the block is found in hdw4s-session' || bad 'the block is found in hdw4s-session' 'sed found nothing'
@@ -1059,7 +1060,7 @@ echo '== a named desktop gets a composed dconf profile unless it may lock =='
   out="$(run DCONF_PROFILE="${T}/machine")"
   is  'off by default: the profile is the composed one' "${out}" "${T}/run/hdw4s-dconf-profile"
   is  'which keeps the machine'"'"'s layers and adds ours beneath' \
-      "$(cat "${T}/run/hdw4s-dconf-profile" | tr '\n' ' ')" 'user-db:user system-db:local system-db:hdw4s-named '
+      "$(tr '\n' ' ' < "${T}/run/hdw4s-dconf-profile")" 'user-db:user system-db:local system-db:hdw4s-named '
   rm -f "${T}/run/hdw4s-dconf-profile"
   out="$(run DCONF_PROFILE="${T}/machine" HDW4S_SCREEN_LOCK=on)"
   is  'on: the machine'"'"'s profile is left as it is' "${out}" "${T}/machine"
@@ -1068,6 +1069,7 @@ echo '== a named desktop gets a composed dconf profile unless it may lock =='
 )
 
 echo '== the trash is linked onto the home'"'"'s filesystem =='
+# shellcheck disable=SC2016  # matched as literal text in hdw4s-session
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
   # From the marker comment to the second closing "  fi" after it: the choice
   # of directory, then the link.
