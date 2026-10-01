@@ -2343,6 +2343,130 @@ echo '== the fresh-mint marker is spelled the same in the router and the page ==
     "$(sed -n '/^def asked_marker_header/,/^$/p' "${ROOT}/hdw4s-demux")" 'HttpOnly'
 )
 
+echo '== the arrival decision keeps its order =='
+# WRITTEN BECAUSE NOTHING ASSERTED IT. A review of a proposed reconnect after a
+# transport switch found that every safety property of arrival rests on the ORDER of a dozen lines in
+# hdw4s-gate-index -- which markers are spent before anything connects, which paths
+# connect unconditionally, and which one compares the desktop and waits for a hidden
+# tab -- and that a change reordering them would turn nothing red. These pin the order
+# as shipped. A deliberate reorder updates this list; an accidental one fails here.
+#
+# Checked on the GENERATED page, and the red arms below edit the generated page rather
+# than the generator, so that they test this check and nothing else.
+#
+# WHAT IT CANNOT SEE: whether the page behaves as its order says in a browser. It is a
+# check on the text the browser is handed.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+  "${ROOT}/hdw4s-gate-index" "${d}/in.html" "${d}/out.html" >/dev/null 2>&1
+  order() { python3 - "$1" <<'PY'
+import re, sys
+h = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"go\.addEventListener\('click', boot\);(.*?)\n\}\)\(\);", h, re.S)
+if not m:
+    sys.exit(print("the arrival decision was not found"))
+a = m.group(1)
+steps = (
+    ("EXPECT is read", "expected = sessionStorage.getItem(EXPECT)==='1';"),
+    ("EXPECT is deleted before it is used", "sessionStorage.removeItem(EXPECT);"),
+    ("EXPECT connects", "if (expected) return boot();"),
+    ("the fresh cookie must name this desktop", "return c.trim() === want;"),
+    ("the fresh cookie is deleted", "document.cookie = FRESH + '=; Path=/; Max-Age=0"),
+    ("the fresh cookie connects", "announceFresh();\n        return boot();"),
+    ("a viewer connects", "if (/^#(shared|player[2-4]|display2)/.test(location.hash)) "
+                          "return boot();"),
+    ("gate=off connects", "if (GATE === 'off') return boot();"),
+    ("the resume branch opens", "if (LOADED_HIDDEN && knownInc) {"),
+    ("the incarnation is compared", "var same = !!served && served === knownInc;"),
+    ("only the comparison connects", "if (same) return boot();"),
+    ("a hidden tab waits", "if (!document.hidden) return decide();"),
+    ("the card is what is left", "if (GATE === 'mint') return show(MINT, MINT_GO);\n"
+                                 "  show(COLD, COLD_GO);"))
+at = -1
+for what, needle in steps:
+    n = a.count(needle)
+    if n != 1:
+        sys.exit(print("%s: found %d times" % (what, n)))
+    i = a.index(needle)
+    if i < at:
+        sys.exit(print("%s: out of order" % what))
+    at = i
+if not a.rstrip().endswith("show(COLD, COLD_GO);"):
+    sys.exit(print("the card is what is left: something follows it"))
+if a.count("return boot()") != 5:
+    sys.exit(print("connecting paths: %d, want 5" % a.count("return boot()")))
+s = h.index("var LOADED_HIDDEN = (document.visibilityState === 'hidden');") \
+    if "var LOADED_HIDDEN = (document.visibilityState === 'hidden');" in h else -1
+if s < 0 or s > h.index("var gate = document.getElementById('hdw4s-gate');"):
+    sys.exit(print("whether anyone was looking is not read first"))
+print("ok")
+PY
+  }
+  # The positive control, on the page as shipped.
+  is 'the shipped page decides arrival in the pinned order' "$(order "${d}/out.html")" 'ok'
+
+  # Each red arm edits one line of a COPY of the generated page and must turn red.
+  arm() { python3 - "${d}/out.html" "${d}/red.html" "$@" <<'PY'
+import sys
+s = open(sys.argv[1], encoding="utf-8").read()
+pairs = sys.argv[3:]
+for old, new in zip(pairs[::2], pairs[1::2]):
+    if s.count(old) != 1:
+        sys.exit("red arm does not apply: %r found %d times" % (old, s.count(old)))
+    s = s.replace(old, new)
+open(sys.argv[2], "w", encoding="utf-8").write(s)
+PY
+  }
+  # Red for the RIGHT reason: the check must name the step the arm broke, so an arm
+  # that went red because the section could not be found does not count.
+  redorder() { arm "${@:3}" 2>"${d}/armerr" \
+                 && r="$(order "${d}/red.html")" \
+                 || r="the arm did not apply: $(cat "${d}/armerr")"
+               case "${r}" in
+                 ok) bad "$1" 'the check stayed green' ;;
+                 *'the arm did not apply'*) bad "$1" "${r}" ;;
+                 *) has "$1" "${r}" "$2" ;;
+               esac; }
+
+  # EXPECT deleted only after it is honoured: the product's own one-shot reload would
+  # stay armed for the next F5, which is the steal the owner found.
+  redorder 'EXPECT consumed after it connects is caught' \
+    'EXPECT connects: out of order' \
+    "    sessionStorage.removeItem(EXPECT);
+" '' \
+    'if (expected) return boot();' \
+    'if (expected) return boot();
+  try { sessionStorage.removeItem(EXPECT); } catch(e){}'
+  # The fresh cookie never deleted: a one-shot becomes a standing permission.
+  redorder 'a fresh cookie that is never deleted is caught' \
+    'the fresh cookie is deleted: found 0 times' \
+    "document.cookie = FRESH + '=; Path=/; Max-Age=0; SameSite=Lax; Secure';" ''
+  # A viewer's unconditional boot moved below the resume branch.
+  redorder 'a viewer decided after the resume branch is caught' \
+    'gate=off connects: out of order' \
+    "  if (/^#(shared|player[2-4]|display2)/.test(location.hash)) return boot();
+" '' \
+    "  if (GATE === 'mint') return show(MINT, MINT_GO);" \
+    "  if (/^#(shared|player[2-4]|display2)/.test(location.hash)) return boot();
+  if (GATE === 'mint') return show(MINT, MINT_GO);"
+  # A hidden tab that no longer waits to be seen.
+  redorder 'a resume that does not wait for a hidden tab is caught' \
+    'a hidden tab waits: found 0 times' \
+    'if (!document.hidden) return decide();' 'return decide();'
+  # A resume that no longer compares the desktop.
+  redorder 'a resume that does not compare the incarnation is caught' \
+    'the incarnation is compared: found 0 times' \
+    'var same = !!served && served === knownInc;' 'var same = !!served;'
+  # A sixth way to connect.
+  redorder 'an extra unconditional connect is caught' \
+    'connecting paths: 6, want 5' \
+    "  if (GATE === 'off') return boot();" \
+    "  if (GATE === 'off') return boot();
+  if (knownInc) return boot();"
+)
+
 echo '== the fresh-desktop card tells the truth about how long the desktop lasts =='
 # Written from the failure: the card said "nothing in it survives being closed" and that
 # was false for as long as it shipped. Closing a tab does not stop a session -- it is
@@ -4298,7 +4422,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=715   # update when tests are added; a wrong number is the point
+EXPECTED=722   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
