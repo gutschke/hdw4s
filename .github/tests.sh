@@ -1017,6 +1017,9 @@ PY
 )
 
 echo '== a user-dirs file edited in the home is published, if it is the newer =='
+# The "$HOME" in this group is the literal text a user-dirs file carries, never an
+# expansion, so single quotes are the point rather than a slip.
+# shellcheck disable=SC2016
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
   run() {
     HDW4S_ETCDIR="${T}/etc" python3 - "${ROOT}/hdw4s-template" "${T}" 2>&1 <<'PY'
