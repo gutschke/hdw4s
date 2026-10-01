@@ -1151,7 +1151,12 @@ if "$(dirname "$0")/tests.sh" > /tmp/hdw4s-tests.$$ 2>&1; then
   printf '%-28s %s\n' 'tests.sh' "$(tail -n1 /tmp/hdw4s-tests.$$)"
 else
   bad 'tests.sh' 'behaviour tests failed'
-  grep -E '^  FAIL|failed\.$' /tmp/hdw4s-tests.$$ | sed 's/^/  /'
+  # EVERYTHING BUT THE PASSES, not only the FAIL lines. A passing run prints
+  # nothing besides "ok" lines and headers, so whatever else is there is what a
+  # failing test printed about itself -- the router suite dumps its whole
+  # output on failure, and CI, where nobody can rerun it by hand, showed only
+  # "FAIL the router suite passes" and threw the reason away.
+  grep -vE '^  ok |^== |^$' /tmp/hdw4s-tests.$$ | sed 's/^/  /' || :
 fi
 rm -f /tmp/hdw4s-tests.$$
 echo
