@@ -18,6 +18,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `seed` <instance> [`--only` <path>]...<br>
 `hdw4s` `keyring` <instance><br>
 `hdw4s` `reap`<br>
+`hdw4s` `pool` `size` [<N>]<br>
 `hdw4s` `template` `edit` [`--yes`]|`keep` [<path>...]|`forget` <path>...|`reset`|`show`<br>
 `hdw4s` `firewall` `--apply`|`--check`|`--print`|`--restore`<br>
 `hdw4s` `--version`
@@ -86,12 +87,11 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Stop a session and give up its slot, so another session may take the port.
     The session's profile directory is left in place.
 
-    A seat of the ephemeral pool, or the template-authoring slot, is released
-    only with `--internal`, and `--internal` is refused for anything else.
-    Releasing a seat makes the pool smaller for good; see **THE EPHEMERAL
-    POOL**. Releasing the authoring slot is never needed -- `template reset`
-    empties the template -- but is harmless: the next `template edit` sets up a
-    fresh one.
+    A seat of the ephemeral pool is never released by name: `pool size`
+    chooses which seats go. The template-authoring slot is released only with
+    `--internal`, which is refused for anything else. Releasing it is never
+    needed -- `template reset` empties the template -- but is harmless: the
+    next `template edit` sets up a fresh one.
 
   * `transport` <instance> `tcp`|`unix`:
     Choose how the reverse proxy reaches this session. See **TRANSPORTS**.
@@ -114,6 +114,20 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Print an nginx configuration for this session, matching whichever
     transport and authentication it is set up for.
 
+  * `pool size` [<N>]:
+    With no number, print how many seats the ephemeral pool has, which of them
+    are in use and why, and anything about the pool that does not agree with
+    `HDW4S_EPHEMERAL_SLOTS`. With a number, make the pool that size **now**,
+    with no reboot: new seats are set up and offered to visitors at once, and
+    seats are taken away from the highest-numbered down. See **THE EPHEMERAL
+    POOL**.
+
+    A seat a visitor is using is never taken away, whether or not anybody is
+    looking at it at the moment. The pool then stops one above it, the command
+    says which seat held it there and how to end that desktop, and it exits
+    non-zero. Running it again later with the same number finishes the job, and
+    so does running it again after it was interrupted.
+
   * `set` [<instance>] <KEY>=<VALUE>...:
     Change a setting without opening an editor. With an instance, writes to
     that session's file; without one, to the defaults. The edit is deliberately
@@ -122,6 +136,8 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     the documented default is uncommented in place, so the explanation above it
     still applies; otherwise the setting is appended. Nothing else in the file
     is touched, and anything not offered here can still be edited by hand.
+    `HDW4S_EPHEMERAL_SLOTS` is refused, here and by `unset`: it is written by
+    `pool size`, which changes the seats along with it.
 
   * `unset` [<instance>] <KEY>:
     Comment a setting out so the default applies again. The line is commented
@@ -697,11 +713,13 @@ single hostname for the whole pool and are given a session from it.
   * **A slot must not be reached directly.** Not by a reverse proxy, not by
     anything else. The sockets under `/run/hdw4s-proxy/` belong to the pool.
 
-  * **How many slots.** A fresh install mints **one**, which is the number that
-    is safe on a machine the package knows nothing about. The ceiling is **100**,
-    and it is the user-id window rather than a policy: slots take consecutive
-    ids from `HDW4S_EPHEMERAL_UID_BASE` inside 60900-60999, and the minter
-    refuses at boot rather than writing outside it.
+  * **How many slots.** A fresh install mints **one** and offers none until
+    the pool is given a size; one is the number that is safe on a machine the
+    package knows nothing about. The ceiling is **99**, and it is the user-id
+    window rather than a policy: slots take consecutive ids from
+    `HDW4S_EPHEMERAL_UID_BASE` inside 60900-60999, and the top of that window
+    is kept for the template-authoring slot. `pool size` refuses a number
+    beyond it before changing anything.
 
     An idle slot costs an entry under `/run` and nothing else. An occupied one
     costs about **560 MB** -- measured across sixteen concurrent attached
@@ -720,12 +738,15 @@ single hostname for the whole pool and are given a session from it.
     leaves a unit reporting `active` behind a blank screen. Size the pool for
     the machine.
 
-  * **Changing the size.** It is two things today, and both must agree: the
-    number `HDW4S_EPHEMERAL_SLOTS`, which the minter reads **once, at boot**,
-    and one row per seat in the slot table, which is what the pool hands out.
-    `hdw4s set HDW4S_EPHEMERAL_SLOTS=N` prints the steps. To raise it, reboot
-    and then `hdw4s enable --ephemeral` each new seat. To lower it, first
-    `hdw4s release --internal` every seat numbered N or above, then reboot.
+  * **Changing the size.** `hdw4s pool size N`, and nothing else. Three
+    things describe the pool -- `HDW4S_EPHEMERAL_SLOTS`, which the next boot
+    mints identities from; the identities themselves, under `/run`; and one
+    row per seat in the slot table, which is what visitors are offered -- and
+    the command changes all three, in an order that an interruption cannot turn
+    into a seat that is offered and cannot start. Seats go from the top
+    because the setting describes seats `0` to `N-1`. A seat a visitor is using
+    holds the pool at one above it until that desktop ends; `hdw4s pool size`
+    with no number shows which.
 
   * **The credential belongs to the pool, not to a slot.** A reverse proxy
     presents one credential to reach the pool; individual slots have none and

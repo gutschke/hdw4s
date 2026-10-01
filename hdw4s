@@ -196,6 +196,9 @@ Usage: hdw4s <command> [arguments]
                           home-relative paths, e.g. --only .config/dconf
   reap                    stop desktops nobody has connected to for a long time
   keyring <instance>      give a session its own keyring, unlocked at start
+  pool size [<N>]         how many visitors can have a desktop at once; with N,
+                          change it now -- hdw4s chooses the seats, and never
+                          takes one a visitor is using
   template edit           change what every new ephemeral desktop starts from:
                           prints a one-time link to the authoring desktop, and
                           asks whether to publish the changes when you log out
@@ -475,8 +478,9 @@ internal_kind() {
 #
 # Each message says what to do INSTEAD, because the administrator typing one of
 # these wanted something, and "refused" with no route is how people end up
-# editing the slot table by hand. "release --internal" is the one way past, and
-# it exists because the pool has no size command of its own yet; see set_hint.
+# editing the slot table by hand. For a pool seat the way is "hdw4s pool size",
+# which chooses the seats itself; for the authoring slot it is "release
+# --internal", the one way past.
 refuse_internal_slot() {
   local inst="$1" verb="$2" kind unit
   kind="$(internal_kind "${inst}")"
@@ -499,15 +503,13 @@ refuse_internal_slot() {
           '  Disabling one seat makes the pool smaller with nothing reporting it.' \
           '  To end the desktop a visitor has in it now:' \
           "    systemctl stop ${unit}" \
-          '  To make the pool smaller for good, see HDW4S_EPHEMERAL_SLOTS in' \
-          '  hdw4s(8).' >&2 ;;
+          '  To make the pool smaller for good:' \
+          '    hdw4s pool size <N>' >&2 ;;
       release)
         printf '%s\n' \
-          '  Releasing it removes the seat from the pool for good, so fewer' \
-          '  visitors can be served at once, and nothing else reports it. To make' \
-          '  the pool smaller, release the highest-numbered seats and lower' \
-          '  HDW4S_EPHEMERAL_SLOTS to match; this one, if that is what you want:' \
-          "    hdw4s release --internal ${inst}" >&2 ;;
+          '  To make the pool smaller, say how many seats it should have and' \
+          '  hdw4s takes idle ones off the top:' \
+          '    hdw4s pool size <N>' >&2 ;;
     esac
   else
     printf '%s\n' \
@@ -1331,45 +1333,30 @@ cmd_show() {
 }
 
 cmd_enable() {
-  local type='desktop' inst what
-  case "${1:-}" in
-    --ephemeral) type='ephemeral'; shift;;
-  esac
-  inst="$1"
-  # The name first, for every type: it reaches file paths below, and a pool
-  # seat's name was the one nothing checked.
+  local inst="$1"
+  # The name first: it reaches file paths below.
   split_name "${inst}" || fail
   # BEFORE ANYTHING IS WRITTEN, and the reason is what used to happen after:
   # alloc_slot hands back the EXISTING row whatever type was asked for, so
   # "hdw4s enable ephemeral3" went on to write a person's drop-ins into the pool
-  # unit's directory. The guard is on the name, not on the flag, because the
-  # administrator who types a pool seat's name without the flag is exactly the
-  # one who does not know it is a pool seat.
-  if [ "${type}" = 'desktop' ]; then
-    refuse_internal_slot "${inst}" enable || fail
-  else
-    # The other direction: a name that already has a row of another type -- a
-    # person's desktop, or the authoring slot -- is not turned into a seat by a
-    # flag. alloc_slot would keep the old type in the table while this wrote
-    # the new type's drop-ins, and the two would disagree for good.
-    what=''
-    if [ "$(internal_kind "${inst}")" = 'template' ]; then
-      what='the template-authoring slot'
-    elif [ -n "$(slot_of "${inst}")" ] && [ "$(type_of "${inst}")" != 'ephemeral' ]; then
-      what='a named desktop'
-    fi
-    [ -z "${what}" ] ||
-      die "hdw4s: ${inst} is ${what}, and a pool seat cannot take its name."
-  fi
-  enable_slot "${type}" "${inst}"
+  # unit's directory. The guard is on the name, because the administrator who
+  # types a pool seat's name is exactly the one who does not know it is one.
+  #
+  # "enable --ephemeral <seat>" is gone from here. It was how a seat was added
+  # one at a time, after a reboot, under a name the administrator had to work
+  # out; "hdw4s pool size" now adds seats itself, through enable_slot below, and
+  # a second spelling would be a second way to make a row the next boot does not
+  # mint an identity for.
+  refuse_internal_slot "${inst}" enable || fail
+  enable_slot desktop "${inst}"
 }
 
 # THE WORK OF "enable", for any type, with no opinion about who asked.
 #
-# Split from cmd_enable because there are two callers and only one of them is
-# the command line: "hdw4s template edit" provisions its own authoring slot
-# through here (provision_template), and that type is deliberately NOT reachable
-# from "hdw4s enable" any more. The guards above are about what an administrator
+# Split from cmd_enable because there are three callers and only one of them
+# is the command line: "hdw4s template edit" provisions its own authoring slot
+# through here (provision_template), and "hdw4s pool size" adds pool seats
+# (pool_resize); neither type is reachable from "hdw4s enable" any more. The guards above are about what an administrator
 # may name; this is about what a slot of each type needs.
 #
 #   template   the authoring slot. It takes the ephemeral machinery --
@@ -1835,7 +1822,6 @@ declare -A SETTABLE=(
   [HDW4S_PROFILE_DIR]='path'
   [HDW4S_BASE_PORT]='number'
   [HDW4S_BLOCK_SIZE]='number'
-  [HDW4S_EPHEMERAL_SLOTS]='number'
   [HDW4S_EPHEMERAL_HOME_SIZE]='size'
   [HDW4S_EPHEMERAL_PROFILE_SIZE]='size'
   [HDW4S_EPHEMERAL_SHM_SIZE]='size'
@@ -2144,6 +2130,24 @@ config_write() {
   mv "${tmp}" "${file}"
 }
 
+# THE POOL'S SIZE IS NOT A SETTING ANY MORE, though it is still stored as one.
+#
+# "set HDW4S_EPHEMERAL_SLOTS=N" wrote the number and nothing else, and the number
+# is one of three things that must agree: it decides which identities the next
+# boot mints, while the router offers the seats that have a ROW. Lowered here,
+# the next boot stopped minting seats the router still offered, and every visitor
+# sent to one got a desktop that could not start. "hdw4s pool size N" writes the
+# same line, in the order that cannot produce that, with the rows and the
+# identities beside it -- so this refuses and names it, for set and unset alike.
+# A hand edit is still possible, as for every setting; "hdw4s pool size" with no
+# number reports any disagreement that leaves, and the command to repair it.
+refuse_pool_setting() {
+  [ "$1" = 'HDW4S_EPHEMERAL_SLOTS' ] || return 0
+  die "hdw4s: the pool's size is changed with its own command, which also adds or" \
+      '  removes the seats visitors are offered, now, without a reboot:' \
+      '    hdw4s pool size <N>'
+}
+
 cmd_set() {
   local inst='' file key value pair
   if [ "$#" -gt 1 ] && [ "${1#*=}" = "$1" ]; then
@@ -2160,6 +2164,7 @@ cmd_set() {
     esac
     key="${pair%%=*}"
     value="${pair#*=}"
+    refuse_pool_setting "${key}"
     [ -n "${SETTABLE[${key}]+set}" ] ||
       die "hdw4s: ${key} cannot be set from the command line." \
           "  Settable: ${!SETTABLE[*]}" \
@@ -2236,6 +2241,7 @@ cmd_unset() {
     ''|*[!A-Za-z0-9_]*)
       die "hdw4s: '${key}' is not a setting name." ;;
   esac
+  refuse_pool_setting "${key}"
 
   # The same guard "set" carries. Without it the refusal there was half a
   # guard: "hdw4s set alice HDW4S_AUTH=none" was refused and pointed at the
@@ -2268,7 +2274,7 @@ cmd_unset() {
 # files get a reputation for not working.
 set_hint() {
   local inst="$1" pair firewall='' session='' updater='' atenable='' relay='' \
-        atenable2='' atboot='' poolsize='' atedit=''
+        atenable2='' atboot='' atedit=''
   shift
   for pair in "$@"; do
     case "${pair%%=*}" in
@@ -2297,15 +2303,6 @@ set_hint() {
       # conservative one.
       HDW4S_EPHEMERAL_HOME_SIZE|HDW4S_EPHEMERAL_PROFILE_SIZE|\
       HDW4S_EPHEMERAL_SHM_SIZE|HDW4S_EPHEMERAL_BACKGROUND) atboot='yes';;
-      # The same, and it is also not the whole of the pool's size: the router
-      # hands out the seats that have a ROW in the slot table, and this writes
-      # none. So the hint names both halves and their order. Raising: the rows
-      # can only be written after the reboot, because "enable" looks the seat's
-      # account up and the reboot is what mints it. Lowering: the rows go
-      # BEFORE it, or the router goes on offering seats whose identity the next
-      # boot no longer makes, and each visitor sent there gets a desktop that
-      # fails to start.
-      HDW4S_EPHEMERAL_SLOTS) atboot='yes'; poolsize="${pair#*=}";;
       # Read afresh by every "hdw4s template edit" to print its link, and by
       # nothing that runs in a session; "restart the affected sessions" was
       # printed for it, and no restart touches it.
@@ -2315,14 +2312,6 @@ set_hint() {
   done
   [ -z "${atboot}" ] ||
     echo '  Read only at boot, by hdw4s-ephemeral-slots.service: reboot to use it.'
-  if [ -n "${poolsize}" ]; then
-    local prefix="${HDW4S_EPHEMERAL_PREFIX:-ephemeral}"
-    echo '  The pool is also one row per seat in the slot table, and this writes'
-    echo '  none. To raise it, after the reboot enable each new seat:'
-    echo "    hdw4s enable --ephemeral ${prefix}<N>"
-    echo "  To lower it, before the reboot release every seat from ${prefix}${poolsize} up:"
-    echo "    hdw4s release --internal ${prefix}<N>"
-  fi
   [ -z "${atedit}" ] ||
     echo "  Used by the next 'hdw4s template edit'; nothing needs restarting."
   [ -z "${firewall}" ] || echo "  Run 'hdw4s firewall --apply' to use it."
@@ -3402,38 +3391,30 @@ cmd_disable() {
   echo "use 'hdw4s release ${inst}' to give it up."
 }
 
-cmd_release() {
-  local internal=''
-  if [ "${1:-}" = '--internal' ]; then internal='yes'; shift; fi
-  local inst="$1"
-  # An account that has since been deleted still holds a slot, and its port
-  # stays open in the firewall. Refusing to release it because the account is
-  # gone leaves editing the table by hand as the only way out -- which its own
-  # header tells the administrator never to do. The name is still checked: it
-  # is interpolated into the paths this function removes.
-  #
-  # The legacy spelling for the same reason: an instance named "<user>:<session>"
-  # by a version that still created them is exactly the instance an administrator
-  # now needs to be able to retire, so this is the one command that accepts the
-  # name the rest of the tool refuses.
-  split_legacy_name "${inst}" || fail
-  # A POOL SEAT OR THE AUTHORING SLOT ONLY WHEN SAID SO. See
-  # refuse_internal_slot: releasing a seat is a permanent, unreported cut to the
-  # pool, and this was the only command that could make it. "--internal" is the
-  # administrator saying they know what the name is. It is also the only way to
-  # retire a template row an earlier version left on a person's name, which is
-  # why the flag is not simply "--pool".
-  #
-  # AND ONLY THEN: the flag on a person's desktop is refused, so that it cannot
-  # become the habitual way to type "release" and stop meaning anything.
-  if [ -z "${internal}" ]; then
-    refuse_internal_slot "${inst}" release || fail
-  elif [ -z "$(internal_kind "${inst}")" ]; then
-    die "hdw4s: ${inst} is not a pool seat or the authoring slot; --internal is" \
-        "  only for those. To release a person's desktop: hdw4s release ${inst}"
+# THE WORK OF "release": everything a slot owns, taken away. No guards and no
+# messages -- those belong to whoever decided this slot should go, and there are
+# two: "release", and "pool size" taking seats off the top of the pool. One
+# implementation, because a seat retired by the pool and a slot released by name
+# must leave the same nothing behind; two copies would disagree the first time
+# a slot grew a new file. The caller reloads systemd, once, after its last call.
+#
+# INTERNAL says the identity the minter made goes too, which only a pool seat or
+# the authoring slot has.
+retire_slot() {
+  local inst="$1" internal="${2:-}" unit
+  # THE UNIT IS NAMED FROM THE CALLER'S KNOWLEDGE, not looked up, when the slot
+  # is internal: "pool size" has already taken the seat's row off the offer
+  # before it gets here, and unit_of() asks that row -- with it gone, it answers
+  # "a person's desktop" and every line below would act on hdw4s@<seat>, a unit
+  # that does not exist, while the seat's own drop-ins stayed behind. Both
+  # internal kinds run the ephemeral unit.
+  if [ -n "${internal}" ]; then
+    unit="hdw4s-ephemeral@${inst}.service"
+  else
+    unit="$(unit_of "${inst}")"
   fi
   systemctl disable --now "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
-  systemctl stop "hdw4s-proxy@${inst}.service" "$(unit_of "${inst}")" 2>/dev/null || :
+  systemctl stop "hdw4s-proxy@${inst}.service" "${unit}" 2>/dev/null || :
   # The filesystem socket, which systemd will not remove for a unit that is
   # listening on a port: its address list no longer names a path, so there is
   # nothing for RemoveOnStop= to unlink. Measured -- releasing a session left
@@ -3442,7 +3423,7 @@ cmd_release() {
   # worse than the orphan it started as because nothing keyed on instance
   # identity has anything left to match.
   rm -f "${RUNDIR}/hdw4s-proxy/${inst}.sock"
-  rm -rf "$(dropin_of "${inst}")" \
+  rm -rf "${DROPIN}/${unit}.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.service.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
   rm -f "${ETCDIR}/${inst}.keyring.cred" "${ETCDIR}/${inst}.auth.cred"
@@ -3457,7 +3438,7 @@ cmd_release() {
   # under it is worse than a stale record -- and only records that name this
   # seat, judged by the same namespace evidence that made it internal.
   if [ -n "${internal}" ] && [ -f "${NSDIR}/${inst}/passwd" ]; then
-    if systemctl is-active --quiet "$(unit_of "${inst}")"; then
+    if systemctl is-active --quiet "${unit}"; then
       echo "hdw4s: ${inst} is still running, so its identity was left in place;" >&2
       echo "  it goes at the next reboot." >&2
     else
@@ -3474,6 +3455,59 @@ cmd_release() {
       rm -rf "${NSDIR:?}/${inst}"
     fi
   fi
+  # A POOL SEAT'S WATCHERS, which the minter started and nothing else stops:
+  # left running, a start request written for this name would still start a
+  # desktop in a seat the pool no longer has. The authoring slot has none, and
+  # stopping a unit that is not loaded is a no-op.
+  [ -z "${internal}" ] ||
+    systemctl stop "hdw4s-teardown@${inst}.path" "hdw4s-start@${inst}.path" 2>/dev/null || :
+}
+
+cmd_release() {
+  local internal=''
+  if [ "${1:-}" = '--internal' ]; then internal='yes'; shift; fi
+  local inst="$1"
+  # An account that has since been deleted still holds a slot, and its port
+  # stays open in the firewall. Refusing to release it because the account is
+  # gone leaves editing the table by hand as the only way out -- which its own
+  # header tells the administrator never to do. The name is still checked: it
+  # is interpolated into the paths this function removes.
+  #
+  # The legacy spelling for the same reason: an instance named "<user>:<session>"
+  # by a version that still created them is exactly the instance an administrator
+  # now needs to be able to retire, so this is the one command that accepts the
+  # name the rest of the tool refuses.
+  split_legacy_name "${inst}" || fail
+  # THE AUTHORING SLOT ONLY WHEN SAID SO. See refuse_internal_slot: it is not
+  # a person's desktop, and "--internal" is the administrator saying they know
+  # what the name is. It is also the only way to retire a template row an
+  # earlier version left on a person's name, which the enable refusal and the
+  # template editor both name. A pool seat is refused even with the flag; see
+  # below.
+  #
+  # AND ONLY THEN: the flag on a person's desktop is refused, so that it cannot
+  # become the habitual way to type "release" and stop meaning anything.
+  if [ -z "${internal}" ]; then
+    refuse_internal_slot "${inst}" release || fail
+  else
+    case "$(internal_kind "${inst}")" in
+      template) ;;
+      # A POOL SEAT IS NOT RELEASED BY NAME ANY MORE, not even when said so.
+      # "--internal" was the way to shrink the pool only because the pool had
+      # no size command; it has one now, and releasing one seat by name could
+      # take a seat out of the middle -- one the next boot mints again from
+      # HDW4S_EPHEMERAL_SLOTS -- or one a visitor is using. "pool size" picks
+      # the seats, checks each is idle, and writes the setting to match.
+      pool)
+        die "hdw4s: ${inst} is a seat of the ephemeral pool. The pool is sized as" \
+            '  one thing, and hdw4s chooses which seats go:' \
+            '    hdw4s pool size <N>' ;;
+      *)
+        die "hdw4s: ${inst} is not the authoring slot; --internal is only for" \
+            "  that. To release a person's desktop: hdw4s release ${inst}" ;;
+    esac
+  fi
+  retire_slot "${inst}" "${internal}"
   systemctl daemon-reload
   echo "Session ${inst} released. Its credentials were removed with it, so a"
   echo 'keyring in the profile below can no longer be unlocked. Left in place:'
@@ -3527,6 +3561,361 @@ provision_template() {
   enable_slot template "${TEMPLATE_SLOT}" >/dev/null
 }
 
+# --- the ephemeral pool, as one thing -----------------------------------------
+#
+# THE ADMINISTRATOR SAYS HOW MANY; hdw4s DECIDES WHICH. A visitor is handed
+# whichever seat is free, so nothing about one seat matters to anybody but this
+# code, and the command that sizes the pool takes a number and no names.
+#
+# WHAT HAS TO AGREE, because three things describe the pool and each has its own
+# reader:
+#
+#   HDW4S_EPHEMERAL_SLOTS   what the NEXT BOOT mints identities for: seats
+#                           <prefix>0 .. <prefix>N-1, a prefix and nothing else
+#   the minted identities   what can start NOW (/run, gone at every boot)
+#   the rows in the table   what the router OFFERS, re-read on every arrival
+#
+# Only one disagreement costs a visitor anything: a ROW with no identity, which
+# the router offers and the seat cannot start (217/USER). An identity with no row
+# is a seat nobody is sent to -- what every fresh install has had for seat 0 --
+# and harmless. So every step below is ordered so that an interruption leaves
+# at worst the harmless kind: growing writes the setting and mints BEFORE it
+# writes a row; shrinking drops rows BEFORE it lowers the setting. Running the
+# command again with the same number finishes whatever was interrupted, because
+# it compares all three against the number rather than applying a difference.
+#
+# WHY SEATS GO FROM THE TOP. The setting describes a prefix, so a seat taken out
+# of the middle is one the next boot mints again: rows and identities would then
+# disagree in the harmless direction, and "how big is the pool" would have three
+# answers. Highest first keeps it a prefix. The cost is that one busy seat high
+# up holds the pool at its size even while lower seats are idle; the output
+# says which seat, and why.
+
+# The router's own grace for a letting whose desktop has not answered yet
+# (hdw4s-demux MINT_GRACE). A reservation younger than this is a visitor on
+# their way to the seat.
+POOL_MINT_GRACE=180
+TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
+
+# The seat's number if NAME is a seat of this pool -- <prefix> and a number
+# written the one way the minter writes it -- else nothing.
+seat_index() {
+  local prefix="${HDW4S_EPHEMERAL_PREFIX:-ephemeral}" n
+  n="${1#"${prefix}"}"
+  case "${n}" in "$1"|''|*[!0-9]*|0?*) return 0 ;; esac
+  echo "${n}"
+}
+
+# Every name the table offers visitors, in table order.
+pool_rows() {
+  [ ! -r "${SLOTS}" ] ||
+    awk '$1 !~ /^#/ && $3 == "ephemeral" { print $2 }' "${SLOTS}"
+}
+
+# WHY A SEAT MAY NOT BE TAKEN AWAY NOW, or nothing if it may.
+#
+# THE ROUTER'S OWN EVIDENCE, read the way the router reads it, and never a
+# probe: these seats are socket-activated, so anything that connects to one to
+# ask whether it is alive starts a desktop in it (hdw4s-demux slot_occupied()
+# says so at length). Four observations, each a stat, and any one is enough:
+#
+#   the session's runtime directory   a desktop is running there. It may well
+#                                     be idle -- its visitor gone to lunch --
+#                                     and it is still theirs: a returning tab
+#                                     resumes it, and ending it is a decision
+#                                     about somebody's work that this command
+#                                     does not take for them.
+#   the unit's state                  starting or stopping, which the directory
+#                                     does not show yet or any more.
+#   a fresh reservation               the router has just let it, and the
+#                                     visitor is on their way.
+#   a teardown request or marker      it is being ended; wait for that.
+#
+# NOT the router's lettings table. A letting is a claim about who was handed a
+# seat, and outlives the desktop: one whose desktop has ended holds nothing
+# anybody can lose. The router says the same (slots_in_use()).
+seat_busy() {
+  local inst="$1" state age now
+  if [ -d "${RUNDIR}/hdw4s/${inst}" ]; then
+    echo 'a desktop is running in it'; return 0
+  fi
+  state="$(systemctl show -p ActiveState --value "hdw4s-ephemeral@${inst}.service" \
+             2>/dev/null || :)"
+  case "${state}" in
+    ''|inactive|failed) ;;
+    *) echo "its desktop is ${state}"; return 0 ;;
+  esac
+  if [ -e "${POOLDIR}/reserved/${inst}" ]; then
+    now="$(date +%s)"
+    age=$(( now - $(stat -c %Y "${POOLDIR}/reserved/${inst}" 2>/dev/null || echo 0) ))
+    # The absolute value, as the router takes it: a stamp from the future must
+    # not hold a seat forever, and must not free one early either.
+    [ "${age}" -ge 0 ] || age=$(( -age ))
+    if [ "${age}" -lt "${POOL_MINT_GRACE}" ]; then
+      echo 'a visitor has just been handed it'; return 0
+    fi
+  fi
+  if [ -e "${TEARDOWNDIR}/${inst}" ] || [ -e "${TEARDOWNDIR}/ending/${inst}" ]; then
+    echo 'its desktop is being ended'; return 0
+  fi
+}
+
+# Print the pool: its size, which seats are in use, and anything that does not
+# agree. Reads only.
+pool_show() {
+  local conf="${HDW4S_EPHEMERAL_SLOTS:-1}" prefix="${HDW4S_EPHEMERAL_PREFIX:-ephemeral}"
+  local rows inst why busy=0 n=0 i inuse='' missing='' strays=''
+  rows=" $(pool_rows | tr '\n' ' ')"
+  for inst in ${rows}; do
+    n=$(( n + 1 ))
+    why="$(seat_busy "${inst}")"
+    [ -n "${why}" ] || continue
+    busy=$(( busy + 1 ))
+    inuse="${inuse}$(printf '  %-16s %s' "${inst}" "${why}")"$'\n'
+  done
+  echo "The ephemeral pool has ${n} seat(s); ${busy} in use."
+  printf '%s' "${inuse}"
+  # Where the three descriptions disagree, said with the one command that makes
+  # them agree. An install sized by hand before "pool size" existed can be here.
+  for (( i = 0; i < conf; i++ )); do
+    case "${rows} " in *" ${prefix}${i} "*) ;; *) missing="${missing} ${prefix}${i}";; esac
+  done
+  for inst in ${rows}; do
+    i="$(seat_index "${inst}")"
+    { [ -n "${i}" ] && [ "${i}" -lt "${conf}" ]; } || strays="${strays} ${inst}"
+  done
+  if [ -n "${missing}${strays}" ]; then
+    echo
+    echo "HDW4S_EPHEMERAL_SLOTS is ${conf}, and the seats visitors are offered do not match it:"
+    [ -z "${missing}" ] || echo "  not offered:${missing}"
+    [ -z "${strays}" ] || echo "  offered, and not minted at the next boot:${strays}"
+    echo '  To make them agree, say which size you want:'
+    echo "    hdw4s pool size ${conf}"
+  fi
+}
+
+# Put back rows this run dropped, exactly as they were. Under the table's lock,
+# and on the same index when it is still free: the index means nothing to a seat
+# on a filesystem socket, but "list" shows it, and a seat that moved would read as
+# a change somebody made. One whose index was taken meanwhile goes through
+# alloc_slot, after the lock is let go -- it takes the same lock.
+restore_rows() {
+  local line lock again=()
+  exec {lock}<>"${SLOTS}"
+  flock "${lock}"
+  for line in "$@"; do
+    if awk -v x="${line%% *}" '$1 !~ /^#/ && $1 == x { f = 1 } END { exit !f }' "${SLOTS}"; then
+      again+=("$(echo "${line}" | cut -d' ' -f2)")
+    else
+      printf '%s\n' "${line}" >> "${SLOTS}"
+    fi
+  done
+  exec {lock}<&-
+  for line in "${again[@]}"; do
+    alloc_slot "${line}" ephemeral >/dev/null
+  done
+}
+
+# "hdw4s pool size N": make the pool N seats, now, without a reboot.
+pool_resize() {
+  local want="$1" prefix="${HDW4S_EPHEMERAL_PREFIX:-ephemeral}" lock max
+  local minter="${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-ephemeral-slots"
+  local cands=() inst i why blocked='' line taken=() saved=() keep_from=-1
+  local achieved n total needed
+
+  case "${want}" in
+    ''|*[!0-9]*) die "hdw4s: the pool size is a number of seats, not '${want}'." ;;
+  esac
+  want=$(( 10#${want} ))
+
+  # ONE AT A TIME, and refused rather than queued. Two runs would each compute
+  # the seats to add or take from a table the other is changing, and the second
+  # to write the setting would win with a number that matches neither. A queue
+  # would make the second run silently undo the first; a refusal says so.
+  install -d -m0755 "${RUNDIR}"
+  exec {lock}>"${RUNDIR}/hdw4s-pool.lock"
+  flock -n "${lock}" ||
+    die 'hdw4s: another "hdw4s pool size" is running; wait for it and run this again.'
+
+  # THE LARGEST POOL THE MINTER CAN MAKE, asked of the minter, which owns the uid
+  # window and the authoring slot's end of it. Asked BEFORE anything is written:
+  # finding out from a seat that fails to mint leaves the setting saying a size
+  # the next boot cannot make -- and there a failure takes every seat down.
+  max="$(HDW4S_ETCDIR="${ETCDIR}" "${minter}" --pool-max)" ||
+    die 'hdw4s: could not ask the minter how large the pool may be.'
+  [ "${want}" -le "${max}" ] ||
+    die "hdw4s: the pool can have at most ${max} seats on this machine." \
+        '  Each seat has a uid of its own, from a fixed window that it shares with' \
+        '  the template-authoring slot.'
+
+  # THE PORT BLOCK, which pool seats still take an index from although they
+  # never listen on a port. Asked before anything is written for the same reason.
+  total="$( [ ! -r "${SLOTS}" ] || awk '$1 !~ /^#/ { n += 1 } END { print n + 0 }' "${SLOTS}")"
+  needed=0
+  for (( i = 0; i < want; i++ )); do
+    [ -n "$(slot_of "${prefix}${i}")" ] || needed=$(( needed + 1 ))
+  done
+  n=0
+  while read -r inst; do
+    i="$(seat_index "${inst}")"
+    { [ -n "${i}" ] && [ "${i}" -lt "${want}" ]; } || n=$(( n + 1 ))
+  done < <(pool_rows)
+  [ $(( ${total:-0} - n + needed )) -le "${HDW4S_BLOCK_SIZE}" ] ||
+    die "hdw4s: ${want} seats do not fit in the ${HDW4S_BLOCK_SIZE} slots of the port block." \
+        '  Every session takes one, pool seats included. Raise HDW4S_BLOCK_SIZE' \
+        "  in ${CONF} and run 'hdw4s firewall --apply' first."
+
+  # --- shrinking: every seat that should not be there, highest first ---------
+  #
+  # Rows that are not seats of this pool at all go first: an install sized by
+  # hand could have made them, and nothing mints an identity for them, so the
+  # router offers a door that cannot open. Then seats from the top, rows and
+  # identities alike: an identity with no row is what an earlier, larger
+  # setting left behind.
+  #
+  # A seat's identity is judged by the namespace view only the minter writes, as
+  # internal_kind() judges it -- never by the name, which a person may share.
+  local seats=''
+  for inst in $(pool_rows); do
+    i="$(seat_index "${inst}")"
+    if [ -z "${i}" ]; then
+      cands+=("${inst}")
+    elif [ "${i}" -ge "${want}" ]; then
+      seats="${seats}${i}"$'\n'
+    fi
+  done
+  for line in "${NSDIR}/${prefix}"*/passwd; do
+    [ -f "${line}" ] || continue
+    inst="${line%/passwd}"; inst="${inst##*/}"
+    i="$(seat_index "${inst}")"
+    [ -z "${i}" ] || [ "${i}" -lt "${want}" ] || seats="${seats}${i}"$'\n'
+  done
+  for i in $(printf '%s' "${seats}" | sort -rnu); do
+    cands+=("${prefix}${i}")
+  done
+
+  # FIRST PASS: take each idle seat off the offer, stopping at the first busy
+  # one -- every seat below it stays, so that the pool is still a prefix.
+  for inst in "${cands[@]+"${cands[@]}"}"; do
+    why="$(seat_busy "${inst}")"
+    if [ -n "${why}" ]; then blocked="${inst}: ${why}"; break; fi
+    line="$( [ ! -r "${SLOTS}" ] || awk -v i="${inst}" \
+      '$1 !~ /^#/ && $2 == i && $3 == "ephemeral" { print; exit }' "${SLOTS}")"
+    [ -z "${line}" ] || drop_row "${inst}"
+    taken+=("${inst}"); saved+=("${line}")
+  done
+
+  # SECOND PASS, after the router has had time to finish any letting it began
+  # before the row went. It re-reads the table on every arrival, so once a row
+  # is gone no new visitor can be sent to the seat -- but one whose letting was
+  # already being written can, and its reservation lands a moment later. The
+  # router's whole let is a stat or two and one small write under its own lock,
+  # so the wait is generous; it is not a guarantee, and the window it covers is
+  # stated here because nothing else can see it. A seat that turns out to be
+  # busy goes back on the offer, and so does every seat below it.
+  if [ "${#taken[@]}" -gt 0 ]; then
+    sleep "${HDW4S_POOL_SETTLE:-2}"
+    for (( i = 0; i < ${#taken[@]}; i++ )); do
+      why="$(seat_busy "${taken[i]}")"
+      if [ -n "${why}" ]; then blocked="${taken[i]}: ${why}"; keep_from="${i}"; break; fi
+    done
+    if [ "${keep_from}" -ge 0 ]; then
+      local back=()
+      for (( i = keep_from; i < ${#taken[@]}; i++ )); do
+        [ -z "${saved[i]}" ] || back+=("${saved[i]}")
+      done
+      [ "${#back[@]}" -eq 0 ] || restore_rows "${back[@]}"
+      taken=("${taken[@]:0:keep_from}")
+    fi
+  fi
+  for inst in "${taken[@]+"${taken[@]}"}"; do
+    retire_slot "${inst}" yes
+  done
+
+  # WHAT THE POOL NOW IS: the number asked for, or one above the highest seat
+  # that is still there because it could not go.
+  achieved="${want}"
+  for inst in $(pool_rows); do
+    i="$(seat_index "${inst}")"
+    [ -z "${i}" ] || [ "${i}" -lt "${achieved}" ] || achieved=$(( i + 1 ))
+  done
+
+  # THE SETTING, after the rows when shrinking and before the seats when
+  # growing -- the order that leaves only the harmless disagreement if this is
+  # interrupted (see the note at the top of this section).
+  config_write "${CONF}" 'HDW4S_EPHEMERAL_SLOTS' "${achieved}"
+  HDW4S_EPHEMERAL_SLOTS="${achieved}"
+
+  # --- growing: every seat below the size that is not complete ---------------
+  for (( i = 0; i < achieved; i++ )); do
+    inst="${prefix}${i}"
+    # A name that is already something else -- a person's desktop typed into the
+    # table under a seat's name, or the authoring slot -- is not made a seat.
+    if [ -n "$(slot_of "${inst}")" ] && [ "$(type_of "${inst}")" != 'ephemeral' ]; then
+      pool_stop_at "${i}" "${inst} is already a $(type_of "${inst}") session"
+      return 1
+    fi
+    if [ ! -f "${NSDIR}/${inst}/passwd" ]; then
+      # A SEAT THAT CANNOT BE MINTED ENDS THE GROWTH THERE, and the setting is
+      # brought back down to match. Left at the larger number, it would hand the
+      # next boot a seat that fails -- and the boot's minter dies on a failure,
+      # taking every seat with it. The minter's own message says why.
+      if ! HDW4S_ETCDIR="${ETCDIR}" "${minter}" --seat "${inst}" >/dev/null; then
+        pool_stop_at "${i}" "${inst} could not be minted (above)"
+        return 1
+      fi
+    fi
+    if [ -z "$(slot_of "${inst}")" ]; then
+      enable_slot ephemeral "${inst}" >/dev/null
+    fi
+  done
+  systemctl daemon-reload
+
+  echo "The ephemeral pool has ${achieved} seat(s)."
+  if [ -n "${blocked}" ]; then
+    printf '%s\n' \
+      "  Not ${want}: ${blocked}." \
+      '  Seats go from the top, so the pool can be no smaller while that seat is' \
+      '  in use. Run this again once it is free. To end that desktop now --' \
+      '  whoever is using it loses it:' \
+      "    systemctl stop hdw4s-ephemeral@${blocked%%:*}.service" >&2
+    return 1
+  fi
+}
+
+# Bring the pool down to the $1 seats that are complete, and say why.
+#
+# THE SETTING, AND ANY ROW ABOVE IT THAT HAS NO IDENTITY. An install sized the
+# old way can have rows for seats the last boot did not mint; growing would have
+# minted them, and stopping short leaves them offered to visitors with nothing
+# behind them -- the one disagreement this command exists to prevent. A seat
+# with no identity cannot have a desktop in it, so taking its row is never
+# taking a visitor's seat. One that HAS an identity keeps its row: it can start,
+# and the next run of this command settles it.
+pool_stop_at() {
+  local inst i
+  for inst in $(pool_rows); do
+    i="$(seat_index "${inst}")"
+    if [ -z "${i}" ] || [ "${i}" -lt "$1" ]; then continue; fi
+    [ ! -f "${NSDIR}/${inst}/passwd" ] || continue
+    [ -z "$(seat_busy "${inst}")" ] || continue
+    retire_slot "${inst}" yes
+  done
+  config_write "${CONF}" 'HDW4S_EPHEMERAL_SLOTS' "$1"
+  systemctl daemon-reload
+  echo "hdw4s: the pool stopped growing at $1 seat(s): $2." >&2
+  echo "  HDW4S_EPHEMERAL_SLOTS is now $1, so the next boot makes the same pool." >&2
+}
+
+cmd_pool() {
+  shift   # "size", checked by the dispatcher
+  if [ "$#" -eq 0 ]; then
+    pool_show
+  else
+    pool_resize "$1" || fail
+  fi
+}
+
 # REFUSE AN UNREADABLE SLOT TABLE HERE, ONCE, BEFORE ANY COMMAND RUNS.
 #
 # Every predicate below asks the table what kind of session a slot is, and
@@ -3570,10 +3959,7 @@ case "${1:-}" in
   list)     shift; cmd_list "$@";;
   check)    shift; [ $# -eq 0 ] || usage_error; cmd_check "$@";;
   show)     shift; [ $# -eq 1 ] || usage_error; cmd_show "$@";;
-  enable)   shift
-            case "${1:-}" in --ephemeral) [ $# -eq 2 ] || usage_error;;
-                         *)           [ $# -eq 1 ] || usage_error;; esac
-            cmd_enable "$@";;
+  enable)   shift; [ $# -eq 1 ] || usage_error; cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || usage_error; cmd_disable "$@";;
   keyring)  shift; [ $# -eq 1 ] || usage_error; cmd_keyring "$@";;
   seed)     shift; [ $# -ge 1 ] || usage_error; cmd_seed "$@";;
@@ -3588,6 +3974,14 @@ case "${1:-}" in
             case "${1:-}" in --internal) [ $# -eq 2 ] || usage_error;;
                              *)          [ $# -eq 1 ] || usage_error;; esac
             cmd_release "$@";;
+  # Root first, as for "template edit", so a non-root run is refused in one line
+  # rather than by the first write into /etc half way through. Showing the size
+  # reads only, and needs nothing.
+  pool)     shift
+            case "$#:${1:-}" in 1:size|2:size) ;; *) usage_error;; esac
+            [ "$#" -ne 2 ] || [ "${EUID}" -eq 0 ] ||
+              die 'hdw4s pool size: changing it needs root.'
+            cmd_pool "$@";;
   firewall) shift; exec /usr/lib/hdw4s/hdw4s-firewall "$@";;
   # "edit" needs a slot to run the authoring desktop in, and makes one here, in
   # the program that owns the slot table, rather than in hdw4s-template: a second
