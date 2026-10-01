@@ -1105,6 +1105,42 @@ PY
   has 'and one whose rules are carried is kept'       "${out}" "kept=['dnr_dynamic_ruleset', 'path'] gone=['path']"
 )
 
+echo '== an ephemeral desktop'"'"'s data is published from its home, and never its trash =='
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  mkdir -p "${T}/etc" "${T}/root" "${T}/author/config" \
+           "${T}/home/.local/share/gnome-shell/extensions/ext@x" \
+           "${T}/home/.local/share/Trash/files" "${T}/home/.local/share/Trash/info" \
+           "${T}/home/.local/share/backgrounds"
+  echo "HDW4S_TEMPLATE_DIR=${T}/root" > "${T}/etc/hdw4s.conf"
+  echo '{}' > "${T}/home/.local/share/gnome-shell/extensions/ext@x/metadata.json"
+  echo secret > "${T}/home/.local/share/Trash/files/deleted.txt"
+  echo img > "${T}/home/.local/share/backgrounds/mine.jpg"
+  out="$(HDW4S_ETCDIR="${T}/etc" python3 - "${ROOT}/hdw4s-template" "${T}" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys, os
+l = importlib.machinery.SourceFileLoader("t", sys.argv[1])
+s = importlib.util.spec_from_loader("t", l); m = importlib.util.module_from_spec(s)
+l.exec_module(m); m.normalise = lambda tree: None
+T = sys.argv[2]
+gen, _, _ = m.harvest(T + "/author", T + "/home", "x")
+found = [os.path.relpath(os.path.join(d, f), gen) for d, _, fs in os.walk(gen) for f in fs]
+print("ext=%s" % any(p.endswith("ext@x/metadata.json") for p in found))
+print("trash=%s" % any("Trash" in p or "deleted.txt" in p for p in found))
+# Only backgrounds a setting names are kept, and this sandbox has no settings
+# database to name one: what is asserted is WHERE the author's are looked for.
+print("bg=%s" % (m.author_path(T + "/author", T + "/home", "data/backgrounds")[0]
+                 == T + "/home/.local/share/backgrounds"))
+e = m.filter_dconf([("org/gnome/desktop/background", "picture-uri",
+                     "'file:///home/user/.local/share/backgrounds/mine.jpg'")], "x", [])
+print("uri=%s" % (e[0][2] if e else "dropped"))
+PY
+)"
+  has   'an extension in the home'"'"'s ~/.local/share is published' "${out}" 'ext=True'
+  has   'the trash is never published'                       "${out}" 'trash=False'
+  has   'backgrounds are looked for there'                   "${out}" 'bg=True'
+  has   'and the setting points at the published copy'       "${out}" "/backgrounds/mine.jpg'"
+  hasnt 'not at the author'"'"'s home'                        "${out}" 'uri=.*home/user'
+)
+
 echo '== the updater checks what it downloaded =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   eval "$(sed -n '/^verify_sha256() {/,/^}/p;/^asset_digest() {/,/^}/p' \
@@ -4574,7 +4610,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=740   # update when tests are added; a wrong number is the point
+EXPECTED=745   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

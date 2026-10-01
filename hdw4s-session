@@ -198,6 +198,31 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   export XDG_STATE_HOME="${profile}/state"
   export XDG_CACHE_HOME="${profile}/cache"
 
+  # AN EPHEMERAL DESKTOP KEEPS ITS DATA IN ITS HOME, a real ~/.local/share. The
+  # profile split exists for named homes on shared filesystems, where settings
+  # databases misbehave; an ephemeral home is this desktop's own and is thrown
+  # away with it, so that reason does not apply -- and the split broke the
+  # trash. Trashing is a rename, which cannot cross mounts (EXDEV, measured,
+  # bind mounts included), and the Trash view (gvfsd-trash) ignores a Trash
+  # that is a symbolic link (measured: a real directory listed, a link to the
+  # same place did not). Both hold only if XDG_DATA_HOME is on the home's own
+  # mount. Owner, 2026-09-30: "the fix for visitors/template sounds absolutely
+  # correct."
+  #
+  # A ~/.local/share LINK into the profile, left by the version before this one
+  # in a home that outlived it (the template editor's, until a reboot), is
+  # replaced by a real directory holding what it pointed at.
+  if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+    old="$(readlink "${HOME}/.local/share" 2>/dev/null || :)"
+    if [ -n "${old}" ]; then
+      rm -f "${HOME}/.local/share"
+      install -d -m0700 "${HOME}/.local/share"
+      [ ! -d "${old}" ] || cp -R --update=none "${old}/." "${HOME}/.local/share/" ||
+        echo "hdw4s-session: could not move ${old} into ~/.local/share." >&2
+    fi
+    export XDG_DATA_HOME="${HOME}/.local/share"
+  fi
+
   # THE ADMINISTRATOR'S TEMPLATE, copied into a profile that starts empty.
   # "hdw4s template edit" publishes it already filtered, world-readable on
   # purpose -- every visitor receives it -- and its settings half is a dconf
@@ -216,6 +241,16 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
         echo "hdw4s-session: could not copy the template from ${src}; this" \
              'session starts without it.' >&2
     done
+    # The template still publishes the data half under profile/data, as it
+    # always has; this desktop's data directory is in the home (above).
+    if [ -d "${profile}/data" ] && [ "${XDG_DATA_HOME}" != "${profile}/data" ]; then
+      install -d -m0700 "${XDG_DATA_HOME}"
+      if ! cp -R --update=none "${profile}/data/." "${XDG_DATA_HOME}/" ||
+         ! rm -rf "${profile}/data"; then
+        echo "hdw4s-session: could not move the template's data into" \
+             "${XDG_DATA_HOME}; this session starts without it." >&2
+      fi
+    fi
   fi
 
   install -d -m0700 "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" \
@@ -238,7 +273,8 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   # links existed -- is merged into the profile first, the profile's own files
   # winning, and then replaced; a link that is already right is left alone.
   if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
-    for pair in ".config:${XDG_CONFIG_HOME}" ".local/share:${XDG_DATA_HOME}" \
+    # ~/.local/share is not among them: it IS the data directory here (above).
+    for pair in ".config:${XDG_CONFIG_HOME}" \
                 ".local/state:${XDG_STATE_HOME}" ".cache:${XDG_CACHE_HOME}"; do
       link="${HOME}/${pair%%:*}"; target="${pair#*:}"
       [ "$(readlink "${link}" 2>/dev/null)" = "${target}" ] && continue
@@ -274,31 +310,29 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
     done
   fi
 
-  # THE TRASH LIVES ON THE HOME'S FILESYSTEM, because trashing is a rename and a
-  # rename cannot cross mounts. With XDG_DATA_HOME in the profile, GIO's home
-  # trash ($XDG_DATA_HOME/Trash) is on a different mount from every file in the
-  # home, so Files could not move anything to the trash: "Unable to trash file
-  # ... across filesystem boundaries" (measured 2026-09-30, reported by the
-  # owner). A link from the profile's Trash into the home fixes it: GIO decides
-  # by the FILE's device, which matches the home's, and the rename then lands on
-  # the home's own filesystem through the link.
+  # A NAMED DESKTOP'S TRASH IS THE HOME'S OWN, through a link. Trashing is a
+  # rename and cannot cross mounts, and a named desktop keeps XDG_DATA_HOME on
+  # local disk while its home is often elsewhere, so GIO's home trash
+  # ($XDG_DATA_HOME/Trash) could not take a single file from the home: "Unable
+  # to trash file ... across filesystem boundaries" (reported by the owner,
+  # 2026-09-30). The profile's Trash links to ~/.local/share/Trash -- the
+  # person's ordinary trash, shared with their other logins -- and GIO, which
+  # picks the home trash by the FILE's device, renames through the link onto
+  # the home's filesystem.
   #
-  # Named desktop: the home's own ~/.local/share/Trash -- the person's ordinary
-  # trash, shared with their other logins, which is where they would look.
-  # Ephemeral: ~/.local/share is itself a link into the profile (above), so the
-  # trash gets a directory of its own under ~/.local, which is a real directory
-  # on the home's filesystem. Not ~/.Trash: the trash specification gives
-  # ".Trash" at the top of a mount a meaning of its own (a shared per-volume
-  # trash), and a name GIO interprets is not one to borrow.
+  # THE COST, measured and accepted: the Trash VIEW (gvfsd-trash) ignores a
+  # Trash that is a link, so Files shows it empty here although the files are
+  # there and the person's other machines show them. A bind mount would satisfy
+  # the view and break trashing (rename across mount points is EXDEV even on
+  # one filesystem, measured), and moving XDG_DATA_HOME into the home would undo
+  # the isolation the profile exists for. An ephemeral desktop has neither
+  # problem: its data directory is in its home (above).
   #
   # A real Trash already holding something is left alone: those are files a
   # person put there, and moving them is not this script's decision.
-  if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
-    trash="${HOME}/.local/Trash"
-  else
-    trash="${HOME}/.local/share/Trash"
-  fi
-  if [ "$(readlink "${XDG_DATA_HOME}/Trash" 2>/dev/null)" != "${trash}" ]; then
+  trash="${HOME}/.local/share/Trash"
+  if [ "${HDW4S_SESSION_TYPE:-}" != 'ephemeral' ] &&
+     [ "$(readlink "${XDG_DATA_HOME}/Trash" 2>/dev/null)" != "${trash}" ]; then
     if [ -d "${XDG_DATA_HOME}/Trash" ] && [ ! -L "${XDG_DATA_HOME}/Trash" ] &&
        [ -n "$(find "${XDG_DATA_HOME}/Trash" -mindepth 2 -print -quit 2>/dev/null)" ]; then
       echo "hdw4s-session: ${XDG_DATA_HOME}/Trash holds files; left as it is, so" \

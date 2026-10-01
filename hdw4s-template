@@ -412,6 +412,12 @@ def filter_dconf(entries, inst, notes):
                 or under(path, DCONF_DENY) or path in owned:
             continue
         value = value.replace(author_bg, published_bg)
+        # And where the author's backgrounds live since the data directory
+        # moved into the home (hdw4s-session): every desktop's home is
+        # /home/user, so without this the value would name a file only the
+        # author's own home had, and pass the check below as if it were fine.
+        value = value.replace("/home/user/.local/share/backgrounds/",
+                              published_bg)
         # /home/user is every visitor's home, so a value naming it is fine
         # (and names a file only if "keep" carried it). Any other home, and
         # either profile root, names something no visitor has.
@@ -839,6 +845,19 @@ def autostart_notes(gen, notes):
                          % (m.group(1)[:80], n))
 
 
+def author_path(author, home, rel):
+    """(path, top) where the author's REL lives, for the inside() check. The
+    template publishes its data half as profile/data, but an ephemeral desktop
+    now keeps its data in a real ~/.local/share in its home (hdw4s-session), so
+    "data/..." is read from there when the home has one; from the profile
+    otherwise (a desktop started before that change)."""
+    share = os.path.join(home, ".local", "share")
+    if rel.startswith("data/") and os.path.isdir(share) and \
+            not os.path.islink(share):
+        return os.path.join(share, rel[len("data/"):]), home
+    return os.path.join(author, rel), author
+
+
 def harvest(author, home, inst):
     """Build the next template from AUTHOR (the profile) and HOME in a new
     generation directory."""
@@ -865,8 +884,8 @@ def harvest(author, home, inst):
         else:
             scan_kept(gen, rel, notes)
     for rel in KEEP_FILES:
-        src = os.path.join(author, rel)
-        if os.path.lexists(src) and not inside(src, author):
+        src, top = author_path(author, home, rel)
+        if os.path.lexists(src) and not inside(src, top):
             notes.append("left out %s: it is, or is reached through, a "
                          "symbolic link" % rel)
             continue
@@ -915,10 +934,10 @@ def harvest(author, home, inst):
     # Backgrounds: the author's new ones, and the published ones still named.
     bg = os.path.join(gen, "backgrounds")
     os.makedirs(bg)
-    for src in (os.path.join(CURRENT, "backgrounds"),
-                os.path.join(author, "data", "backgrounds")):
+    mine, top = author_path(author, home, "data/backgrounds")
+    for src in (os.path.join(CURRENT, "backgrounds"), mine):
         if os.path.isdir(src) and (src.startswith(CURRENT) or
-                                   inside(src, author)):
+                                   inside(src, top)):
             for n in os.listdir(src):
                 if os.path.isfile(os.path.join(src, n)) and \
                         not os.path.islink(os.path.join(src, n)):
