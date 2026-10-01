@@ -1093,18 +1093,23 @@ def cmd_edit(yes):
         if not opened:
             say("It ended before the link was used; nothing was changed.")
             return 1
+        # YES BY DEFAULT. Owner, 2026-09-30: "It's one last opportunity to
+        # bail out, but usually the admin wants the changes they just made."
+        # Enter publishes; only an explicit "n" declines. End of input (Ctrl-D)
+        # and no terminal at all still publish nothing: neither is somebody
+        # pressing Enter at the question.
         if yes:
             answer = "y"
         elif sys.stdin.isatty():
             try:
                 answer = input("Publish these changes as the template for new "
-                               "desktops? [y/N] ")
+                               "desktops? [Y/n] ").strip().lower() or "y"
             except EOFError:
-                answer = ""
+                answer = "n"
         else:
             say("Not a terminal and no --yes, so nothing is published.")
-            answer = ""
-        if answer.strip().lower() not in ("y", "yes"):
+            answer = "n"
+        if answer not in ("y", "yes"):
             say("Nothing was published.")
             return 1
 
