@@ -233,7 +233,14 @@ COOL_EXTENSION = 34.9                # degrees past the bluest aubergine: BLUE
 # Removing it gives eight distinct rungs. A constant that describes something
 # unreachable is worse than no constant, because everything downstream reasons
 # from it.
-WARM_EXTENSION = 0.0                 # Ubuntu orange is as warm as the ceiling allows
+#
+# BOTH OF THOSE CHANGED, and the extension came back with them. Under the AA
+# ceiling (TOP_L) the warm end has 11 more L* units to be warm in, and with
+# continuous draws (HUE_DRAW) there are no rungs for it to collapse together.
+# The owner voted the 20 degree extension up, blind, in the second round of
+# rating sheets. It is still not gold -- nothing at this lightness is -- it is
+# a warmer orange-red than Ubuntu orange, and that is what was chosen.
+WARM_EXTENSION = 20.0
 
 # THE ENDS ARE COMPUTED WHEN THEY ARE ASKED FOR, NOT WHEN THIS FILE IS LOADED.
 # They used to be module constants derived from the two extensions at import,
@@ -279,22 +286,25 @@ WEIGHTS = 5
 # captured at import, so that a caller can assign one and see it take effect.
 # They were literals inside spec_for(), which left a rating sheet able to vary
 # only the arc's two ends -- and moving the ends turned out not to be what the
-# owner was reacting to. The defaults are exactly what shipped in 2.4.5; a
-# change of default is a design change and is made, and argued, on its own.
+# owner was reacting to. A change of default is a design change, made and
+# argued on its own. The defaults below are the sheet the owner chose from three
+# rounds of blind rating ("relief-darker"): continuous draws, a darker and wider
+# ladder, a two-sided ramp, the AA ceiling and lightness relief. Before them
+# this drew exactly what 2.4.5 did.
 #
 # HOW A DESKTOP'S HUE AND WEIGHT ARE DRAWN. "rungs" is RUNGS evenly spaced hues
 # and WEIGHTS evenly spaced lightnesses, picked from the token. "continuous"
 # draws a position anywhere over the SAME range -- rung 0 .. RUNGS-1, weight
 # 0 .. WEIGHTS-1 -- from bytes of the token's hash that nothing else uses, so
 # the only difference between the two is discreteness, not reach.
-HUE_DRAW = "rungs"
-WEIGHT_DRAW = "rungs"
+HUE_DRAW = "continuous"
+WEIGHT_DRAW = "continuous"
 
 # THE LIGHTNESS LADDER: the dye's L* runs from LADDER_FLOOR at weight 0 to
 # LADDER_FLOOR + LADDER_SPAN at the top weight. Its ceiling is a CONTRAST
 # question (see TOP_L), its floor a taste one.
-LADDER_FLOOR = 23.0
-LADDER_SPAN = 7.0
+LADDER_FLOOR = 19.0
+LADDER_SPAN = 19.0
 
 # THE ACCENTS. Each tint is (drift along the arc as a fraction of its span,
 # chroma as a fraction of what that hue can carry, opacity). DRIFT scales every
@@ -334,8 +344,8 @@ SHADE_CHROMA = 0.38
 # arc's own two ends, so EVERY desktop has the coolest hue on one side and the
 # warmest on the other, whatever its dye.
 SWEEP = "hue"
-SWEEP_A = 0.55
-SWEEP_DRIFT = (+0.20, -0.22)
+SWEEP_A = 0.7
+SWEEP_DRIFT = (+0.45, -0.45)
 SWEEP_ENDS = False
 SWEEP_CHROMA = 0.85                  # the ramp colours' chroma fraction
 
@@ -380,7 +390,7 @@ SWEEP_CHROMA = 0.85                  # the ramp colours' chroma fraction
 # None means TOP_L; setting it above TOP_L is for a deployment where no icon
 # label ever sits on the background, and SPEC_CEILING has to be raised with it
 # or "check" refuses -- deliberately, because that is the label ceiling.
-RELIEF = 0.0
+RELIEF = 0.8
 RELIEF_SCALE = 1.0
 RELIEF_DARK_L = 50.0                 # the multiplying colour; lower is darker
 RELIEF_LIGHT_L = None
@@ -411,25 +421,23 @@ def arc(t):
     return (lo + (hi - lo) * min(1.0, max(0.0, t))) % 360.0
 
 
-# The band the rendered field must stay inside. The floor is taste -- the owner
-# called the previous band too dark, at 84% black in the terms he used. The
-# ceiling is contrast: white icon labels sit on this field, so the field must
-# not climb into them.
-BAND_LO, BAND_HI = 29.0, 45.0
-
 # THE BRIGHTEST THE FIELD IS ALLOWED TO GET, and the one number that faces the
 # only hard constraint here. White desktop icon labels sit on this field; GNOME
 # draws them white and that is not ours to change; white falls to 7:1 -- WCAG
-# AAA -- at L* 37.8. So the top of the field is pinned just under that and the
+# AAA -- at L* 37.8, and to 4.5:1 -- AA, the level WCAG asks of body text -- at
+# L* 49.9. AAA held the whole field under 37.8 and the owner found every round
+# of it too uniform; AA is what he chose, blind, in the second round of rating
+# sheets, and it is still a real contrast floor. So the top of the field is
+# pinned just under the AA line and the
 # BASE is what moves between slots. Pinning the top rather than the lift is the
 # repair for a version of this that varied the lift and reached L* 49.3, which
 # private/redarm-background-band.py caught by rasterising and measuring.
-TOP_L = 37.0
+TOP_L = 48.5
 
 # The highest lightness any stop colour may be SPECIFIED at, as an input bound.
 # Slack above TOP_L, because compositing can only darken here -- every blob
 # paints over a darker base -- never brighten past its own stop.
-SPEC_CEILING = 38.0
+SPEC_CEILING = 49.5
 
 # The colour a failed generation falls back to, and the one the dconf layer
 # names for primary-color. Canonical aubergine from the brand palette.
@@ -1270,16 +1278,22 @@ def cmd_check(args):
           % ("slot", "rung", "dye", "sheltered", "bleached", "weathered", "top L*"))
     for slot in range(1, args.slots + 1):
         rung = (slot * STRIDE) % RUNGS
+        # What the slot USES goes in its own name. It was assigned back to
+        # `top`, the cap, so with relief off every slot after the first was
+        # specified under the previous slot's brightest colour: never above the
+        # real cap, so the guard could only under-report, but it was not
+        # checking the field that ships. (With relief on, the light colour IS
+        # the cap, so the two names happen to agree.)
         spec = spec_for(rung, slot % WEIGHTS, 0x5eed5eed, top=top)
-        top = spec["top_L"]
-        if top > SPEC_CEILING:
+        used = spec["top_L"]
+        if used > SPEC_CEILING:
             bad.append(slot)
         print("%-6d %-5d %-9s %-9s %-9s %-9s %5.1f%s"
               % (slot, rung, spec["base"], spec["regions"][0][0],
-                 spec["regions"][1][0], spec["regions"][2][0], top,
-                 "  ABOVE THE CEILING" if top > SPEC_CEILING else ""))
+                 spec["regions"][1][0], spec["regions"][2][0], used,
+                 "  ABOVE THE CEILING" if used > SPEC_CEILING else ""))
 
-    if args.slots > RUNGS:
+    if args.slots > RUNGS and HUE_DRAW == "rungs":
         print("\nNote: %d slots over %d rungs. Slot %d repeats slot 1's hue and "
               "is told apart by where its colours sit and how dark it is. "
               "That is this ARC's limit and no longer the brand's: the owner "

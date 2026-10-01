@@ -1499,18 +1499,23 @@ g.COOL_EXTENSION = 80.0
 print("extension=%s" % ("moved" if dye() != before else "ignored"))
 g.COOL_EXTENSION = 34.9
 print("restored=%s" % (dye() == before))
-g.LADDER_FLOOR = 40.0
+floor = g.LADDER_FLOOR
+g.LADDER_FLOOR = floor + 10.0
 print("ladder=%s" % ("moved" if dye() != before else "ignored"))
-g.LADDER_FLOOR = 23.0
+g.LADDER_FLOOR = floor
+g.HUE_DRAW = g.WEIGHT_DRAW = "rungs"
 dyes = lambda: len({g.choose("hdw4s-ephemeral1", b"t%d" % i, "ephemeral")["base"]
                     for i in range(60)})
 print("rungs_distinct_le_40=%s" % (dyes() <= g.RUNGS * g.WEIGHTS))
 g.HUE_DRAW = g.WEIGHT_DRAW = "continuous"
 print("continuous_distinct_gt_40=%s" % (dyes() > g.RUNGS * g.WEIGHTS))
 pic = lambda: g.svg(g.choose("hdw4s-ephemeral1", tok, "ephemeral"))
+print("relief_shipped=%s" % ("rdark" in pic() and "rlight" in pic()))
+relief = g.RELIEF
+g.RELIEF = 0.0
 off = pic()
 print("relief_off_emits_nothing=%s" % ("rdark" not in off and "rlight" not in off))
-g.RELIEF = 0.8
+g.RELIEF = relief
 on = pic()
 print("relief_on_draws=%s" % ("rdark" in on and "rlight" in on and on != off))
 g.SWEEP_CHROMA = 1.0
@@ -1523,6 +1528,18 @@ def check():
 print("relief_at_ceiling_check=%d" % check())
 g.RELIEF_LIGHT_L = g.SPEC_CEILING + 5.0
 print("relief_above_ceiling_check=%d" % check())
+# Every slot is checked against the real cap, not the slot before it's colour.
+# Relief OFF: with it on, every slot's brightest colour is the cap itself, and
+# the defect cannot show.
+g.RELIEF = 0.0
+g.RELIEF_LIGHT_L = None
+out = io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+    g.main(["check"])
+rows = [r.split() for r in out.getvalue().splitlines()[1:] if r[:1].isdigit()]
+print("each_slot_own_cap=%s" % (len(rows) > 1 and all(
+    abs(float(r[-1]) - g.spec_for(int(r[1]), int(r[0]) % g.WEIGHTS, 0x5eed5eed,
+                                  top=g.TOP_L)["top_L"]) < 0.05 for r in rows)))
 PY
 )"
   has 'an arc extension assigned after loading moves the dye' "${out}" 'extension=moved'
@@ -1530,16 +1547,18 @@ PY
   has 'the lightness ladder is read at call time too'         "${out}" 'ladder=moved'
   has 'the stepped draw has at most rungs x weights dyes'     "${out}" 'rungs_distinct_le_40=True'
   has 'the continuous draw is not stepped'                    "${out}" 'continuous_distinct_gt_40=True'
-  # Lightness relief: off by default draws nothing, on draws, and its light
+  # Lightness relief: shipped on; off draws nothing, on draws, and its light
   # sections count against the white-label ceiling like every other colour.
-  has 'lightness relief at its default draws nothing'          "${out}" 'relief_off_emits_nothing=True'
+  has 'lightness relief is drawn as shipped'                   "${out}" 'relief_shipped=True'
+  has 'switched off it draws nothing'                          "${out}" 'relief_off_emits_nothing=True'
   has 'and switched on draws light and dark sections'          "${out}" 'relief_on_draws=True'
   has 'the ramp chroma is read at call time'                   "${out}" 'sweep_chroma=moved'
   has 'relief at the ceiling passes the ceiling check'         "${out}" 'relief_at_ceiling_check=0'
   has 'relief brighter than the ceiling is refused'            "${out}" 'relief_above_ceiling_check=1'
+  has 'the check holds each slot to the cap, not to the last slot' "${out}" 'each_slot_own_cap=True'
   "${ROOT}/hdw4s-background" check >/dev/null 2>&1
   is 'the shipped field passes its own ceiling check' "$?" '0'
-  "${ROOT}/hdw4s-background" check --top-lightness 45 >/dev/null 2>&1
+  "${ROOT}/hdw4s-background" check --top-lightness 55 >/dev/null 2>&1
   is 'and a field allowed above it is refused'        "$?" '1'
 )
 
@@ -5041,7 +5060,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=867   # update when tests are added; a wrong number is the point
+EXPECTED=869   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
