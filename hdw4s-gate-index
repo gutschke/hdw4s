@@ -298,9 +298,9 @@ __ACT__
   //
   // NOT RE-MEASURED, AND NO LONGER RE-MEASURABLE AT THAT BUILD. It was a branch tip
   // upstream has since squashed and force-pushed, so that revision exists nowhere any
-  // more. What the updater now installs is 2.0.0rc1, which renamed webrtc_mode.py and
+  // more. What the updater installed next was 2.0.0rc1 (now 2.0.0), which renamed webrtc_mode.py and
   // websockets_mode.py and moved selkies-ws-core.js -- exactly the files this paragraph
-  // is about. Nobody has watched a page get evicted on rc1. Read the two behaviours
+  // is about. Nobody has watched a page get evicted on rc1 or 2.0.0. Read the two behaviours
   // below as the reason this code has the shape it has, not as a statement about the
   // build in front of you; measure them again before relying on either.
   //

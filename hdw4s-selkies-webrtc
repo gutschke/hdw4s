@@ -14,7 +14,7 @@ it with a plain aiohttp.ClientSession -- TCP. It sends, on that connection, the
 session's Basic credential (when the session has one) and the server's master
 token in its HELLO. Nothing of ours listens on that port, so the first process on
 the machine to bind it -- another desktop's occupant among them -- would be the
-signalling server this desktop trusts. Read in Selkies 2.0.0rc1 and a later dev
+signalling server this desktop trusts. Read in Selkies 2.0.0rc1, 2.0.0 and a later dev
 build; the connection is measured by .github/live and the box tier, not assumed.
 
 WHAT IT DOES. Before handing over to upstream's main(), it replaces the aiohttp
@@ -62,7 +62,7 @@ MARKER = "SUPPORTS_UNIX_SOCKET"
 # THE WHOLE MODULE, not only the two functions: a second ClientSession, or one
 # reached by another name ("from aiohttp import ClientSession", "import aiohttp
 # as ..."), anywhere in the signalling client would open a connection this
-# replacement never sees. 2.0.0rc1 and the dev build both name it exactly twice:
+# replacement never sees. 2.0.0rc1, 2.0.0 and the dev build all name it exactly twice:
 # the attribute's annotation and the one call.
 EXPECTED_CLIENTSESSION = 2
 ALLOWED_FROM_AIOHTTP = {"ClientWebSocketResponse", "WSMsgType"}

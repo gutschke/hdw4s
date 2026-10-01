@@ -1146,7 +1146,7 @@ lockdown=(
   #
   # That revision cannot be read again: upstream squashed and force-pushed the
   # branch it names. WHICH file reads which flag was re-checked against
-  # 2.0.0rc1, the release the updater now installs, and still holds -- the
+  # 2.0.0rc1, then the release the updater installed, and still held -- the
   # WebRTC/websockets split below is right. WHAT each flag then does was not
   # re-read there, so those three sentences are from the vanished build and are
   # unverified against rc1.

@@ -5976,7 +5976,8 @@ def request_framing(headers):
 
 # WHAT A DESKTOP'S RESPONSE MAY CARRY TO THE BROWSER: fields whose effect ends
 # with the response or the document it delivers. Everything else is dropped.
-# The list is what upstream Selkies sends (2.0.0rc1, read in stream_server.py
+# The list is what upstream Selkies sends (2.0.0rc1, read in stream_server.py,
+# which 2.0.0 does not change
 # and aiohttp's file and WebSocket responses), plus the page-scoped security
 # policies a later Selkies might plausibly add. Deliberately NOT here, each with
 # its reason:
