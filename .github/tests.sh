@@ -46,6 +46,16 @@ ROOT="${PWD}"
 # duration group would have been testing whatever is in /usr/lib/hdw4s.
 export HDW4S_LIBDIR="${ROOT}"
 
+# No bytecode cache, for every python3 this suite starts. The components have no
+# ".py" suffix, so a loader caches them as __pycache__/<name>cpython-*.pyc in the
+# TREE, and a cache is trusted when the source's size and mtime-in-seconds match.
+# A red arm that swaps two names in a file keeps its size, and is put back within
+# the same second it was applied -- so the next run loaded the DOCTORED router
+# from the cache and failed a test the arm had not touched. Measured here, on
+# 2026-09-30. A few groups set sys.dont_write_bytecode themselves; this covers
+# the ones that do not, and anything added later.
+export PYTHONDONTWRITEBYTECODE=1
+
 # Results go to a file, not to shell variables: every group runs in a subshell
 # so that one failure cannot derail the rest, and a subshell cannot hand a
 # counter back to its parent. Counting in variables looked like it worked and
@@ -1036,14 +1046,19 @@ PY
   mkdir -p "${T}/etc" "${T}/root" "${T}/author/config" "${T}/home/.config" \
            "${T}/home/.Music" "${T}/home/Music" "${T}/home/Downloads"
   echo "HDW4S_TEMPLATE_DIR=${T}/root" > "${T}/etc/hdw4s.conf"
+  # The literal "$HOME" is what a user-dirs file holds; it must not expand here.
+  # shellcheck disable=SC2016
   printf 'XDG_MUSIC_DIR="$HOME/Music"\n' > "${T}/author/config/user-dirs.dirs"
+  # shellcheck disable=SC2016
   printf 'XDG_MUSIC_DIR="$HOME/.Music"\n' > "${T}/home/.config/user-dirs.dirs"
   touch -d '-1 hour' "${T}/author/config/user-dirs.dirs"
   out="$(run)"
+  # shellcheck disable=SC2016
   has 'the home'"'"'s newer file is published' "${out}" 'XDG_MUSIC_DIR="$HOME/.Music"'
   has 'with the hidden folder it names'       "${out}" 'folders=.Music'
   touch -d '-2 hours' "${T}/home/.config/user-dirs.dirs"
   out="$(run)"
+  # shellcheck disable=SC2016
   has 'an older one in the home is not'       "${out}" 'XDG_MUSIC_DIR="$HOME/Music"'
 )
 
