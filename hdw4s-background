@@ -18,12 +18,12 @@ point rather than an embellishment: a single field makes hue and lightness move
 together, so a viewer who loses one channel loses both at once. Measured with
 two fields, a dichromat keeps roughly 70% of the per-session distance.
 
-The anchors, the band and the field strength are NOT tunable here and are not
-guesses. Three anchors, band L* 29-45, k = 1.5, approved 2026-09-24 against a
-rendered sheet; the measurements behind each number are in
-private/DESIGN-per-session-background.md sections 4.9 and 4.10. The band is
-bounded below by taste and above by contrast: white icon labels sit on this
-field, and at the lightest pixel of band E they read 8.2:1, above WCAG AAA.
+The things worth varying -- the arc, the draw, the lightness ladder, how far
+and how strongly the accents stray -- are named module-level knobs, read at
+call time, so that a rating sheet can move them and see the result (see "WHAT
+A DRAW VARIES"). Their defaults are the shipped design, not guesses; the
+lightness is bounded below by taste and above by contrast, because white icon
+labels may sit on this field (see TOP_L).
 
 NO NEW PACKAGE DEPENDENCY, and that is why this emits SVG text rather than
 pixels. GNOME rasterises the wallpaper itself through gdk-pixbuf's SVG loader,
@@ -234,8 +234,27 @@ COOL_EXTENSION = 34.9                # degrees past the bluest aubergine: BLUE
 # unreachable is worse than no constant, because everything downstream reasons
 # from it.
 WARM_EXTENSION = 0.0                 # Ubuntu orange is as warm as the ceiling allows
-ARC_LO = swatch("Light aubergine")[2] - COOL_EXTENSION      # ~321.9
-ARC_HI = swatch("Ubuntu Orange")[2] + 360.0 + WARM_EXTENSION   # ~432
+
+# THE ENDS ARE COMPUTED WHEN THEY ARE ASKED FOR, NOT WHEN THIS FILE IS LOADED.
+# They used to be module constants derived from the two extensions at import,
+# so assigning COOL_EXTENSION afterwards -- which is what a rating sheet does --
+# silently changed nothing, and the sheet showed the shipped arc under another
+# name. ARC_LO and ARC_HI remain as explicit overrides for a caller that wants
+# to name the ends directly; None means "derive them from the extensions now".
+ARC_LO = None
+ARC_HI = None
+
+
+def arc_ends():
+    """(cool end, warm end) of the arc in degrees, warm end unwrapped past 360
+    so that the interval is increasing. Today about 296.0 .. 406.0."""
+    lo = (swatch("Light aubergine")[2] - COOL_EXTENSION
+          if ARC_LO is None else ARC_LO)
+    hi = (swatch("Ubuntu Orange")[2] + 360.0 + WARM_EXTENSION
+          if ARC_HI is None else ARC_HI)
+    return lo, hi
+
+
 RUNGS = 8                            # distinct rungs on the arc
 
 STRIDE = 3                           # coprime with RUNGS: consecutive slots
@@ -252,6 +271,72 @@ STRIDE = 3                           # coprime with RUNGS: consecutive slots
 # came out as slot 1 in both, and two desktops that differ only in a jitter are
 # two desktops that look the same.
 WEIGHTS = 5
+
+# ---------------------------------------------------------------------------
+# WHAT A DRAW VARIES, NAMED HERE AND READ AT CALL TIME.
+#
+# Every value below is read by choose() or spec_for() each time they run, never
+# captured at import, so that a caller can assign one and see it take effect.
+# They were literals inside spec_for(), which left a rating sheet able to vary
+# only the arc's two ends -- and moving the ends turned out not to be what the
+# owner was reacting to. The defaults are exactly what shipped in 2.4.5; a
+# change of default is a design change and is made, and argued, on its own.
+#
+# HOW A DESKTOP'S HUE AND WEIGHT ARE DRAWN. "rungs" is RUNGS evenly spaced hues
+# and WEIGHTS evenly spaced lightnesses, picked from the token. "continuous"
+# draws a position anywhere over the SAME range -- rung 0 .. RUNGS-1, weight
+# 0 .. WEIGHTS-1 -- from bytes of the token's hash that nothing else uses, so
+# the only difference between the two is discreteness, not reach.
+HUE_DRAW = "rungs"
+WEIGHT_DRAW = "rungs"
+
+# THE LIGHTNESS LADDER: the dye's L* runs from LADDER_FLOOR at weight 0 to
+# LADDER_FLOOR + LADDER_SPAN at the top weight. Its ceiling is a CONTRAST
+# question (see TOP_L), its floor a taste one.
+LADDER_FLOOR = 23.0
+LADDER_SPAN = 7.0
+
+# THE ACCENTS. Each tint is (drift along the arc as a fraction of its span,
+# chroma as a fraction of what that hue can carry, opacity). DRIFT scales every
+# drift at once -- how far an image's accents stray from its own dye -- and
+# ACCENT_OVERSHOOT lets a drifting accent run that many degrees past either end
+# of the arc instead of piling up against it; 0 is the hard clamp arc() argues
+# for. TINT_CHROMA scales the chroma fractions (capped at what the hue can
+# carry). TINT_OPACITY, TINT_CENTRE and TINT_CONTRAST decide how much of the
+# canvas each accent wins: opacity and centre raise its presence, contrast
+# sharpens where it stops. BASE_CHROMA is the dye's own chroma fraction; lowering
+# it, or raising the accents' presence, is how the base stops punching through.
+TINTS = (
+    (-0.152, 0.98, 0.85),
+    (+0.104, 0.98, 0.85),
+    (+0.264, 0.92, 0.81),
+    (-0.056, 0.90, 0.44),
+    (+0.184, 0.95, 0.42),
+)
+DRIFT = 1.0
+ACCENT_OVERSHOOT = 0.0
+TINT_CHROMA = 1.0
+TINT_OPACITY = 1.0
+TINT_CENTRE = 0.40
+TINT_CONTRAST = 8.0
+BASE_CHROMA = 0.82
+
+# THE SHADES: (lightness as a fraction toward the ceiling, or, negative, toward
+# black; opacity), and their chroma fraction at the dye's own hue.
+SHADES = (
+    (-0.42, 0.62),
+    (+0.92, 0.58),
+)
+SHADE_CHROMA = 0.38
+
+# THE WHOLE-CANVAS RAMP (see light_sweep). SWEEP_DRIFT is where its two colours
+# sit, as offsets from the dye along the arc. SWEEP_ENDS replaces those with the
+# arc's own two ends, so EVERY desktop has the coolest hue on one side and the
+# warmest on the other, whatever its dye.
+SWEEP = "hue"
+SWEEP_A = 0.55
+SWEEP_DRIFT = (+0.20, -0.22)
+SWEEP_ENDS = False
 
 
 def arc(t):
@@ -274,7 +359,8 @@ def arc(t):
     The guard that would have caught it is cheap and is now in cmd_check:
     rendered mean hue must be MONOTONIC in rung. It fires the moment drift
     crosses an end, which is exactly when the wrap bites."""
-    return (ARC_LO + (ARC_HI - ARC_LO) * min(1.0, max(0.0, t))) % 360.0
+    lo, hi = arc_ends()
+    return (lo + (hi - lo) * min(1.0, max(0.0, t))) % 360.0
 
 
 # The band the rendered field must stay inside. The floor is taste -- the owner
@@ -710,7 +796,7 @@ def slot_number(instance):
     return int(digits) if digits else None
 
 
-def choose(instance, token, kind=None):
+def choose(instance, token, kind=None, tweak=None):
     """WHAT DIFFERS BETWEEN TWO DESKTOPS, AND WHAT STAYS PUT ACROSS A RESTART.
 
     Two questions, two answers, and the two kinds of session get DIFFERENT
@@ -775,12 +861,19 @@ def choose(instance, token, kind=None):
     # -- while still guaranteeing nothing for one person holding two. The
     # mitigation that does work is the wider, brand-adjacent hue range, which
     # makes an unlucky draw rarer at no cost in machinery.
-    seed64 = int.from_bytes(hashlib.sha256(token).digest()[:8], "big")
-    rung = seed64 % RUNGS
-    weight = (seed64 >> 17) % WEIGHTS
+    digest = hashlib.sha256(token).digest()
+    seed64 = int.from_bytes(digest[:8], "big")
+    if HUE_DRAW == "continuous":
+        rung = (RUNGS - 1) * int.from_bytes(digest[8:12], "big") / 2.0 ** 32
+    else:
+        rung = seed64 % RUNGS
+    if WEIGHT_DRAW == "continuous":
+        weight = (WEIGHTS - 1) * int.from_bytes(digest[12:16], "big") / 2.0 ** 32
+    else:
+        weight = (seed64 >> 17) % WEIGHTS
     layout_seed = seed64
 
-    return spec_for(rung, weight, layout_seed)
+    return spec_for(rung, weight, layout_seed, tweak=tweak)
 
 
 def spec_for(rung, weight, seed, top=None, tweak=None):
@@ -793,22 +886,37 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     # tell us which number, and only if the direction was already right. Last
     # round was twelve numeric questions inside a space that was itself wrong,
     # and none of the answers could reach what he wanted.
-    tw = dict(fade_scale=1.0, fade_a=1.0, drift=1.0, grain_a=1.0,
+    # The defaults are the module's knobs, read NOW; a tweak overrides them
+    # for this one call.
+    tw = dict(fade_scale=1.0, fade_a=TINT_OPACITY, drift=DRIFT, grain_a=1.0,
               grain_scale=1.0, regions=3, variant="stack",
-              micro_a=1.0, tint_contrast=8.0, shade_a=1.0,
-              micro_kind="weave", sweep="hue", sweep_a=0.55,
+              micro_a=1.0, tint_contrast=TINT_CONTRAST, shade_a=1.0,
+              micro_kind="weave", sweep=SWEEP, sweep_a=SWEEP_A,
               arc_lo=None, faded_anchor="dye", ladder="smooth",
               arc_hi=None)
     tw.update(tweak or {})
 
+    # A fractional rung is a continuous draw (HUE_DRAW); the arithmetic is the
+    # same either way.
     t = rung / float(RUNGS)
-    lo = ARC_LO if tw["arc_lo"] is None else tw["arc_lo"]
-    hi = ARC_HI if tw["arc_hi"] is None else tw["arc_hi"]
+    lo, hi = arc_ends()
+    lo = lo if tw["arc_lo"] is None else tw["arc_lo"]
+    hi = hi if tw["arc_hi"] is None else tw["arc_hi"]
 
     def arc_(u):
         """This candidate's arc, so the SPAN can be compared side by side.
         CLAMPED, never wrapped -- see arc() for what wrapping did."""
         return (lo + (hi - lo) * min(1.0, max(0.0, u))) % 360.0
+
+    over = ACCENT_OVERSHOOT / (hi - lo)
+
+    def accent(u):
+        """Where a drifting accent lands: the arc, plus ACCENT_OVERSHOOT
+        degrees of leeway past each end. Still CLAMPED, still never wrapped;
+        with no overshoot this is arc_() exactly."""
+        if not over:
+            return arc_(u)
+        return (lo + (hi - lo) * min(1.0 + over, max(-over, u))) % 360.0
 
     h_dye = arc_(t)
 
@@ -823,9 +931,10 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
         # defensible weight ladder available, and it is coarser on purpose.
         rungsL = sorted(swatch(n)[0] for n in
                         ("Dark aubergine", "Mid aubergine", "Light aubergine"))
-        base_L = rungsL[(weight % WEIGHTS) % len(rungsL)] + 8.0
+        base_L = rungsL[int(weight % WEIGHTS) % len(rungsL)] + 8.0
     else:
-        base_L = 23.0 + 7.0 * (weight % WEIGHTS) / (WEIGHTS - 1.0)
+        base_L = (LADDER_FLOOR
+                  + LADDER_SPAN * (weight % WEIGHTS) / (WEIGHTS - 1.0))
 
     def col(L, h, frac):
         # Chroma as a fraction of what the hue can carry at that lightness,
@@ -878,26 +987,16 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
     # Measured by rendering four slots and taking the chroma-weighted circular
     # mean hue of each, which is the only way to see both halves of the trade at
     # once; optimising either alone walks straight past it.
-    tints = (
-        # (drift along the arc, chroma fraction, opacity)
-        (-0.152, 0.98, 0.85),
-        (+0.104, 0.98, 0.85),
-        (+0.264, 0.92, 0.81),
-        (-0.056, 0.90, 0.44),
-        (+0.184, 0.95, 0.42),
-    )[:max(2, min(5, int(tw["regions"])))]
-    shades = (
-        # (lightness as a fraction toward the ceiling, or negative toward black)
-        (-0.42, 0.62),
-        (+0.92, 0.58),
-    )
+    tints = TINTS[:max(2, min(5, int(tw["regions"])))]
+    shades = SHADES
 
     regions = []
     hottest = base_L
     n = 0
 
-    def add(colour, L, opacity, contrast=None, centre=0.40):
+    def add(colour, L, opacity, contrast=None, centre=None):
         contrast = tw["tint_contrast"] if contrast is None else contrast
+        centre = TINT_CENTRE if centre is None else centre
         nonlocal n, hottest
         hottest = max(hottest, L)
         # VERY LOW FREQUENCY, ONE OCTAVE. Two to four features across the
@@ -922,8 +1021,9 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
         n += 1
 
     for dr, cf, op in tints:
-        h = arc_(t + dr * tw["drift"])
-        add(col(base_L, h, cf), base_L, op)          # ISO-LIGHTNESS, by design
+        h = accent(t + dr * tw["drift"])
+        add(col(base_L, h, min(1.0, cf * TINT_CHROMA)), base_L,
+            op)                                      # ISO-LIGHTNESS, by design
     for dL, op in shades:
         L = base_L + (top - base_L) * dL if dL > 0 else base_L * (1.0 + dL)
         L = max(4.0, min(top, L))
@@ -951,7 +1051,7 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
             add(lch_to_hex(L, min(6.0, max_chroma(L, wg[2])), wg[2]), L,
                 op * tw["shade_a"], contrast=3.0, centre=0.46)
             continue
-        add(col(L, h_dye, 0.38), L, op * tw["shade_a"],
+        add(col(L, h_dye, SHADE_CHROMA), L, op * tw["shade_a"],
             contrast=3.0, centre=0.46)                  # ISO-HUE
 
     # TWO TEXTURES, NOT ONE, and he named the distinction himself: "we might
@@ -972,7 +1072,7 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
              (seed >> 47) % 65536, 2, 2.30, 0.50, 0.22 * tw["micro_a"])
 
     return {
-        "base": col(base_L, h_dye, 0.82),
+        "base": col(base_L, h_dye, BASE_CHROMA),
         "regions": regions,
         "grain": grain,
         "micro": micro,
@@ -983,8 +1083,10 @@ def spec_for(rung, weight, seed, top=None, tweak=None):
         "sweep_a": 0.55 * tw["sweep_a"],
         "sweep_vec": ((seed >> 3) % 2, (seed >> 5) % 2,
                       1 - (seed >> 3) % 2, 1 - (seed >> 5) % 2),
-        "sweep_colours": (col(min(top, base_L + 11.0), arc_(t + 0.20), 0.85),
-                          col(base_L, arc_(t - 0.22), 0.85)),
+        "sweep_colours": (
+            col(min(top, base_L + 11.0),
+                arc_(1.0 if SWEEP_ENDS else t + SWEEP_DRIFT[0]), 0.85),
+            col(base_L, arc_(0.0 if SWEEP_ENDS else t + SWEEP_DRIFT[1]), 0.85)),
         "variant": tw["variant"],
         # The brightest lightness this field ACTUALLY uses, not the ceiling it
         # was allowed. A guard pointed at the limit rather than at the value can
@@ -1112,8 +1214,9 @@ def cmd_check(args):
     # It asserts on the SPEC and not on the pixels, so it runs with no rendering
     # library, which is why the package can carry it. The rendered version lives
     # in private/redarm-background-band.py.
-    lo_h, hi_h = ARC_LO % 360.0, ARC_HI % 360.0
-    span = ARC_HI - ARC_LO
+    arc_lo, arc_hi = arc_ends()
+    lo_h, hi_h = arc_lo % 360.0, arc_hi % 360.0
+    span = arc_hi - arc_lo
 
     def along(h):
         """How far along the arc a hue sits, SIGNED, in degrees.
@@ -1144,7 +1247,9 @@ def cmd_check(args):
     # colour above L* 38" when no slot did. A guard reporting a failure that is
     # really its own bookkeeping is worse than one that stays quiet.
     wrapped = []
-    widest = (0.264 + 0.152) * span * 1.35 + 4.0
+    drifts = [d for d, _c, _o in TINTS]
+    widest = ((max(drifts) - min(drifts)) * DRIFT * span * 1.35 + 4.0
+              + 2.0 * ACCENT_OVERSHOOT)
     for rung in range(RUNGS):
         sp2 = spec_for(rung, 0, 0x5eed5eed, top=top)
         hs = [along(hex_to_lch(c)[2]) for c, *_ in sp2["regions"]]

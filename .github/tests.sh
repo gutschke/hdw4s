@@ -1482,6 +1482,44 @@ PY
   has 'and wrote nothing, outside or staged'   "${out}" 'escaped=False stage2=False'
 )
 
+echo '== the background generator reads its knobs when it draws, not when it loads =='
+# THE DEFECT: the arc's ends were derived from COOL_EXTENSION and WARM_EXTENSION
+# once, at import, so a rating sheet that assigned an extension afterwards
+# showed the shipped arc under another sheet's name, and nothing said so.
+( set +e
+  out="$(python3 - "${ROOT}/hdw4s-background" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys
+l = importlib.machinery.SourceFileLoader("g", sys.argv[1])
+s = importlib.util.spec_from_loader("g", l); g = importlib.util.module_from_spec(s)
+l.exec_module(g)
+tok = b"tests-sh-token"
+dye = lambda: g.choose("hdw4s-ephemeral1", tok, "ephemeral")["base"]
+before = dye()
+g.COOL_EXTENSION = 80.0
+print("extension=%s" % ("moved" if dye() != before else "ignored"))
+g.COOL_EXTENSION = 34.9
+print("restored=%s" % (dye() == before))
+g.LADDER_FLOOR = 40.0
+print("ladder=%s" % ("moved" if dye() != before else "ignored"))
+g.LADDER_FLOOR = 23.0
+dyes = lambda: len({g.choose("hdw4s-ephemeral1", b"t%d" % i, "ephemeral")["base"]
+                    for i in range(60)})
+print("rungs_distinct_le_40=%s" % (dyes() <= g.RUNGS * g.WEIGHTS))
+g.HUE_DRAW = g.WEIGHT_DRAW = "continuous"
+print("continuous_distinct_gt_40=%s" % (dyes() > g.RUNGS * g.WEIGHTS))
+PY
+)"
+  has 'an arc extension assigned after loading moves the dye' "${out}" 'extension=moved'
+  has 'and putting it back puts the dye back'                 "${out}" 'restored=True'
+  has 'the lightness ladder is read at call time too'         "${out}" 'ladder=moved'
+  has 'the stepped draw has at most rungs x weights dyes'     "${out}" 'rungs_distinct_le_40=True'
+  has 'the continuous draw is not stepped'                    "${out}" 'continuous_distinct_gt_40=True'
+  "${ROOT}/hdw4s-background" check >/dev/null 2>&1
+  is 'the shipped field passes its own ceiling check' "$?" '0'
+  "${ROOT}/hdw4s-background" check --top-lightness 45 >/dev/null 2>&1
+  is 'and a field allowed above it is refused'        "$?" '1'
+)
+
 echo '== the updater checks what it downloaded =='
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
   eval "$(sed -n '/^verify_sha256() {/,/^}/p;/^asset_digest() {/,/^}/p' \
@@ -4980,7 +5018,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=855   # update when tests are added; a wrong number is the point
+EXPECTED=862   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
