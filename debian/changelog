@@ -1,3 +1,11 @@
+hdw4s (2.4.7) unstable; urgency=medium
+
+  * Visitor desktop backgrounds are livelier at full screen: smaller and
+    stronger lighter and darker sections, more saturated colour, and the two
+    colours of each picture further apart.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Thu, 01 Oct 2026 11:15:00 -0700
+
 hdw4s (2.4.6) unstable; urgency=medium
 
   * Visitor desktops get more visibly different backgrounds: each one draws
