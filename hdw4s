@@ -110,6 +110,10 @@ DROPIN='/etc/systemd/system'
 # hardcoded, it made every behaviour of cmd_reap untestable, which is why a
 # message that was wrong for half the session types survived unnoticed.
 REAPDIR="${HDW4S_REAP_STAMP_DIR:-/run/hdw4s-reap}"
+# How long a pool desktop may run with nobody ever having opened it (cmd_reap).
+# Not a setting: such a desktop holds nothing, so there is no trade-off to
+# tune. The sweep runs every five minutes, so it goes within ten.
+NEVER_ATTACHED_SECONDS=300
 # The router's own runtime directory, where it records the last request it
 # ACCEPTED for each slot. The reaper reads that record and never writes it.
 #
@@ -2785,8 +2789,10 @@ reap_say() {
 # cannot also speak.
 RLAST=''
 RLAST_WHY=''
+# A third argument reads another of the router's per-slot records instead:
+# "last-attach", when the slot's stream was last opened. Same checks.
 router_last_request() {
-  local inst="${1}" path="${POOLDIR}/last-request/${1}" raw=''
+  local inst="${1}" path="${POOLDIR}/${3:-last-request}/${1}" raw=''
   RLAST=''; RLAST_WHY=''
   # -L before -r: a symlink that resolves to a readable file passes -r.
   if [ -L "${path}" ]; then
@@ -2881,7 +2887,7 @@ clients_of() {
 # browser client reconnects by itself, so an open tab counts as connected even
 # across a laptop lid being shut.
 cmd_reap() {
-  local idx inst stype established last now age raw window stopped=0
+  local idx inst stype established last now age raw window started stopped=0
   now="$(date +%s)"
   [ -r "${SLOTS}" ] || return 0
 
@@ -2967,10 +2973,58 @@ cmd_reap() {
       install -d -m0700 -o root -g root "${stampdir}" 2>/dev/null || :
     [ -d "${RUNDIR}/hdw4s/${inst}" ] || continue
     local stamp="${stampdir}/${inst}"
+    # A POOL DESKTOP NOBODY EVER OPENED IS DISCARDED AFTER FIVE MINUTES, not
+    # after the idle window. Minting one costs a single cookieless GET, and a
+    # visitor who closes the tab while it starts, or anything that fetches the
+    # front door and stops there, used to hold a seat for the whole window
+    # (seven days by default) -- the real slot leak. Such a desktop holds no
+    # state by construction, so stopping it loses nothing a fresh mint would
+    # not give back.
+    #
+    # "Opened" means the STREAM was opened, not that a request was forwarded:
+    # the router forwards a held page request once the desktop answers whether
+    # or not the browser that asked is still there, so a tab closed during
+    # startup still leaves a last-request record (measured). The witnesses are
+    # the router's last-attach record (a WebSocket upgrade the desktop accepted)
+    # and a connection a sample saw (the ".attached" marker below).
+    #
+    # Both are judged against THIS desktop's start, because a seat's records
+    # survive from its previous visitor. The start is when the unit left
+    # "inactive", not when it became active: the router can reach a desktop's
+    # socket a second before the unit reports active (measured), and everything
+    # a previous occupant did happened before this unit started at all.
+    # An attach record that is present but unusable is no opinion, and so is a
+    # start that cannot be read; the idle window decides as before.
+    started=''
+    if in_ephemeral_pool "${stype}" && [ "${established}" != 'unknown' ]; then
+      started="$(systemctl show --timestamp=unix -P InactiveExitTimestamp \
+                   "$(unit_of "${inst}")" 2>/dev/null)" || started=''
+      started="${started#@}"
+      case "${started}" in ''|*[!0-9]*) started='';; esac
+    fi
+    if [ -n "${started}" ] && [ "${established}" -eq 0 ] &&
+       [ $(( now - started )) -ge "${NEVER_ATTACHED_SECONDS}" ] &&
+       [ "$(cat "${stamp}.attached" 2>/dev/null)" != "${started}" ]; then
+      if router_last_request "${inst}" "${now}" last-attach; then
+        [ "${RLAST}" -lt "${started}" ] || started=''
+      elif [ -n "${RLAST_WHY}" ]; then
+        started=''
+      fi
+      if [ -n "${started}" ]; then
+        reap_say "hdw4s: stopping ${inst}; nobody has opened it in the $(duration_words $(( now - started ))) since it started."
+        reap_say '  It held nothing, and the seat is free for a new session.'
+        systemctl stop "hdw4s-proxy@${inst}.service" 2>/dev/null || :
+        systemctl stop "$(unit_of "${inst}")" 2>/dev/null || :
+        stopped=$(( stopped + 1 ))
+        continue
+      fi
+    fi
     # "unknown" first: it is not a number, and treating it as one would be an
     # arithmetic error rather than the cautious answer it is meant to be.
     if [ "${established}" = 'unknown' ] || [ "${established}" -gt 0 ]; then
       printf '%s\n' "${now}" > "${stamp}" 2>/dev/null || :
+      [ -z "${started}" ] ||
+        printf '%s\n' "${started}" > "${stamp}.attached" 2>/dev/null || :
       continue
     fi
     if [ -r "${stamp}" ]; then

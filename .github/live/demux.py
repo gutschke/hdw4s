@@ -4261,6 +4261,39 @@ def open_stream(rig, client, sid):
     return s
 
 
+def test_only_an_opened_stream_records_an_attach(rig):
+    """The reaper discards a pool desktop nobody opened within five minutes,
+    and its witness is last-attach/<slot>. A page request must NOT write it:
+    the router forwards a held page request once the desktop answers whether
+    or not the browser is still there (measured on a development box), so a
+    request record cannot tell an opened desktop from an abandoned one. The
+    page arrival is the control; the stream is what writes the record."""
+    a = rig.client()
+    sid, visited = arrive_on_slot(rig, a)
+    page = os.path.join(rig.statedir, "last-request", visited)
+    path = os.path.join(rig.statedir, "last-attach", visited)
+    for _ in range(50):
+        if os.path.exists(page):
+            break
+        time.sleep(0.05)
+    assert os.path.exists(page), "the control failed: no request record"
+    assert not os.path.exists(path), \
+        "a page request wrote the attach record for %s" % visited
+    ws = open_stream(rig, a, sid)
+    try:
+        for _ in range(50):
+            if os.path.exists(path):
+                break
+            time.sleep(0.05)
+        assert os.path.exists(path), \
+            "an opened stream wrote no attach record for %s" % visited
+        with open(path) as f:
+            assert abs(int(f.read()) - time.time()) < 60, \
+                "the attach record is not the time of the upgrade"
+    finally:
+        ws.close()
+
+
 def stream_until_dropped(rig, client, sid, slot, drop):
     """Open the tab's stream, let DROP end it from the desktop's side, and
     return once the TAB has seen it end -- the moment its client reconnects."""
@@ -6550,6 +6583,7 @@ def main():
              test_cookie_slides_beyond_the_front_door,
              test_refusal_is_logged_with_what_it_takes_to_judge_it,
              test_last_request_record_is_written_where_the_connection_is_accepted,
+             test_only_an_opened_stream_records_an_attach,
              test_a_refused_session_is_logged_once,
              test_a_session_cannot_set_our_cookie,
              test_cookie_lifetime_guard, test_refresh_rate_limit,

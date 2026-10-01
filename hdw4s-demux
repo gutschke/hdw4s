@@ -1938,23 +1938,35 @@ def socket_path(instance):
 # them is the measurement that says the poll is missing connections.
 
 TOUCH_DIR = os.path.join(STATE_DIR, "last-request")
+# When a slot last had its stream opened: a WebSocket upgrade the desktop
+# accepted. The reaper's witness that somebody ever OPENED a pool desktop. Not
+# the last-request record: the router forwards a held page request once the
+# desktop answers whether or not the browser that asked is still there, so a
+# tab closed while its desktop started still reads as a request.
+ATTACH_DIR = os.path.join(STATE_DIR, "last-attach")
 _touched = {}
 _touch_lock = threading.Lock()
 
 
-def touch_slot(instance, now=None):
-    """Record that a request reached this slot. Rate limited, never required."""
+def touch_slot(instance, now=None, where=None):
+    """Record that a request reached this slot. Rate limited, never required.
+
+    With where=ATTACH_DIR, that its stream was opened: not rate limited, since
+    an upgrade happens once per connection and the first one is the one that
+    matters."""
     now = time.time() if now is None else now
-    with _touch_lock:
-        if now - _touched.get(instance, 0.0) < TOUCH_EVERY:
-            return
-        _touched[instance] = now
+    if where is None:
+        where = TOUCH_DIR
+        with _touch_lock:
+            if now - _touched.get(instance, 0.0) < TOUCH_EVERY:
+                return
+            _touched[instance] = now
     try:
-        os.makedirs(TOUCH_DIR, mode=0o700, exist_ok=True)
-        tmp = os.path.join(TOUCH_DIR, ".%s.new" % instance)
+        os.makedirs(where, mode=0o700, exist_ok=True)
+        tmp = os.path.join(where, ".%s.new" % instance)
         with open(tmp, "w") as f:
             f.write("%d\n" % int(now))
-        os.replace(tmp, os.path.join(TOUCH_DIR, instance))
+        os.replace(tmp, os.path.join(where, instance))
     except OSError:
         # Bookkeeping, not routing. A failure here must never cost a visitor a
         # request; it costs the refusal log one column, which says so itself.
@@ -6348,6 +6360,7 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         # after a 101 the connection belongs to that WebSocket and carries no
         # further requests to route. What follows is WebSocket frames, which a
         # browser reads as frames and never as a head.
+        touch_slot(instance, where=ATTACH_DIR)
         pending = buffered_now(upf, up)
         if pending:
             wf.write(upf.read(len(pending)))

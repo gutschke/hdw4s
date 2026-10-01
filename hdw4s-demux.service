@@ -55,7 +55,7 @@ RuntimeDirectoryMode=0700
 # WITHOUT THIS, EVERYTHING THIS DIRECTORY HOLDS IS DELETED AT THE MOMENT IT IS
 # NEEDED, and the default is the deleting one. RuntimeDirectory= removes the
 # tree when the unit stops unless told otherwise, and a restart is a stop --
-# so the three things kept here are all erased by the event they exist for:
+# so the four things kept here are all erased by the event they exist for:
 #
 #   ownership.json       which browser owns which desktop. Lost, every visitor
 #                        is cut off from a desktop that goes on running, and it
@@ -70,6 +70,10 @@ RuntimeDirectoryMode=0700
 #                        arms were already failing on exactly this before this
 #                        line was added; they named the cause and the cause was
 #                        this default.
+#   last-attach/<slot>   when the slot's stream was last opened. The reaper's
+#                        witness that somebody ever opened a pool desktop; lost,
+#                        a desktop opened before the restart and idle at the
+#                        next sweep is taken for one nobody opened and stopped.
 #   reserved/<slot>      a mint held while its session starts. SURVIVING THE
 #                        ROUTER'S DEATH IS THE ENTIRE PURPOSE of that file: it
 #                        exists so a crash inside the grace window cannot hand a

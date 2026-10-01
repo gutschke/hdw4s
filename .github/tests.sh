@@ -2719,6 +2719,93 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
   hasnt 'and nothing of what it pointed at is printed' "${out}" 'verysecret'
 )
 
+echo '== a pool desktop nobody opened is discarded after five minutes =='
+# Minting costs one cookieless GET, so a tab closed during startup -- or a fetch
+# of the front door that stops there -- used to hold a seat for the whole idle
+# window. Both witnesses are judged against THIS desktop's start, because a
+# seat's records survive from its previous visitor; the arms that use a record
+# from before the start are the ones that pin that down.
+( set +e; sandbox; . "${SB}/setup.sh"
+  unset JOURNAL_STREAM
+  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
+  POOLDIR="${SB}/run/hdw4s-demux"
+  printf '%s\n' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
+  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_0" "${REAPDIR}" "${POOLDIR}/last-request" \
+           "${POOLDIR}/last-attach"
+  now="$(date +%s)"
+  START="$(( now - 600 ))"
+  CLIENTS=0
+  clients_of() { echo "${CLIENTS}"; }
+  STOPPED="${SB}/stopped"
+  systemctl() {
+    case "$1 ${3:-}" in
+      'is-active ') echo 'active';;
+      'show -P')    echo "@${START}";;
+      'stop '*)     printf '%s\n' "$2" >> "${STOPPED}";;
+    esac
+  }
+  printf 'HDW4S_IDLE_DAYS=7d\n' > "${SB}/etc/_hdw4s_0.conf"
+  rstamp="${POOLDIR}/last-attach/_hdw4s_0"
+  lastreq="${POOLDIR}/last-request/_hdw4s_0"
+  marker="${REAPDIR}/_hdw4s_0.attached"
+  fresh() { : > "${STOPPED}"; rm -f "${rstamp}" "${lastreq}" "${marker}"
+            printf '%s\n' "$(( now - 60 ))" > "${REAPDIR}/_hdw4s_0"; }
+
+  # POSITIVE CONTROL: a fresh idle stamp, so the seven-day window alone would
+  # keep it; only the new rule can stop it.
+  fresh
+  out="$(cmd_reap 2>/dev/null)"
+  has 'a desktop nobody opened in ten minutes is stopped' "${out}" 'nobody has opened it'
+  is  'its proxy and its desktop both' "$(wc -l < "${STOPPED}")" '2'
+
+  fresh; printf '%s\n' "$(( START + 30 ))" > "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'a stream the router saw opened since the start keeps it' "${out}" 'stopping'
+
+  # MEASURED on a development box: a tab given up during startup still leaves a request
+  # record, because the router forwards the held request once the desktop
+  # answers. A forwarded request is not an opened desktop.
+  fresh; printf '%s\n' "$(( START + 30 ))" > "${lastreq}"
+  out="$(cmd_reap 2>/dev/null)"
+  has 'a forwarded page request alone does not' "${out}" 'nobody has opened it'
+
+  fresh; printf '%s\n' "$(( START - 30 ))" > "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  has 'the previous visitor'"'"'s stream does not' "${out}" 'nobody has opened it'
+
+  fresh; printf '%s\n' "${START}" > "${marker}"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'a connection a sample saw in this start keeps it' "${out}" 'stopping'
+
+  fresh; printf '%s\n' "$(( START - 9999 ))" > "${marker}"
+  out="$(cmd_reap 2>/dev/null)"
+  has 'one seen in an earlier start does not' "${out}" 'nobody has opened it'
+
+  fresh; printf 'yesterday\n' > "${rstamp}"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'an unusable attach record is no opinion' "${out}" 'nobody has opened it'
+
+  fresh; CLIENTS=1
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'a connected desktop is left alone' "${out}" 'stopping'
+  is    'and the sample records the start it was seen in' "$(cat "${marker}" 2>/dev/null)" "${START}"
+  CLIENTS=0
+
+  fresh; START="$(( now - 120 ))"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'a desktop up for two minutes is left alone' "${out}" 'stopping'
+  START="$(( now - 600 ))"
+
+  fresh; START=''
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'an unknown start is no opinion' "${out}" 'stopping'
+  START="$(( now - 600 ))"
+
+  fresh; printf '%s\n' '1 _hdw4s_0 template' > "${SLOTS}"
+  out="$(cmd_reap 2>/dev/null)"
+  hasnt 'the template editor is not pool capacity' "${out}" 'nobody has opened it'
+)
+
 echo '== the arrival and sharing arms are chosen at generation, and a bad one is refused =='
 # Written from the failure: a QA matrix once tested one transport twice because a
 # mis-set knob was silently ignored, so the generator must REFUSE a value it does not
@@ -5060,7 +5147,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=869   # update when tests are added; a wrong number is the point
+EXPECTED=882   # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
