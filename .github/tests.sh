@@ -7558,6 +7558,12 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   export HDW4S_ETCDIR HDW4S_RUNDIR="${RUNDIR}" HDW4S_INCARNATION_DIR HDW4S_WEBROOT_DIR
   # shellcheck source=/dev/null
   . "${SB}/lib.sh" 2>/dev/null || :
+  # The root namespace's /shared, which "hdw4s check" asks the minter about:
+  # the sandbox's, never the machine's (as sandbox() sets it). Without these,
+  # on a machine with /shared, check compared the real bind with a sandbox
+  # path and called it foreign (seen as root on a dev box, 2026-10-04).
+  export HDW4S_SHARED_MARK="${SB}/shared-mark" HDW4S_SHARED_MOUNTPOINT="${SB}/shared-point" \
+         HDW4S_SHARED_VIEW_STATE="${SB}/shared-view"
   trap - ERR
   trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
   SLOTS="${HDW4S_ETCDIR}/instances"; RUNDIR="${SB}/run"
@@ -8775,6 +8781,12 @@ echo '== hdw4s check sees a named desktop that will not start =='
   export HDW4S_LEDGER_DIR="${SB}/ledger"
   # shellcheck source=/dev/null
   . "${SB}/lib.sh" 2>/dev/null || :
+  # The root namespace's /shared, which "hdw4s check" asks the minter about:
+  # the sandbox's, never the machine's (as sandbox() sets it). Without these,
+  # on a machine with /shared, check compared the real bind with a sandbox
+  # path and called it foreign (seen as root on a dev box, 2026-10-04).
+  export HDW4S_SHARED_MARK="${SB}/shared-mark" HDW4S_SHARED_MOUNTPOINT="${SB}/shared-point" \
+         HDW4S_SHARED_VIEW_STATE="${SB}/shared-view"
   trap - ERR
   trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
   SLOTS="${HDW4S_ETCDIR}/instances"; RUNDIR="${SB}/run"
