@@ -8825,12 +8825,16 @@ echo '== an upgrade never stops the router, and restarts it only when the layout
   hasnt 'inside the window nothing restarts the router' "${win}" 'hdw4s-demux'
   has   'outside it, the router is restarted onto the new code' "${rest}" 'try-restart hdw4s-demux.service'
   is    'and nowhere else in postinst' "$(command grep -c 'hdw4s-demux.service' "${ROOT}/debian/postinst")" '1'
+  # Removal stops the router itself, not only its socket: the service holds the
+  # socket's descriptor and kept answering after the package was gone.
+  rm_blk="$(sed -n "/^if \[ \"\$1\" = 'remove' \]/,/^fi$/p" "${ROOT}/debian/prerm")"
+  has   'removal stops the router service itself' "${rm_blk}" 'systemctl stop hdw4s-demux.service'
 )
 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1686  # update when tests are added; a wrong number is the point
+EXPECTED=1687  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
