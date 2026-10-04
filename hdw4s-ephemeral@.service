@@ -97,24 +97,28 @@ UMask=0077
 # Both of these are namespace-local. The files below name the slot uid "user"
 # and nothing else; getent inside reads them, because nss falls back to `files`
 # for a uid these do carry.
-BindReadOnlyPaths=%t/hdw4s-ns/%i/passwd:/etc/passwd
-BindReadOnlyPaths=%t/hdw4s-ns/%i/group:/etc/group
+BindReadOnlyPaths=%t/hdw4s/ns/%i/passwd:/etc/passwd
+BindReadOnlyPaths=%t/hdw4s/ns/%i/group:/etc/group
 # nss-systemd reads these records directly, with no daemon to ask, so the bound
 # passwd above does not hide them: without this, `getent passwd ephemeral0`
 # answers from inside. Measured 2026-09-16.
 InaccessiblePaths=%t/userdb
 # The names of everyone else with a desktop on this machine. ProtectSystem=strict
 # makes the filesystem read-only, not invisible, so without this a session can
-# list /etc/hdw4s, /var/lib/hdw4s and /run/hdw4s-proxy and read off every real
+# list /etc/hdw4s, /var/lib/hdw4s and /run/hdw4s/proxy and read off every real
 # account by file name -- the same names this unit goes to the trouble of
 # stripping out of the passwd and group files it binds over. Contents were never
 # reachable (another profile is 0700 and owned by its user); the names were.
 #
-# /run/hdw4s is NOT in this list and cannot be: it is the parent of this unit's
-# own RuntimeDirectory, and covering it makes the session's own runtime directory
-# inaccessible -- measured. Closing that one means moving XDG_RUNTIME_DIR out of
-# the shared parent, which is where "hdw4s list" reads a session's display from.
-# %t/hdw4s-incarnation is deliberately NOT in this list, though it was until the
+# /run/hdw4s and /run/hdw4s/session are NOT in this list and cannot be: they hold
+# this unit's own RuntimeDirectory, and covering a parent of it makes the
+# session's own runtime directory inaccessible -- measured. So the names in
+# /run/hdw4s/session -- the other desktops running -- stay listable here, as they
+# were before they had a directory of their own. Hiding them now takes an empty
+# tmpfs over that one directory with this session's own bound back, which is a
+# change of its own and not made here: "hdw4s list" reads a session's display
+# from it on the host, and nothing inside needs the others.
+# %t/hdw4s/incarnation is deliberately NOT in this list, though it was until the
 # measurement below. It is created "install -d -m0700" by root, and each record
 # inside it is 0600 root, so an occupant -- who is never root here -- can neither
 # list it nor read it: measured on a test container with a control, an unprivileged uid gets EACCES on
@@ -122,7 +126,7 @@ InaccessiblePaths=%t/userdb
 # added nothing that the mode did not already provide, and it cost the gate: it
 # applies to the namespace rather than to a uid, so the one command that has to
 # read that record was locked out by it too.
-InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s-proxy
+InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s/proxy
 # PRINTING GOES ONLY THROUGH SELKIES: its queue hands the document to the
 # visitor's own browser (hdw4s-run-session points CUPS_SERVER at it). The
 # machine's CUPS socket is hidden so an application cannot fall back to the
@@ -147,7 +151,7 @@ EnvironmentFile=-/etc/hdw4s/%i.conf
 # The same reasoning as the base unit: not /run/user/<uid>, which belongs to
 # logind and which this unit has no PAM session to claim. A directory of its own
 # costs nothing, and RuntimeDirectory= below makes systemd its owner.
-Environment=XDG_RUNTIME_DIR=%t/hdw4s/%i
+Environment=XDG_RUNTIME_DIR=%t/hdw4s/session/%i
 # The application wrappers go ahead of the real binaries; they are what redirects
 # programs that ignore the XDG variables.
 Environment=PATH=/usr/lib/hdw4s/wrappers:/usr/local/bin:/usr/bin:/bin
@@ -190,7 +194,7 @@ BindReadOnlyPaths=/etc/hdw4s/chrome-policies:/etc/opt/chrome/policies/managed
 # And StateDirectory= is deliberately absent, which is only safe BECAUSE of the
 # redirect above: removing the directive alone does not remove the directory,
 # since hdw4s-session creates the profile unconditionally.
-RuntimeDirectory=hdw4s/%i
+RuntimeDirectory=hdw4s/session/%i
 RuntimeDirectoryMode=0700
 
 # The profile is deliberately NOT under XDG_RUNTIME_DIR, though it was and the
@@ -409,7 +413,7 @@ KillMode=control-group
 # The gate, and the "!" is load-bearing rather than stylistic -- as is the fact
 # that it is "!" and NOT "+". It lived inside hdw4s-run-session until 2026-09-22
 # and was unsatisfiable the whole time, unnoticed because the incarnation layer
-# had never run anywhere: layer 4 reads /run/hdw4s-incarnation/%i, that record is
+# had never run anywhere: layer 4 reads /run/hdw4s/incarnation/%i, that record is
 # root-owned 0600 so the occupant cannot forge it, and User= above means every
 # unprivileged part of this unit runs AS the occupant.
 #
@@ -504,12 +508,16 @@ ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate %i
 # mount point there and the rebuild -- and the start -- would fail. A named desktop
 # publishes nothing and its page does not resize.
 ReadWritePaths=-/usr/share/hdw4s/webroot/%i/hdw4s-startup
-# The one place in /run this session may create anything, and only because the
-# directory beneath it is its own: ProtectSystem=strict makes the rest of /run
-# read-only here, and <instance> itself is root's and 0711, so this lifts the
-# read-only MOUNT and leaves the permissions to decide. No "-": hdw4s-stream@ has
-# made it by now, and a session that cannot listen should fail naming the path.
-ReadWritePaths=/run/hdw4s-stream/%i
+# /run IS NOT READ-ONLY HERE. ProtectSystem=strict leaves /run writable --
+# measured inside a running desktop of each kind, 2026-10-04: /run is a
+# read-write mount in the session's namespace -- so what keeps the occupant out
+# of root's entries under /run is their PERMISSIONS, not a mount. This line is a
+# no-op today, kept so that a later read-only /run (filed, not done) does not
+# take away the one directory this session must create in. It names the
+# session's stream directory, where <instance> is root's and 0711 and only "s"
+# beneath it is the session's own. No "-": hdw4s-stream@ has made it by now, and
+# a session that cannot listen should fail naming the path.
+ReadWritePaths=/run/hdw4s/stream/%i
 
 [Install]
 WantedBy=multi-user.target

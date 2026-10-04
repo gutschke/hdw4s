@@ -84,7 +84,7 @@ def tone(instance):
     """
     return subprocess.Popen(
         ["sudo", "-n", "-u", instance, "env",
-         "XDG_RUNTIME_DIR=/run/hdw4s/" + instance,
+         "XDG_RUNTIME_DIR=/run/hdw4s/session/" + instance,
          "speaker-test", "-t", "sine", "-f", "440", "-l", "4"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

@@ -92,15 +92,17 @@ CURRENT = os.path.join(ROOT, "current")
 # parent is root's and 0711 (entered by name, never listed); the slot's own
 # directory is its uid's and 0700. The authoring session uses it AS its profile
 # root, by the drop-in hdw4s-ephemeral-slots writes for the template row.
-AUTHOR_ROOT = conf("HDW4S_AUTHOR_DIR", "/run/hdw4s-author")
-INVITE_DIR = conf("HDW4S_INVITE_DIR", "/run/hdw4s-invite")
+# Every runtime path of the package is under one directory, derived from here.
+RUN_DIR = os.environ.get("HDW4S_RUNDIR", "/run/hdw4s")
+AUTHOR_ROOT = conf("HDW4S_AUTHOR_DIR", os.path.join(RUN_DIR, "author"))
+INVITE_DIR = conf("HDW4S_INVITE_DIR", os.path.join(RUN_DIR, "invite"))
 # Where the router records that an invite was used. Read only.
-SPENT_DIR = "/run/hdw4s-demux/spent-invites"
+SPENT_DIR = os.path.join(RUN_DIR, "demux", "spent-invites")
 DCONF_DIR = "/etc/dconf/db/hdw4s-template.d"
 KEYFILE = "50-template"
-LOCK = "/run/hdw4s-template.lock"
+LOCK = os.path.join(RUN_DIR, "template.lock")
 INVITE_SECONDS = 300
-PROFILE_ROOT = "/run/hdw4s-profile"
+PROFILE_ROOT = os.path.join(RUN_DIR, "profile")
 
 KEEP_LIST = os.path.join(ETC, "template-keep")
 
@@ -240,7 +242,7 @@ def template_rows():
 
 # Where hdw4s-ephemeral-slots writes each minted slot's own passwd view: the
 # evidence that a name is a slot IT made, and not merely a name that resolves.
-NS_DIR = os.environ.get("HDW4S_NS_DIR", "/run/hdw4s-ns")
+NS_DIR = os.environ.get("HDW4S_NS_DIR", os.path.join(RUN_DIR, "ns"))
 
 
 def pick_instance():
@@ -1131,7 +1133,7 @@ def install_keyfile(src):
             "settings yet: %s" % r.stderr.strip())
 
 
-FRONT_DOORS = "/run/hdw4s-demux/front-doors"
+FRONT_DOORS = os.path.join(RUN_DIR, "demux", "front-doors")
 
 
 def front_door():

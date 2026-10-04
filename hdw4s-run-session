@@ -815,7 +815,7 @@ if [ "${HDW4S_DEBUG_DESKTOP}" = 'on' ]; then
   # this project keeps being bitten by -- an empty file reads as "nothing was
   # sent", which is the opposite of "nobody was listening" -- so the absence is
   # written INTO the file it would have written.
-  debug_dir="/run/hdw4s/${instance}"
+  debug_dir="/run/hdw4s/session/${instance}"
   if [ -d "${debug_dir}" ]; then
     if command -v dbus-monitor >/dev/null 2>&1; then
       {
@@ -1463,7 +1463,7 @@ webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${instance}"
 # layer had never actually run on any machine until 2026-09-22.
 #
 # Layer 4 asserts that hdw4s-incarnation published an identity for THIS start,
-# by reading /run/hdw4s-incarnation/<instance>. That record is root-owned and
+# by reading /run/hdw4s/incarnation/<instance>. That record is root-owned and
 # mode 0600 on purpose: the occupant must not be able to forge it. But this
 # script is the session, and the unit sets User=%i, so everything here runs AS
 # the occupant -- which cannot read it. Measured, with a control: as the slot

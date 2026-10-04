@@ -16,7 +16,7 @@ ExecStart=/usr/lib/hdw4s/hdw4s-shared-expose
 # NO SANDBOXING THAT MAKES A MOUNT NAMESPACE -- no ProtectSystem=, PrivateTmp=,
 # ProtectHome=, ReadWritePaths= or anything else of the kind -- and that is the
 # unit's whole point rather than an omission. The table is bound onto
-# /run/hdw4s-shared in the HOST's namespace, from where it propagates into every
+# /run/hdw4s/shared in the HOST's namespace, from where it propagates into every
 # desktop. Done from a private namespace, the bind would succeed, the guard run
 # beside it would accept it, and no desktop would ever see it.
 #

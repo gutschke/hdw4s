@@ -12,7 +12,7 @@ Requires=hdw4s-ephemeral-slots.service
 # teardown request: the router can create a file in one directory (0770, group
 # www-data) and the only thing it can say by doing so is "this slot". Everything
 # privileged happens on this side, keyed by %i.
-PathExists=/run/hdw4s-start/%i
+PathExists=/run/hdw4s/start/%i
 Unit=hdw4s-start@%i.service
 
 [Install]

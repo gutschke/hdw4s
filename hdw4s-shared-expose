@@ -12,13 +12,13 @@
 #
 # THE LAYOUT, which is the design's and is only carried out here:
 #
-#   /run/hdw4s-shared        a plain directory tmpfiles makes at every boot;
-#                            every desktop has BindPaths=/run/hdw4s-shared:/shared
+#   /run/hdw4s/shared        a plain directory tmpfiles makes at every boot;
+#                            every desktop has BindPaths=/run/hdw4s/shared:/shared
 #   the store                tmpfs:  a tmpfs this script mounts at
-#                                    /run/hdw4s-shared-store, with the flags
+#                                    /run/hdw4s/shared-store, with the flags
 #                            source: HDW4S_SHARED_SOURCE, mounted (and in a
 #                                    container bound in) by whoever provides it
-#   the exposure             <store>/table bound ONTO /run/hdw4s-shared;
+#   the exposure             <store>/table bound ONTO /run/hdw4s/shared;
 #                            a bind keeps the source mount's flags
 #
 # A desktop started before the bind sees an empty, root-owned /shared it cannot
@@ -47,8 +47,9 @@ trap 'rc="$?"
       exit "${rc}"' INT TERM QUIT HUP EXIT ERR
 
 ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
-EXPOSE="${HDW4S_SHARED_EXPOSE:-/run/hdw4s-shared}"
-TMPFS_STORE="${HDW4S_SHARED_STORE:-/run/hdw4s-shared-store}"
+RUNDIR="${HDW4S_RUNDIR:-/run/hdw4s}"  # every runtime path of the package is under it
+EXPOSE="${HDW4S_SHARED_EXPOSE:-${RUNDIR}/shared}"
+TMPFS_STORE="${HDW4S_SHARED_STORE:-${RUNDIR}/shared-store}"
 # The literal is what install.sh rewrites when the package is put elsewhere.
 GUARD_TOOL="${HDW4S_SHARED_TOOL:-/usr/lib/hdw4s/hdw4s-shared-sweep}"
 # How long the guard may take. It opens and stats the store, which on a dead
@@ -68,7 +69,7 @@ FLAGS='nosymfollow,nodev,noexec,nosuid'
 MOUNTINFO="${HDW4S_MOUNTINFO:-/proc/self/mountinfo}"
 # The identity of every mount this script has made, by mount id, so that it
 # only ever unmounts one of those. /run: gone at a reboot, with the mounts.
-STATE="${HDW4S_SHARED_STATE:-/run/hdw4s-shared-expose}"
+STATE="${HDW4S_SHARED_STATE:-${RUNDIR}/shared-expose}"
 # shellcheck source=/dev/null
 [ ! -r "${ETCDIR}/hdw4s.conf" ] || . "${ETCDIR}/hdw4s.conf"
 
@@ -148,7 +149,7 @@ is_ours() {
   # A local one records it in the ROOT field: a bind of <store>/table has root
   # /table. NFS records the root as "/" and puts the path in the SOURCE:
   # "server:/export/table". Measured on a container whose store is an NFSv4
-  # mount bound in: the exposure read "0:251 / /run/hdw4s-shared ... nfs4" with
+  # mount bound in: the exposure read "0:251 / /run/hdw4s/shared ... nfs4" with
   # source "...:/export/shared/table", and a rule that wanted root /table refused
   # this service's own bind. So for NFS the table is identified by its source
   # (the store's source plus /table) with root "/"; for anything else by root.
@@ -404,7 +405,7 @@ tmpfs_store() {
     # PRIVATE, so that the exposure bound from it is not its mount peer: /run
     # is shared, a tmpfs mounted under it joins that, and the bind of its table
     # would then share a peer group with it -- anything mounted on
-    # /run/hdw4s-shared would appear on the table the sweep walks (measured, in
+    # /run/hdw4s/shared would appear on the table the sweep walks (measured, in
     # a user namespace). Propagation INTO desktops follows the exposure's
     # parent, /run, not the store, so it should be unaffected; T2 on a real box
     # decides, and this is its own commit so that it can be reverted alone.
@@ -523,7 +524,7 @@ else
   refuse "${store} is not an acceptable store: ${why:-the guard did not answer}"
 fi
 
-# 3. IS IT ALREADY EXPOSED, AND STILL ACCEPTABLE? Form (i): /run/hdw4s-shared is
+# 3. IS IT ALREADY EXPOSED, AND STILL ACCEPTABLE? Form (i): /run/hdw4s/shared is
 #    a bind of the table (root /table, or on NFS the store's source plus
 #    /table), with the flags -- and it is the mount this service made. Nothing
 #    to do.

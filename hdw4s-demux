@@ -3,7 +3,7 @@
 
 This is the component the reverse proxy talks to. It is the only thing on the
 box listening on TCP, and it is the only leg where a credential does any work:
-below it every session is reached through /run/hdw4s-proxy/<instance>.sock,
+below it every session is reached through /run/hdw4s/proxy/<instance>.sock,
 where who may connect is already decided by the socket's mode and its
 directory's permissions, before any HTTP exchange happens.
 
@@ -62,7 +62,7 @@ Whether a slot is in use and whose it is are two facts with two owners and two
 acceptable losses. Losing "whose" sends a returning visitor to the gate, which
 is the arrival rule's designed damage and is honest. Losing "in use" hands a
 second person a desktop the first is sitting in, and must never happen -- so the
-half that must not be lost is the half we do not own: /run/hdw4s/<instance>,
+half that must not be lost is the half we do not own: /run/hdw4s/session/<instance>,
 the session unit's own runtime directory, which exists exactly while a desktop
 does and which no restart of ours can forget.
 
@@ -97,11 +97,17 @@ import urllib.parse
 
 NAME = "hdw4s-demux"
 
-PROXY_RUNDIR = os.environ.get("HDW4S_PROXY_RUNDIR", "/run/hdw4s-proxy")
+# EVERY RUNTIME PATH OF THE PACKAGE IS UNDER ONE DIRECTORY, and every path below
+# is derived from it. HDW4S_RUNDIR is the spelling the CLI reads too: one name
+# for one path. Each session's own directory is "session/<instance>" beneath it
+# and everything else is a sibling of "session" -- not of the sessions, whose
+# names are account names and could otherwise collide with ours.
+RUN_DIR = os.environ.get("HDW4S_RUNDIR", "/run/hdw4s")
+PROXY_RUNDIR = os.environ.get("HDW4S_PROXY_RUNDIR", os.path.join(RUN_DIR, "proxy"))
 # Where each session's streaming server listens, one directory per instance;
 # see stream_socket_path() and hdw4s-stream-dir.
-STREAM_DIR = os.environ.get("HDW4S_STREAM_DIR", "/run/hdw4s-stream")
-STATE_DIR = os.environ.get("HDW4S_DEMUX_STATE", "/run/hdw4s-demux")
+STREAM_DIR = os.environ.get("HDW4S_STREAM_DIR", os.path.join(RUN_DIR, "stream"))
+STATE_DIR = os.environ.get("HDW4S_DEMUX_STATE", os.path.join(RUN_DIR, "demux"))
 
 def credential_dir():
     """Where credentials are actually readable from.
@@ -323,17 +329,17 @@ def asked_marker_header(sid):
 # Where the periodic sweep records the last time anything was connected to a
 # slot. Same environment variable the CLI reads, deliberately: two spellings of
 # one path is two paths as soon as either is edited.
-REAP_STAMP_DIR = os.environ.get("HDW4S_REAP_STAMP_DIR", "/run/hdw4s-reap")
+REAP_STAMP_DIR = os.environ.get("HDW4S_REAP_STAMP_DIR", os.path.join(RUN_DIR, "reap"))
 
 # WHERE THE ANSWER TO "IS A DESKTOP RUNNING HERE" ACTUALLY LIVES, and it is not
-# ours. /run/hdw4s/<instance> is the session unit's own RuntimeDirectory:
+# ours. /run/hdw4s/session/<instance> is the session unit's own RuntimeDirectory:
 # systemd creates it when the unit starts and removes it when the unit stops,
 # so it is present exactly while there is a desktop behind the slot, and a reap
 # frees it without anybody having to remember to.
 #
-# HDW4S_RUNDIR is the spelling the CLI already reads. One name for one path;
-# a second spelling is a second path the moment either is edited.
-SESSION_RUNDIR = os.path.join(os.environ.get("HDW4S_RUNDIR", "/run"), "hdw4s")
+# Derived from RUN_DIR above, as the CLI derives it: one name for one path; a
+# second spelling is a second path the moment either is edited.
+SESSION_RUNDIR = os.path.join(RUN_DIR, "session")
 
 # Where each slot publishes the identity of ITS CURRENT START. Written by
 # hdw4s-incarnation at every session start, mode 0644 in a read-only tree, so
@@ -352,7 +358,7 @@ WEBROOT_DIR = os.environ.get("HDW4S_WEBROOT_DIR", "/usr/share/hdw4s/webroot")
 # when too SHORT is the defect, so it errs long.
 #
 # THIS NUMBER IS NOT DERIVED, AND THE ATTEMPT TO DERIVE IT WAS RETRACTED. A run
-# timed "first connect until /run/hdw4s/<inst> exists" and the figures were
+# timed "first connect until /run/hdw4s/session/<inst> exists" and the figures were
 # withdrawn, because that directory is RuntimeDirectory= and systemd creates it
 # BEFORE ExecStart runs -- it measured a mkdir, not a session start. Do not
 # quote those numbers; they are not evidence about this constant. What this
@@ -2589,7 +2595,7 @@ def slot_unreachable(instance, listening=None, path=None):
     to it was handed to a visitor.
 
     IT USED TO CONNECT, AND THAT WAS NOT AN OBSERVATION. IT WAS AN ACTION.
-    /run/hdw4s-proxy/<instance>.sock belongs to hdw4s-proxy@<instance>.socket,
+    /run/hdw4s/proxy/<instance>.sock belongs to hdw4s-proxy@<instance>.socket,
     which is socket-activated and which the sweep deliberately leaves listening
     when it reaps a desktop. So a bare connect() -- no bytes sent, no HTTP --
     starts the relay AND a whole GNOME session behind it. Measured on a stock
@@ -2824,7 +2830,7 @@ def assert_probe_does_not_activate(probe=slot_unreachable,
 # WHAT IS ASKED: whether the session's stream socket is LISTENING, in the
 # kernel's own table of unix sockets -- the table listening_paths() already reads
 # for the slot sockets. The path is not configured anywhere, and that is the
-# point: it is /run/hdw4s-stream/<instance>/s/stream.sock for every session, the
+# point: it is /run/hdw4s/stream/<instance>/s/stream.sock for every session, the
 # one the relay's ExecStart= names and the one hdw4s-session hands the server, so
 # there is no per-instance setting for this router to read and get wrong. (It
 # used to be a TCP port read out of the instance's config file. A port is a name
@@ -3178,7 +3184,7 @@ def assert_occupancy_is_read_not_created(occupied=slot_occupied,
 
     d = tempfile.mkdtemp(prefix="hdw4s-demux-occ-")
     try:
-        rundir = os.path.join(d, "run", "hdw4s")
+        rundir = os.path.join(d, "run", "hdw4s", "session")
         web = os.path.join(d, "webroot")
 
         # 1. A MISSING AUTHORITY IS NOT AN EMPTY ONE. Before anything is built,
@@ -3302,10 +3308,10 @@ def assert_occupancy_is_read_not_created(occupied=slot_occupied,
 # decline is logged, because a guard whose refusal is silent cannot be told from
 # one that never ran.
 
-TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", "/run/hdw4s-teardown")
+TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", os.path.join(RUN_DIR, "teardown"))
 # Where hdw4s-teardown keeps its in-progress markers: root's, and read here only.
 # NOT inside TEARDOWN_DIR, which this router may write -- see teardown_requested().
-ENDING_DIR = os.environ.get("HDW4S_ENDING_DIR", "/run/hdw4s-ending")
+ENDING_DIR = os.environ.get("HDW4S_ENDING_DIR", os.path.join(RUN_DIR, "ending"))
 
 
 # HOW LONG A TEARDOWN IN PROGRESS MAY HOLD A SLOT OUT OF THE POOL. Bounded
@@ -3847,7 +3853,7 @@ def let_slot(own, identity):
 #
 #   1. hdw4s-start@<slot>.path sees the file (PathExists=) and runs
 #      hdw4s-start@<slot>.service, root, which RENAMES it to
-#      /run/hdw4s-start-taken/<slot> (root, 0700 directory) -- so a request is
+#      /run/hdw4s/start-taken/<slot> (root, 0700 directory) -- so a request is
 #      taken at most once, and a second one for the slot is a new file -- and
 #      only then asks systemd to start hdw4s-ephemeral@<slot>.
 #   2. That start runs hdw4s-incarnation@<slot> first (After=), which mints
@@ -3857,7 +3863,7 @@ def let_slot(own, identity):
 #      (an administrator's systemctl start) finds no request and no field.
 #   3. Only then does the session itself start.
 
-START_DIR = os.environ.get("HDW4S_START_DIR", "/run/hdw4s-start")
+START_DIR = os.environ.get("HDW4S_START_DIR", os.path.join(RUN_DIR, "start"))
 
 # THE ONE WAY INTO THE TEMPLATE-AUTHORING DESKTOP. "hdw4s template edit" (root)
 # writes one file here named by the SHA-256 of a random token and prints the
@@ -3867,7 +3873,7 @@ START_DIR = os.environ.get("HDW4S_START_DIR", "/run/hdw4s-start")
 # That the invite has been SPENT is recorded in the router's own state
 # directory, where "hdw4s template edit" looks for it -- the invite itself is
 # never written by the router.
-INVITE_DIR = os.environ.get("HDW4S_INVITE_DIR", "/run/hdw4s-invite")
+INVITE_DIR = os.environ.get("HDW4S_INVITE_DIR", os.path.join(RUN_DIR, "invite"))
 SPENT_DIR = os.path.join(STATE_DIR, "spent-invites")
 _INVITE_SHAPE = r"^[0-9a-f]{32}$"
 
@@ -4844,7 +4850,7 @@ def arrival(own, wf, identity, query, new_identity, dest=None):
 # link preview or one crawler away from doing it unasked, and the visitor would
 # have no idea what happened.
 
-TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", "/run/hdw4s-teardown")
+TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", os.path.join(RUN_DIR, "teardown"))
 
 
 def console_target(path):
@@ -6824,7 +6830,7 @@ def assert_an_ended_letting_is_never_proxied(factory=Ownership,
 
     d = tempfile.mkdtemp(prefix="hdw4s-demux-ended-")
     try:
-        rundir = os.path.join(d, "run", "hdw4s")
+        rundir = os.path.join(d, "run", "hdw4s", "session")
         web = os.path.join(d, "web")
         os.makedirs(os.path.join(rundir, "_hdw4s_0"))
         os.makedirs(os.path.join(web, "_hdw4s_0"))
@@ -7090,8 +7096,10 @@ def main():
         log("  Every slot will be treated as available. After a restart of this"
             " service that re-lets desktops that never stopped, and the visitor"
             " already using one is not told.")
-        log("  It is created by hdw4s-ephemeral-slots at boot; if that has not"
-            " run, this router is routing without the fact it routes on.")
+        log("  systemd makes it when the first desktop since boot starts, and"
+            " keeps it when that desktop stops, so before then no slot has a"
+            " desktop to lose. Absent after a desktop has run, this router is"
+            " routing without the fact it routes on.")
     # The corroborator, reported separately because "no opinion" and "agrees"
     # are different states and only one of them is evidence.
     published = [n for n in pool if slot_incarnation(n)]

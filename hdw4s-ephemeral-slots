@@ -53,9 +53,15 @@ trap 'rc="$?"
 
 ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
 USERDB="${HDW4S_USERDB_DIR:-/run/userdb}"
-# Derived per-boot state, so /run rather than /etc.
-NSDIR="${HDW4S_NS_DIR:-/run/hdw4s-ns}"
-PROFILEDIR="${HDW4S_PROFILE_ROOT:-/run/hdw4s-profile}"
+# Derived per-boot state, so /run rather than /etc -- and all of it under ONE
+# directory, which every path below is derived from. Each session's own runtime
+# directory is "session/<instance>" beneath it (systemd's RuntimeDirectory=), and
+# everything made here is a sibling of "session", never of the sessions: their
+# names are account names, and an account called "proxy" would otherwise be a
+# directory root depends on.
+RUNDIR="${HDW4S_RUNDIR:-/run/hdw4s}"
+NSDIR="${HDW4S_NS_DIR:-${RUNDIR}/ns}"
+PROFILEDIR="${HDW4S_PROFILE_ROOT:-${RUNDIR}/profile}"
 DROPDIR="${HDW4S_DROPIN_DIR:-/run/systemd/system}"
 # The two directories the session unit hides with InaccessiblePaths=. They are named
 # here, and not only where each is otherwise used, because InaccessiblePaths= without
@@ -64,19 +70,19 @@ DROPDIR="${HDW4S_DROPIN_DIR:-/run/systemd/system}"
 #
 # They belong to this script for the same reason USERDB does -- it is the one thing
 # ordered early enough that nothing can run before it. See the install -d below.
-PROXYDIR="${HDW4S_PROXY_RUNDIR:-/run/hdw4s-proxy}"
+PROXYDIR="${HDW4S_PROXY_RUNDIR:-${RUNDIR}/proxy}"
 # Where a visitor's request to end their own desktop is recorded. Created here
 # for the same reason PROXYDIR is: nothing else creates it, and a path unit
 # watching a directory that does not exist reports active and can never fire.
-TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
-STARTDIR="${HDW4S_START_DIR:-/run/hdw4s-start}"
-INVITEDIR="${HDW4S_INVITE_DIR:-/run/hdw4s-invite}"
-INCARNDIR="${HDW4S_INCARNATION_DIR:-/run/hdw4s-incarnation}"
+TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-${RUNDIR}/teardown}"
+STARTDIR="${HDW4S_START_DIR:-${RUNDIR}/start}"
+INVITEDIR="${HDW4S_INVITE_DIR:-${RUNDIR}/invite}"
+INCARNDIR="${HDW4S_INCARNATION_DIR:-${RUNDIR}/incarnation}"
 # Where each session's streaming server listens: one directory per instance,
 # prepared at every session start by hdw4s-stream-dir. Named here because it is
 # machine-wide and must exist before any session can start, for NAMED sessions
 # as much as for the pool -- see the install -d below.
-STREAMDIR="${HDW4S_STREAM_DIR:-/run/hdw4s-stream}"
+STREAMDIR="${HDW4S_STREAM_DIR:-${RUNDIR}/stream}"
 RELAY_GROUP='hdw4s-relay'
 # shellcheck source=/dev/null
 [ ! -r "${ETCDIR}/hdw4s.conf" ] || . "${ETCDIR}/hdw4s.conf"
@@ -133,15 +139,15 @@ if [ "${1:-}" = '--uid-window' ]; then
   exit 0
 fi
 
-# THE ROOT NAMESPACE'S /shared. Desktops bind /run/hdw4s-shared there; in the
+# THE ROOT NAMESPACE'S /shared. Desktops bind /run/hdw4s/shared there; in the
 # root namespace it is a bind of that same PLAIN directory, made read-only and a
 # SLAVE of /run, so that the table the expose service binds onto
-# /run/hdw4s-shared arrives at /shared too, and leaves with it. Root then finds
+# /run/hdw4s/shared arrives at /shared too, and leaves with it. Root then finds
 # the table where every desktop does, and finds nothing -- and cannot write --
 # while no table is shown (measured in a user namespace, every ordering).
 #
 # THE ONE TRAP IS ORDER. Made while a table is ALREADY bound at
-# /run/hdw4s-shared, the bind takes the table itself, and PINS it: it stays in
+# /run/hdw4s/shared, the bind takes the table itself, and PINS it: it stays in
 # root after the expose service took it away -- after a drift, a dead store, a
 # withdrawn tmpfs -- and nothing in the guard notices (it accepts a pinned
 # view: measured). So this is never a .mount unit or an fstab line (a restart
@@ -150,10 +156,10 @@ fi
 # that closes the race against an expose run between the look and the bind.
 #
 # THE SHAPE IS POSITIVE, derived from /run's OWN line in the mount table, never
-# from a stat of /run/hdw4s-shared (which reports the table whenever one is
+# from a stat of /run/hdw4s/shared (which reports the table whenever one is
 # bound). The bottom mount at /shared -- the one whose parent is not itself
 # at /shared, by parent id, not by position: propagation can tuck a mount
-# beneath -- must be on /run's device with /run's root plus "/hdw4s-shared",
+# beneath -- must be on /run's device with /run's root plus "/hdw4s/shared",
 # read-only, and a slave of /run's peer group. Everything above it must be a
 # copy of something mounted at the exposure. ANYTHING else is wrong, including
 # shapes nobody listed: on NFS a pin has root "/", not "/table".
@@ -180,11 +186,11 @@ SHARED_MARK="${HDW4S_SHARED_MARK:-/var/lib/hdw4s/.shared-mountpoint}"
 # is the package going (prerm, uninstall.sh), after which nothing runs at boot.
 SHARED_LATER='The next boot with HDW4S_SHARED off removes it; or, once they have stopped:'
 SHARED_POINT="${HDW4S_SHARED_MOUNTPOINT:-/shared}"
-SHARED_EXPOSE="${HDW4S_SHARED_EXPOSE:-/run/hdw4s-shared}"
+SHARED_EXPOSE="${HDW4S_SHARED_EXPOSE:-${RUNDIR}/shared}"
 # What the last run did about the bind: "bound <mount id>", the identity it is
 # taken away by, or "declined <reason>". /run, because the bind does not
 # survive a boot either.
-SHARED_VIEW_STATE="${HDW4S_SHARED_VIEW_STATE:-/run/hdw4s-shared-view}"
+SHARED_VIEW_STATE="${HDW4S_SHARED_VIEW_STATE:-${RUNDIR}/shared-view}"
 MOUNTINFO="${HDW4S_MOUNTINFO:-/proc/self/mountinfo}"
 
 # The desktop instances that are in any state but inactive or failed, one per
@@ -206,7 +212,7 @@ mounted_at() { awk -v p="$1" '$5 == p { f = 1 } END { exit !f }' "${MOUNTINFO}";
 #   good       the bind described above
 #   none       nothing is mounted at /shared
 #   deleted    the bind's source was removed and remade: it shows nothing
-#   foreign    the bottom is not /run's /hdw4s-shared: pinned, or not ours
+#   foreign    the bottom is not /run's /hdw4s/shared: pinned, or not ours
 #   rw         the bottom is writable: root's writes land in the plain directory
 #   unshared   /run is not a shared mount, so nothing can arrive at /shared
 #   not-slave  the bottom sends mounts back to /run instead of only receiving
@@ -317,12 +323,12 @@ shared_view_bind() {
     say_declined 'not-empty'
     return 0
   fi
-  # NEVER A PEER OF /run WHILE ATTACHED. A bind of /run/hdw4s-shared made with
+  # NEVER A PEER OF /run WHILE ATTACHED. A bind of /run/hdw4s/shared made with
   # mount(8) is attached first and made a slave and read-only afterwards, BY
   # PATH; in between it is a peer of /run, and a table bound at the exposure in
   # that instant lands ON it -- after which the remount and the make-slave act
   # on that copy, and unmounting it from /shared propagates back to /run and
-  # takes the table off /run/hdw4s-shared itself, from every desktop (measured).
+  # takes the table off /run/hdw4s/shared itself, from every desktop (measured).
   # So the bind is cloned DETACHED (open_tree), made read-only and a slave
   # while it is attached nowhere (mount_setattr), and only then attached at
   # /shared (move_mount): from its first instant there it receives from /run
@@ -786,7 +792,7 @@ fi
 # any socket can listen -- this unit is WantedBy=sysinit.target, and sockets.target is
 # two targets later, so nothing can accept a connection before this line has run.
 #
-# /run/hdw4s-proxy is here because nothing else creates it, which is not what its own
+# /run/hdw4s/proxy is here because nothing else creates it, which is not what its own
 # unit says. Measured on systemd 255, three arms with a positive control: a socket unit
 # declaring RuntimeDirectory= and carrying no Exec= line creates NOTHING -- the
 # directive is a systemd.exec setting and there is no execution context to attach it
@@ -796,7 +802,7 @@ fi
 # replaces that bind with a port, silently removes the only thing that was creating it,
 # and the feature then works until the next reboot.
 #
-# /run/hdw4s-incarnation is a different failure with the same symptom, and is here so
+# /run/hdw4s/incarnation is a different failure with the same symptom, and is here so
 # that it cannot happen at all: hdw4s-incarnation makes it itself, but at the END of a
 # script that exits early when the web root is missing, and the session only Wants=
 # that unit -- so the script failing for any reason leaves the session to die on the
@@ -982,7 +988,7 @@ while IFS="$(printf '\t')" read -r name id label; do
 # Generated by hdw4s-ephemeral-slots; edits are lost at the next boot.
 [Service]
 TemporaryFileSystem=/home/user:size=${HDW4S_EPHEMERAL_HOME_SIZE},mode=0700,uid=${id},gid=${id}
-TemporaryFileSystem=/run/hdw4s-profile/${name}:size=${HDW4S_EPHEMERAL_PROFILE_SIZE},mode=0700,uid=${id},gid=${id}
+TemporaryFileSystem=/run/hdw4s/profile/${name}:size=${HDW4S_EPHEMERAL_PROFILE_SIZE},mode=0700,uid=${id},gid=${id}
 TemporaryFileSystem=/dev/shm:mode=1777,size=${HDW4S_EPHEMERAL_SHM_SIZE}
 EOF
   else
@@ -1003,7 +1009,7 @@ EOF
   # Chrome gets one more policy file, over a placeholder of the same name,
   # refusing sign-in: visitors may sign in, but an account signed in HERE would
   # be harvested into every visitor's desktop.
-  author="${HDW4S_AUTHOR_DIR:-/run/hdw4s-author}"
+  author="${HDW4S_AUTHOR_DIR:-${RUNDIR}/author}"
   cat > "${drop}/10-home.conf" <<EOF
 # Generated by hdw4s-ephemeral-slots; edits are lost at the next boot.
 [Service]
@@ -1146,7 +1152,7 @@ esac
 # is hdw4s-shared-expose's, re-run every 30 seconds, because a store can come
 # and go while the machine is up and this runs once.
 #
-# THE DESKTOPS BIND /run/hdw4s-shared, NEVER THE STORE, AND NEVER OPTIONALLY.
+# THE DESKTOPS BIND /run/hdw4s/shared, NEVER THE STORE, AND NEVER OPTIONALLY.
 # That directory is made by tmpfiles at every boot, unconditionally, so the bind
 # source always exists: an empty root-owned directory until a store is judged
 # good and bound onto it. "BindPaths=-..." with a missing source is the trap
@@ -1186,7 +1192,7 @@ shared_drop="$(printf '%s\n' \
   "# Generated by hdw4s-ephemeral-slots at boot from HDW4S_SHARED=${shared_mode}." \
   '# Never "BindPaths=-...": see hdw4s-ephemeral-slots.' \
   '[Service]' \
-  'BindPaths=/run/hdw4s-shared:/shared')"
+  'BindPaths=/run/hdw4s/shared:/shared')"
 for unit in hdw4s@.service hdw4s-ephemeral@.service; do
   f="${DROPDIR}/${unit}.d/50-shared.conf"
   if [ "${shared_mode}" != 'off' ]; then
@@ -1287,7 +1293,7 @@ fi
 # THE POOL ONLY, AND THE TEMPLATE DELIBERATELY NOT. This loop reads the same
 # spec list as the minting loop above, and that is a trap rather than a
 # convenience: a teardown watcher is how a VISITOR ends their own desktop.
-# /run/hdw4s-teardown is mode 0770 group www-data and the router runs in
+# /run/hdw4s/teardown is mode 0770 group www-data and the router runs in
 # www-data, so the watcher's whole authorisation model is "the file's name is
 # the slot". Pointing one at the administrator's authoring seat would put their
 # unsaved work one filename away from anything that can reach that directory.

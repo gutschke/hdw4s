@@ -157,7 +157,7 @@ class Slot(threading.Thread):
         self.incarnation = None
         # THE OCCUPANCY AUTHORITY, and it is the session's, not ours.
         #
-        # /run/hdw4s/<instance> is the session unit's own RuntimeDirectory: it
+        # /run/hdw4s/session/<instance> is the session unit's own RuntimeDirectory: it
         # exists exactly while that session is up and systemd removes it when
         # the unit stops. Until this existed here, an occupied slot and a free
         # one were BYTE-IDENTICAL in this rig -- bare sockets in a tmpdir with
@@ -771,10 +771,10 @@ class Rig:
                 # port line the moment a second one existed.
                 with open(os.path.join(self.etc, name + ".conf"), "a") as f:
                     f.write("HDW4S_IDLE_DAYS=%s\n" % (days,))
-        # HDW4S_RUNDIR is what the CLI already reads, default /run. The
-        # sessions' runtime directories hang off it at hdw4s/<instance>.
+        # HDW4S_RUNDIR is what the CLI already reads, default /run/hdw4s. The
+        # sessions' runtime directories hang off it at session/<instance>.
         self.hdw4s_rundir = os.path.join(self.tmp, "run")
-        os.makedirs(os.path.join(self.hdw4s_rundir, "hdw4s"))
+        os.makedirs(os.path.join(self.hdw4s_rundir, "session"))
         # Where each slot publishes the token for its CURRENT start, and where
         # a request for a slot to be torn down is left. Both real directories,
         # both empty at start: a slot that has never been visited publishes
@@ -799,7 +799,7 @@ class Rig:
         for i in range(nslots):
             name = "_hdw4s_%d" % i
             s = Slot(os.path.join(self.rundir, name + ".sock"), name,
-                     os.path.join(self.hdw4s_rundir, "hdw4s", name),
+                     os.path.join(self.hdw4s_rundir, "session", name),
                      webroot=self.webroot, stream=self.streams.get(name))
             s.start()
             self.slots.append(s)
@@ -822,7 +822,7 @@ class Rig:
         self.strays = []
         for name in strays:
             s = Slot(os.path.join(self.rundir, name + ".sock"), name,
-                     os.path.join(self.hdw4s_rundir, "hdw4s", name),
+                     os.path.join(self.hdw4s_rundir, "session", name),
                      webroot=self.webroot, stream=self.streams.get(name))
             s.start()
             self.strays.append(s)
@@ -2822,9 +2822,18 @@ def test_the_records_the_refusal_log_is_read_from_survive_a_restart():
     preserved = [l for l in text.splitlines()
                  if l.startswith("RuntimeDirectoryPreserve=")
                  and l.split("=", 1)[1].strip() != "no"]
-    src = open(DEMUX).read()
-    state_default = src.split('HDW4S_DEMUX_STATE", "')[1].split('"')[0]
-    under = [d for d in rundirs if state_default.startswith("/run/" + d)]
+    # The default AS THE ROUTER COMPUTES IT, with nothing in the environment to
+    # move it: it is derived from the runtime root now, so reading a literal
+    # out of the source would find none.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HDW4S_")}
+    state_default = subprocess.run(
+        [sys.executable, "-c",
+         "import importlib.machinery as M, importlib.util as U, sys\n"
+         "l = M.SourceFileLoader('d', sys.argv[1]); m = U.module_from_spec("
+         "U.spec_from_loader('d', l)); l.exec_module(m); print(m.STATE_DIR)",
+         DEMUX], env=env, capture_output=True, text=True, check=True).stdout.strip()
+    under = [d for d in rundirs
+             if (state_default + "/").startswith("/run/" + d + "/")]
     assert not under or preserved, (
         "the router's on-disk records live in %s, which is RuntimeDirectory=%s "
         "with no RuntimeDirectoryPreserve= -- systemd deletes them every time "
@@ -3486,7 +3495,7 @@ def test_identity_lifetime_is_rechecked_without_a_refusal(rig=None):
 # The pool is the typed table, not the socket directory
 # --------------------------------------------------------------------------
 #
-# Every hdw4s-proxy@ instance on a box binds into /run/hdw4s-proxy, named
+# Every hdw4s-proxy@ instance on a box binds into /run/hdw4s/proxy, named
 # desktops included, so a router that computes free capacity by listing that
 # directory will hand a stranger somebody's long-lived session. Measured
 # 2026-09-22 and recorded in the shipped function's own docstring; sighted three
@@ -6513,11 +6522,11 @@ def grace_edge(path):
     Replays the handler's order against the router at PATH, in this process."""
     m = load_demux_from(path)
     tmp = tempfile.mkdtemp(prefix="demux-grace-")
-    for d in ("run/hdw4s", "reserved", "start", "teardown"):
+    for d in ("run/hdw4s/session", "reserved", "start", "teardown"):
         os.makedirs(os.path.join(tmp, d))
     m.log = lambda msg: None
     m.ephemeral_slots = lambda table=None: ["_hdw4s_0"]
-    m.SESSION_RUNDIR = os.path.join(tmp, "run", "hdw4s")
+    m.SESSION_RUNDIR = os.path.join(tmp, "run", "hdw4s", "session")
     m.RESERVE_DIR = os.path.join(tmp, "reserved")
     m.START_DIR = os.path.join(tmp, "start")
     m.TEARDOWN_DIR = os.path.join(tmp, "teardown")

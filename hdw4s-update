@@ -49,7 +49,12 @@ PATCH_MANIFEST=''
 # its own lock and will refuse the second caller, but by then this script has
 # already downloaded, decided and possibly removed the pre-2.0 tree; the useful
 # place to stop is before any of that.
-LOCKFILE='/run/lock/hdw4s-update.lock'
+#
+# Under /run/hdw4s, root's, not in /run/lock: that directory is 1777, so any
+# account can create the file before the updater ever runs, and root's open of
+# somebody else's file there is then refused (protected_regular). 0600 for the
+# reason every lock of ours is: flock needs only a descriptor.
+LOCKFILE="${HDW4S_RUNDIR:-/run/hdw4s}/update.lock"
 
 # Where a 1.6-era installation is moved before dpkg is allowed near the prefix.
 # Installing the .deb straight over the old virtualenv is not a clean upgrade
@@ -209,6 +214,17 @@ case "${1:-}" in
     ;;
 esac
 
+# NOT WHILE THE PREVIOUS RUNTIME LAYOUT IS LIVE: this machine was upgraded and
+# not yet rebooted. Which desktops are idle is judged below from where they are,
+# and in that window every running desktop is somewhere else and would be taken
+# for an idle one and restarted. The one predicate is hdw4s-old-layout's; asked
+# here, at the top, it covers the timer, a Persistent= catch-up and the
+# installer's start alike. Not a failure: the reboot finishes the upgrade.
+if "$(dirname "$0")/hdw4s-old-layout"; then
+  echo 'hdw4s-update: waiting for the reboot that finishes the upgrade; nothing done.'
+  exit 0
+fi
+
 [ "$(id -u)" -eq 0 ] || {
   echo 'This script must be run as "root"' >&2
   die
@@ -216,7 +232,11 @@ esac
 
 # Held for the whole run, including the download. Non-blocking: the timer fires
 # daily and a second run has nothing to add to the one already in progress.
+mkdir -p "${LOCKFILE%/*}"
+was="$(umask)"; umask 077
 exec 9>"${LOCKFILE}"
+umask "${was}"
+chmod 0600 "${LOCKFILE}"
 flock -n 9 || {
   echo 'hdw4s: another hdw4s-update is already running; leaving it to finish.'
   exit 0
@@ -1237,7 +1257,7 @@ for unit in "${units[@]}"; do
         # by the path, and its peer is the proxy's. Owners that cannot be seen
         # at all mean somebody may be there, never that nobody is.
         attached="$(ss -Hxp state established 2>/dev/null |
-          awk -v path="/run/hdw4s-stream/${inst}/s/stream.sock" \
+          awk -v path="/run/hdw4s/stream/${inst}/s/stream.sock" \
               -v who="pid=${proxy_pid}," '
             /users:/ { owners = 1 }
             $4 == path { peer[$7] = 1; served++ }
@@ -1257,7 +1277,7 @@ for unit in "${units[@]}"; do
   # recent one means somebody was here even if all three samples above happened
   # to land in a gap, so treat it as in use and let the session pick the new
   # version up when it next stops on its own.
-  stamp="/run/hdw4s-reap/${inst}"
+  stamp="/run/hdw4s/reap/${inst}"
   if [ "${attached:-0}" -eq 0 ] && [ -r "${stamp}" ]; then
     last="$(cat "${stamp}" 2>/dev/null || echo 0)"
     case "${last}" in

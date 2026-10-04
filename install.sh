@@ -18,7 +18,7 @@ trap 'rc="$?"
 
 src="$(cd "$(dirname "$0")" && pwd)"
 SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-template}
-         hdw4s-is-slot hdw4s-slot-scrub 60-hdw4s-slots.rules
+         hdw4s-is-slot hdw4s-old-layout hdw4s-slot-scrub 60-hdw4s-slots.rules
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
          hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index hdw4s-names.js
@@ -178,7 +178,8 @@ if [ "${src}" != "${dst}" ]; then
 fi
 chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
            "${dst}"/hdw4s-duration "${dst}"/hdw4s-template \
-           "${dst}"/hdw4s-is-slot "${dst}"/hdw4s-slot-scrub "${dst}"/hdw4s-shared-sweep \
+           "${dst}"/hdw4s-is-slot "${dst}"/hdw4s-old-layout "${dst}"/hdw4s-slot-scrub \
+           "${dst}"/hdw4s-shared-sweep \
            "${dst}"/hdw4s-ephemeral-slots "${dst}"/hdw4s-webroot \
            "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse "${dst}"/hdw4s-ledger \
            "${dst}"/hdw4s-incarnation "${dst}"/hdw4s-stream-dir \
@@ -397,8 +398,8 @@ systemctl enable --now hdw4s-check.timer
 # only "systemctl enable" creates.
 #
 # Measured on a box installed this way: the unit read "linked", the minter never
-# ran at boot, and /run/userdb, /run/hdw4s-ns, /run/hdw4s-profile, /run/hdw4s-proxy
-# and /run/hdw4s-incarnation were all absent -- along with the slot accounts
+# ran at boot, and /run/userdb, /run/hdw4s/ns, /run/hdw4s/profile, /run/hdw4s/proxy
+# and /run/hdw4s/incarnation were all absent -- along with the slot accounts
 # themselves, so "id ephemeral0" said no such user. The whole ephemeral feature was
 # dead from the first reboot onward, and looked healthy until then only because
 # installing runs the minter directly.

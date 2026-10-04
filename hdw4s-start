@@ -4,13 +4,13 @@
 #   hdw4s-start <slot>
 #
 # Run as root by hdw4s-start@<slot>.service, which hdw4s-start@<slot>.path
-# triggers when the router writes /run/hdw4s-start/<slot>. It is the ONLY way an
+# triggers when the router writes /run/hdw4s/start/<slot>. It is the ONLY way an
 # ephemeral desktop is started: the slot's relay is Requisite= on the session,
 # so a connection can no longer start one. See "Starting a desktop" in
 # hdw4s-demux for the request's format and why.
 #
 # WHAT THIS DOES, AND ALL IT DOES:
-#   1. takes the request -- renames it to /run/hdw4s-start-taken/<slot>, root's,
+#   1. takes the request -- renames it to /run/hdw4s/start-taken/<slot>, root's,
 #      so a request is taken at most once and a later one is a new file;
 #   2. asks systemd to start hdw4s-ephemeral@<slot>.service, which runs the
 #      incarnation hook (this start's token) before the session itself.
@@ -30,8 +30,9 @@ slot="${1:?usage: hdw4s-start <slot>}"
 case "${slot}" in
   ''|*/*|.*) echo "hdw4s-start: refusing a slot name '${slot}'" >&2; exit 2 ;;
 esac
-req="${HDW4S_START_DIR:-/run/hdw4s-start}/${slot}"
-taken="${HDW4S_START_TAKEN_DIR:-/run/hdw4s-start-taken}"
+RUNDIR="${HDW4S_RUNDIR:-/run/hdw4s}"  # every runtime path of the package is under it
+req="${HDW4S_START_DIR:-${RUNDIR}/start}/${slot}"
+taken="${HDW4S_START_TAKEN_DIR:-${RUNDIR}/start-taken}"
 
 install -d -m 0700 "${taken}"
 # A rename is the take: if two triggers race, exactly one finds the file.

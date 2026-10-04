@@ -10,7 +10,7 @@
 # name the administrator gave it, and a pattern would miss it -- or, written
 # loosely enough to catch it, catch a real person too.
 # hdw4s-ephemeral-slots writes the slot's own passwd view under
-# /run/hdw4s-ns/<name>/ as root, for slots and nothing else, and /run is empty
+# /run/hdw4s/ns/<name>/ as root, for slots and nothing else, and /run is empty
 # after every boot, so a stale answer cannot outlive the slot table.
 #
 # Group membership would be the textbook test (subject.isInGroup), and it was
@@ -20,4 +20,4 @@
 case "${1:-}" in
   ''|*/*|.*|*[!A-Za-z0-9._-]*) exit 1;;
 esac
-[ -f "/run/hdw4s-ns/$1/passwd" ]
+[ -f "/run/hdw4s/ns/$1/passwd" ]

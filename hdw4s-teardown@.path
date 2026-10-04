@@ -16,7 +16,7 @@ Requires=hdw4s-ephemeral-slots.service
 # name a unit, a pid, a cgroup or a command. Everything privileged happens on
 # this side of the line, keyed by %i, which systemd fills in from the unit's own
 # name rather than from anything the router wrote.
-PathExists=/run/hdw4s-teardown/%i
+PathExists=/run/hdw4s/teardown/%i
 Unit=hdw4s-teardown@%i.service
 
 [Install]

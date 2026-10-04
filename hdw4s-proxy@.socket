@@ -24,11 +24,11 @@ Documentation=man:hdw4s(8)
 # That is not a hardening option, it is the shape -- nothing outside the machine
 # addresses an ephemeral session, so a port would serve no caller it has and
 # every caller it must not have.
-ListenStream=/run/hdw4s-proxy/%i.sock
+ListenStream=/run/hdw4s/proxy/%i.sock
 # RETRACTION, and it is the defect this file caused. Three lines used to stand here:
 #
 #     RuntimeDirectoryPreserve=yes
-#     RuntimeDirectory=hdw4s-proxy
+#     RuntimeDirectory=<this directory>
 #     RuntimeDirectoryMode=0755
 #
 # with a comment explaining that they kept the shared parent directory alive across
@@ -38,7 +38,7 @@ ListenStream=/run/hdw4s-proxy/%i.sock
 # service carrying the same directive as the positive control -- the service got its
 # directory, this unit never got one.
 #
-# What created /run/hdw4s-proxy was the ListenStream= below it, binding a socket
+# What created /run/hdw4s/proxy was the ListenStream= below it, binding a socket
 # INSIDE the directory: measured again with the directive deleted outright, and the
 # directory still appeared. The directive was being credited with work the bind was
 # doing, which is why nobody questioned it for as long as every deployment was on the

@@ -14,7 +14,7 @@ Restart=on-failure
 RestartSec=1s
 
 # Runs as its own account, in the www-data group, because that is what the slot
-# sockets are owned by: /run/hdw4s-proxy/<instance>.sock is root:www-data 0660.
+# sockets are owned by: /run/hdw4s/proxy/<instance>.sock is root:www-data 0660.
 # Connecting to one is a filesystem-permission question, and this group
 # membership is the whole of the answer -- there is no credential below this
 # point and there does not need to be one.
@@ -50,7 +50,7 @@ SupplementaryGroups=www-data
 #
 # No "-" on this one. A front door with no credential must not start.
 LoadCredential=demux.auth.cred:/etc/hdw4s/demux.auth.cred
-RuntimeDirectory=hdw4s-demux
+RuntimeDirectory=hdw4s/demux
 RuntimeDirectoryMode=0700
 # WITHOUT THIS, EVERYTHING THIS DIRECTORY HOLDS IS DELETED AT THE MOMENT IT IS
 # NEEDED, and the default is the deleting one. RuntimeDirectory= removes the
@@ -145,19 +145,26 @@ ProtectSystem=strict
 # hdw4s-teardown@<slot>.service, keyed by the instance name systemd fills in
 # rather than by anything written here.
 #
-# WITHOUT THIS LINE THE WRITE FAILS AND THE FAILURE IS THE GOOD KIND: strict
-# makes the whole filesystem read-only except the runtime directory, so the
-# router would answer a visitor "this machine could not take that request" and
-# log the errno, rather than reporting success and ending nothing. That is the
-# right way round, and it is why the console reports the error instead of
-# assuming the write worked.
-ReadWritePaths=/run/hdw4s-teardown
+# A NO-OP TODAY, AND KEPT. ProtectSystem=strict leaves /run writable -- measured
+# inside this router's namespace, 2026-10-04 -- so what lets it write here is the
+# directory's permissions (root:www-data 0770, and this service is in www-data),
+# not this line. It is kept for a later read-only /run, under which the write
+# would fail without it -- and fail the good way: the router answers a visitor
+# "this machine could not take that request" and logs the errno, rather than
+# reporting success and ending nothing. That is why the console reports the
+# error instead of assuming the write worked.
+ReadWritePaths=/run/hdw4s/teardown
 # AND THE START REQUEST, the same shape for the opposite act: one file whose name is
 # a slot, which hdw4s-start@<slot> turns into a start as root. This is now the only
 # way a pool desktop starts -- a connection cannot (the relay is Requisite= on the
-# session) -- so without this line nothing starts at all, and the router says so
-# per mint rather than reporting a start that never happens.
-ReadWritePaths=/run/hdw4s-start
+# session) -- so under a read-only /run, without this line nothing would start at
+# all. Like the line above, a no-op today: permissions decide while /run is
+# writable.
+ReadWritePaths=/run/hdw4s/start
+# NOT THE /shared TABLE. Every desktop may write there, so this takes nothing
+# from anyone; it is the one process strangers on the network talk to, and it
+# has no use for it. "-": the directory exists only once tmpfiles has run.
+InaccessiblePaths=-/run/hdw4s/shared
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

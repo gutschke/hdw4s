@@ -83,14 +83,15 @@ LC_ALL=C; export LC_ALL
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
 
 SLOT="${1:?usage: hdw4s-teardown <slot>}"
-REQDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
+RUNDIR="${HDW4S_RUNDIR:-/run/hdw4s}"  # every runtime path of the package is under it
+REQDIR="${HDW4S_TEARDOWN_DIR:-${RUNDIR}/teardown}"
 # The in-progress markers, beside the request directory and NOT inside it. The
 # request directory is the front door's to write -- 0770, group www-data -- so a
 # marker kept in it was a marker the front door could remove, replace with a
 # symlink, or plant, and the front door is the one process that reads it to
 # decide whether a slot may be let. Root's, 0755: the router reads it, nothing
 # but this script writes it.
-ENDDIR="${HDW4S_ENDING_DIR:-/run/hdw4s-ending}"
+ENDDIR="${HDW4S_ENDING_DIR:-${RUNDIR}/ending}"
 CGROOT="${HDW4S_SESSION_CGROUP_ROOT:-/sys/fs/cgroup/hdw4s.slice}"
 UNIT="hdw4s-ephemeral@${SLOT}.service"
 

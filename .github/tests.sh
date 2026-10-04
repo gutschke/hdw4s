@@ -187,7 +187,7 @@ echo '== the stream listens on a path, never a port =='
   fi
   # The relay names the path for every instance, and nothing writes a port over it.
   case "$(grep '^ExecStart=' "${ROOT}/hdw4s-proxy@.service")" in
-    *'systemd-socket-proxyd /run/hdw4s-stream/%i/s/stream.sock') ok 'the relay connects to the path';;
+    *'systemd-socket-proxyd /run/hdw4s/stream/%i/s/stream.sock') ok 'the relay connects to the path';;
     *) bad 'the relay connects to the path' 'its ExecStart= names something else';;
   esac
   is 'nothing in the CLI writes a loopback upstream' \
@@ -904,7 +904,7 @@ echo '== list sums the pool up in one line, and lists seats only when asked =='
   me="$(id -un)"
   RUNDIR="${SB}/run"; POOLDIR="${SB}/demux"; TEARDOWNDIR="${SB}/teardown"
   ENDINGDIR="${SB}/ending"
-  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_1"; printf ':12\n' > "${RUNDIR}/hdw4s/_hdw4s_1/display"
+  mkdir -p "${RUNDIR}/session/_hdw4s_1"; printf ':12\n' > "${RUNDIR}/session/_hdw4s_1/display"
   printf '%s\n' "0 ${me}" '1000 _hdw4s_0 ephemeral' '1001 _hdw4s_1 ephemeral' \
     '1002 _hdw4s_2 ephemeral' '1003 _hdw4s_3 ephemeral' '1004 _hdw4s_4 ephemeral' \
     '1005 tmpl template' > "${SLOTS}"
@@ -930,7 +930,7 @@ echo '== list sums the pool up in one line, and lists seats only when asked =='
   out="$(cmd_list 2>/dev/null)"
   has   'every kind of busy counts'           "${out}" '5 seat(s), 3 in use.'
   hasnt 'and 60% is not nearly full'          "${out}" 'Nearly full'
-  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_4"
+  mkdir -p "${RUNDIR}/session/_hdw4s_4"
   out="$(cmd_list 2>/dev/null)"
   has   'at 80% it says the pool is nearly full' "${out}" 'Nearly full'
   has   'and how to add seats'                    "${out}" 'hdw4s pool size <N>'
@@ -977,7 +977,7 @@ echo '== the pool is sized as one thing, and never takes a visitor'"'"'s seat ==
   # seat added live actually serves a desktop is a question for a real box.
   NSDIR="${SB}/ns"; USERDB="${SB}/userdb"; RUNDIR="${SB}/run"
   POOLDIR="${SB}/demux"; TEARDOWNDIR="${SB}/teardown"; ENDINGDIR="${SB}/ending"
-  mkdir -p "${NSDIR}" "${USERDB}" "${RUNDIR}/hdw4s" "${POOLDIR}/reserved" "${TEARDOWNDIR}"
+  mkdir -p "${NSDIR}" "${USERDB}" "${RUNDIR}/session" "${POOLDIR}/reserved" "${TEARDOWNDIR}"
   CALLS="${SB}/calls"; : > "${CALLS}"
   systemctl() { echo "systemctl $*" >> "${CALLS}"; [ "$1" != is-active ]; }
   enable_slot() { echo "enable_slot $*" >> "${CALLS}"; alloc_slot "$2" "$1" >/dev/null; }
@@ -1020,7 +1020,7 @@ MINT
 
   # SHRINKING PAST A VISITOR. _hdw4s_2 has a desktop running, whoever is or
   # is not looking at it: nothing may be taken, and the command says so.
-  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_2"
+  mkdir -p "${RUNDIR}/session/_hdw4s_2"
   out="$( (pool_resize 1) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'shrinking past a busy seat fails' || bad 'shrinking past a busy seat fails' "rc ${rc}"
   is  'and takes no seat' "$(rows)" '_hdw4s_0 _hdw4s_1 _hdw4s_2 '
@@ -1032,7 +1032,7 @@ MINT
   has 'pool size shows it in use' "$(pool_show)" '_hdw4s_2         a desktop is running in it'
 
   # A busy seat LOWER down holds the pool one above it; seats above it go.
-  rmdir "${RUNDIR}/hdw4s/_hdw4s_2"; mkdir -p "${RUNDIR}/hdw4s/_hdw4s_1"
+  rmdir "${RUNDIR}/session/_hdw4s_2"; mkdir -p "${RUNDIR}/session/_hdw4s_1"
   : > "${CALLS}"
   out="$( (pool_resize 0) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a busy seat lower down still fails the command' \
@@ -1043,7 +1043,7 @@ MINT
   has 'and its own unit was stopped, by name' "$(cat "${CALLS}")" 'stop hdw4s-proxy@_hdw4s_2.service hdw4s-ephemeral@_hdw4s_2.service'
   has 'and its watchers' "$(cat "${CALLS}")" 'stop hdw4s-teardown@_hdw4s_2.path hdw4s-start@_hdw4s_2.path'
   has 'and it says it is 2, not 0' "${out}" 'has 2 seat(s)'
-  rmdir "${RUNDIR}/hdw4s/_hdw4s_1"
+  rmdir "${RUNDIR}/session/_hdw4s_1"
 
   # THE OTHER THREE KINDS OF BUSY. A fresh reservation is a visitor on the way;
   # a stale one is not. A unit starting has no runtime directory yet.
@@ -1082,15 +1082,15 @@ MINT
 
   # THE LOCK IS ROOT'S ALONE. flock needs only a read descriptor, so a lock file
   # anybody can read is one anybody can hold, and every resize is then refused.
-  is  'the pool lock is 0600' "$(stat -c %a "${RUNDIR}/hdw4s-pool.lock")" '600'
-  chmod 0644 "${RUNDIR}/hdw4s-pool.lock"
+  is  'the pool lock is 0600' "$(stat -c %a "${RUNDIR}/pool.lock")" '600'
+  chmod 0644 "${RUNDIR}/pool.lock"
   (pool_resize 1) >/dev/null 2>&1
   is  'and one an older version left readable is made 0600' \
-      "$(stat -c %a "${RUNDIR}/hdw4s-pool.lock")" '600'
+      "$(stat -c %a "${RUNDIR}/pool.lock")" '600'
 
   # ONE AT A TIME: a second run is refused while the first holds the lock, and
   # changes nothing.
-  out="$( exec {held}>"${RUNDIR}/hdw4s-pool.lock"; flock "${held}"; (pool_resize 3) 2>&1 )"; rc=$?
+  out="$( exec {held}>"${RUNDIR}/pool.lock"; flock "${held}"; (pool_resize 3) 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'a second pool size at once is refused' \
     || bad 'a second pool size at once is refused' "rc ${rc}"
   has 'and says why' "${out}" 'another "hdw4s pool size" is running'
@@ -1285,7 +1285,7 @@ echo '== the boot run refuses a table that still offers the retired seat names =
 group_shared_wiring() {
 echo '== /shared: the boot run binds it only when asked, never optionally, and takes it away =='
 # Off means NONE of its files: a drop-in left behind is a /shared nobody turned
-# on. On means the desktops bind /run/hdw4s-shared, which always exists, and
+# on. On means the desktops bind /run/hdw4s/shared, which always exists, and
 # NEVER with "-": an optional bind whose source is missing leaves an existing
 # /shared on the root filesystem writable from every desktop (systemd 255).
 ( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
@@ -1313,12 +1313,12 @@ echo '== /shared: the boot run binds it only when asked, never optionally, and t
            HDW4S_STREAM_DIR="${SB}/stream" HDW4S_DCONF_DB_DIR="${SB}/no-dconf" \
            HDW4S_SHARED_MARK="${SB}/var/.shared-mountpoint" \
            HDW4S_SHARED_MOUNTPOINT="${SB}/shared" \
-           HDW4S_SHARED_EXPOSE="${SB}/run/hdw4s-shared" HDW4S_SHARED_VIEW_STATE="${SB}/view" \
+           HDW4S_SHARED_EXPOSE="${SB}/run/hdw4s/shared" HDW4S_SHARED_VIEW_STATE="${SB}/view" \
            "${ROOT}/hdw4s-ephemeral-slots" 2>&1; }
   conf() { printf '%s\n' 'HDW4S_EPHEMERAL_SLOTS=0' "$@" > "${SB}/etc/hdw4s.conf"; }
   d1="${SB}/system/hdw4s@.service.d/50-shared.conf"
   d2="${SB}/system/hdw4s-ephemeral@.service.d/50-shared.conf"
-  tmpfs_knobs="${SB}/system/hdw4s-shared-sweep@run-hdw4s\\x2dshared\\x2dstore.service.d/50-knobs.conf"
+  tmpfs_knobs="${SB}/system/hdw4s-shared-sweep@run-hdw4s-shared\\x2dstore.service.d/50-knobs.conf"
   any() { local f; for f in "$@"; do [ -e "${f}" ] && { echo there; return; }; done; echo absent; }
 
   conf; out="$(boot)"; rc=$?
@@ -1331,14 +1331,14 @@ echo '== /shared: the boot run binds it only when asked, never optionally, and t
   conf HDW4S_SHARED=tmpfs HDW4S_SHARED_IDLE=45m HDW4S_SHARED_MAX_AGE=3d
   out="$(boot)"; rc=$?
   is  'tmpfs: the boot run succeeds' "${rc}" '0'
-  is  'named desktops bind /run/hdw4s-shared as /shared' \
-    "$(grep '^BindPaths=' "${d1}" 2>/dev/null)" 'BindPaths=/run/hdw4s-shared:/shared'
+  is  'named desktops bind /run/hdw4s/shared as /shared' \
+    "$(grep '^BindPaths=' "${d1}" 2>/dev/null)" 'BindPaths=/run/hdw4s/shared:/shared'
   is  'and so do ephemeral ones' \
-    "$(grep '^BindPaths=' "${d2}" 2>/dev/null)" 'BindPaths=/run/hdw4s-shared:/shared'
+    "$(grep '^BindPaths=' "${d2}" 2>/dev/null)" 'BindPaths=/run/hdw4s/shared:/shared'
   # RED ARM in the assertion: "-/" anywhere in a directive line is the optional
   # form, whatever path follows it.
   hasnt 'never the optional form' "$(grep -h '^[A-Za-z]*Paths=' "${d1}" "${d2}" 2>/dev/null)" '=-'
-  hasnt 'and never the store, which may be absent or dead' "$(cat "${d1}" "${d2}" 2>/dev/null)" 'hdw4s-shared-store'
+  hasnt 'and never the store, which may be absent or dead' "$(cat "${d1}" "${d2}" 2>/dev/null)" 'shared-store'
   has 'the expose timer is started, with the first run' "$(cat "${SB}/calls")" \
     'start --no-block hdw4s-shared-expose.timer hdw4s-shared-expose.service'
   hasnt 'and never enabled' "$(cat "${SB}/calls")" 'enable'
@@ -1885,7 +1885,7 @@ m = importlib.util.module_from_spec(sp); l.exec_module(m)
 # The REAL lines, as captured inside the container (PM P23).
 STORE = ("1356 1324 0:251 / /srv/hdw4s-shared rw,nosuid,nodev,noexec,nosymfollow "
          "master:3169 - nfs4 192.0.2.1:/export/shared rw,vers=4.2,soft,addr=192.0.2.1")
-EXPO = ("3417 987 0:251 / /run/hdw4s-shared rw,nosuid,nodev,noexec,nosymfollow "
+EXPO = ("3417 987 0:251 / /run/hdw4s/shared rw,nosuid,nodev,noexec,nosymfollow "
         "master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1")
 P = m.parse_mountinfo
 class St(object):
@@ -1910,7 +1910,7 @@ try:
     print("export", proved(EXPO.replace("/export/shared/table", "/other/table"), St((0, 251), 9)))
     print("identity", proved(EXPO, St((0, 251), 2)))
     print("normalised", proved(EXPO.replace("/export/shared/table", "//export/shared//table/"), St((0, 251), 9)))
-    LOC = "30 1 0:40 /table /run/hdw4s-shared rw,nosuid,nodev,noexec,nosymfollow - tmpfs s rw"
+    LOC = "30 1 0:40 /table /run/hdw4s/shared rw,nosuid,nodev,noexec,nosymfollow - tmpfs s rw"
     print("local", lproved(LOC, St((0, 40), 5)), lproved(LOC, St((0, 40), 6)),
           lproved(LOC.replace(" /table ", " / "), St((0, 40), 5)))
 except Exception as e:
@@ -2880,19 +2880,19 @@ echo '== /shared: the bind source is made with no mode, so tmpfiles never re-mod
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
   # THIS line, by its path: the file also makes the named desktops' failure
   # ledger (since 2026-10-03), which is never bound over and does take a mode.
-  line="$(grep -v '^#' "${ROOT}/hdw4s-tmpfiles.conf" | grep ' /run/hdw4s-shared ')"
-  is 'one line for it, no mode, no owner, no age' "${line}" 'd /run/hdw4s-shared - - - -'
-  mkdir -p "${T}/run/hdw4s-shared"; chmod 0777 "${T}/run/hdw4s-shared"
+  line="$(grep -v '^#' "${ROOT}/hdw4s-tmpfiles.conf" | grep ' /run/hdw4s/shared ')"
+  is 'one line for it, no mode, no owner, no age' "${line}" 'd /run/hdw4s/shared - - - -'
+  mkdir -p "${T}/run/hdw4s/shared"; chmod 0777 "${T}/run/hdw4s/shared"
   printf '%s\n' "${line}" | systemd-tmpfiles --create --root="${T}" - 2>/dev/null
-  is 'a table bound there stays 0777 through a tmpfiles run' "$(stat -c %a "${T}/run/hdw4s-shared")" '777'
+  is 'a table bound there stays 0777 through a tmpfiles run' "$(stat -c %a "${T}/run/hdw4s/shared")" '777'
   # RED ARM: the same run with a mode on the line does re-mode it, so the
   # assertion above can fail.
-  printf '%s\n' 'd /run/hdw4s-shared 0755 - - -' | systemd-tmpfiles --create --root="${T}" - 2>/dev/null
-  is 'RED ARM: a mode on the line would have made it 0755' "$(stat -c %a "${T}/run/hdw4s-shared")" '755'
-  rmdir "${T}/run/hdw4s-shared"
+  printf '%s\n' 'd /run/hdw4s/shared 0755 - - -' | systemd-tmpfiles --create --root="${T}" - 2>/dev/null
+  is 'RED ARM: a mode on the line would have made it 0755' "$(stat -c %a "${T}/run/hdw4s/shared")" '755'
+  rmdir "${T}/run/hdw4s/shared"
   printf '%s\n' "${line}" | systemd-tmpfiles --create --root="${T}" - 2>/dev/null
   is 'made fresh, it is 0755: nobody writes to /shared before a store is bound' \
-    "$(stat -c %a "${T}/run/hdw4s-shared")" '755'
+    "$(stat -c %a "${T}/run/hdw4s/shared")" '755'
 )
 
 echo '== /shared: the expose service binds only what the guard accepts, and unmounts only its own =='
@@ -2904,10 +2904,10 @@ echo '== /shared: the expose service binds only what the guard accepts, and unmo
 # desktop host /home may be a bind of a homes server, and a lazy unmount aimed
 # at the wrong mount is the other way to lose what is on it.
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
-  mkdir -p "${T}/etc" "${T}/run/hdw4s-shared" "${T}/elsewhere" "${T}/run/hdw4s-shared-store/table"
+  mkdir -p "${T}/etc" "${T}/run/hdw4s/shared" "${T}/elsewhere" "${T}/run/hdw4s/shared-store/table"
   printf 'MemTotal:       16777216 kB\n' > "${T}/meminfo"
   printf '%s\n' '1 0 0:1 / / rw - ext4 /dev/root rw' > "${T}/mountinfo"
-  E="${T}/run/hdw4s-shared"; S="${T}/run/hdw4s-shared-store"
+  E="${T}/run/hdw4s/shared"; S="${T}/run/hdw4s/shared-store"
   # The stand-ins' shared helpers: the topmost mount at a path, and adding one.
   cat > "${T}/mi.sh" <<'MI'
 mi_top() { awk -v p="$1" '$5 == p { on[$1] = $2 } END { for (i in on) { t = 1
@@ -2987,12 +2987,12 @@ STUB
   has 'with an inode cap derived from it' "${m}" 'nr_inodes=104858,'
   has 'and every flag' "${m}" 'nosymfollow,nodev,noexec,nosuid,strictatime'
   # A store root only root can pass through: no desktop reaches the table by
-  # the store's own path (ls /run/hdw4s-shared-store/table as a seat fails).
+  # the store's own path (ls /run/hdw4s/shared-store/table as a seat fails).
   has 'the tmpfs store root is 0700' "${m}" ',mode=0700,'
   has 'and the store is made private before anything is bound from it' \
     "$(sed -n '/tmpfs/,/--bind/p' "${T}/mounts")" "mount --make-private -- ${S}"
   hasnt 'never a percentage on the mount' "${m}" 'size=10%'
-  has 'the table is bound onto /run/hdw4s-shared' "${m}" "mount --bind -- ${S}/table ${E}"
+  has 'the table is bound onto /run/hdw4s/shared' "${m}" "mount --bind -- ${S}/table ${E}"
   # What was bound is not trusted for having been bound.
   is  'what was bound is judged, and taken away when it fails' "$(at "${E}")" '0'
   has 'by a lazy unmount that does not resolve the path through the store' "${m}" "umount -l -c -- ${E}"
@@ -3162,7 +3162,7 @@ STUB
 
   # THE REAL LINES, captured from the kernel's mount table in a container on a
   # development box (store an NFSv4 mount bound in; this service's bind of its
-  # table on top of /run/hdw4s-shared), with only the two mount POINTS moved
+  # table on top of /run/hdw4s/shared), with only the two mount POINTS moved
   # into this sandbox. Every other field -- ids, device, root, optional fields,
   # type, source -- is as read. The code before this rule refused its own bind
   # here ("has root /, not /table") and left it stranded.
@@ -3238,8 +3238,8 @@ echo '== /shared: the expose service against the REAL guard, with real mounts ==
   set +e
   mkdir -p "${T}/run" "${T}/etc" "${T}/src"
   mount -t tmpfs run "${T}/run"; mount --make-shared "${T}/run"
-  install -d -m 0755 "${T}/run/hdw4s-shared"
-  E="${T}/run/hdw4s-shared"; S="${T}/run/hdw4s-shared-store"
+  install -d -m 0755 "${T}/run/hdw4s/shared"
+  E="${T}/run/hdw4s/shared"; S="${T}/run/hdw4s/shared-store"
   export HDW4S_SHARED_STATE="${T}/state" HDW4S_ETCDIR="${T}/etc" HDW4S_SHARED_EXPOSE="${E}" \
          HDW4S_SHARED_STORE="${S}" HDW4S_SHARED_TOOL="${ROOT}/hdw4s-shared-sweep"
   conf() { printf "%s\n" "$@" > "${T}/etc/hdw4s.conf"; }
@@ -3465,7 +3465,7 @@ group_shared_wiring
 
 echo '== /shared in the root namespace: the read-only view, on real mounts, by the shipped boot run =='
 # Design C2 (PM P33): root's /shared is a read-only SLAVE bind of the plain
-# /run/hdw4s-shared, so the table arrives there with the exposure and leaves
+# /run/hdw4s/shared, so the table arrives there with the exposure and leaves
 # with it. Its one trap is order -- made while a table is already shown, the
 # bind takes the table itself and PINS it -- so every refusal and the shape
 # check are exercised HERE, by the shipped script, on real mounts in a user
@@ -3554,7 +3554,7 @@ PY
   SB="${T}/sb-${V}"; mkdir -p "${SB}/etc" "${SB}/var" "${T}/run"
   printf "%s\n" "1 _hdw4s_0 ephemeral" > "${SB}/etc/instances"
   mount -t tmpfs run "${T}/run"; mount --make-shared "${T}/run"
-  E="${T}/run/hdw4s-shared"; S="${T}/run/hdw4s-shared-store"; P="${T}/shared-${V}"
+  E="${T}/run/hdw4s/shared"; S="${T}/run/hdw4s/shared-store"; P="${T}/shared-${V}"
   MARK="${SB}/var/.shared-mountpoint"; VIEW="${SB}/view"
   mkdir -p "${E}" "${S}"
   mount -t tmpfs -o mode=0700,nosymfollow,nodev,noexec,nosuid,strictatime store "${S}"
@@ -3690,7 +3690,7 @@ PY
   # C2-1: THE RACE -- an expose run that binds between the look and the bind.
   # THE PROPERTY (review of the first cut, R1): at no instant attached at
   # /shared is the bind a PEER of /run, so nothing unmounted at /shared can
-  # propagate back and take the table off /run/hdw4s-shared. The first cut
+  # propagate back and take the table off /run/hdw4s/shared. The first cut
   # attached, then made it a slave by path; a table bound in between landed on
   # it, and the clean-up unmounted the EXPOSURE (measured, reviewer e2b.sh).
   export S E
@@ -3754,7 +3754,7 @@ PY
 
   # FINDING 1: NEVER ON A MISSING SOURCE.
   fresh; rmdir "${E}"; out="$(boot)"
-  has "with no /run/hdw4s-shared the bind is not attempted" "${out}" "does not exist"
+  has "with no /run/hdw4s/shared the bind is not attempted" "${out}" "does not exist"
   is  "and nothing is mounted at /shared" "$(n_at "${P}")" 0
   is  "and the check is RED: a boot that left no bind" "$(checkrc)" 1
   has "and says why" "$(view check)" "is not bound to the"
@@ -3818,7 +3818,7 @@ PY
     is  "turned off with nothing running: the boot run unmounts it, removes /shared, then the mark" \
       "$(n_at "${P}"):$([ -e "${P}" ] && echo P)$([ -e "${MARK}" ] && echo M)$([ -e "${VIEW}" ] && echo V)" 0:
   fi
-  is  "and /run/hdw4s-shared is untouched" "$([ -d "${E}" ] && echo there)" there
+  is  "and /run/hdw4s/shared is untouched" "$([ -d "${E}" ] && echo there)" there
   fi
   # Leave nothing running: fresh would start another desktop stand-in.
   V=done fresh; [ -z "${PEER:-}" ] || kill "${PEER}"
@@ -3834,8 +3834,10 @@ echo '== /shared in the root namespace: the shape check, on the mount table a co
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
   : > "${T}/mark"
   RUN='25 1 0:25 / /run rw,nosuid,nodev,noexec,relatime shared:5 - tmpfs tmpfs rw,mode=755'
-  EXPO='3417 25 0:251 / /run/hdw4s-shared rw,nosuid,nodev,noexec,nosymfollow master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1'
-  GOOD='3500 1 0:25 /hdw4s-shared /shared ro,relatime master:5 - tmpfs tmpfs rw,mode=755'
+  EXPO='3417 25 0:251 / /run/hdw4s/shared rw,nosuid,nodev,noexec,nosymfollow master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1'
+  # NESTED: the exposure is /run/hdw4s/shared, two levels below the mount that
+  # holds it, so the bind's root on /run's device is "/hdw4s/shared".
+  GOOD='3500 1 0:25 /hdw4s/shared /shared ro,relatime master:5 - tmpfs tmpfs rw,mode=755'
   COPY='3501 3500 0:251 / /shared rw,nosuid,nodev,noexec,nosymfollow master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1'
   PIN='3502 1 0:251 / /shared ro,nosuid,nodev,noexec,nosymfollow master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1'
   # "<exit>:<shape word>": a red must NAME its shape, or a script that merely
@@ -3859,8 +3861,13 @@ echo '== /shared in the root namespace: the shape check, on the mount table a co
     "$(chk "${RUN}" "${GOOD/ro,relatime/ro,relatime shared:77}")" '1:not-slave'
   is  'with /run not shared nothing can ever arrive: red' "$(chk "${RUN/shared:5 /}" "${GOOD}")" '1:unshared'
   is  'a deleted source is red, by name' \
-    "$(chk "${RUN}" "${GOOD/\/hdw4s-shared \/shared/\/hdw4s-shared\/\/deleted \/shared}")" '1:deleted'
+    "$(chk "${RUN}" "${GOOD/\/hdw4s\/shared \/shared/\/hdw4s\/shared\/\/deleted \/shared}")" '1:deleted'
   is  'the good bind alone, unexposed: good' "$(chk "${RUN}" "${GOOD}")" '0:'
+  # A view of the exposure where an older version kept it, /run/hdw4s-shared,
+  # is not this one, and nothing falls back to it: left over from before a
+  # reboot, it is somebody else's mount at /shared, and named as such.
+  is  'a view of the old flat exposure is foreign, not good' \
+    "$(chk "${RUN}" "${GOOD/\/hdw4s\/shared \/shared/\/hdw4s-shared \/shared}")" '1:foreign'
   # Unmounted by hand (shape pass F1): the record says bound, nothing is there.
   # It strands table copies in every slave namespace, which no read here can
   # see; the record is the only witness, so it is red, with the remedy.
@@ -5404,9 +5411,9 @@ echo '== what the reaper tells someone whose session it just stopped =='
   # Nothing exercised cmd_reap before this, which is why the message was wrong
   # for half the session types for as long as both types existed.
   unset JOURNAL_STREAM
-  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
+  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/reap"
   printf '%s\n' '0 dora' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
-  mkdir -p "${RUNDIR}/hdw4s/dora" "${RUNDIR}/hdw4s/_hdw4s_0" "${REAPDIR}"
+  mkdir -p "${RUNDIR}/session/dora" "${RUNDIR}/session/_hdw4s_0" "${REAPDIR}"
 
   # Nobody is connected: ss reports nothing, and the proxy exists, so that
   # "nothing" means "nobody there" rather than "we could not look".
@@ -5634,9 +5641,9 @@ echo '== never reaping is a choice for a named session and a leak for a slot =='
 echo '== the reaper works in seconds, and refuses to guess =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   unset JOURNAL_STREAM
-  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
+  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/reap"
   printf '%s\n' '0 dora' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
-  mkdir -p "${RUNDIR}/hdw4s/dora" "${RUNDIR}/hdw4s/_hdw4s_0" "${REAPDIR}"
+  mkdir -p "${RUNDIR}/session/dora" "${RUNDIR}/session/_hdw4s_0" "${REAPDIR}"
   ss() { :; }
   STOPPED="${SB}/stopped"; : > "${STOPPED}"
   systemctl() {
@@ -5702,10 +5709,10 @@ echo '== the router is a second witness to idleness, and may only ever extend a 
 # the failure that empties the pool instead of the desktop.
 ( set +e; sandbox; . "${SB}/setup.sh"
   unset JOURNAL_STREAM
-  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
-  POOLDIR="${SB}/run/hdw4s-demux"
+  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/reap"
+  POOLDIR="${SB}/run/demux"
   printf '%s\n' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
-  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_0" "${REAPDIR}" "${POOLDIR}/last-request"
+  mkdir -p "${RUNDIR}/session/_hdw4s_0" "${REAPDIR}" "${POOLDIR}/last-request"
   ss() { :; }
   STOPPED="${SB}/stopped"; : > "${STOPPED}"
   systemctl() {
@@ -5790,10 +5797,10 @@ echo '== a pool desktop nobody opened is discarded after five minutes =='
 # from before the start are the ones that pin that down.
 ( set +e; sandbox; . "${SB}/setup.sh"
   unset JOURNAL_STREAM
-  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/hdw4s-reap"
-  POOLDIR="${SB}/run/hdw4s-demux"
+  RUNDIR="${SB}/run"; REAPDIR="${SB}/run/reap"
+  POOLDIR="${SB}/run/demux"
   printf '%s\n' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
-  mkdir -p "${RUNDIR}/hdw4s/_hdw4s_0" "${REAPDIR}" "${POOLDIR}/last-request" \
+  mkdir -p "${RUNDIR}/session/_hdw4s_0" "${REAPDIR}" "${POOLDIR}/last-request" \
            "${POOLDIR}/last-attach"
   now="$(date +%s)"
   START="$(( now - 600 ))"
@@ -7122,10 +7129,16 @@ echo '== every path the session hides must be one something creates first =='
 (
   unit="${ROOT}/hdw4s-ephemeral@.service"
   minter="${ROOT}/hdw4s-ephemeral-slots"
-  created="$( grep -hE '^install -d' "${minter}" | grep -oE '[{][A-Z0-9_]+[}]' | tr -d '{}' |
-             while read -r v; do
-               sed -n "s|^${v}=\"[$]{[A-Z0-9_]*:-\([^}]*\)}\"|\\1|p" "${minter}"
-             done)"
+  # Each directory as the minter itself resolves it, with nothing in the
+  # environment: its own assignment lines, evaluated in order. A default may be
+  # derived from another (everything under RUNDIR), so reading the literal after
+  # ":-" would find "${RUNDIR}/proxy", which names nothing.
+  # shellcheck disable=SC2016  # expanded by the inner shell, not here
+  created="$(env -i bash -c '
+    eval "$(grep -E "^[A-Z_]+=\"[$][{]HDW4S_[A-Z_]+:-.*[}]\"$" "$1")"
+    for v in $(grep -hE "^install -d" "$1" | grep -oE "[{][A-Z0-9_]+[}]" | tr -d "{}"); do
+      eval "printf \"%s\\n\" \"\${${v}}\""
+    done' _ "${minter}")"
   hidden="$(grep -hE '^InaccessiblePaths=' "${unit}" | sed 's/^InaccessiblePaths=//' |
             tr ' ' '\n' | grep '^%t/' | sed 's|^%t|/run|')"
 
@@ -7338,7 +7351,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
 ( set +e; sandbox; . "${SB}/setup.sh"
   # Written from the failure, measured on the test container on 2026-09-22:
   # ephemeral2 was active with no token in its web root and none recorded under
-  # /run/hdw4s-incarnation, while ephemeral0 and ephemeral1 had both. The wiring
+  # /run/hdw4s/incarnation, while ephemeral0 and ephemeral1 had both. The wiring
   # was right on all three -- Wants= and After= name the publisher -- and the
   # slot had simply started at 15:08, before the publisher first ran at 16:26,
   # and had never been restarted. Nothing was broken; something was old. Every
@@ -7349,7 +7362,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # publishing nothing makes both sides of that comparison empty, which reads as
   # "unchanged" -- so the riskiest input takes the quietest path.
   RUNDIR="${SB}/run"
-  HDW4S_INCARNATION_DIR="${SB}/run/hdw4s-incarnation"
+  HDW4S_INCARNATION_DIR="${SB}/run/incarnation"
   HDW4S_WEBROOT_DIR="${SB}/webroot"
   mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}/_hdw4s_0" \
            "${HDW4S_WEBROOT_DIR}/_hdw4s_1" "${HDW4S_WEBROOT_DIR}/alice"
@@ -7378,7 +7391,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # constant in a comparison is a claim: the doors, the front-door port and the
   # failed-unit list are ASSUMED sound in this group and are exercised, in both
   # directions, in the group that follows.
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
+  STUB_DOORS="${RUNDIR}/proxy/_hdw4s_0.sock ${RUNDIR}/proxy/_hdw4s_1.sock"
   STUB_PORT='7280'
   STUB_FAILED=''
   STUB_SLOTS='active'
@@ -7445,9 +7458,9 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # no longer refuses to start it -- as the default, that would take every
   # desktop down at the next streaming server update -- so this report is what
   # turns "it quietly lost a transport" into a red timer.
-  mkdir -p "${RUNDIR}/hdw4s/alice"
+  mkdir -p "${RUNDIR}/session/alice"
   printf '%s\n' 'it names ClientSession 3 time(s), not 2' \
-    > "${RUNDIR}/hdw4s/alice/webrtc-degraded"
+    > "${RUNDIR}/session/alice/webrtc-degraded"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'a desktop that degraded to websockets FAILS the check' "${rc}" '1'
   has 'and is named'                        "${out}" 'alice is running WITHOUT WebRTC'
@@ -7456,7 +7469,7 @@ echo '== a running session that publishes no identity is a failure, not a quiet 
   # session can fail both: one counter would report two failures of one session.
   has 'and has its own summary' "${out}" '1 of 3 running session(s) started without the WebRTC'
   hasnt 'and is not counted as a token failure' "${out}" 'failed this check'
-  rm -f "${RUNDIR}/hdw4s/alice/webrtc-degraded"
+  rm -f "${RUNDIR}/session/alice/webrtc-degraded"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'and passes again once it has WebRTC' "${rc}" '0'
 
@@ -7539,7 +7552,7 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   HDW4S_ETCDIR="${SB}/etc"; mkdir -p "${HDW4S_ETCDIR}"
   SLOTS="${HDW4S_ETCDIR}/instances"
   RUNDIR="${SB}/run"
-  HDW4S_INCARNATION_DIR="${SB}/run/hdw4s-incarnation"
+  HDW4S_INCARNATION_DIR="${SB}/run/incarnation"
   HDW4S_WEBROOT_DIR="${SB}/webroot"
   mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}"
   export HDW4S_ETCDIR HDW4S_RUNDIR="${RUNDIR}" HDW4S_INCARNATION_DIR HDW4S_WEBROOT_DIR
@@ -7550,7 +7563,7 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   SLOTS="${HDW4S_ETCDIR}/instances"; RUNDIR="${SB}/run"
   printf '%s\n' '0 _hdw4s_0 ephemeral' '1 _hdw4s_1 ephemeral' > "${SLOTS}"
 
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
+  STUB_DOORS="${RUNDIR}/proxy/_hdw4s_0.sock ${RUNDIR}/proxy/_hdw4s_1.sock"
   STUB_PORT='7280'; STUB_FAILED=''; STUB_SLOTS='active'
   # shellcheck disable=SC2317
   ss() {
@@ -7592,11 +7605,11 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
 
   # One door shut. Not a capacity shortfall: the router mints a visitor onto the
   # name and the request fails with the slot consumed.
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock"
+  STUB_DOORS="${RUNDIR}/proxy/_hdw4s_0.sock"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'one slot with no listener fails'  "${rc}" '1'
   has 'and names WHICH slot'             "${out}" 'Not listening: _hdw4s_1'
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
+  STUB_DOORS="${RUNDIR}/proxy/_hdw4s_0.sock ${RUNDIR}/proxy/_hdw4s_1.sock"
 
   # The front door. Asked of the kernel, not of systemd: a socket unit can be
   # active while nothing is bound.
@@ -7627,7 +7640,7 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   # Everything else about the pool is sound here -- doors listening, the
   # minter active -- so the only thing this arm can be red about is the names.
   printf '%s\n' '0 ephemeral0 ephemeral' '1 _hdw4s_1 ephemeral' > "${SLOTS}"
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/ephemeral0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
+  STUB_DOORS="${RUNDIR}/proxy/ephemeral0.sock ${RUNDIR}/proxy/_hdw4s_1.sock"
   HDW4S_EPHEMERAL_SLOTS=2
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'a row under a retired name fails the check' "${rc}" '1'
@@ -7635,7 +7648,7 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   hasnt 'and not the seat beside it' "$(printf '%s\n' "${out}" | grep 'never mints')" '_hdw4s_1'
   has 'and the repair, at the configured size' "${out}" 'hdw4s pool size 2'
   printf '%s\n' '0 _hdw4s_0 ephemeral' '1 _hdw4s_1 ephemeral' > "${SLOTS}"
-  STUB_DOORS="${RUNDIR}/hdw4s-proxy/_hdw4s_0.sock ${RUNDIR}/hdw4s-proxy/_hdw4s_1.sock"
+  STUB_DOORS="${RUNDIR}/proxy/_hdw4s_0.sock ${RUNDIR}/proxy/_hdw4s_1.sock"
   # The retired setting is said, and is not a failure: it changes nothing.
   HDW4S_EPHEMERAL_PREFIX=ephemeral
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
@@ -8311,6 +8324,170 @@ PY
   is 'the template lock is 0600' "${mode}" '600'
 )
 
+echo '== every runtime file is under /run/hdw4s, and nothing names the old places =='
+# ONE DIRECTORY, /run/hdw4s: each desktop's own runtime directory at
+# session/<instance> and everything else a sibling of "session", never of the
+# sessions -- their names are account names, so an account called "proxy" would
+# otherwise BE root's front-door directory. Read over every file that ships
+# (the changelog excepted: it is history), so that a path put back by a later
+# edit, a merge or a copied line is caught here rather than on a box.
+( set +e; d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  # What ships: the tree, less the tests, the changelog and anything that is
+  # not part of the repository's own content.
+  shipped() {
+    (cd "$1" && find . \( -path ./.git -o -path ./.github -o -path ./private \
+                          -o -path ./.claude -o -name __pycache__ \) -prune \
+                 -o -type f ! -path ./debian/changelog -print | sort)
+  }
+  # The old spellings, each the form one of the programs used: the literal
+  # path (and its roff-escaped form in the man page), the unit specifier, the
+  # CLI's variable, and systemd's directive.
+  OLD='/run/hdw4s[-.][A-Za-z]|/run/hdw4s\\-|%t/hdw4s-|RUNDIR\}?/hdw4s-|RuntimeDirectory=hdw4s-|/run/lock/hdw4s-'
+  old_hits() { (cd "$1" && shipped . | xargs -d '\n' grep -nIE "${OLD}" 2>/dev/null); }
+  # THE SEARCH CAN SEE WHAT IT SEARCHES: an empty list would pass everything
+  # below. The red arms further down plant into a copy made from this same list.
+  list="$(shipped "${ROOT}")"
+  has 'the files searched include the man page' "${list}" './hdw4s.8'
+  has 'and the units' "${list}" './hdw4s-proxy@.service'
+  is 'no shipped file names a runtime path outside /run/hdw4s' "$(old_hits "${ROOT}")" ''
+  # A sandbox directive naming the PARENT itself, or the sessions' directory, is
+  # a hole of a different kind: write access to, a bind of, or a mask over every
+  # runtime file the package has. Only a named child may be named.
+  broad() {
+    (cd "$1" && shipped . | xargs -d '\n' grep -ohIE \
+       "(ReadWritePaths|ReadOnlyPaths|BindPaths|BindReadOnlyPaths|InaccessiblePaths|TemporaryFileSystem)=[^'\"]*" 2>/dev/null) |
+      awk '{ sub(/^[A-Za-z]*=/, "")
+             for (i = 1; i <= NF; i++) { t = $i; sub(/^[-+]/, "", t); sub(/:.*/, "", t); sub(/\/$/, "", t)
+               if (t ~ /^(\/run|%t)\/hdw4s(\/session)?$/) print t } }'
+  }
+  is 'no sandbox directive names /run/hdw4s, or its sessions, as a whole' "$(broad "${ROOT}")" ''
+  # RED ARMS, on a copy: each old spelling planted once must be seen, and so
+  # must a broad directive.
+  mkdir -p "${d}/t"
+  (cd "${ROOT}" && shipped . | tar -cf - -T -) | tar -xf - -C "${d}/t"
+  # shellcheck disable=SC2016  # planted literally, as a script would spell them
+  for plant in '/run/hdw4s-x' '%t/hdw4s-x' '/run/hdw4s-proxy/x.sock' '%t/hdw4s-ns/%i' \
+               'RuntimeDirectory=hdw4s-demux' '"${RUNDIR}/hdw4s-pool.lock"' \
+               '\fB/run/hdw4s\-ledger\fR' '/run/lock/hdw4s-update.lock'; do
+    cp "${ROOT}/hdw4s-teardown" "${d}/t/hdw4s-teardown"
+    printf '# %s\n' "${plant}" >> "${d}/t/hdw4s-teardown"
+    [ -n "$(old_hits "${d}/t")" ] && ok "RED ARM: a planted ${plant} is seen" \
+      || bad "RED ARM: a planted ${plant} is seen" 'the check passed it'
+  done
+  cp "${ROOT}/hdw4s-teardown" "${d}/t/hdw4s-teardown"
+  for plant in 'ReadWritePaths=/run/hdw4s' 'InaccessiblePaths=-%t/hdw4s/' \
+               'BindPaths=/run/hdw4s/session:/x'; do
+    cp "${ROOT}/hdw4s-demux.service" "${d}/t/hdw4s-demux.service"
+    printf '%s\n' "${plant}" >> "${d}/t/hdw4s-demux.service"
+    [ -n "$(broad "${d}/t")" ] && ok "RED ARM: a planted ${plant} is seen" \
+      || bad "RED ARM: a planted ${plant} is seen" 'the check passed it'
+  done
+
+  # THE RELAY SEES ONE STREAM DIRECTORY AND NOTHING ELSE UNDER /run. An empty
+  # /run with exactly two paths bound back: its own stream directory and the
+  # notify socket. A bind of the stream ROOT would hand it every desktop's
+  # stream -- the redirect the barrier exists to stop.
+  relay_paths() {
+    grep -E '^(TemporaryFileSystem|BindPaths|BindReadOnlyPaths|ReadWritePaths|ReadOnlyPaths)=' "$1" | sort | tr '\n' ' '
+  }
+  want='BindReadOnlyPaths=/run/hdw4s/stream/%i BindReadOnlyPaths=/run/systemd/notify TemporaryFileSystem=/run '
+  is 'the relay binds its own stream and notify, under an empty /run, and nothing else' \
+     "$(relay_paths "${ROOT}/hdw4s-proxy@.service")" "${want}"
+  sed 's|^BindReadOnlyPaths=/run/hdw4s/stream/%i$|BindReadOnlyPaths=/run/hdw4s/stream|' \
+    "${ROOT}/hdw4s-proxy@.service" > "${d}/relay-red"
+  if cmp -s "${ROOT}/hdw4s-proxy@.service" "${d}/relay-red"; then
+    bad 'the relay red arm mutates the unit' 'the sed matched nothing'
+  else
+    [ "$(relay_paths "${d}/relay-red")" != "${want}" ] \
+      && ok 'RED ARM: a relay binding the whole stream root is seen' \
+      || bad 'RED ARM: a relay binding the whole stream root is seen' 'the check passed it'
+  fi
+
+  # NOTHING REMOVES THE PARENT, OR ANY ANCESTOR OF A SHARED MOUNT, RECURSIVELY.
+  # /run/hdw4s/shared is the bind source of every desktop's /shared, and in tmpfs
+  # mode a store is mounted at /run/hdw4s/shared-store: a recursive removal of
+  # either, or of anything above them, walks into whatever is mounted there --
+  # on an NFS box, the table. Per-child removal, then rmdir.
+  rm_r() {  # every recursive rm whose target is such a path, one per line
+    for f in "$@"; do
+      sed -e ':a' -e '/\\$/N; s/\\\n/ /; ta' "${f}" |
+        awk -v f="${f##*/}" '/(^|[;&|( ])rm / && /(^|[ \t])-[A-Za-z]*[rR]|--recursive/ {
+          for (i = 1; i <= NF; i++) { t = $i; gsub(/["'"'"']/, "", t); sub(/\/\*?$/, "", t)
+            if (t ~ /^(\/|\/run|\/run\/hdw4s|\/run\/hdw4s\/shared|\/run\/hdw4s\/shared-store|\/shared)$/) print f ": " $0 } }'
+    done
+  }
+  rmfiles=("${ROOT}/uninstall.sh" "${ROOT}"/debian/*postrm "${ROOT}"/debian/*prerm)
+  is 'no removal script deletes /run/hdw4s or a shared mount'"'"'s ancestor recursively' \
+     "$(rm_r "${rmfiles[@]}")" ''
+  cp "${ROOT}/debian/postrm" "${d}/postrm"
+  printf '%s\n' '  rm -rf /run/hdw4s' >> "${d}/postrm"
+  [ -n "$(rm_r "${d}/postrm")" ] && ok 'RED ARM: a planted rm -rf /run/hdw4s is seen' \
+    || bad 'RED ARM: a planted rm -rf /run/hdw4s is seen' 'the check passed it'
+  printf '%s\n' "  rm -rf --one-file-system '/run/hdw4s/'*" > "${d}/postrm"
+  [ -n "$(rm_r "${d}/postrm")" ] && ok 'RED ARM: a planted rm of everything under it is seen' \
+    || bad 'RED ARM: a planted rm of everything under it is seen' 'the check passed it'
+  # And the parent is asserted once, root's and 0755, by tmpfiles -- never a
+  # mount, never given an age.
+  is 'tmpfiles makes /run/hdw4s root'"'"'s and 0755, with no age' \
+     "$(grep -cx 'd /run/hdw4s 0755 root root -' "${ROOT}/hdw4s-tmpfiles.conf")" '1'
+  # The sessions' runtime directories sit in session/, in both kinds of unit.
+  for u in hdw4s@.service hdw4s-ephemeral@.service; do
+    is "${u} puts its runtime directory under session/" \
+       "$(grep -E '^(RuntimeDirectory|Environment=XDG_RUNTIME_DIR)=' "${ROOT}/${u}" | tr '\n' ' ')" \
+       'Environment=XDG_RUNTIME_DIR=%t/hdw4s/session/%i RuntimeDirectory=hdw4s/session/%i '
+  done
+  is 'the router keeps its records under /run/hdw4s' \
+     "$(grep -E '^RuntimeDirectory=' "${ROOT}/hdw4s-demux.service")" 'RuntimeDirectory=hdw4s/demux'
+  # The one network-facing process has no use for the /shared table.
+  is 'the router cannot see the /shared table' \
+     "$(grep -cx 'InaccessiblePaths=-/run/hdw4s/shared' "${ROOT}/hdw4s-demux.service")" '1'
+
+  # THE UPDATER'S LOCK, out of the world-writable /run/lock and root's alone:
+  # the lines that take it, run against a scratch path.
+  # shellcheck disable=SC2016  # the script's own text, matched literally
+  lk="$(sed -n '/^mkdir -p "\${LOCKFILE%\/\*}"$/,/^chmod 0600 "\${LOCKFILE}"$/p' "${ROOT}/hdw4s-update")"
+  is 'the updater lock is taken in five lines' "$(printf '%s\n' "${lk}" | grep -c .)" '5'
+  is 'and defaults to /run/hdw4s/update.lock' \
+     "$(unset HDW4S_RUNDIR; eval "$(grep '^LOCKFILE=' "${ROOT}/hdw4s-update")"; echo "${LOCKFILE}")" '/run/hdw4s/update.lock'
+  is 'and is made 0600' "$( (LOCKFILE="${d}/u/update.lock"; umask 022; eval "${lk}"; stat -c %a "${LOCKFILE}") )" '600'
+
+  # THE INSTALL-TO-REBOOT WINDOW IS READ FROM THE BOX: an old /run/hdw4s-* entry
+  # means the previous layout is still live, whatever version is being upgraded
+  # from. ONE predicate, hdw4s-old-layout, run here against a stand-in /run.
+  win() { HDW4S_RUN_PARENT="$1" "${ROOT}/hdw4s-old-layout" && echo yes || echo no; }
+  mkdir -p "${d}/r1" "${d}/r2/hdw4s/session" "${d}/r3/hdw4s" "${d}/r4"
+  is 'an empty /run is no window' "$(win "${d}/r1")" 'no'
+  is 'the new layout alone is no window' "$(win "${d}/r2")" 'no'
+  mkdir "${d}/r3/hdw4s-proxy"
+  is 'RED: an old entry beside the new is the window' "$(win "${d}/r3")" 'yes'
+  ln -s private/hdw4s-demux "${d}/r4/hdw4s-demux"
+  is 'RED: and so is a dangling old symlink (the router'"'"'s records)' "$(win "${d}/r4")" 'yes'
+  # Its two askers, and nobody else asks: postinst for the reboot notice, the
+  # updater for itself. A second copy of the test is how two answers start.
+  is 'postinst asks it for the reboot notice' \
+     "$(grep -c '^  if /usr/lib/hdw4s/hdw4s-old-layout; then$' "${ROOT}/debian/postinst")" '1'
+  hasnt 'and keeps no copy of its own' "$(cat "${ROOT}/debian/postinst")" 'hdw4s-*'
+  hasnt 'and nothing in postinst keys it to a version' "$(cat "${ROOT}/debian/postinst")" 'compare-versions'
+  # THE UPDATER, IN THE WINDOW, DOES NOTHING AND SAYS SO -- before it even asks
+  # whether it is root, so this runs as anybody and can never reach a download.
+  upd() { HDW4S_RUN_PARENT="$2" HDW4S_ETCDIR="${d}/etc" bash "$1" 2>&1; echo "rc=$?"; }
+  out="$(upd "${ROOT}/hdw4s-update" "${d}/r3")"
+  has 'in the window the updater waits for the reboot' "${out}" 'waiting for the reboot that finishes the upgrade'
+  has 'and that is not a failure' "${out}" 'rc=0'
+  # RED ARM: the check taken out, and an exit put where it was, so that the copy
+  # can never get as far as updating anything; it must not say it is waiting.
+  cp "${ROOT}/hdw4s-old-layout" "${d}/hdw4s-old-layout"
+  # shellcheck disable=SC2016  # the script's own text, matched literally
+  sed '/^if "$(dirname "$0")\/hdw4s-old-layout"; then$/,/^fi$/c\exit 7' "${ROOT}/hdw4s-update" > "${d}/hdw4s-update"
+  if cmp -s "${ROOT}/hdw4s-update" "${d}/hdw4s-update"; then
+    bad 'the updater red arm mutates it' 'the sed matched nothing'
+  else
+    out="$(upd "${d}/hdw4s-update" "${d}/r3")"
+    hasnt 'RED ARM: without the check, nothing says it is waiting' "${out}" 'waiting for the reboot'
+    has 'RED ARM: and it went on (to the exit planted in its place)' "${out}" 'rc=7'
+  fi
+)
+
 echo '== the router, against stand-in slots =='
 # NOT a live test, despite living under .github/live: it spawns the real
 # hdw4s-demux against UNIX-socket backends on loopback and needs no systemd, no
@@ -8401,7 +8578,7 @@ echo '== a named desktop latches on failed runs, never on starts or logouts =='
 #
 # Real: hdw4s-ledger itself. Stood in for: systemd, by the three variables it
 # hands an ExecStopPost= ($SERVICE_RESULT, $EXIT_CODE, $EXIT_STATUS), and
-# /run/hdw4s-ledger, by a temporary directory. Nothing here shows that systemd
+# /run/hdw4s/ledger, by a temporary directory. Nothing here shows that systemd
 # runs the writer, nor which values it really passes -- that is the real-unit arm.
 ( set +e
   # One level down, so that a name escaping it would still land in OUR temporary
@@ -8512,13 +8689,13 @@ echo '== the unit wires the ledger as measured: writer after, check in the main 
   is 'the writer runs after every run, as root in the namespace, never fatal' \
      "$(grep -cx 'ExecStopPost=-!/usr/lib/hdw4s/hdw4s-ledger record %i' "${f}")" '1'
   is 'and may write the host ledger directory' \
-     "$(grep -cx 'ReadWritePaths=-/run/hdw4s-ledger' "${f}")" '1'
+     "$(grep -cx 'ReadWritePaths=-/run/hdw4s/ledger' "${f}")" '1'
   # MEASURED: a refusing ExecStartPre= is restarted for ever.
   is 'the check is not an ExecStartPre=' "$(grep -c '^ExecStartPre=.*hdw4s-ledger' "${f}")" '0'
   # 0711, not 0755: a record is opened by name, and the set of desktops that
   # have one is nobody's to list.
   is 'tmpfiles makes the ledger directory root'"'"'s, enterable and unlistable' \
-     "$(grep -cx 'd /run/hdw4s-ledger 0711 root root -' "${ROOT}/hdw4s-tmpfiles.conf")" '1'
+     "$(grep -cx 'd /run/hdw4s/ledger 0711 root root -' "${ROOT}/hdw4s-tmpfiles.conf")" '1'
   is 'the refusal unit is told which desktop it is refusing' \
      "$(grep -cx 'ExecStart=/usr/lib/hdw4s/hdw4s-refuse %i' "${ROOT}/hdw4s-refuse@.service")" '1'
   # NAMED ONLY (threat review L-d), with its red arm: a planted line is seen.
@@ -8568,7 +8745,7 @@ PY
                                      || bad 'a latched desktop gets a different page' 'the bodies are identical'
   has   'it names the unit'                 "${latched}" 'hdw4s@alice.service'
   has   'and the exact command'             "${latched}" 'systemctl reset-failed hdw4s@alice.service'
-  has   'and how the record is cleared'     "${latched}" 'rm -f /run/hdw4s-ledger/alice'
+  has   'and how the record is cleared'     "${latched}" 'rm -f /run/hdw4s/ledger/alice'
   has   'and when it lifts by itself'       "${latched}" "$(date -d "@$(( now + 1200 ))" '+%Y-%m-%d %H:%M')"
   hasnt 'and does not say to reload in a moment' "${latched}" 'Reload in a moment'
   has   'and the responder exits cleanly'   "${latched}" 'RC=0'
@@ -8591,7 +8768,7 @@ echo '== hdw4s check sees a named desktop that will not start =='
   sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s" > "${SB}/lib.sh"
   HDW4S_ETCDIR="${SB}/etc"; mkdir -p "${HDW4S_ETCDIR}" "${SB}/ledger"
   RUNDIR="${SB}/run"
-  HDW4S_INCARNATION_DIR="${SB}/run/hdw4s-incarnation"
+  HDW4S_INCARNATION_DIR="${SB}/run/incarnation"
   HDW4S_WEBROOT_DIR="${SB}/webroot"
   mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}"
   export HDW4S_ETCDIR HDW4S_RUNDIR="${RUNDIR}" HDW4S_INCARNATION_DIR HDW4S_WEBROOT_DIR
@@ -8629,13 +8806,13 @@ echo '== hdw4s check sees a named desktop that will not start =='
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'a latched named desktop fails the check, even after reset-failed' "${rc}" '1'
   has 'and says it is refusing to start' "${out}" 'alice is refusing to start: it failed 3 times'
-  has 'and how the record is cleared'    "${out}" 'rm -f /run/hdw4s-ledger/alice'
+  has 'and how the record is cleared'    "${out}" 'rm -f /run/hdw4s/ledger/alice'
 )
 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1642  # update when tests are added; a wrong number is the point
+EXPECTED=1682  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

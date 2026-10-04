@@ -35,7 +35,7 @@ set -o nounset -o pipefail
 #     the clock. It never reads a file the session can write: a "reason" copied
 #     out of the session's own directories would be a symlink root follows, and
 #     free text on a web page.
-#   * The ledger lives in /run/hdw4s-ledger, made by tmpfiles as root's 0711;
+#   * The ledger lives in /run/hdw4s/ledger, made by tmpfiles as root's 0711;
 #     each file is root's 0644, replaced by rename. Any account can READ a
 #     record whose name it knows -- an instance name is an account name, and
 #     no secret -- but none can LIST the directory, and none can write to it.
@@ -49,7 +49,7 @@ set -o nounset -o pipefail
 # reconnecting tab, a monitor, anybody who can reach the door -- would keep the
 # latch alive for ever, and the time the page says it lifts would be false.
 
-LEDGER_DIR="${HDW4S_LEDGER_DIR:-/run/hdw4s-ledger}"  # a test hook, not a setting
+LEDGER_DIR="${HDW4S_LEDGER_DIR:-/run/hdw4s/ledger}"  # a test hook, not a setting
 # Three failed runs inside twenty minutes: the panel's measured working value.
 # Do not change either without re-running the arms that measured them.
 THRESHOLD=3

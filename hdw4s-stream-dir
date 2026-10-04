@@ -16,13 +16,13 @@ set -o nounset -o pipefail
 # enforcing nothing), but a filesystem path is guarded by ordinary permissions, which
 # every kernel enforces. So the streaming server listens on
 #
-#   /run/hdw4s-stream/<instance>/s/stream.sock
+#   /run/hdw4s/stream/<instance>/s/stream.sock
 #
 # and the layout is what does the refusing:
 #
-#   /run/hdw4s-stream                root:hdw4s-relay 0711  made at boot (slot minter)
-#   /run/hdw4s-stream/<instance>     root:root        0711  made here, never removed
-#   /run/hdw4s-stream/<instance>/s   <account>:hdw4s-relay 2750  REMADE at every
+#   /run/hdw4s/stream                root:hdw4s-relay 0711  made at boot (slot minter)
+#   /run/hdw4s/stream/<instance>     root:root        0711  made here, never removed
+#   /run/hdw4s/stream/<instance>/s   <account>:hdw4s-relay 2750  REMADE at every
 #                                                        start, removed at stop
 #
 # Nobody but the session's own account may create anything in "s", and nobody but
@@ -73,7 +73,8 @@ case "${instance}" in
                exit 1;;
 esac
 
-STREAMDIR="${HDW4S_STREAM_DIR:-/run/hdw4s-stream}"
+RUNDIR="${HDW4S_RUNDIR:-/run/hdw4s}"  # every runtime path of the package is under it
+STREAMDIR="${HDW4S_STREAM_DIR:-${RUNDIR}/stream}"
 outer="${STREAMDIR}/${instance}"
 inner="${outer}/s"
 

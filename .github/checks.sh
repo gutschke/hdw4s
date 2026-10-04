@@ -397,7 +397,10 @@ strip_pool_identifiers() {
   # went red on the first manual page that ever mentioned it -- two years of
   # green meaning only that nobody had documented the file. Same lesson as the
   # line above, found the same way.
+  # And the router's runtime directory, which is "<runtime root>/demux" since
+  # every runtime path moved under /run/hdw4s: a path, like the unit name.
   sed -e 's/hdw4s\\\?-[d]emux//g' \
+      -e 's#\(/run/hdw4s\|[$]{RUNDIR}\)/[d]emux##g' \
       -e 's/[d]emux\\\?\.auth\\\?\.cred//g' \
       -e 's/HDW4S_[D]EMUX[A-Z_]*//g' \
       -e 's/[d]emux_port//g'

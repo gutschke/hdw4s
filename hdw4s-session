@@ -141,7 +141,7 @@ fi
 # may take first. hdw4s-stream@ made the directory for this start; see
 # hdw4s-stream-dir for the layout and what it refuses. Derived from the instance
 # and from nothing a configuration file can say.
-HDW4S_STREAM_SOCKET="/run/hdw4s-stream/${instance}/s/stream.sock"
+HDW4S_STREAM_SOCKET="/run/hdw4s/stream/${instance}/s/stream.sock"
 export HDW4S_STREAM_SOCKET
 stream_dir="${HDW4S_STREAM_SOCKET%/*}"
 stream_root="${stream_dir%/*/*}"
@@ -188,7 +188,7 @@ esac
 # argument for the same reason -- a configuration file cannot reach argv.
 if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
   HDW4S_ISOLATION='profile'
-  HDW4S_PROFILE_DIR="${HDW4S_EPHEMERAL_PROFILE_ROOT:-/run/hdw4s-profile}"
+  HDW4S_PROFILE_DIR="${HDW4S_EPHEMERAL_PROFILE_ROOT:-/run/hdw4s/profile}"
 fi
 
 : "${HDW4S_PROFILE_DIR:=/var/lib/hdw4s}"

@@ -80,7 +80,7 @@ class Session:
         return subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
              "root@" + self.host,
-             "sudo -u %s env DISPLAY=:0 XAUTHORITY=/run/hdw4s/%s/Xauthority %s"
+             "sudo -u %s env DISPLAY=:0 XAUTHORITY=/run/hdw4s/session/%s/Xauthority %s"
              % (self.user, self.user, shell)],
             capture_output=True)
 

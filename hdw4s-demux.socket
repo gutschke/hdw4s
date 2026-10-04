@@ -4,7 +4,7 @@ Documentation=man:hdw4s(8)
 
 [Socket]
 # The ONE TCP port on this machine. Everything below it is reached over
-# filesystem sockets in /run/hdw4s-proxy, where who may connect is decided by
+# filesystem sockets in /run/hdw4s/proxy, where who may connect is decided by
 # the socket's mode and its directory's permissions rather than by a credential.
 # That is why authentication lives on this leg and nowhere else: this is the
 # only leg where a credential can do any work.

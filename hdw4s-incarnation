@@ -63,7 +63,7 @@ served="$(cat "${root}/hdw4s-incarnation" 2>/dev/null || :)"
 # /run and not the session's XDG_RUNTIME_DIR: that one lives inside the session's own
 # namespace and is wiped with it, which is the opposite of what a record of "what did
 # the previous start publish" is for.
-state='/run/hdw4s-incarnation'
+state='/run/hdw4s/incarnation'
 install -d -m0700 "${state}"
 [ -e "${state}/${inst}" ] && mv -f "${state}/${inst}" "${state}/${inst}.prev"
 printf '%s\n' "${value}" > "${state}/${inst}"

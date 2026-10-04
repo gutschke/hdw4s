@@ -63,7 +63,7 @@
 # A third property belongs beside them because it is about the same uid and the
 # same directory, and because nothing else in the tree asserts it:
 #
-#   3. an occupant cannot create or remove a slot directory in /run/hdw4s --
+#   3. an occupant cannot create or remove a slot directory in /run/hdw4s/session --
 #      neither anybody else's nor its own.
 #
 # That is what makes the router's occupancy reading a fact about the pool rather
@@ -82,7 +82,7 @@
 # documented reason of its own, and hdw4s-ephemeral@.service depends on the
 # OPPOSITE value -- which it gets from the default, by saying nothing. The two
 # files sit beside each other. Making them "consistent" deletes the only thing
-# that removes /run/hdw4s/<slot>, which is the one path measured to carry a file
+# that removes /run/hdw4s/session/<slot>, which is the one path measured to carry a file
 # from one start of a slot into the next. Nothing else in the tree fails.
 #
 # There is deliberately NO kernel-keyring assertion here, and its absence is a
@@ -138,7 +138,7 @@ check_static() {
   # would leave the other accounts' names readable, and PrivateTmp=no is not a
   # smaller version of PrivateTmp=yes.
   for d in 'RemoveIPC=yes' 'PrivateTmp=yes' 'ProtectHome=tmpfs' \
-           'ProtectSystem=strict' 'RuntimeDirectory=hdw4s/%i' \
+           'ProtectSystem=strict' 'RuntimeDirectory=hdw4s/session/%i' \
            'TemporaryFileSystem=/var/tmp'; do
     if unit_has "${d}" "${unit}"; then note "unit ${d}" 'ok'
     else bad "unit ${d}" 'missing or changed'; fi
@@ -147,14 +147,14 @@ check_static() {
   # Absent, and each absence is load-bearing.
   #
   # RuntimeDirectoryPreserve: the default is "no", and the default is what removes
-  # /run/hdw4s/<slot> when the session stops. An explicit "no" is fine and clearer;
+  # /run/hdw4s/session/<slot> when the session stops. An explicit "no" is fine and clearer;
   # anything else hands the next occupant the previous one's runtime directory.
   if unit_mentions 'RuntimeDirectoryPreserve=' "${unit}"; then
     if unit_has 'RuntimeDirectoryPreserve=no' "${unit}"; then
       note 'unit RuntimeDirectoryPreserve' 'ok (explicit no)'
     else
       bad 'unit RuntimeDirectoryPreserve' \
-          'set to something other than "no": /run/hdw4s/<slot> would survive the session'
+          'set to something other than "no": /run/hdw4s/session/<slot> would survive the session'
     fi
   else
     note 'unit RuntimeDirectoryPreserve' 'ok (absent, defaults to no)'
@@ -173,7 +173,7 @@ check_static() {
   # cannot turn %i into a number. The unit is therefore NOT where they are, and a
   # check that only read the unit would pass a tree that had lost all three.
   # The label and the pattern are separate because the pattern has to match the
-  # shell variable as the script spells it, and "/run/hdw4s-profile/\${name}"
+  # shell variable as the script spells it, and "/run/hdw4s/profile/\${name}"
   # printed with its regex escapes is not something a reader should have to
   # decode out of a report line.
   check_dropin() {
@@ -181,13 +181,13 @@ check_static() {
     else bad "dropin $1" 'the generated drop-in no longer mounts this'; fi
   }
   check_dropin /home/user            '/home/user:'
-  check_dropin /run/hdw4s-profile    '/run/hdw4s-profile/\$\{name\}:'
+  check_dropin /run/hdw4s/profile    '/run/hdw4s/profile/\$\{name\}:'
   check_dropin /dev/shm              '/dev/shm:'
   # uid= on the two that hold the session's own files: without it the tmpfs is
   # root-owned and the session cannot write it, which fails loudly -- but a tmpfs
   # mounted with the WRONG uid would not, and would be readable by that uid.
   if grep -qE '^TemporaryFileSystem=/home/user:.*uid=\$\{id\}' "${slots}" &&
-     grep -qE '^TemporaryFileSystem=/run/hdw4s-profile/.*uid=\$\{id\}' "${slots}"; then
+     grep -qE '^TemporaryFileSystem=/run/hdw4s/profile/.*uid=\$\{id\}' "${slots}"; then
     note 'dropin uid=' 'ok'
   else bad 'dropin uid=' 'the private filesystems are not pinned to the slot uid'; fi
 
@@ -329,8 +329,8 @@ check_clean() {
   # one start of a slot to the next. Checked as a path AND as a directive, because
   # a drop-in can turn the directive on without changing any file in the tree --
   # which is what the static half above cannot see.
-  if [ -e "/run/hdw4s/${slot}" ]; then
-    bad "clean ${slot} runtimedir" "/run/hdw4s/${slot} survived the session"
+  if [ -e "/run/hdw4s/session/${slot}" ]; then
+    bad "clean ${slot} runtimedir" "/run/hdw4s/session/${slot} survived the session"
   else note "clean ${slot} runtimedir" 'ok'; fi
   n="$(systemctl show -p RuntimeDirectoryPreserve --value \
          "hdw4s-ephemeral@${slot}.service" 2>/dev/null || true)"
@@ -473,7 +473,7 @@ check_clean() {
 # Assertion 3, and it is the one the whole ephemeral design rests on without
 # saying so anywhere.
 #
-# /run/hdw4s/<slot> is not a RECORD of whether a desktop is running behind that
+# /run/hdw4s/session/<slot> is not a RECORD of whether a desktop is running behind that
 # slot -- it IS that fact. systemd makes it with the session and removes it with
 # the session, so the router reads it with os.path.isdir and never opens
 # anything. Every derivation on the arrival path is built on that reading being
@@ -481,14 +481,16 @@ check_clean() {
 # shell sits inside one of these.
 #
 # The property that makes it unforgeable is not in any file. It is a permission
-# on the PARENT: `RuntimeDirectory=hdw4s/%i` gives the last component to the
-# session's user, and the intermediate /run/hdw4s is made by systemd as root.
+# on the PARENT: `RuntimeDirectory=hdw4s/session/%i` gives the last component to the
+# session's user, and the intermediate /run/hdw4s/session is made by systemd as
+# root.
 # If an occupant could write that directory, two lines would do this:
 #
-#   rmdir /run/hdw4s/<some other slot>   makes an occupied slot read FREE, so
-#                                        the router double-books a live desktop
-#   mkdir /run/hdw4s/<every free slot>   makes the whole pool read FULL, so
-#                                        every visitor is refused
+#   rmdir /run/hdw4s/session/<some other slot>   makes an occupied slot read FREE,
+#                                                so the router double-books a
+#                                                live desktop
+#   mkdir /run/hdw4s/session/<every free slot>   makes the whole pool read FULL,
+#                                                so every visitor is refused
 #
 # WHOSE ACT THE DIRECTORY IS, because two things one sentence apart get
 # conflated and one of them cost a retracted measurement. The directory is made
@@ -544,7 +546,7 @@ check_rundir() {
   if [ -n "${HDW4S_RUNDIR_PARENT:-}" ]; then
     parent="${HDW4S_RUNDIR_PARENT}"; fixture=' (fixture)'
   else
-    # DERIVED, never pinned. A constant "/run/hdw4s" here would keep answering
+    # DERIVED, never pinned. A constant "/run/hdw4s/session" here would keep answering
     # confidently about a path the unit had stopped using -- which is the shape
     # of a check that validates a copy nobody runs.
     #
@@ -805,9 +807,9 @@ EOF
     expect green 'distinct, evasion removed again' "${self}" distinct
 
     expect green 'clean, parked slot as it stands' "${self}" clean _hdw4s_0
-    install -d -m 0700 -o "${id}" -g "${id}" /run/hdw4s/_hdw4s_0
+    install -d -m 0700 -o "${id}" -g "${id}" /run/hdw4s/session/_hdw4s_0
     expect red 'clean, runtime directory planted' "${self}" clean _hdw4s_0
-    rm -rf /run/hdw4s/_hdw4s_0
+    rm -rf /run/hdw4s/session/_hdw4s_0
     : > /tmp/.uid-invariant-selftest && chown "${id}:${id}" /tmp/.uid-invariant-selftest
     EXPECT_MATCH="uid   /tmp/.uid-invariant-selftest" \
       expect red 'clean, one owned file planted' "${self}" clean _hdw4s_0
@@ -858,7 +860,7 @@ EOF
     rm -f "${namef}"
 
     # And then the real one, which is the measurement rather than the proof of
-    # the comparison. It skips where there is no /run/hdw4s to ask about, and a
+    # the comparison. It skips where there is no /run/hdw4s/session to ask about, and a
     # skip is not a pass -- it says so on its own line.
     expect green 'rundir, the real parent as it stands' "${self}" rundir _hdw4s_0
   else
@@ -869,7 +871,7 @@ EOF
   # a directory owned by somebody else -- but NOT a parked slot, because they
   # never touch /run: the property is a permission on a directory, so it can be
   # planted with chmod on a directory of our own. That also keeps a
-  # world-writable /run/hdw4s from existing for even a moment on a machine that
+  # world-writable /run/hdw4s/session from existing for even a moment on a machine that
   # may have a live session on it. Gated separately from the block above for
   # exactly that reason: folded in with "clean", four arms that need nothing of
   # the sort would skip on every box with a session running, which is most of

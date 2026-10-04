@@ -800,7 +800,7 @@ def main():
         # answer waiting for a second deployment to exist.
         listen = unit_property(esock_unit, "Listen")
         m = re.search(r"(/\S+)/[^/]+\.sock", listen or "")
-        rundir = m.group(1) if m else "/run/hdw4s-proxy"
+        rundir = m.group(1) if m else "/run/hdw4s/proxy"
         print("  socket dir   : %s (%s)"
               % (rundir, "from %s" % esock_unit if m else "FALLBACK -- the unit "
                  "named no filesystem address; pass --rundir"))

@@ -79,18 +79,18 @@ OnFailure=hdw4s-refuse@%i.service
 #    reaches a session, and nothing secret is passed downstream.
 ExecStartPre=/usr/lib/hdw4s/hdw4s-wait %i
 # THE UPSTREAM IS A PATH, AND THE SAME ONE FOR EVERY INSTANCE, so it is written here
-# and not per instance: /run/hdw4s-stream/<instance>/s/stream.sock, made for each
+# and not per instance: /run/hdw4s/stream/<instance>/s/stream.sock, made for each
 # session start by hdw4s-stream@ (see hdw4s-stream-dir for why a path and not a
 # port). A per-instance "ExecStart=" drop-in naming a loopback port is the shape
 # this replaced; the installer removes the ones it wrote.
-ExecStart=/usr/lib/systemd/systemd-socket-proxyd /run/hdw4s-stream/%i/s/stream.sock
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd /run/hdw4s/stream/%i/s/stream.sock
 # The group that may enter a stream directory. The relay is its only member.
 SupplementaryGroups=hdw4s-relay
 
 # THIS RELAY CAN SEE ONE STREAM DIRECTORY AND NOTHING ELSE UNDER /run, and that is
 # what stops a desktop redirecting it. The directory "s" belongs to the session's
 # occupant, who may replace stream.sock with a SYMLINK -- to another slot's
-# stream.sock, to another slot's front door in /run/hdw4s-proxy, to anything that
+# stream.sock, to another slot's front door in /run/hdw4s/proxy, to anything that
 # accepts -- and connect() follows symlinks. Permissions cannot refuse that: this
 # relay is in the group that enters EVERY stream directory, by design. So the
 # namespace refuses it instead: an empty /run, with only this instance's directory
@@ -106,12 +106,12 @@ SupplementaryGroups=hdw4s-relay
 # start, and a pool relay outlives its session, so a bind of "s" would go on showing
 # the removed one. <instance> is root's and permanent.
 #
-# /run/systemd/notify is bound back for Type=notify. /run/hdw4s-proxy needs no line:
+# /run/systemd/notify is bound back for Type=notify. /run/hdw4s/proxy needs no line:
 # the front socket arrives as a file descriptor, and under the empty /run the
 # directory is simply absent. Mounts apply sorted by destination, so the empty /run
 # goes down before the two paths bound into it.
 TemporaryFileSystem=/run
-BindReadOnlyPaths=/run/hdw4s-stream/%i
+BindReadOnlyPaths=/run/hdw4s/stream/%i
 BindReadOnlyPaths=/run/systemd/notify
 CapabilityBoundingSet=
 DynamicUser=yes

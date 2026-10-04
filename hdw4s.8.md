@@ -354,14 +354,14 @@ nothing, so this is also how to restart one from inside it.
 
 **A desktop that keeps failing is not started again.** Each run that ends in
 failure -- not a logout, not a stop -- is recorded in
-`/run/hdw4s-ledger/<instance>`. After three inside twenty minutes the next start
+`/run/hdw4s/ledger/<instance>`. After three inside twenty minutes the next start
 refuses before the desktop comes up, and a visitor gets a page naming the
 desktop, when it last failed, when it will be tried again by itself, and the
 commands below. `hdw4s check` reports it, and the journal says so once at
 warning priority. Find the cause in `journalctl -u hdw4s@<instance>`, then:
 
     systemctl reset-failed hdw4s@<instance>.service
-    rm -f /run/hdw4s-ledger/<instance>
+    rm -f /run/hdw4s/ledger/<instance>
 
 The unit's own start limit stays behind this as a fuse, for a failure that
 happens before the session's check can run; it is sized so that ordinary use,
@@ -640,8 +640,10 @@ administrators `sudoers` allows.
 
 What does constrain a root process inside a session is the unit's sandbox, not
 its capabilities. `ProtectSystem=strict` makes the file system read-only apart
-from the session's own directories, so the writes above fail there; devices are
-hidden and kernel tunables are not writable. `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`
+from the session's own directories, so the writes above fail there -- with one
+exception: it leaves `/run` writable, and the machine's `/run` is what a session
+sees there, so a root process in a session can write in it. Devices are hidden
+and kernel tunables are not writable. `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`
 and `CAP_NET_ADMIN` are still out of the bounding set, so mounting, loading a
 module and reconfiguring the network stay impossible for uid 0 in a session.
 
@@ -819,7 +821,7 @@ single hostname for the whole pool and are given a session from it.
     on. Reaching a slot directly skips that decision entirely.
 
   * **A slot must not be reached directly.** Not by a reverse proxy, not by
-    anything else. The sockets under `/run/hdw4s-proxy/` belong to the pool.
+    anything else. The sockets under `/run/hdw4s/proxy/` belong to the pool.
 
   * **Seats have no port.** They are reached over filesystem sockets, so they
     take nothing from the `HDW4S_BLOCK_SIZE` port block, which is for named
@@ -1004,12 +1006,12 @@ replaces it, and a leftover line is named by `hdw4s check`.
     watcher is not.
 
   * **`hdw4s-shared-expose.service`**, every 30 seconds. Desktops bind
-    `/run/hdw4s-shared` as `/shared`; this binds the store's `table` onto that
+    `/run/hdw4s/shared` as `/shared`; this binds the store's `table` onto that
     directory once the store passes the guard, and takes it away again when the
     store stops answering, is not mounted, or has lost a mount flag. A desktop
     that is already running sees the table arrive and leave. It only ever
     unmounts a mount it made itself and recorded: anything else found mounted
-    at `/run/hdw4s-shared` is left where it is, named in its log, and
+    at `/run/hdw4s/shared` is left where it is, named in its log, and
     `hdw4s check` is red until somebody removes it.
 
 **It fails soft.** While there is no acceptable store, desktops start as usual
@@ -1024,7 +1026,7 @@ daemon has stopped -- also stalls the run that would take it away, so `/shared`
 stays bound to it, and every desktop started until the store answers again
 hangs at start. `hdw4s check` warns about an NFS store mounted `hard`.
 
-`/run/hdw4s-shared` itself is made at every boot, empty and root's, whether the
+`/run/hdw4s/shared` itself is made at every boot, empty and root's, whether the
 feature is on or not. **Do not delete it**: every desktop with `/shared` then
 fails to start (226/NAMESPACE), on purpose -- the alternative systemd offers,
 an optional bind, would leave a `/shared` on the root filesystem writable by
@@ -1034,14 +1036,14 @@ is red until then.
 
 **For the administrator:** in the root namespace `/shared` is a read-only
 view that shows the table only while it is guarded: the boot makes it, as a
-read-only bind of `/run/hdw4s-shared` that receives whatever is bound there and
+read-only bind of `/run/hdw4s/shared` that receives whatever is bound there and
 nothing else, so the table appears and leaves with the expose service's bind.
 While no table is shown it is empty and refuses writes; while one is, it is the
 table, writable as the desktops' is. Copy out with a plain `cp`; there is
 nothing on the table but regular files and directories. Expiry applies to what
 the administrator leaves there, too. **Give the tools the store path, never
 /shared** -- `hdw4s-shared-sweep --dir` takes the store's own mount or
-`/run/hdw4s-shared`.
+`/run/hdw4s/shared`.
 
 That view is made only while no table is shown yet: made later, it would keep
 the table after the expose service takes it away. So turning the feature on
@@ -1067,8 +1069,10 @@ view away on purpose, turn the feature off and reboot.
 ### The store
 
 In `tmpfs` mode the package makes the store itself, at
-`/run/hdw4s-shared-store`, with a root only root can enter: desktops reach the
-table through `/shared` and no other way. In `source` mode,
+`/run/hdw4s/shared-store`, with a root only root can enter: desktops reach the
+table through `/shared` and no other way. The front door's router, the one
+process here that strangers on the network talk to, has no use for the table and
+cannot see it. In `source` mode,
 `HDW4S_SHARED_SOURCE` names one, and it must be exactly this, or it is refused
 and `/shared` stays empty:
 
@@ -1154,7 +1158,7 @@ one path everywhere -- locally where the storage is, over NFS elsewhere.
 
 ### hdw4s check
 
-Red when `/shared` is on and nothing is bound at `/run/hdw4s-shared`, when what
+Red when `/shared` is on and nothing is bound at `/run/hdw4s/shared`, when what
 is bound fails the guard, when `HDW4S_SHARED` or its expiry settings cannot be
 read, and when nobody is sweeping: some item has gone unused for longer than
 `HDW4S_SHARED_IDLE` plus two sweeps -- on a machine with
@@ -1166,7 +1170,7 @@ for a lost flag and bound again ("drift healed at ..."): a repair is never
 silent. In `tmpfs` mode it also says how big the table is, default or not.
 
 Red, too, when `/shared` in the root namespace is anything but the read-only
-view of `/run/hdw4s-shared` described above -- a view that kept the table after
+view of `/run/hdw4s/shared` described above -- a view that kept the table after
 it was taken away, one whose source was deleted, one that is writable, or
 anything else mounted there -- and when the feature is on and the boot left no
 view at all. A view left for the next boot is a warning; an administrator's own
@@ -1179,7 +1183,7 @@ machine itself can guarantee.
 
   * **Unix socket** (`hdw4s transport` <instance> `unix`):
     The session listens only on loopback, and systemd exposes it at
-    `/run/hdw4s-proxy/<instance>.sock`, owned by the group named in
+    `/run/hdw4s/proxy/<instance>.sock`, owned by the group named in
     `HDW4S_PROXY_GROUP`. Who may connect is then a question of file
     permissions: a process that cannot open the socket cannot reach the
     session at all, whatever address it comes from and whatever it claims to
@@ -1318,7 +1322,7 @@ screen and type into it.
 A session's streaming server never listens on a port. Every desktop on a
 machine shares one network namespace, so a port is a name any of them could take
 first and be connected to in place of the desktop it belongs to. It listens at
-`/run/hdw4s-stream/<instance>/s/stream.sock` instead, in a directory made afresh
+`/run/hdw4s/stream/<instance>/s/stream.sock` instead, in a directory made afresh
 for each start that only the session's own account may create in and only it and
 the relay's group, `hdw4s-relay`, may enter. An account in that group could
 therefore open every desktop on the machine, so a session refuses to start as one.
@@ -1362,17 +1366,24 @@ therefore open every desktop on the machine, so a session refuses to start as on
   * `/etc/systemd/system/hdw4s-proxy@<instance>.socket.d/`:
     The address the front door listens on, written by `hdw4s transport`.
 
-  * `/run/hdw4s-shared/`:
+  * `/run/hdw4s/`:
+    Everything hdw4s keeps while the machine is up: each desktop's runtime
+    directory under `session/`, and beside it the sockets, stream directories,
+    requests and records listed here. A reboot empties it. After installing a
+    version that changed where these live, reboot: a desktop still running
+    keeps using the old places until it is restarted.
+
+  * `/run/hdw4s/shared/`:
     What every desktop binds as `/shared`: made empty at every boot, with the
     table bound onto it while `/shared` is on and a store passes. See
     **THE SHARED DROP AREA**.
 
-  * `/run/hdw4s-ledger/<instance>`:
+  * `/run/hdw4s/ledger/<instance>`:
     A named desktop's failed runs inside the last twenty minutes, one line each,
     written by root when a run ends. Three refuse the next start; see
     **INSTANCES**. Removing it clears the refusal.
 
-  * `/run/hdw4s-stream/<instance>/s/`:
+  * `/run/hdw4s/stream/<instance>/s/`:
     Where the session's streaming server listens. Made by
     `hdw4s-stream@<instance>.service` when the session starts, removed when it
     stops.
@@ -1384,10 +1395,10 @@ therefore open every desktop on the machine, so a session refuses to start as on
   * `/var/lib/hdw4s/<instance>/`:
     An isolated session's profile.
 
-  * `/run/hdw4s/<instance>/`:
+  * `/run/hdw4s/session/<instance>/`:
     Runtime directory: X authority cookie, X server log, current display.
 
-  * `/run/hdw4s-proxy/<instance>.sock`:
+  * `/run/hdw4s/proxy/<instance>.sock`:
     The filesystem socket a session is reached through, where
     `hdw4s transport` has been told to use one.
 

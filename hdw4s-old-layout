@@ -1,0 +1,25 @@
+#!/bin/sh
+# Exit 0 while this machine is still running the PREVIOUS runtime layout, 1 when
+# it is not.
+#
+#   hdw4s-old-layout
+#
+# Every runtime file of hdw4s lives under /run/hdw4s now. A machine whose /run
+# still holds a /run/hdw4s-<anything> entry was upgraded and not yet rebooted:
+# its desktops, their stream sockets and their front doors are where the
+# previous version put them, and only the reboot brings the two together. In
+# that window nothing may act on where the desktops are -- the updater would
+# take every running desktop for an idle one -- so both of the package's
+# questions about it ask HERE, and nowhere else: the installer's reboot notice
+# and the updater. One home, so the two can never disagree.
+#
+# It reads that an entry EXISTS, never what is in it: nothing falls back to the
+# old layout. A fact about the machine, not about a version number -- a build
+# that already carried the new version can still be running the old layout.
+#
+# HDW4S_RUN_PARENT is a test hook, not a setting: the /run it looks in.
+run="${HDW4S_RUN_PARENT:-/run}"
+for e in "${run}"/hdw4s-*; do
+  if [ -e "${e}" ] || [ -L "${e}" ]; then exit 0; fi
+done
+exit 1

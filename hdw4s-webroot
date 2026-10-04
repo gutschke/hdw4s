@@ -38,7 +38,7 @@ MARKER='hdw4s-gate'
 # otherwise a test asserting "the session is running" can only simulate it by
 # leaving a token lying about, which is the very conflation that produced the
 # bug this variable exists to let us test.
-INCARNATION_DIR="${HDW4S_INCARNATION_DIR:-/run/hdw4s-incarnation}"
+INCARNATION_DIR="${HDW4S_INCARNATION_DIR:-${HDW4S_RUNDIR:-/run/hdw4s}/incarnation}"
 die() { echo "hdw4s-webroot: $*" >&2; exit 1; }
 
 usage() {

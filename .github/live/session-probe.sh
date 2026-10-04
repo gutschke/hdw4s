@@ -90,7 +90,7 @@ fi
 # a wrong answer waiting for a second deployment to exist.
 pdir="\$(systemctl show -p Listen --value "hdw4s-proxy@\${INST}.socket" 2>/dev/null |
         sed -n 's|.*[^A-Za-z0-9_]\(/[^ ]*\)/[^/ ]*\.sock.*|\1|p' | head -1)"
-pdir="\${pdir:-/run/hdw4s-proxy}"
+pdir="\${pdir:-/run/hdw4s/proxy}"
 sock="\${pdir}/\${INST}.sock"
 echo "socket       : \${sock}"
 echo "  inode      : \$(stat -c '%U:%G %a' "\${sock}" 2>/dev/null || echo '(absent)')"
@@ -118,5 +118,5 @@ root="/usr/share/hdw4s/webroot/\${INST}"
 echo "web root     : \$([ -d "\${root}" ] && echo present || echo MISSING)"
 echo "marker: file : \$(grep -c hdw4s-gate "\${root}/index.html" 2>/dev/null || echo 0)"
 echo "incarnation  : served=\$([ -s "\${root}/hdw4s-incarnation" ] && echo yes || echo no) \
-run-record=\$([ -s "/run/hdw4s-incarnation/\${INST}" ] && echo yes || echo no)"
+run-record=\$([ -s "/run/hdw4s/incarnation/\${INST}" ] && echo yes || echo no)"
 REMOTE

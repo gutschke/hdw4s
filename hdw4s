@@ -105,11 +105,28 @@ ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
 CONF="${ETCDIR}/hdw4s.conf"
 SLOTS="${ETCDIR}/instances"
 DROPIN='/etc/systemd/system'
+# EVERY RUNTIME FILE OF THIS PACKAGE IS UNDER ONE DIRECTORY, and this is it.
+# Each session's own runtime directory is "session/<instance>" beneath it, and
+# everything else -- the front-door sockets, the stream root, the minted
+# identities, the requests, the locks -- is a sibling of "session". Not beside
+# the sessions: their names are account names, and an account called "proxy"
+# or "stream" would then collide with a directory root depends on.
+#
+# Overridable so a test can point it somewhere disposable; every path below is
+# derived from it. The reaper reads two trees -- its stamps and the sessions'
+# own directories -- so both have to move together, or every reaper decision is
+# unreachable from a test.
+#
+# Filesystem paths only. The "/run/..." that appear in text printed for an
+# operator -- the nginx block, the socket named by "hdw4s show" -- stay literal:
+# they describe the machine rather than this process, and a test override must
+# not rewrite what a human is told to type.
+RUNDIR="${HDW4S_RUNDIR:-/run/hdw4s}"
 # Where the reaper records when it last saw a connection. Overridable for the
 # same reason as the paths above, and it was the one write path that was not:
 # hardcoded, it made every behaviour of cmd_reap untestable, which is why a
 # message that was wrong for half the session types survived unnoticed.
-REAPDIR="${HDW4S_REAP_STAMP_DIR:-/run/hdw4s-reap}"
+REAPDIR="${HDW4S_REAP_STAMP_DIR:-${RUNDIR}/reap}"
 # How long a pool desktop may run with nobody ever having opened it (cmd_reap).
 # Not a setting: such a desktop holds nothing, so there is no trade-off to
 # tune. The sweep runs every five minutes, so it goes within ten.
@@ -119,19 +136,7 @@ NEVER_ATTACHED_SECONDS=300
 #
 # Same environment variable hdw4s-demux reads, deliberately: two spellings of
 # one path is two paths as soon as either is edited.
-POOLDIR="${HDW4S_DEMUX_STATE:-/run/hdw4s-demux}"
-# The runtime tree a session publishes its own live state in. Overridable for
-# the same reason, and needed alongside REAPDIR rather than instead of it: the
-# reaper reads the stamp only for an instance whose directory here exists, so
-# pointing the stamps somewhere disposable and leaving this one absolute still
-# leaves every reaper decision unreachable from a test. Two overrides, because
-# the reaper consults two trees.
-#
-# Filesystem paths only. The "/run/..." that appear in text printed for an
-# operator -- the nginx block, the socket named by "hdw4s show" -- stay literal:
-# they describe the machine rather than this process, and a test override must
-# not rewrite what a human is told to type.
-RUNDIR="${HDW4S_RUNDIR:-/run}"
+POOLDIR="${HDW4S_DEMUX_STATE:-${RUNDIR}/demux}"
 
 # Defaults. Every one of these may be overridden in /etc/hdw4s/hdw4s.conf.
 #
@@ -468,7 +473,7 @@ SEAT_PREFIX='_hdw4s_'
 # Where hdw4s-ephemeral-slots writes each minted slot's own passwd view. The
 # same variable the minter reads, so a test that points one somewhere disposable
 # points both; two spellings of one path is two paths as soon as either moves.
-NSDIR="${HDW4S_NS_DIR:-/run/hdw4s-ns}"
+NSDIR="${HDW4S_NS_DIR:-${RUNDIR}/ns}"
 USERDB="${HDW4S_USERDB_DIR:-/run/userdb}"
 
 # THE POOL'S OWN SETTINGS FILE: what every ephemeral desktop reads after
@@ -646,7 +651,7 @@ dropin_of() {
 # because a command that greps for its own argument is a trap this tree has paid
 # for more than once. An empty answer here means "nothing bound", and the empty
 # answer was seen beside a known positive on the same machine before either was
-# believed: /run/hdw4s-proxy/ephemeral0.sock listed, a name that does not exist
+# believed: /run/hdw4s/proxy/ephemeral0.sock listed, a name that does not exist
 # empty.
 unix_listener() {
   [ -n "$(ss -H -lx "src = $1" 2>/dev/null || :)" ]
@@ -789,8 +794,8 @@ setting_with_source() {
         printf '%s\t%s' profile 'hdw4s-session (fixed for this kind of desktop)'
         return 0;;
       HDW4S_PROFILE_DIR)
-        local root=/run/hdw4s-profile
-        [ "$(type_of "${inst}")" != template ] || root=/run/hdw4s-author
+        local root=/run/hdw4s/profile
+        [ "$(type_of "${inst}")" != template ] || root=/run/hdw4s/author
         printf '%s\t%s' "${root}" 'hdw4s-session (fixed for this kind of desktop)'
         return 0;;
     esac
@@ -899,7 +904,7 @@ list_seats() {
     printf '%-18s %-9s %-9s %-8s %s\n' "${inst}" \
       "$( [ "${t}" = ephemeral ] && echo seat || echo template)" \
       "${_LIST_STATE[hdw4s-ephemeral@${inst}.service]:-unknown}" \
-      "$(cat "${RUNDIR}/hdw4s/${inst}/display" 2>/dev/null || echo '-')" \
+      "$(cat "${RUNDIR}/session/${inst}/display" 2>/dev/null || echo '-')" \
       "${why:--}"
   done < <(sort -n "${SLOTS}")
 }
@@ -986,7 +991,7 @@ cmd_list() {
     fi
     printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
       "${inst}" "${user}" "${port}" "${auth}" "${prof}" "${trans}" "${state}" \
-      "$(cat "${RUNDIR}/hdw4s/${inst}/display" 2>/dev/null || echo '-')"
+      "$(cat "${RUNDIR}/session/${inst}/display" 2>/dev/null || echo '-')"
   done < <(sort -n "${SLOTS}")
 
   list_pool_line
@@ -1045,7 +1050,7 @@ cmd_list() {
 # Counted in SHARED_BAD, a counter of its own, because the summary has to name
 # the object a finding is about and /shared is neither a session nor the pool.
 #
-# THE JUDGEMENT IS NOT HERE. Whether /run/hdw4s-shared is an acceptable
+# THE JUDGEMENT IS NOT HERE. Whether /run/hdw4s/shared is an acceptable
 # exposure, whether anybody is sweeping it, how full it is: hdw4s-shared-sweep
 # --check answers all of it, with the same guard the expose service binds by.
 # What is here is what only this side knows -- the settings.
@@ -1056,10 +1061,10 @@ cmd_list() {
 SHARED_BAD=0
 shared_red() { printf '%s\n' "$@" >&2; SHARED_BAD=$(( SHARED_BAD + 1 )); }
 check_shared() {
-  local mode="${HDW4S_SHARED-}" expose="${HDW4S_SHARED_EXPOSE:-/run/hdw4s-shared}"
+  local mode="${HDW4S_SHARED-}" expose="${HDW4S_SHARED_EXPOSE:-${RUNDIR}/shared}"
   local tool="${HDW4S_SHARED_TOOL:-${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-shared-sweep}"
   local idle="${HDW4S_SHARED_IDLE:-30m}" out rc bytes drift now store inst
-  local state="${HDW4S_SHARED_STATE:-/run/hdw4s-shared-expose}"
+  local state="${HDW4S_SHARED_STATE:-${RUNDIR}/shared-expose}"
   SHARED_BAD=0
   # The old switch, said here as well as at boot: a machine upgraded with only
   # HDW4S_SHARED_SIZE set has /shared OFF, and nothing else would say so.
@@ -1202,7 +1207,7 @@ cmd_check() {
   # A fourth, for the same reason: a session without WebRTC can also fail the
   # token arm, and one counter would then report two failures of one session.
   local webrtc_bad=0
-  local incarn="${HDW4S_INCARNATION_DIR:-${RUNDIR}/hdw4s-incarnation}"
+  local incarn="${HDW4S_INCARNATION_DIR:-${RUNDIR}/incarnation}"
   local webroot="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}"
   local readable='yes'
   # That directory is 0700 and owned by root, so an unprivileged caller cannot
@@ -1350,7 +1355,7 @@ cmd_check() {
     [ "$(type_of "${inst}")" = 'ephemeral' ] || continue
     slot_total=$(( slot_total + 1 ))
     [ -n "$(seat_index "${inst}")" ] || retired="${retired} ${inst}"
-    if unix_listener "${RUNDIR}/hdw4s-proxy/${inst}.sock"; then
+    if unix_listener "${RUNDIR}/proxy/${inst}.sock"; then
       doors=$(( doors + 1 ))
     else
       shut="${shut} ${inst}"
@@ -1430,7 +1435,7 @@ cmd_check() {
     if [ "${doors}" -eq 0 ]; then
       printf '%s\n' \
         "hdw4s: none of the ${slot_total} ephemeral slot(s) has a listening door." \
-        "  Nothing is bound at ${RUNDIR}/hdw4s-proxy/<slot>.sock, so no arrival" \
+        "  Nothing is bound at ${RUNDIR}/proxy/<slot>.sock, so no arrival" \
         '  can start a desktop and every visitor is refused. This is what a' \
         '  teardown that does not re-arm the sockets leaves behind.' \
         '  Arm them: systemctl start hdw4s-proxy@<slot>.socket' >&2
@@ -1498,7 +1503,7 @@ cmd_check() {
         '  Find the cause, then clear it:' \
         "    journalctl -u ${unit}" \
         "    systemctl reset-failed ${unit}" \
-        "    rm -f /run/hdw4s-ledger/${ninst}" >&2
+        "    rm -f /run/hdw4s/ledger/${ninst}" >&2
     elif printf '%s\n' "${failed_named}" | command grep -qxF -- "${unit}"; then
       printf '%s\n' \
         "hdw4s: the named desktop ${unit} has failed." \
@@ -1507,7 +1512,7 @@ cmd_check() {
         '  cause, then clear it:' \
         "    journalctl -u ${unit}" \
         "    systemctl reset-failed ${unit}" \
-        "    rm -f /run/hdw4s-ledger/${ninst}" >&2
+        "    rm -f /run/hdw4s/ledger/${ninst}" >&2
     else
       continue
     fi
@@ -1579,13 +1584,13 @@ cmd_check() {
     # user's: its occupant can delete it, and loses only the transport this
     # reports as missing. The journal line is the record that cannot be taken
     # back from inside.
-    if [ -r "${RUNDIR}/hdw4s/${inst}/webrtc-degraded" ]; then
+    if [ -r "${RUNDIR}/session/${inst}/webrtc-degraded" ]; then
       printf '%s\n' \
         "hdw4s: ${inst} is running WITHOUT WebRTC, although it is configured to" \
         '  offer it. The signalling adapter does not recognise the installed' \
         '  streaming server, so the desktop started on websockets alone with the' \
         '  transport switch locked off. Reason given:' \
-        "    $(head -n1 "${RUNDIR}/hdw4s/${inst}/webrtc-degraded" 2>/dev/null || :)" \
+        "    $(head -n1 "${RUNDIR}/session/${inst}/webrtc-degraded" 2>/dev/null || :)" \
         '  Update hdw4s to a version that knows this streaming server, or set' \
         "  HDW4S_WEBRTC=no for ${inst} and restart it to stop this report." >&2
       webrtc_bad=$(( webrtc_bad + 1 ))
@@ -1755,7 +1760,7 @@ cmd_show() {
   # unprivileged caller, about sessions that have one.
   [ ! -e "${ETCDIR}/${inst}.keyring.cred" ] ||
     echo 'keyring       its own, unlocked at start'
-  echo "display       $(cat "${RUNDIR}/hdw4s/${inst}/display" 2>/dev/null ||
+  echo "display       $(cat "${RUNDIR}/session/${inst}/display" 2>/dev/null ||
                         echo 'not running (assigned at start)')"
 }
 
@@ -1882,8 +1887,9 @@ enable_slot() {
     "User=${user}" \
     > "$(dropin_of "${inst}")/50-user.conf"
 
-  # ProtectSystem=strict makes the whole filesystem read-only apart from what
-  # is named, and a desktop has to be able to write its own home. The unit
+  # ProtectSystem=strict makes the filesystem read-only apart from what is named
+  # (and /run, which it leaves writable), and a desktop has to be able to write
+  # its own home. The unit
   # cannot name it, because there is no specifier for the home directory of the
   # account in User= -- %h is the *manager's* home, which for a system unit is
   # /root. So it is looked up here, at the one moment the account is known.
@@ -1934,8 +1940,8 @@ enable_slot() {
     rm -f "$(dropin_of "${inst}")/45-gpu.conf"
   fi
 
-  # ProtectSystem=strict makes everything read-only but what is named, and the
-  # unit names only /var/lib/hdw4s. Any other profile directory was therefore
+  # ProtectSystem=strict makes everything outside /run read-only but what is
+  # named, and the unit names only /var/lib/hdw4s. Any other profile directory was therefore
   # read-only inside the session, which failed at "install -d" with a bare
   # EROFS -- so the setting parsed, passed validation, was reported back by
   # "show", and could not work. Named here for the same reason the home
@@ -2084,7 +2090,7 @@ enable_slot() {
   # serve -- every other account in the container, which is what made
   # "curl 127.0.0.1:7304" answer 200 with somebody's live desktop. A filesystem
   # socket has no such caller: reachability becomes the mode and the owner of
-  # /run/hdw4s-proxy, which the session unit already hides with
+  # /run/hdw4s/proxy, which the session unit already hides with
   # InaccessiblePaths=. The question is removed rather than guarded.
   local want='tcp'
   if ephemeral_shaped "${type}"; then
@@ -2095,7 +2101,7 @@ enable_slot() {
   cmd_transport "${inst}" "${want}" >/dev/null
 
   if [ "${want}" = 'unix' ]; then
-    echo "Session ${inst} is reachable at ${RUNDIR}/hdw4s-proxy/${inst}.sock."
+    echo "Session ${inst} is reachable at ${RUNDIR}/proxy/${inst}.sock."
     echo 'It does not listen on the network. The front door that reaches it has'
     echo "to run on this machine; see 'hdw4s proxy ${inst}' for its configuration."
   else
@@ -2908,7 +2914,7 @@ cmd_transport() {
         '  visitor reaches one well-known hostname and a front door running' \
         '  here chooses the slot. A port would therefore serve no caller the' \
         '  slot has, and every caller it must not have -- any account in this' \
-        "  container could open it. It stays on ${RUNDIR}/hdw4s-proxy/${inst}.sock."
+        "  container could open it. It stays on ${RUNDIR}/proxy/${inst}.sock."
   fi
 
   install -d -m0755 "${dir}"
@@ -2938,7 +2944,7 @@ cmd_transport() {
       # the mechanism, and removing the reorder and keeping the rm would leave
       # the bug in any path that does not come through here.
       systemctl stop "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
-      rm -f "${RUNDIR}/hdw4s-proxy/${inst}.sock"
+      rm -f "${RUNDIR}/proxy/${inst}.sock"
       # Replace the filesystem socket the unit defaults to. An empty
       # ListenStream= first, because these accumulate rather than replace.
       printf '%s\n' \
@@ -2969,7 +2975,7 @@ cmd_transport() {
       config_write "${ETCDIR}/${inst}.conf" 'HDW4S_TRANSPORT' 'unix'
       systemctl daemon-reload
       systemctl restart "hdw4s-proxy@${inst}.socket" 2>/dev/null || :
-      echo "Session ${inst} is reachable at /run/hdw4s-proxy/${inst}.sock,"
+      echo "Session ${inst} is reachable at /run/hdw4s/proxy/${inst}.sock,"
       echo "readable by group ${group} only. It does not listen on the network."
       # The third way the combination is reached, and the only one that is not a
       # refusal. Moving a session onto the socket is the safer direction and must
@@ -3124,7 +3130,7 @@ clients_of() {
   # use gets stopped: connections to the stream with no owner visible anywhere
   # are 'unknown', never 0.
   ss -Hxp state established 2>/dev/null |
-    awk -v path="/run/hdw4s-stream/${inst}/s/stream.sock" -v who="pid=${pid}," '
+    awk -v path="/run/hdw4s/stream/${inst}/s/stream.sock" -v who="pid=${pid}," '
       # Netid Recv-Q Send-Q Local Inode Peer PeerInode [users:(...)]
       /users:/ { owners = 1 }
       $4 == path { peer[$7] = 1; served++ }
@@ -3210,7 +3216,7 @@ cmd_reap() {
     # no connections for it, and the only other record is the session's own log,
     # which is upstream's prose and would be read by nobody but a parser.
     #
-    # Not /run/hdw4s/<inst>: that is the session's RuntimeDirectory, owned by
+    # Not /run/hdw4s/session/<inst>: that is the session's RuntimeDirectory, owned by
     # the session user at mode 0700, so the user can replace this file with a
     # symlink and have the reaper -- which runs as root -- truncate whatever it
     # points at and write a timestamp into it. /etc/shadow, /etc/sudoers, take
@@ -3245,7 +3251,7 @@ cmd_reap() {
     local stampdir="${REAPDIR}"
     install -d -m0750 -o root -g www-data "${stampdir}" 2>/dev/null ||
       install -d -m0700 -o root -g root "${stampdir}" 2>/dev/null || :
-    [ -d "${RUNDIR}/hdw4s/${inst}" ] || continue
+    [ -d "${RUNDIR}/session/${inst}" ] || continue
     local stamp="${stampdir}/${inst}"
     # A POOL DESKTOP NOBODY EVER OPENED IS DISCARDED AFTER FIVE MINUTES, not
     # after the idle window. Minting one costs a single cookieless GET, and a
@@ -3497,7 +3503,7 @@ pool_proxy() {
 #     address a visitor may be sent to
 #   * the credential belongs to the pool, not to a seat; seats have none and
 #     cannot be given one
-#   * a seat's own socket under /run/hdw4s-proxy must NOT be reached directly,
+#   * a seat's own socket under /run/hdw4s/proxy must NOT be reached directly,
 #     by nginx or by anything else
 #
 # See hdw4s(8), "THE EPHEMERAL POOL".
@@ -3551,7 +3557,7 @@ cmd_proxy() {
   # A seat minted and not yet in the table has no row for refuse_internal_slot
   # to read, and minting makes its runtime profile directory before any row
   # exists. The machine says what it is, so the same redirection applies.
-  [ ! -d "/run/hdw4s-profile/${inst}" ] ||
+  [ ! -d "${RUNDIR}/profile/${inst}" ] ||
     die "hdw4s: ${inst} is a seat of the ephemeral pool, not a person's desktop." \
         '  The reverse-proxy configuration for the pool:' \
         '    hdw4s pool proxy'
@@ -3573,7 +3579,7 @@ cmd_proxy() {
     upstream="        # A filesystem socket: who may connect is a question of
         # permissions, not of source address. Add nginx's user to the group
         # that owns it.
-        proxy_pass http://unix:/run/hdw4s-proxy/${inst}.sock:;"
+        proxy_pass http://unix:/run/hdw4s/proxy/${inst}.sock:;"
   else
     upstream="        proxy_pass http://HOST_RUNNING_HDW4S:${port};"
   fi
@@ -3933,7 +3939,7 @@ retire_slot() {
   # instance with no configuration, no slot row and no unit at all, which is
   # worse than the orphan it started as because nothing keyed on instance
   # identity has anything left to match.
-  rm -f "${RUNDIR}/hdw4s-proxy/${inst}.sock"
+  rm -f "${RUNDIR}/proxy/${inst}.sock"
   rm -rf "${DROPIN}/${unit}.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.service.d" \
          "${DROPIN}/hdw4s-proxy@${inst}.socket.d"
@@ -4116,9 +4122,9 @@ provision_template() {
 # (hdw4s-demux MINT_GRACE). A reservation younger than this is a visitor on
 # their way to the seat.
 POOL_MINT_GRACE=180
-TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
+TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-${RUNDIR}/teardown}"
 # hdw4s-teardown's in-progress markers: root's, beside the requests, not in them.
-ENDINGDIR="${HDW4S_ENDING_DIR:-/run/hdw4s-ending}"
+ENDINGDIR="${HDW4S_ENDING_DIR:-${RUNDIR}/ending}"
 
 # The seat's number if NAME is a seat of this pool -- SEAT_PREFIX and a number
 # written the one way the minter writes it -- else nothing.
@@ -4159,7 +4165,7 @@ pool_rows() {
 # anybody can lose. The router says the same (slots_in_use()).
 seat_busy() {
   local inst="$1" state age now
-  if [ -d "${RUNDIR}/hdw4s/${inst}" ]; then
+  if [ -d "${RUNDIR}/session/${inst}" ]; then
     echo 'a desktop is running in it'; return 0
   fi
   if [ -n "${_LIST_PRELOADED:-}" ]; then
@@ -4274,9 +4280,9 @@ pool_resize() {
   mkdir -p "${RUNDIR}"
   local was
   was="$(umask)"; umask 077
-  exec {lock}>"${RUNDIR}/hdw4s-pool.lock"
+  exec {lock}>"${RUNDIR}/pool.lock"
   umask "${was}"
-  chmod 0600 "${RUNDIR}/hdw4s-pool.lock"
+  chmod 0600 "${RUNDIR}/pool.lock"
   flock -n "${lock}" ||
     die 'hdw4s: another "hdw4s pool size" is running; wait for it and run this again.'
 

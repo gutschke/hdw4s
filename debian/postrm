@@ -15,10 +15,10 @@ if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
   # (rmdir, never rm). /shared itself is prerm's, which still has the code
   # that knows whether it may go (--shared-view release-for-removal).
   # While its mark is still there, the root namespace's bind of
-  # /run/hdw4s-shared may stand, and removing a bind's source succeeds and
+  # /run/hdw4s/shared may stand, and removing a bind's source succeeds and
   # leaves /shared showing a deleted directory for ever after.
-  [ -e /var/lib/hdw4s/.shared-mountpoint ] || rmdir /run/hdw4s-shared 2>/dev/null || :
-  rmdir /run/hdw4s-shared-store 2>/dev/null || :
+  [ -e /var/lib/hdw4s/.shared-mountpoint ] || rmdir /run/hdw4s/shared 2>/dev/null || :
+  rmdir /run/hdw4s/shared-store 2>/dev/null || :
 
   if [ -e /etc/sysctl.d/60-hdw4s.conf ]; then
     rm -f /etc/sysctl.d/60-hdw4s.conf
@@ -36,8 +36,14 @@ if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
     slot="${f%.user}"
     rm -f "${slot}.user" "${slot}.group"
   done
-  rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/hdw4s-ledger /run/systemd/system/hdw4s-ephemeral@*.service.d \
+  rm -rf /run/hdw4s/ns /run/hdw4s/profile /run/hdw4s/ledger /run/systemd/system/hdw4s-ephemeral@*.service.d \
        /run/systemd/journald@hdw4s-*.conf.d /run/systemd/system/systemd-journald@hdw4s-*.service.d
+  # And the directory they all live in, only if that left it empty: rmdir, never
+  # "rm -r". /run/hdw4s/shared is the source of a bind that may still stand in
+  # the root namespace and in a running desktop, and a recursive removal of a
+  # parent walks into whatever is mounted beneath it -- on a box with /shared on
+  # NFS, into the table itself. What is left, a reboot clears.
+  rmdir /run/hdw4s 2>/dev/null || :
 # The settings layer. Only our own profile and database are touched;
 # /etc/dconf/profile/user belongs to every session on the machine.
 #
@@ -66,7 +72,7 @@ if [ "$1" = 'purge' ]; then
   # administrator's configuration and the users' state. Purge removes ours.
   rm -f /etc/hdw4s/instances /etc/hdw4s/hdw4s.conf
   # The published template, and an authoring profile a crash left behind.
-  rm -rf /var/lib/hdw4s-template /run/hdw4s-author
+  rm -rf /var/lib/hdw4s-template /run/hdw4s/author
   # Per-instance overrides, and the credentials sealed to this machine. Leaving
   # the credentials contradicted the sentence above, and leaving the drop-ins
   # meant a reinstall came back up with stale User= and port assignments

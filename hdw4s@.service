@@ -191,7 +191,7 @@ Environment=LIBGL_ALWAYS_SOFTWARE=1
 # whatever XDG_RUNTIME_DIR names, so pointing it at /run/user/<uid> would have
 # stopping the desktop delete the runtime directory out from under an ssh login
 # by the same account. A directory of its own costs nothing and cannot do that.
-Environment=XDG_RUNTIME_DIR=%t/hdw4s/%i
+Environment=XDG_RUNTIME_DIR=%t/hdw4s/session/%i
 # Put the application wrappers ahead of the real binaries. They are what
 # redirects programs that ignore the XDG variables, Firefox above all.
 Environment=PATH=/usr/lib/hdw4s/wrappers:/usr/local/bin:/usr/bin:/bin
@@ -245,8 +245,8 @@ ExecStart=/usr/lib/hdw4s/hdw4s-session %i
 # "!" and NOT "+", for the reason the gate lines above give, and one more: "+"
 # keeps TemporaryFileSystem=, so a write meant for the host's /run could land in
 # a namespace and the ledger would never latch -- failing OPEN, silently. "!" is
-# root in this namespace, where the one writable piece of /run is the ledger
-# directory named in ReadWritePaths= below, which is the host's.
+# root in this namespace, which sees the host's /run/hdw4s/ledger (a writable
+# mount here, as all of /run is: see ReadWritePaths= below).
 #
 # "-": a ledger that cannot be written must never turn a clean end into a
 # failure. The writer says so at error priority instead.
@@ -331,19 +331,23 @@ ProtectSystem=strict
 # unit cannot name it: there is no specifier for the home of the account in
 # User=, and %h is the manager's home, which here is /root.
 ReadWritePaths=/var/lib/hdw4s
-# The one place in /run this session may create anything, and only because the
-# directory beneath it is its own: ProtectSystem=strict makes the rest of /run
-# read-only here, and <instance> itself is root's and 0711, so this lifts the
-# read-only MOUNT and leaves the permissions to decide. No "-": hdw4s-stream@ has
-# made it by now, and a session that cannot listen should fail naming the path.
-ReadWritePaths=/run/hdw4s-stream/%i
-# The failure ledger, for its root writer above. Lifting the read-only mount
-# grants the occupant nothing: the directory is root's 0711 (tmpfiles) and each
+# /run IS NOT READ-ONLY HERE. ProtectSystem=strict leaves /run writable --
+# measured inside a running desktop of each kind, 2026-10-04: /run is a
+# read-write mount in the session's namespace -- so what keeps the occupant out
+# of root's entries under /run is their PERMISSIONS, not a mount. This line is a
+# no-op today, kept so that a later read-only /run (filed, not done) does not
+# take away the one directory this session must create in. It names the
+# session's stream directory, where <instance> is root's and 0711 and only "s"
+# beneath it is the session's own. No "-": hdw4s-stream@ has made it by now, and
+# a session that cannot listen should fail naming the path.
+ReadWritePaths=/run/hdw4s/stream/%i
+# The failure ledger, for its root writer above. Like the line above it, a no-op
+# while /run is writable here, and kept for a later read-only /run. It grants the
+# occupant nothing either way: the directory is root's 0711 (tmpfiles) and each
 # file root's 0644, so the session can read a record by name, list none and
-# write none. "-"
-# because a missing directory must not stop a desktop starting; the writer
-# reports it.
-ReadWritePaths=-/run/hdw4s-ledger
+# write none -- permissions, which hold today. "-" because a missing directory
+# must not stop a desktop starting; the writer reports it.
+ReadWritePaths=-/run/hdw4s/ledger
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -370,7 +374,7 @@ RestartSec=5
 # own refusal, and the start limit above still holds -- so it needs, and must be
 # given, no capability.
 RestartPreventExitStatus=75
-RuntimeDirectory=hdw4s/%i
+RuntimeDirectory=hdw4s/session/%i
 RuntimeDirectoryMode=0700
 Slice=hdw4s-%i.slice
 StateDirectory=hdw4s/%i

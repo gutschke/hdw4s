@@ -167,9 +167,9 @@ fi
 rm -f /etc/sysusers.d/hdw4s-sysusers.conf /etc/sysusers.d/hdw4s-shared-sysusers.conf
 # The stream directories, made per session start. /run clears at a reboot; an
 # uninstall should not wait for one.
-rm -rf --one-file-system /run/hdw4s-stream
+rm -rf --one-file-system /run/hdw4s/stream
 # The named desktops' failure ledger, likewise.
-rm -rf --one-file-system /run/hdw4s-ledger
+rm -rf --one-file-system /run/hdw4s/ledger
 # /shared: the timer that re-binds the table, then the table itself and a tmpfs
 # store, then the directory desktops bound it from and its tmpfiles line.
 #
@@ -183,7 +183,7 @@ rm -rf --one-file-system /run/hdw4s-ledger
 systemctl stop hdw4s-shared-expose.timer hdw4s-shared-expose.service >/dev/null 2>&1 || :
 if [ -x "${dst}/hdw4s-shared-expose" ]; then
   "${dst}/hdw4s-shared-expose" --withdraw ||
-    echo 'Note: something is still mounted under /run/hdw4s-shared*; it was not ours to remove.'
+    echo 'Note: something is still mounted under /run/hdw4s/shared*; it was not ours to remove.'
 fi
 # The root namespace's /shared FIRST, by the same code the package's prerm
 # runs: it unmounts only the bind it recorded making, keeps /shared while a
@@ -194,8 +194,8 @@ fi
 # Then the directory that bind is made from -- but not while the mark says the
 # bind may still stand: removing its source succeeds, and leaves /shared
 # showing a deleted directory for ever after.
-[ -e /var/lib/hdw4s/.shared-mountpoint ] || rmdir /run/hdw4s-shared 2>/dev/null || :
-rmdir /run/hdw4s-shared-store 2>/dev/null || :
+[ -e /var/lib/hdw4s/.shared-mountpoint ] || rmdir /run/hdw4s/shared 2>/dev/null || :
+rmdir /run/hdw4s/shared-store 2>/dev/null || :
 rm -f /etc/tmpfiles.d/hdw4s-tmpfiles.conf
 # The slot identities and the per-slot drop-ins the minting writes. They live in
 # /run and a reboot would clear them, but an uninstall that leaves accounts
@@ -208,8 +208,14 @@ for f in /run/userdb/*.user; do
   slot="${f%.user}"
   rm -f "${slot}.user" "${slot}.group"
 done
-rm -rf /run/hdw4s-ns /run/hdw4s-profile /run/systemd/system/hdw4s-ephemeral@*.service.d \
+rm -rf /run/hdw4s/ns /run/hdw4s/profile /run/systemd/system/hdw4s-ephemeral@*.service.d \
        /run/systemd/journald@hdw4s-*.conf.d /run/systemd/system/systemd-journald@hdw4s-*.service.d
+# And the directory they all live in, only if that left it empty: rmdir, never
+# "rm -r". /run/hdw4s/shared is the source of a bind that may still stand in
+# the root namespace and in a running desktop, and a recursive removal of a
+# parent walks into whatever is mounted beneath it -- on a box with /shared on
+# NFS, into the table itself. What is left, a reboot clears.
+rmdir /run/hdw4s 2>/dev/null || :
 # The settings layer and the policy. Only our own profile and database are
 # touched; /etc/dconf/profile/user belongs to every session on the machine.
 rm -rf /etc/dconf/db/hdw4s-ephemeral.d /etc/dconf/db/hdw4s-ephemeral \

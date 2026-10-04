@@ -200,8 +200,8 @@ class Slot:
             return 127, "", "%s is not running" % self.name
         env = ["env", "HOME=/home/user", "USER=user", "LOGNAME=user",
                "DISPLAY=%s" % (self.display() or ":0"),
-               "XDG_RUNTIME_DIR=/run/hdw4s/%s" % self.name,
-               "XAUTHORITY=/run/hdw4s/%s/Xauthority" % self.name,
+               "XDG_RUNTIME_DIR=/run/hdw4s/session/%s" % self.name,
+               "XAUTHORITY=/run/hdw4s/session/%s/Xauthority" % self.name,
                "DCONF_PROFILE=hdw4s-ephemeral"]
         b = self.bus()
         if b:

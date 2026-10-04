@@ -18,7 +18,7 @@ deadline="${2:-120}"
 
 # The path the relay's own ExecStart= names; see hdw4s-proxy@.service. Inside the
 # relay's namespace this is the only stream directory that exists.
-sock="/run/hdw4s-stream/${instance}/s/stream.sock"
+sock="/run/hdw4s/stream/${instance}/s/stream.sock"
 
 # A CONNECT, the question the relay will ask, rather than a look at the file: a
 # socket file is not a listener. python3 because bash's /dev/tcp has no AF_UNIX

@@ -106,7 +106,7 @@ again.</p>
 <p>An administrator can find the cause and clear it sooner, on the machine:</p>
 <pre>journalctl -u $unit
 systemctl reset-failed $unit
-rm -f /run/hdw4s-ledger/$name</pre>
+rm -f /run/hdw4s/ledger/$name</pre>
 </main></body></html>
 """)
 

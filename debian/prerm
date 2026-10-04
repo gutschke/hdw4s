@@ -21,7 +21,7 @@ if [ "$1" = 'remove' ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ];
     >/dev/null 2>&1 || :
   if [ -x /usr/lib/hdw4s/hdw4s-shared-expose ]; then
     /usr/lib/hdw4s/hdw4s-shared-expose --withdraw ||
-      echo 'hdw4s: something is still mounted under /run/hdw4s-shared*; it was not ours to remove.' >&2
+      echo 'hdw4s: something is still mounted under /run/hdw4s/shared*; it was not ours to remove.' >&2
   fi
   for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 'hdw4s@*' \
              2>/dev/null | awk '{print $1}'); do
