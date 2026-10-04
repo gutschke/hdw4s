@@ -903,6 +903,7 @@ echo '== list sums the pool up in one line, and lists seats only when asked =='
   # is full.
   me="$(id -un)"
   RUNDIR="${SB}/run"; POOLDIR="${SB}/demux"; TEARDOWNDIR="${SB}/teardown"
+  ENDINGDIR="${SB}/ending"
   mkdir -p "${RUNDIR}/hdw4s/_hdw4s_1"; printf ':12\n' > "${RUNDIR}/hdw4s/_hdw4s_1/display"
   printf '%s\n' "0 ${me}" '1000 _hdw4s_0 ephemeral' '1001 _hdw4s_1 ephemeral' \
     '1002 _hdw4s_2 ephemeral' '1003 _hdw4s_3 ephemeral' '1004 _hdw4s_4 ephemeral' \
@@ -975,7 +976,7 @@ echo '== the pool is sized as one thing, and never takes a visitor'"'"'s seat ==
   # systemctl, and the wait for the router. Runs nothing on a machine. Whether a
   # seat added live actually serves a desktop is a question for a real box.
   NSDIR="${SB}/ns"; USERDB="${SB}/userdb"; RUNDIR="${SB}/run"
-  POOLDIR="${SB}/demux"; TEARDOWNDIR="${SB}/teardown"
+  POOLDIR="${SB}/demux"; TEARDOWNDIR="${SB}/teardown"; ENDINGDIR="${SB}/ending"
   mkdir -p "${NSDIR}" "${USERDB}" "${RUNDIR}/hdw4s" "${POOLDIR}/reserved" "${TEARDOWNDIR}"
   CALLS="${SB}/calls"; : > "${CALLS}"
   systemctl() { echo "systemctl $*" >> "${CALLS}"; [ "$1" != is-active ]; }
@@ -1059,10 +1060,10 @@ MINT
   is  'a starting unit holds its seat' "$(rows)" '_hdw4s_0 _hdw4s_1 '
   has 'and says so' "${out}" 'its desktop is activating'
   systemctl() { echo "systemctl $*" >> "${CALLS}"; [ "$1" != is-active ]; }
-  mkdir -p "${TEARDOWNDIR}/ending"; : > "${TEARDOWNDIR}/ending/_hdw4s_1"
+  mkdir -p "${ENDINGDIR}"; : > "${ENDINGDIR}/_hdw4s_1"
   out="$( (pool_resize 1) 2>&1 )"
   is  'a seat being torn down holds too' "$(rows)" '_hdw4s_0 _hdw4s_1 '
-  rm -f "${TEARDOWNDIR}/ending/_hdw4s_1"
+  rm -f "${ENDINGDIR}/_hdw4s_1"
 
   # THE ROUTER LETTING A SEAT WHILE IT IS BEING TAKEN. The row goes first, then
   # the wait, then a second look: a letting that read the table before the row
@@ -1078,6 +1079,14 @@ MINT
   rm -f "${POOLDIR}/reserved/_hdw4s_1"
   (pool_resize 1) >/dev/null 2>&1
   is  'once it is idle, it goes' "$(rows)" '_hdw4s_0 '
+
+  # THE LOCK IS ROOT'S ALONE. flock needs only a read descriptor, so a lock file
+  # anybody can read is one anybody can hold, and every resize is then refused.
+  is  'the pool lock is 0600' "$(stat -c %a "${RUNDIR}/hdw4s-pool.lock")" '600'
+  chmod 0644 "${RUNDIR}/hdw4s-pool.lock"
+  (pool_resize 1) >/dev/null 2>&1
+  is  'and one an older version left readable is made 0600' \
+      "$(stat -c %a "${RUNDIR}/hdw4s-pool.lock")" '600'
 
   # ONE AT A TIME: a second run is refused while the first holds the lock, and
   # changes nothing.
@@ -6941,6 +6950,13 @@ echo '== the installed app is never named upstream, on either kind of desktop ==
 
   page manifest.json
   run provision named1 || bad 'a named desktop provisions' "$(cat "${d}/err")"
+  # THE BUILD LOCK IS ROOT'S ALONE: it sits where every account can read, and
+  # flock needs only a descriptor, so a readable one stalls every later build.
+  is 'the web root build lock is 0600' "$(stat -c %a "${d}/web/.hdw4s-webroot.lock")" '600'
+  chmod 0644 "${d}/web/.hdw4s-webroot.lock"
+  run provision named1 || :
+  is 'and one an older version left readable is made 0600' \
+     "$(stat -c %a "${d}/web/.hdw4s-webroot.lock")" '600'
   is 'a named desktop'"'"'s app is named after it' \
     "$(field "${d}/web/named1/manifest.json" name)" 'Desktop|Desktop'
 
@@ -8166,18 +8182,25 @@ echo '== the teardown ends a desktop that is still starting =='
   systemctl() {
     printf '%s\n' "$*" >> "${STUB_LOG}"
     case "$*" in
-      'show -p ActiveState --value '*) printf '%s\n' "${STUB_STATE}";;
+      'show -p ActiveState --value '*)
+        printf '%s\n' "${STUB_STATE}"
+        # Where the in-progress marker is while the script is at work: every
+        # file under the stand-in's /run, as the script's first question sees it.
+        # shellcheck disable=SC2153  # STUB_RUN is set per call, by teardown_in
+        (cd "${STUB_RUN}" && find . -type f | sort) > "${STUB_SEEN}";;
     esac
   }
   export -f systemctl
   # One run of the script against a fresh stand-in, in STATE. Prints what it said.
   teardown_in() {
-    rm -rf "${d}/req" "${d}/cg"; : > "${d}/log"
-    mkdir -p "${d}/req" "${d}/cg/hdw4s-_hdw4s_0.slice"
+    rm -rf "${d}/run" "${d}/cg"; : > "${d}/log"
+    mkdir -p "${d}/run/req" "${d}/cg/hdw4s-_hdw4s_0.slice"
     echo 999999999 > "${d}/cg/hdw4s-_hdw4s_0.slice/cgroup.procs"
     : > "${d}/cg/hdw4s-_hdw4s_0.slice/cgroup.kill"
-    STUB_LOG="${d}/log" STUB_STATE="$1" \
-      HDW4S_TEARDOWN_DIR="${d}/req" HDW4S_SESSION_CGROUP_ROOT="${d}/cg" \
+    : > "${d}/run/req/_hdw4s_0"
+    STUB_LOG="${d}/log" STUB_STATE="$1" STUB_RUN="${d}/run" STUB_SEEN="${d}/seen" \
+      HDW4S_TEARDOWN_DIR="${d}/run/req" HDW4S_ENDING_DIR="${d}/run/ending" \
+      HDW4S_SESSION_CGROUP_ROOT="${d}/cg" \
       bash "${2:-${ROOT}/hdw4s-teardown}" _hdw4s_0 2>&1
   }
   killed() { cat "${d}/cg/hdw4s-_hdw4s_0.slice/cgroup.kill"; }
@@ -8210,6 +8233,82 @@ echo '== the teardown ends a desktop that is still starting =='
     teardown_in activating "${d}/red" >/dev/null
     is 'a teardown that ends only active desktops leaves an activating one' "$(killed)" ''
   fi
+
+  # THE IN-PROGRESS MARKER IS ROOT'S, OUT OF THE FRONT DOOR'S REACH. The request
+  # directory is writable by the router's group, so a marker kept inside it could
+  # be removed, planted or replaced by the process that reads it. Asserted from
+  # what the script actually did -- the files present when it first asked about
+  # the unit -- not from its text.
+  teardown_in active >/dev/null
+  is 'while a teardown runs, its marker is in the marker directory and nowhere else' \
+     "$(tr '\n' ' ' < "${d}/seen")" './ending/_hdw4s_0 '
+  is 'and it is gone when the teardown ends' \
+     "$(cd "${d}/run" && find . -type f | tr '\n' ' ')" ''
+  # RED ARM: the marker put back inside the request directory must be seen.
+  # shellcheck disable=SC2016  # the script's own text, not an expansion here
+  sed 's|^ENDDIR=.*|ENDDIR="${REQDIR}/ending"|' "${ROOT}/hdw4s-teardown" > "${d}/red"
+  if cmp -s "${ROOT}/hdw4s-teardown" "${d}/red"; then
+    bad 'the marker red arm mutates the teardown' 'the sed matched nothing'
+  else
+    teardown_in active "${d}/red" >/dev/null
+    is 'RED ARM: a marker inside the request directory is caught' \
+       "$(tr '\n' ' ' < "${d}/seen")" './req/ending/_hdw4s_0 '
+  fi
+
+  # "ending" IS AN ORDINARY NAME NOW. It was reserved while the markers lived in
+  # "<requests>/ending"; with them in a directory of their own a request by that
+  # name is handled like any other (the pool, whose seats are _hdw4s_N, never
+  # makes one) and leaves the marker directory, and the markers in it, alone.
+  rm -rf "${d}/run"; mkdir -p "${d}/run/req" "${d}/run/ending"
+  : > "${d}/run/req/ending"; : > "${d}/run/ending/_hdw4s_1"; : > "${d}/log"
+  STUB_LOG="${d}/log" STUB_STATE=inactive STUB_RUN="${d}/run" STUB_SEEN="${d}/seen" \
+    HDW4S_TEARDOWN_DIR="${d}/run/req" HDW4S_ENDING_DIR="${d}/run/ending" \
+    HDW4S_SESSION_CGROUP_ROOT="${d}/cg" bash "${ROOT}/hdw4s-teardown" ending >/dev/null 2>&1
+  is 'a request named "ending" is an ordinary one, and the marker directory is untouched' \
+     "$(cd "${d}/run" && find . | sort | tr '\n' ' ')" '. ./ending ./ending/_hdw4s_1 ./req '
+)
+
+echo "== root's lock files can be opened by root alone =="
+# flock(2) needs only a descriptor, and a descriptor only read permission. So a
+# lock file in /run that anybody can read is one any account -- a desktop's
+# occupant included -- can hold for ever, stalling whatever root wanted it for:
+# for the firewall, the 15-minute self-heal. Each lock is taken by the real code
+# that takes it, against a path in a scratch directory, and its mode is read.
+( set +e; d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  # The firewall: its own take_lock(), with the dispatcher cut off.
+  sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s-firewall" > "${d}/fw.sh"
+  fw_lock() {  # take the lock in a scratch path, in a subshell; print its mode
+    # shellcheck disable=SC1090  # a copy of hdw4s-firewall, made just above
+    ( HDW4S_ETCDIR="${d}/etc"; . "$1" >/dev/null 2>&1; trap - EXIT ERR
+      LOCK="${d}/run/firewall.lock"; take_lock; stat -c %a "${LOCK}" )
+  }
+  is 'the firewall lock is 0600' "$(fw_lock "${d}/fw.sh")" '600'
+  chmod 0644 "${d}/run/firewall.lock"
+  is 'and one an older version left readable is made 0600' "$(fw_lock "${d}/fw.sh")" '600'
+  rm -rf "${d}/run"
+  # RED ARM: without the umask and the chmod the lock comes out as the umask
+  # leaves it, which is what shipped.
+  # shellcheck disable=SC2016  # the script's own text, not an expansion here
+  sed -e '/^  umask 077$/d' -e '/^  chmod 0600 "${LOCK}"$/d' "${d}/fw.sh" > "${d}/fw-red.sh"
+  if cmp -s "${d}/fw.sh" "${d}/fw-red.sh"; then
+    bad 'the firewall red arm mutates take_lock' 'the sed matched nothing'
+  else
+    (umask 022; is 'RED ARM: a lock taken without them is caught' \
+       "$(fw_lock "${d}/fw-red.sh")" '644')
+  fi
+  # The template tool's lock, through its own take_lock().
+  mode="$(HDW4S_ETCDIR="${d}/etc" python3 - "${ROOT}/hdw4s-template" "${d}/template.lock" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("tmpl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tmpl", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+m.LOCK = sys.argv[2]
+m.take_lock()
+print("%o" % (os.stat(m.LOCK).st_mode & 0o7777))
+PY
+)"
+  is 'the template lock is 0600' "${mode}" '600'
 )
 
 echo '== the router, against stand-in slots =='
@@ -8416,8 +8515,10 @@ echo '== the unit wires the ledger as measured: writer after, check in the main 
      "$(grep -cx 'ReadWritePaths=-/run/hdw4s-ledger' "${f}")" '1'
   # MEASURED: a refusing ExecStartPre= is restarted for ever.
   is 'the check is not an ExecStartPre=' "$(grep -c '^ExecStartPre=.*hdw4s-ledger' "${f}")" '0'
-  is 'tmpfiles makes the ledger directory root'"'"'s' \
-     "$(grep -cx 'd /run/hdw4s-ledger 0755 root root -' "${ROOT}/hdw4s-tmpfiles.conf")" '1'
+  # 0711, not 0755: a record is opened by name, and the set of desktops that
+  # have one is nobody's to list.
+  is 'tmpfiles makes the ledger directory root'"'"'s, enterable and unlistable' \
+     "$(grep -cx 'd /run/hdw4s-ledger 0711 root root -' "${ROOT}/hdw4s-tmpfiles.conf")" '1'
   is 'the refusal unit is told which desktop it is refusing' \
      "$(grep -cx 'ExecStart=/usr/lib/hdw4s/hdw4s-refuse %i' "${ROOT}/hdw4s-refuse@.service")" '1'
   # NAMED ONLY (threat review L-d), with its red arm: a planted line is seen.
@@ -8534,7 +8635,7 @@ echo '== hdw4s check sees a named desktop that will not start =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1630  # update when tests are added; a wrong number is the point
+EXPECTED=1642  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

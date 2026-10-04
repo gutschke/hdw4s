@@ -338,8 +338,9 @@ ReadWritePaths=/var/lib/hdw4s
 # made it by now, and a session that cannot listen should fail naming the path.
 ReadWritePaths=/run/hdw4s-stream/%i
 # The failure ledger, for its root writer above. Lifting the read-only mount
-# grants the occupant nothing: the directory is root's 0755 (tmpfiles) and each
-# file root's 0644, so the session can read its own record and write none. "-"
+# grants the occupant nothing: the directory is root's 0711 (tmpfiles) and each
+# file root's 0644, so the session can read a record by name, list none and
+# write none. "-"
 # because a missing directory must not stop a desktop starting; the writer
 # reports it.
 ReadWritePaths=-/run/hdw4s-ledger

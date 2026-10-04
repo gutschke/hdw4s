@@ -4117,6 +4117,8 @@ provision_template() {
 # their way to the seat.
 POOL_MINT_GRACE=180
 TEARDOWNDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
+# hdw4s-teardown's in-progress markers: root's, beside the requests, not in them.
+ENDINGDIR="${HDW4S_ENDING_DIR:-/run/hdw4s-ending}"
 
 # The seat's number if NAME is a seat of this pool -- SEAT_PREFIX and a number
 # written the one way the minter writes it -- else nothing.
@@ -4180,7 +4182,7 @@ seat_busy() {
       echo 'a visitor has just been handed it'; return 0
     fi
   fi
-  if [ -e "${TEARDOWNDIR}/${inst}" ] || [ -e "${TEARDOWNDIR}/ending/${inst}" ]; then
+  if [ -e "${TEARDOWNDIR}/${inst}" ] || [ -e "${ENDINGDIR}/${inst}" ]; then
     echo 'its desktop is being ended'; return 0
   fi
 }
@@ -4263,8 +4265,18 @@ pool_resize() {
   # the seats to add or take from a table the other is changing, and the second
   # to write the setting would win with a number that matches neither. A queue
   # would make the second run silently undo the first; a refusal says so.
-  install -d -m0755 "${RUNDIR}"
+  #
+  # ROOT'S ALONE, 0600. flock(2) needs only a descriptor and a descriptor only
+  # read permission, so a lock file anybody can read is one any account here can
+  # hold, and every resize after it is refused. Made under umask 077, and
+  # chmod'ed in case an older version left it readable. The directory is made if
+  # missing and never given a mode: it is not this command's to decide.
+  mkdir -p "${RUNDIR}"
+  local was
+  was="$(umask)"; umask 077
   exec {lock}>"${RUNDIR}/hdw4s-pool.lock"
+  umask "${was}"
+  chmod 0600 "${RUNDIR}/hdw4s-pool.lock"
   flock -n "${lock}" ||
     die 'hdw4s: another "hdw4s pool size" is running; wait for it and run this again.'
 

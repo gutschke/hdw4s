@@ -35,9 +35,10 @@ set -o nounset -o pipefail
 #     the clock. It never reads a file the session can write: a "reason" copied
 #     out of the session's own directories would be a symlink root follows, and
 #     free text on a web page.
-#   * The ledger lives in /run/hdw4s-ledger, made by tmpfiles as root's 0755;
-#     each file is root's 0644, replaced by rename. The owner can READ their
-#     own record and nothing else.
+#   * The ledger lives in /run/hdw4s-ledger, made by tmpfiles as root's 0711;
+#     each file is root's 0644, replaced by rename. Any account can READ a
+#     record whose name it knows -- an instance name is an account name, and
+#     no secret -- but none can LIST the directory, and none can write to it.
 #   * The CHECK runs as the owner and is therefore advisory to that uid: an
 #     owner who defeats it loses only their own protection, and the outer fuse
 #     still holds. Nothing is bought by giving it privilege.

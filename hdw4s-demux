@@ -3303,6 +3303,9 @@ def assert_occupancy_is_read_not_created(occupied=slot_occupied,
 # one that never ran.
 
 TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", "/run/hdw4s-teardown")
+# Where hdw4s-teardown keeps its in-progress markers: root's, and read here only.
+# NOT inside TEARDOWN_DIR, which this router may write -- see teardown_requested().
+ENDING_DIR = os.environ.get("HDW4S_ENDING_DIR", "/run/hdw4s-ending")
 
 
 # HOW LONG A TEARDOWN IN PROGRESS MAY HOLD A SLOT OUT OF THE POOL. Bounded
@@ -3320,7 +3323,7 @@ TEARDOWN_DIR = os.environ.get("HDW4S_TEARDOWN_DIR", "/run/hdw4s-teardown")
 TEARDOWN_MARKER_MAX = 240.0
 
 
-def teardown_requested(instance, root=None, now=None):
+def teardown_requested(instance, root=None, now=None, ending=None):
     """True when this slot is being ended -- asked for, or part way through.
 
     TWO FILES, AND THE SECOND ONE IS THE REPAIR. The request file is removed by
@@ -3331,14 +3334,14 @@ def teardown_requested(instance, root=None, now=None):
     dying -- the whole interval anybody needed it for. A guard that is true only
     outside the window it guards is not a guard.
 
-    So hdw4s-teardown leaves a marker in "ending/<slot>" instead and clears it
-    from a trap when it is done. A SUBDIRECTORY rather than a suffix on the same
-    name: instance names may legally contain a dot -- hdw4s's own validator
-    permits "A-Za-z0-9._-" -- so "<slot>.ending" is a name a slot could in
-    principle have, and a marker that can be spelled as a request is a marker
-    that can trigger the path unit. The one name this shape collides with is a
-    slot called "ending", and hdw4s-teardown refuses that name outright rather
-    than the comment asking anybody to avoid it.
+    So hdw4s-teardown leaves a marker in ENDING_DIR instead and clears it from a
+    trap when it is done. A DIRECTORY OF ITS OWN, and not the request directory,
+    for two reasons. A suffix on the request's name could be spelled as a request
+    -- instance names may legally contain a dot -- and would fire the path unit.
+    And the request directory is writable by this router's group, so a marker
+    kept there could be removed, planted or swapped for a symlink by the very
+    process that reads it to decide whether a slot may be let. The marker is
+    root's, in root's directory; this router can only read it.
     """
     base = TEARDOWN_DIR if root is None else root
     try:
@@ -3347,7 +3350,8 @@ def teardown_requested(instance, root=None, now=None):
     except OSError:
         return False
     try:
-        st = os.stat(os.path.join(base, "ending", instance))
+        st = os.stat(os.path.join(ENDING_DIR if ending is None else ending,
+                                  instance))
     except OSError:
         return False
     here = time.time() if now is None else now
@@ -6864,23 +6868,33 @@ def assert_an_ended_letting_is_never_proxied(factory=Ownership,
         # Without this, the gate above could fire on a FRESH letting that had been
         # minted onto the slot while the previous one was still being torn down.
         tdir = os.path.join(d, "teardown")
-        os.makedirs(os.path.join(tdir, "ending"))
+        edir = os.path.join(d, "ending")
+        os.makedirs(tdir)
+        os.makedirs(edir)
         pool = ["_hdw4s_0", "_hdw4s_1"]
-        seen = asked("_hdw4s_1", root=tdir)
+        seen = asked("_hdw4s_1", root=tdir, ending=edir)
         assert seen is False, \
             "a slot with no teardown marker was reported as being torn down"
-        open(os.path.join(tdir, "ending", "_hdw4s_1"), "w").close()
-        assert asked("_hdw4s_1", root=tdir) is True, \
+        open(os.path.join(edir, "_hdw4s_1"), "w").close()
+        assert asked("_hdw4s_1", root=tdir, ending=edir) is True, \
             "the in-progress marker hdw4s-teardown leaves for the WHOLE of a" \
             " teardown was not seen; the only thing this router could see was" \
             " the request file, which the teardown clears before it does any work"
         # AND IT EXPIRES, because the marker is cleared by another process and a
         # marker that outlived a SIGKILL would take the slot out of the pool
         # until the next reboot.
-        assert asked("_hdw4s_1", root=tdir,
+        assert asked("_hdw4s_1", root=tdir, ending=edir,
                      now=time.time() + TEARDOWN_MARKER_MAX + 1) is False, \
             "the in-progress marker never expires, so one killed teardown" \
             " retires a slot permanently"
+        # AND ONLY THERE. The request directory is this router's group's to
+        # write, so a marker found in it is one anything in that group could
+        # have planted; it must say nothing.
+        os.makedirs(os.path.join(tdir, "ending"))
+        open(os.path.join(tdir, "ending", "_hdw4s_0"), "w").close()
+        assert asked("_hdw4s_0", root=tdir, ending=edir) is False, \
+            "a marker in the request directory, which the front door may" \
+            " write, was taken for a teardown in progress"
         _ = pool
     finally:
         shutil.rmtree(d, ignore_errors=True)

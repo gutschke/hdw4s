@@ -783,6 +783,8 @@ class Rig:
         os.makedirs(self.webroot)
         self.teardowndir = os.path.join(self.tmp, "teardown")
         os.makedirs(self.teardowndir)
+        self.endingdir = os.path.join(self.tmp, "ending")
+        os.makedirs(self.endingdir)
         # WHERE THE ROUTER ASKS FOR A DESKTOP TO BE STARTED, and the stand-in for
         # the root side that acts on it (hdw4s-start@<slot>.path and .service):
         # a thread that TAKES each request -- removes it, as the real one renames
@@ -834,6 +836,7 @@ class Rig:
                    HDW4S_REAP_STAMP_DIR=self.reapdir,
                    HDW4S_WEBROOT_DIR=self.webroot,
                    HDW4S_TEARDOWN_DIR=self.teardowndir,
+                   HDW4S_ENDING_DIR=self.endingdir,
                    HDW4S_START_DIR=self.startdir,
                    HDW4S_STREAM_DIR=self.streamdir,
                    HDW4S_DEMUX_BIND="127.0.0.1",
@@ -4755,6 +4758,7 @@ def concurrent_lettings(path, entry, nslots, nvisitors):
     m.RESERVE_DIR = os.path.join(tmp, "reserved")
     m.TEARDOWN_DIR = os.path.join(tmp, "teardown")
     os.makedirs(m.TEARDOWN_DIR)
+    m.ENDING_DIR = os.path.join(tmp, "ending")
     m.log = lambda msg: None
     m.log_refusal = lambda *a, **kw: None
     barrier = threading.Barrier(nvisitors, timeout=1.5)
@@ -6517,6 +6521,7 @@ def grace_edge(path):
     m.RESERVE_DIR = os.path.join(tmp, "reserved")
     m.START_DIR = os.path.join(tmp, "start")
     m.TEARDOWN_DIR = os.path.join(tmp, "teardown")
+    m.ENDING_DIR = os.path.join(tmp, "ending")
     m.listening_paths = lambda *a, **kw: None
     own = m.Ownership()
     inst, sid_a = m.let_slot(own, "a" * 32)

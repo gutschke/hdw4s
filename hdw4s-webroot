@@ -96,8 +96,19 @@ cmd_build() {
   # one's "mv" finds the directory back in place and moves the staging tree INSIDE it, so
   # the slot ends up with no index.html at all and refuses to start for a reason nothing
   # in the message points at.
+  #
+  # ROOT'S ALONE, 0600. The lock sits in a directory every account can read, and
+  # flock(2) needs nothing more than a descriptor: readable by all, it is a lock
+  # a desktop's occupant can open and hold for ever, and every later build -- each
+  # named desktop's start, each mint -- then waits on it. Made under umask 077,
+  # and chmod'ed in case an older version left it readable.
   mkdir -p "$(dirname "${root}")"
-  exec 9>"$(dirname "${root}")/.hdw4s-webroot.lock" || die 'could not open the build lock'
+  local lock was
+  lock="$(dirname "${root}")/.hdw4s-webroot.lock"
+  was="$(umask)"; umask 077
+  exec 9>"${lock}" || die 'could not open the build lock'
+  umask "${was}"
+  chmod 0600 "${lock}" || die 'could not make the build lock private'
   flock 9 || die 'could not take the build lock'
 
   local stage="${root}.new.$$"

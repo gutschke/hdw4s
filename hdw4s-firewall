@@ -21,6 +21,24 @@ RULES="${ETCDIR}/nftables.conf"
 # and a machine running etckeeper commits every appearance of one in /etc.
 LOCK='/run/hdw4s-firewall.lock'
 
+# Take the lock, on a file only root can open. flock(2) needs no more than a
+# descriptor, and a descriptor needs no more than read permission -- so a lock
+# file anybody can read is one any account on the machine, a desktop's occupant
+# included, can hold for ever, and the 15-minute self-heal below then waits on it
+# instead of putting the firewall back. Created under umask 077, and chmod'ed in
+# case an older version left it readable. The directory is made if it is
+# missing and never given a mode: it is not this script's to decide.
+take_lock() {
+  local was
+  mkdir -p "$(dirname "${LOCK}")"
+  was="$(umask)"
+  umask 077
+  exec 9>"${LOCK}"
+  umask "${was}"
+  chmod 0600 "${LOCK}"
+  flock 9
+}
+
 HDW4S_BASE_PORT=7300
 HDW4S_BLOCK_SIZE=64
 HDW4S_PROXIES=''
@@ -804,9 +822,7 @@ case "${1:-}" in
     # running --apply. Both write the same ruleset file and both load a table;
     # letting them interleave means one truncating the file the other is
     # reading. The lock is held for the whole operation, not just the write.
-    install -d -m0755 "$(dirname "${LOCK}")"
-    exec 9>"${LOCK}"
-    flock 9
+    take_lock
     case "$1" in --apply) cmd_apply;; *) cmd_restore;; esac
     ;;
   --check)

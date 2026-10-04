@@ -84,6 +84,13 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH
 
 SLOT="${1:?usage: hdw4s-teardown <slot>}"
 REQDIR="${HDW4S_TEARDOWN_DIR:-/run/hdw4s-teardown}"
+# The in-progress markers, beside the request directory and NOT inside it. The
+# request directory is the front door's to write -- 0770, group www-data -- so a
+# marker kept in it was a marker the front door could remove, replace with a
+# symlink, or plant, and the front door is the one process that reads it to
+# decide whether a slot may be let. Root's, 0755: the router reads it, nothing
+# but this script writes it.
+ENDDIR="${HDW4S_ENDING_DIR:-/run/hdw4s-ending}"
 CGROOT="${HDW4S_SESSION_CGROUP_ROOT:-/sys/fs/cgroup/hdw4s.slice}"
 UNIT="hdw4s-ephemeral@${SLOT}.service"
 
@@ -93,12 +100,6 @@ UNIT="hdw4s-ephemeral@${SLOT}.service"
 # nothing and the failure it prevents is unrecoverable.
 case "${SLOT}" in
   *[!a-zA-Z0-9_-]*|'') echo "hdw4s-teardown: refusing the slot name ${SLOT}" >&2; exit 2;;
-  # "ending" IS THE ONE RESERVED NAME, and it is refused here rather than left to
-  # a comment asking people not to use it. The in-progress marker below lives in
-  # "${REQDIR}/ending/<slot>", so a slot with that name would have its request
-  # file and the marker directory competing for one path -- and the router reads
-  # both. Mechanical, because a naming convention nobody can check is not one.
-  ending) echo "hdw4s-teardown: 'ending' is reserved; ${REQDIR}/ending holds the in-progress markers" >&2; exit 2;;
 esac
 
 say() { echo "hdw4s-teardown: $*"; }
@@ -130,11 +131,11 @@ say() { echo "hdw4s-teardown: $*"; }
 # default, not a decision, and the router only needs to READ this directory. A
 # mode that stopped it reading would make teardown_requested() answer "nothing is
 # being torn down" for ever, silently, which is the shape of guard this whole
-# change exists to remove. Nothing but this script writes here, so the group does
-# not need the write bit the parent gives www-data.
-mkdir -m 0755 -p "${REQDIR}/ending"
-: > "${REQDIR}/ending/${SLOT}"
-trap 'rm -f "${REQDIR}/ending/${SLOT}"' EXIT
+# change exists to remove. Nothing but this script writes here, so nobody else
+# gets a write bit -- least of all the group that may write requests.
+install -d -m 0755 "${ENDDIR}"
+: > "${ENDDIR}/${SLOT}"
+trap 'rm -f "${ENDDIR}/${SLOT}"' EXIT
 rm -f "${REQDIR}/${SLOT}"
 
 state="$(systemctl show -p ActiveState --value "${UNIT}" 2>/dev/null || echo unknown)"
