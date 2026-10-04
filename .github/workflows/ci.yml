@@ -92,6 +92,15 @@ jobs:
             sleep 5
           done
 
+      # The same namespace allowance as the build job: this job runs the same
+      # tests, and without it every /shared and relay test that needs a user
+      # namespace failed here (v2.4.11's first release run) while the build job
+      # beside it was green.
+      - name: Allow unprivileged user namespaces
+        run: |
+          f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          [ ! -e "${f}" ] || sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       # The package is rebuilt here from the tag rather than carried over from
       # the build job. It costs seconds and removes any question about what
       # happened to the file in between.
