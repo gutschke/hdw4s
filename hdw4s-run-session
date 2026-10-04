@@ -25,6 +25,7 @@ instance="${1:?usage: hdw4s-run-session <instance>}"
 : "${HDW4S_DPI:=follow}"
 : "${HDW4S_INDEXING:=off}"
 : "${HDW4S_SCREEN_LOCK:=off}"
+: "${HDW4S_PRINTING:=browser}"
 : "${HDW4S_THUMBNAILS:=off}"
 : "${HDW4S_DEBUG_DESKTOP:=off}"
 : "${HDW4S_HIDPI:=scale}"
@@ -997,8 +998,16 @@ fi
 # they fell back to the machine's CUPS -- whose printer a visitor saw as its
 # default destination, measured 2026-09-30. The unit also hides the machine's
 # CUPS socket (InaccessiblePaths=-/run/cups), so this is not the only barrier.
-# Named desktops keep the machine's printers: they belong to people who work here.
-if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
+#
+# A NAMED DESKTOP PRINTS THERE TOO, unless HDW4S_PRINTING=machine. Its person is
+# by definition somewhere other than this machine, so the browser is where the
+# paper is; the machine's own printers were measured unreachable from both of our
+# desktop containers, and a job sent there waited for ever with nothing to tell
+# anybody (2026-10-03). There is no "both": an application talks to ONE print
+# server, so the setting picks which. It is a default, not a barrier -- the
+# barriers above stay keyed on the ephemeral kind and nothing here relaxes them,
+# which is why an ephemeral desktop ignores HDW4S_PRINTING=machine.
+if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ] || [ "${HDW4S_PRINTING}" != 'machine' ]; then
   export CUPS_SERVER="${XDG_RUNTIME_DIR}/selkies-cups/cups.sock"
 fi
 
@@ -1088,6 +1097,16 @@ export SELKIES_TURN_REST_URI=''
 # could drop a file there and point its own media at a relay of its choosing.
 # An empty value never exists, so the override can never be taken.
 export SELKIES_RTC_CONFIG_JSON=''
+
+# Printed documents wait in the desktop's OWN state, not in the home. The
+# server's default is ~/.local/state/selkies/print, spelled with a tilde rather
+# than XDG_STATE_HOME, so on a named desktop every document printed sat in the
+# person's home until a page took it -- and a home shared by two machines gave
+# both servers one spool to watch, so a document printed on one could be handed
+# to a page connected to the other. XDG_STATE_HOME is the profile's (per machine
+# under HDW4S_ISOLATION=profile, per visit on an ephemeral desktop), which is
+# what the home holding "files only" means.
+export SELKIES_PRINT_SPOOL_PATH="${XDG_STATE_HOME:-${HOME}/.local/state}/selkies/print"
 
 # Upstream's own entry point, run directly. There is nothing of ours between
 # the unit and the streaming server: 2.0 ships a distribution package with a
@@ -1731,6 +1750,53 @@ stream_pid="$!"
     systemd-notify --status="stream did not listen on ${HDW4S_STREAM_SOCKET}"
 ) &
 children+=($!)
+
+# THE BROWSER QUEUE PRINTS ON THE MACHINE'S PAPER SIZE. Selkies copies its own
+# PPD into place on every start (selkies/printing.py, PrintQueue._prepare), and
+# that PPD defaults to A4 whatever the machine says, because the copy bypasses
+# the step where CUPS would apply the machine's size. The default is what decides
+# the page: measured 2026-10-04, the same one-line job came out 612x792 under a
+# Letter default and 595x842 under A4. A browser that rescales to its own paper
+# then scales a second time, and the margins show it.
+#
+# So once the queue exists, its default is set to the size libpaper would give
+# (PAPERSIZE, then the file PAPERCONF names, then /etc/papersize), through the
+# queue's own scheduler, which this account runs and may administer. Only a size
+# the PPD offers is set; anything else leaves Selkies' default and says so. One
+# line in the journal when it changes something and nothing when the queue
+# already agrees -- which is also how a Selkies that does this itself shows up:
+# the line stops appearing.
+if [ "${CUPS_SERVER:-}" = "${XDG_RUNTIME_DIR}/selkies-cups/cups.sock" ]; then
+  (
+    ppd="${XDG_RUNTIME_DIR}/selkies-cups/ppd/Selkies.ppd"
+    want="${PAPERSIZE:-}"
+    if [ -z "${want}" ]; then
+      want="$(sed -n 's/[[:space:]]*#.*//; /[^[:space:]]/{s/[[:space:]]//g; p; q}' \
+                "${PAPERCONF:-/etc/papersize}" 2>/dev/null)" || want=''
+    fi
+    [ -n "${want}" ] || exit 0
+    for _ in $(seq 1 60); do
+      [ -S "${CUPS_SERVER}" ] && [ -s "${ppd}" ] && break
+      sleep 1
+    done
+    [ -s "${ppd}" ] || exit 0
+    have="$(sed -n 's/^\*DefaultPageSize:[[:space:]]*//p' "${ppd}" | tr -d '\r')"
+    # The PPD's own spelling of that size, matched without regard to case:
+    # libpaper says "letter" and "a4", a PPD "Letter" and "A4".
+    name="$(sed -n 's|^\*PageSize[[:space:]]\{1,\}\([^/:]*\).*|\1|p' "${ppd}" |
+            awk -v w="${want}" 'tolower($0) == tolower(w) { print; exit }')"
+    if [ -z "${name}" ]; then
+      echo "hdw4s: the machine's paper size is \"${want}\", which the browser print queue does not offer; it stays on ${have:-its default}" >&2
+    elif [ "${name}" != "${have}" ]; then
+      if lpadmin -h "${CUPS_SERVER}" -p Selkies -o "PageSize=${name}" 2>/dev/null; then
+        echo "hdw4s: the browser print queue now defaults to ${name}, the machine's paper size (it was ${have:-unset})" >&2
+      else
+        echo "hdw4s: could not set the browser print queue to ${name}, the machine's paper size; it stays on ${have:-its default}" >&2
+      fi
+    fi
+  ) &
+  children+=($!)
+fi
 
 # A LOGOUT ENDS A DESKTOP, AND THAT IS NOT A FAILURE -- of either kind. The GNOME
 # session exits with status 0 when its occupant logs out, and this script used

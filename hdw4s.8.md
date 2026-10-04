@@ -543,6 +543,18 @@ belongs to the copy of the streaming server, of which there is one.
     adds one database beneath it rather than replacing it. Ephemeral desktops
     never lock: nobody could unlock them. Takes effect at the next restart.
 
+  * `HDW4S_PRINTING`:
+    Where a named desktop prints: `browser` (the default) or `machine`. With
+    `browser` a printed document reaches the person's own browser as a PDF and
+    their own print dialog takes over, so it prints wherever they are; a
+    document printed while no browser is connected waits until one is. With
+    `machine` the desktop uses this machine's printers instead -- the right
+    choice only for a desktop that sits next to a printer this machine can
+    reach. An application talks to one print server, so it is one or the
+    other. Ephemeral desktops always print to the browser. The browser queue
+    uses this machine's paper size, as libpaper reports it (`PAPERSIZE`, else
+    `/etc/papersize`). Takes effect at the next restart.
+
   * `HDW4S_INDEXING`:
     Whether the desktop's file indexer runs. Defaults to `off`, and takes
     effect only with `HDW4S_ISOLATION=profile`; without that the indexer is the
@@ -1441,9 +1453,14 @@ a persistent journal the machine's own journal would otherwise give each slot's
 reused uid a file of its own, so the next visitor could read the previous one's
 output.
 
-Printing from an ephemeral desktop goes only to the visitor's own browser, as a
-PDF through the streaming server's print queue; the machine's printers are
-neither listed nor reachable from it. Named desktops keep the machine's printers.
+Printing goes to the person's own browser, as a PDF through the streaming
+server's print queue, on this machine's paper size. An ephemeral desktop cannot
+reach this machine's print server; a named one can, with `HDW4S_PRINTING=machine`.
+What hdw4s does not close is the network: a printer on the local network that
+announces itself is listed in a desktop's print dialogs, and code in a desktop
+can reach it directly, as it can reach anything else on the network. Printing to
+it from an ephemeral desktop goes nowhere through the dialog, but deciding who on
+the network may print is the network's job, not this machine's.
 
 `hdw4s check` asks three questions, and the first two are about the machine
 rather than about any session.

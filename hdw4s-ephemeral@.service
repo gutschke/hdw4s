@@ -132,7 +132,11 @@ InaccessiblePaths=/etc/hdw4s /var/lib/hdw4s %t/hdw4s/proxy
 # machine's CUPS socket is hidden so an application cannot fall back to the
 # system's printers -- which, measured 2026-09-30, a visitor saw as its DEFAULT
 # destination. CUPS also listens on 127.0.0.1:631, which this does not close;
-# reaching it means an application ignoring the configured server on purpose.
+# reaching it means an application ignoring the configured server on purpose
+# (hdw4s-firewall's slots_out closes that). It closes the machine's QUEUE, not a
+# PRINTER: a network printer that announces itself is still listed, through the
+# system's discovery service, and reachable directly over the network -- the
+# network's to restrict, not this unit's (threat read, 2026-10-04).
 InaccessiblePaths=-/run/cups
 # systemd fills these from the slot account, which resolves OUTSIDE the
 # namespace and so carries the outside name. They are the last two leaks.

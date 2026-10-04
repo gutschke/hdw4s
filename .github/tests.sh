@@ -4325,6 +4325,66 @@ echo '== a named desktop gets a composed dconf profile unless it may lock =='
   is  'an ephemeral desktop is left to its own profile' "${out}" "${T}/machine"
 )
 
+echo '== where a desktop prints: the browser, unless a named one is told otherwise =='
+# shellcheck disable=SC2016  # matched as literal text in hdw4s-run-session
+( set +e
+  blk="$(awk '/A NAMED DESKTOP PRINTS THERE TOO/{f=1} f{print; if ($0 ~ /^fi$/) exit}' \
+         "${ROOT}/hdw4s-run-session")"
+  has 'the block is found in hdw4s-run-session' "${blk}" 'export CUPS_SERVER='
+  run() { env -i PATH="${PATH}" XDG_RUNTIME_DIR=/r "$@" bash -c "${blk}"'
+          printf "%s" "${CUPS_SERVER:-unset}"'; }
+  q=/r/selkies-cups/cups.sock
+  is 'a named desktop prints to the browser by default' "$(run HDW4S_PRINTING=browser)" "${q}"
+  is 'and with the setting absent' "$(run)" "${q}"
+  is 'HDW4S_PRINTING=machine leaves a named desktop on the machine'"'"'s printers' \
+     "$(run HDW4S_PRINTING=machine)" 'unset'
+  is 'an ephemeral desktop ignores it and prints to the browser' \
+     "$(run HDW4S_PRINTING=machine HDW4S_SESSION_TYPE=ephemeral)" "${q}"
+)
+
+echo '== printed documents wait in the desktop'"'"'s own state, not in the home =='
+# shellcheck disable=SC2016  # matched as literal text in hdw4s-run-session
+( set +e
+  line="$(grep -m1 '^export SELKIES_PRINT_SPOOL_PATH=' "${ROOT}/hdw4s-run-session")"
+  has 'the spool is set in hdw4s-run-session' "${line}" 'SELKIES_PRINT_SPOOL_PATH'
+  run() { env -i HOME=/h "$@" bash -c "${line}"'; printf "%s" "${SELKIES_PRINT_SPOOL_PATH}"'; }
+  is 'it follows XDG_STATE_HOME, the profile'"'"'s' "$(run XDG_STATE_HOME=/p/state)" '/p/state/selkies/print'
+  is 'and falls back to the home only without one' "$(run)" '/h/.local/state/selkies/print'
+)
+
+echo '== the browser print queue follows the machine'"'"'s paper size =='
+# shellcheck disable=SC2016  # matched as literal text in hdw4s-run-session
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  blk="$(awk '/^if \[ "\$\{CUPS_SERVER:-\}" = /{f=1} f{print; if ($0 ~ /^fi$/) exit}' \
+         "${ROOT}/hdw4s-run-session")"
+  has 'the block is found in hdw4s-run-session' "${blk}" 'lpadmin -h'
+  q="${T}/run/selkies-cups"; mkdir -p "${q}/ppd" "${T}/bin"
+  python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${q}/cups.sock"
+  printf '*DefaultPageSize: A4\n*PageSize A4/A4: "x"\n*PageSize Letter/US Letter: "x"\n' > "${q}/ppd/Selkies.ppd"
+  # A stand-in that records what it was asked, and does nothing else.
+  printf '#!/bin/sh\necho "$*" >> %s/asked\n' "${T}" > "${T}/bin/lpadmin"; chmod +x "${T}/bin/lpadmin"
+  run() { rm -f "${T}/asked"; printf '%b' "$1" > "${T}/papersize"; shift
+          env -i PATH="${T}/bin:${PATH}" XDG_RUNTIME_DIR="${T}/run" PAPERCONF="${T}/papersize" \
+              CUPS_SERVER="${q}/cups.sock" "$@" bash -c 'children=(); '"${blk}"'; wait' 2>&1; }
+  out="$(run 'letter\n')"
+  is  'a Letter machine sets the queue'"'"'s A4 default to Letter' "$(cat "${T}/asked" 2>/dev/null)" \
+      "-h ${q}/cups.sock -p Selkies -o PageSize=Letter"
+  has 'and says so once' "${out}" 'now defaults to Letter, the machine'"'"'s paper size (it was A4)'
+  out="$(run 'a4\n')"
+  is  'a machine that agrees with the queue changes nothing' "$(cat "${T}/asked" 2>/dev/null)" ''
+  is  'and says nothing' "${out}" ''
+  out="$(run 'a4\n' PAPERSIZE=legal)"
+  has 'a size the queue does not offer is reported, not set' "${out}" 'does not offer'
+  run 'a4\n' PAPERSIZE=letter >/dev/null
+  is  'PAPERSIZE wins over the file, as libpaper has it' "$(cat "${T}/asked" 2>/dev/null)" \
+      "-h ${q}/cups.sock -p Selkies -o PageSize=Letter"
+  run '# the machine'"'"'s paper\nletter\n' >/dev/null
+  is  'a comment before the size is skipped' "$(cat "${T}/asked" 2>/dev/null)" \
+      "-h ${q}/cups.sock -p Selkies -o PageSize=Letter"
+  run 'letter\n' CUPS_SERVER= >/dev/null
+  is  'a desktop on the machine'"'"'s printers is left alone' "$(cat "${T}/asked" 2>/dev/null)" ''
+)
+
 echo '== a named desktop'"'"'s trash is linked to the home'"'"'s own =='
 # shellcheck disable=SC2016  # matched as literal text in hdw4s-session
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
@@ -8846,7 +8906,7 @@ echo '== an upgrade never stops the router, and restarts it only when the layout
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1687  # update when tests are added; a wrong number is the point
+EXPECTED=1704  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
