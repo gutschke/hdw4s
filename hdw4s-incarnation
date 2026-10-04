@@ -27,7 +27,10 @@ set -o pipefail
 inst="${1:?usage: hdw4s-incarnation <instance>}"
 root="${HDW4S_WEBROOT_DIR:-/usr/share/hdw4s/webroot}/${inst}"
 [ -d "${root}" ] || {
-  echo "hdw4s-incarnation: no web root at '${root}'" >&2
+  # Named: "hdw4s enable" builds it. A pool seat's is built by the minter at boot.
+  echo "hdw4s-incarnation: no web root at '${root}', so this start cannot publish" \
+       "its identity and will be refused. A named desktop: hdw4s enable ${inst}." \
+       "A pool seat: systemctl restart hdw4s-ephemeral-slots.service" >&2
   exit 1
 }
 

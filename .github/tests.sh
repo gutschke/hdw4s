@@ -648,6 +648,41 @@ echo '== a setting is pointed at the action that applies it =='
   hasnt 'and says nothing about seats'         "${out}" 'pool size'
 )
 
+echo '== a named desktop'"'"'s web root is built when it is enabled, before its door opens =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # A desktop that had never started had nowhere to publish its identity: the
+  # session builds its web root only in ExecStartPre, AFTER hdw4s-incarnation@
+  # publishes into it, so its first start failed the gate and the first visit
+  # after "enable" was refused (seen on a dev box, 2026-10-03; released since
+  # the incarnation gate). enable now builds it, before the socket is enabled.
+  CALLS="${SB}/calls"; : > "${CALLS}"
+  systemctl() { echo "systemctl $*" >> "${CALLS}"; }
+  getent() { [ "$1" = passwd ] && printf 'alice:x:1500:1500::/home/alice:/bin/bash\n'; }
+  mkdir -p "${SB}/lib"
+  # shellcheck disable=SC2016  # $* and WEBROOT_FAILS belong to the stub, not here
+  printf '#!/bin/sh\necho "webroot $*" >> "%s"\n[ -z "${WEBROOT_FAILS:-}" ] || { echo "no bundle" >&2; exit 1; }\n' \
+    "${CALLS}" > "${SB}/lib/hdw4s-webroot"
+  chmod +x "${SB}/lib/hdw4s-webroot"
+  export HDW4S_LIBDIR="${SB}/lib"
+  rm -f "${SLOTS}"
+  ( cmd_enable alice ) >/dev/null 2>&1
+  is  'enable builds the web root of the desktop it enables' \
+      "$(command grep -c '^webroot provision alice$' "${CALLS}")" '1'
+  is  'before the door is opened' \
+      "$(command grep -n -E '^webroot provision alice$|^systemctl enable --now hdw4s-proxy@alice.socket$' "${CALLS}" | cut -d: -f2- | cut -c1-9 | tr '\n' ';')" \
+      'webroot p;systemctl;'
+  : > "${CALLS}"; rm -f "${SLOTS}"
+  out="$( (WEBROOT_FAILS=1 cmd_enable alice) 2>&1 )"; rc=$?
+  [ "${rc}" -ne 0 ] && ok 'a web root that cannot be built fails the enable' \
+    || bad 'a web root that cannot be built fails the enable' "rc ${rc}"
+  has   'and says the first start would fail' "${out}" 'its first start'
+  hasnt 'and the door is not opened'          "$(cat "${CALLS}")" 'enable --now hdw4s-proxy@alice.socket'
+  # A pool seat's web root is the minter's, built at boot with --directory.
+  : > "${CALLS}"; rm -f "${SLOTS}"
+  ( enable_slot ephemeral _hdw4s_0 ) >/dev/null 2>&1
+  hasnt 'a pool seat is not provisioned here' "$(cat "${CALLS}")" 'webroot provision'
+)
+
 echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   # Every refusal here stood in front of a command that used to do its damage
@@ -7580,9 +7615,18 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   # door, and it must still pass.
   printf '%s\n' '0 alice desktop' > "${SLOTS}"
   STUB_DOORS=''; STUB_PORT=''
+  export HDW4S_WEBROOT_DIR="${SB}/webroot"; mkdir -p "${HDW4S_WEBROOT_DIR}/alice"
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
   is  'a box with no ephemeral slots passes' "${rc}" '0'
   has 'and says there is no pool'            "${out}" 'no ephemeral slots configured'
+
+  # The same box, with alice's web root gone: her next start would fail the
+  # gate, though nothing is running and nothing has failed yet. The pass just
+  # above is this arm's control.
+  rmdir "${HDW4S_WEBROOT_DIR}/alice"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a named desktop with no web root fails the check' "${rc}" '1'
+  has 'and names the repair' "${out}" 'hdw4s enable alice'
 )
 
 echo '== the web-root check reads THIS start, and silence is never a pass =='
@@ -8422,8 +8466,11 @@ echo '== hdw4s check sees a named desktop that will not start =='
   trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
   SLOTS="${HDW4S_ETCDIR}/instances"; RUNDIR="${SB}/run"
   # A named desktop and no pool: the shape of the owner's machine, and the shape
-  # in which the pool's failed-unit query never runs at all.
+  # in which the pool's failed-unit query never runs at all. Its web root is
+  # there, as "enable" leaves it; a missing one is its own failure, tested with
+  # the pool's check.
   printf '%s\n' '0 alice desktop' > "${SLOTS}"
+  mkdir -p "${HDW4S_WEBROOT_DIR}/alice"
   STUB_FAILED=''
   # shellcheck disable=SC2317
   systemctl() {
@@ -8452,7 +8499,7 @@ echo '== hdw4s check sees a named desktop that will not start =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1621  # update when tests are added; a wrong number is the point
+EXPECTED=1629  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

@@ -1520,6 +1520,18 @@ cmd_check() {
     # first cannot be looked up by the readers below and the second has no
     # account to run. This command is about sessions that are running now.
     case "${inst}" in *:*) continue;; esac
+    # A NAMED DESKTOP WITHOUT A WEB ROOT cannot start: it publishes its identity
+    # into that root before its own start rebuilds it, and the gate refuses. Asked
+    # of every named desktop, running or not, because the one that is NOT running
+    # is the one whose next visit fails. "enable" builds it; this names the case
+    # it cannot prevent, a web root removed afterwards.
+    if [ "$(type_of "${inst}")" = 'desktop' ] && [ ! -d "${webroot}/${inst}" ]; then
+      printf '%s\n' \
+        "hdw4s: the named desktop ${inst} has no web root at ${webroot}/${inst}," \
+        '  so its next start will fail. Build it again:' \
+        "    hdw4s enable ${inst}" >&2
+      named_bad=$(( named_bad + 1 ))
+    fi
     # EVERY SESSION THAT IS RUNNING, named desktops included. This arm was
     # restricted to the ephemeral pool by "in_ephemeral_pool ... || continue"
     # until 2026-09-26, and the restriction was justified by a comment whose two
@@ -2034,6 +2046,21 @@ enable_slot() {
   if [ "${type}" = 'template' ] &&
      ! command grep -qs '^[[:space:]]*HDW4S_IDLE_DAYS=' "${ETCDIR}/${inst}.conf"; then
     config_write "${ETCDIR}/${inst}.conf" 'HDW4S_IDLE_DAYS' '0'
+  fi
+
+  # A NAMED DESKTOP'S WEB ROOT EXISTS BEFORE ITS DOOR OPENS. The session's start
+  # publishes its identity into that web root (hdw4s-incarnation@, ordered BEFORE
+  # the session) and only then builds the web root (ExecStartPre provision), so
+  # a desktop that had never started had nowhere to publish: its first start
+  # failed the gate, and the first visit after "enable" was refused. Built here,
+  # before the socket below, as hdw4s-ephemeral-slots builds a pool seat's at
+  # boot; the session still rebuilds it at every start. Not by the publisher
+  # when the root is missing: that would tie the identity to the web client's
+  # build. A web root removed later is named by "hdw4s check".
+  if [ "${type}" = 'desktop' ] &&
+     ! "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-webroot" provision "${inst}" >/dev/null; then
+    die "hdw4s: could not build the web client for ${inst}; its first start would" \
+        '  fail. Fix what hdw4s-webroot said above, then run "hdw4s enable" again.'
   fi
 
   systemctl daemon-reload
