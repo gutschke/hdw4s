@@ -4065,6 +4065,74 @@ PY
   hasnt 'not at the author'"'"'s home'                        "${out}" 'uri=.*home/user'
 )
 
+echo '== a Files bookmark carries what it names, empty, and never follows a link =='
+# THE DEFECT (owner, 2026-10-02): a bookmark to ~/.local/Shared, a link to
+# /shared, was published without the link, and the bookmark not at all --
+# config/gtk-3.0/bookmarks was not on the allow-list.
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  mkdir -p "${T}/etc" "${T}/author/config/gtk-3.0" "${T}/home/.local" \
+           "${T}/home/Projects" "${T}/host-etc"
+  echo "HDW4S_TEMPLATE_DIR=${T}/root" > "${T}/etc/hdw4s.conf"
+  echo private > "${T}/home/Projects/notes.txt"
+  echo hostsecret > "${T}/host-etc/shadow"
+  ln -s /shared "${T}/home/.local/Shared"
+  ln -s Projects "${T}/home/via"
+  ln -s loop2 "${T}/home/loop"; ln -s loop "${T}/home/loop2"
+  ln -s ../../elsewhere "${T}/home/esc"
+  ln -s "${T}/host-etc" "${T}/home/evil"
+  printf '%s\n' 'file:///home/user/.local/Shared Shared' \
+    'file:///home/user/Projects' 'file:///home/user/Gone' \
+    'sftp://example.invalid/x Remote' 'file:///home/user/loop' \
+    'file:///home/user/via' 'file:///home/user/esc' \
+    'file:///home/user/evil/sub' 'file:///shared' \
+    'file:///home/user/a%00b' 'sftp://admin:hunter2@internal.invalid/ R' \
+    'file:///home/user' \
+    > "${T}/author/config/gtk-3.0/bookmarks"
+  mkdir -p "${T}/home2" "${T}/gen3/home" "${T}/outside" "${T}/home3/A/B"
+  ln -s /shared/x "${T}/home2/.local"
+  ln -s "${T}/outside" "${T}/gen3/home/A"
+  out="$(HDW4S_ETCDIR="${T}/etc" python3 - "${ROOT}/hdw4s-template" "${T}" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys, os
+l = importlib.machinery.SourceFileLoader("t", sys.argv[1])
+s = importlib.util.spec_from_loader("t", l); m = importlib.util.module_from_spec(s)
+l.exec_module(m); m.normalise = lambda tree: None
+T = sys.argv[2]
+gen, _, notes = m.harvest(T + "/author", T + "/home", "x")
+h = gen + "/home"
+link = lambda p: os.readlink(h + p) if os.path.islink(h + p) else "none"
+print("shared=%s" % link("/.local/Shared"))
+print("projects=%s" % (sorted(os.listdir(h + "/Projects")) if os.path.isdir(h + "/Projects") else "none"))
+print("via=%s esc=%s evil=%s" % (link("/via"), link("/esc"),
+                                 "link" if os.path.islink(h + "/evil") else "none"))
+found = [os.path.join(d, f) for d, _, fs in os.walk(gen) for f in fs]
+print("leaked=%s" % any(open(p, errors="replace").read().strip() in ("private", "hostsecret")
+                        for p in found if not os.path.islink(p)))
+print("marks=%s" % "|".join(l.split(" ")[0].replace("file:///home/user", "~")
+                            for l in open(gen + "/profile/config/gtk-3.0/bookmarks").read().splitlines()))
+print("residue=%s" % [p for p in ("loop", "loop2") if os.path.lexists(h + "/" + p)])
+print("dotlocal=%s" % m.carry_home_path(T + "/gen2", T + "/home2", ".local/foo", []))
+print("guard=%s outside=%s" % (m.carry_home_path(T + "/gen3", T + "/home3", "A/B", []),
+                               os.listdir(T + "/outside")))
+for n in notes:
+    print("note: " + n)
+PY
+)"
+  has   'a bookmarked link is carried as the link'          "${out}" 'shared=/shared'
+  has   'a bookmarked folder is carried EMPTY'              "${out}" 'projects=[]'
+  has   'its contents, and no host file, are never carried' "${out}" 'leaked=False'
+  has   'a chain of links inside the home is chased'        "${out}" 'via=Projects esc=../../elsewhere evil=link'
+  has   'kept: home, network, outside, chased, escaping'    "${out}" 'marks=~/.local/Shared|~/Projects|sftp://example.invalid/x|~/via|~/esc|~/evil/sub|file:///shared|~'
+  has   'a folder that is gone drops its bookmark, said so' "${out}" 'note: left out the bookmark file:///home/user/Gone: ~/Gone is not there'
+  has   'a loop of links ends, said so'                     "${out}" 'note: left out the bookmark file:///home/user/loop: more than 8'
+  has   'the author is told what was emptied'               "${out}" 'note: carried ~/Projects EMPTY'
+  has   'a dropped bookmark leaves nothing behind'          "${out}" 'residue=[]'
+  has   'a malformed bookmark is left out, not a crash'     "${out}" 'note: left out the bookmark file:///home/user/a%00b'
+  has   'a bookmark with a password is left out'            "${out}" 'note: left out a sftp bookmark to internal.invalid: it carries a user'
+  hasnt 'and the password is never printed'                 "${out}" 'hunter2'
+  has   'a link at ~/.local is refused'                     "${out}" 'dotlocal=~/.local is a symbolic link'
+  has   'nothing is created through a link already carried' "${out}" "guard=~/A/B is reached through a link already carried outside=[]"
+)
+
 echo '== a template goes across as one archive, and a doctored one is refused =='
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
   mkdir -p "${T}/etc" "${T}/root/gen-1/dconf" "${T}/root/gen-1/home/Downloads"
@@ -4098,6 +4166,54 @@ PY
   has 'the archive carries the template'       "${out}" "roundtrip=['dconf', 'dconf/50-template', 'home', 'home/Downloads']"
   has 'an archive reaching outside is refused' "${out}" 'doctored: refused'
   has 'and wrote nothing, outside or staged'   "${out}" 'escaped=False stage2=False'
+)
+
+echo '== a template archive carries absolute symbolic links, never anything written through one =='
+# THE DEFECT (owner, 2026-10-03): "template copyfrom" refused a template whose
+# home held ~/.local/Shared -> /shared -- the "data" filter rejects every link to
+# an absolute path, and a Files bookmark legitimately carries one.
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  mkdir -p "${T}/etc" "${T}/outside"
+  echo "HDW4S_TEMPLATE_DIR=${T}/root" > "${T}/etc/hdw4s.conf"
+  out="$(HDW4S_ETCDIR="${T}/etc" python3 - "${ROOT}/hdw4s-template" "${T}" 2>&1 <<'PY'
+import importlib.machinery, importlib.util, sys, os, tarfile, io
+l = importlib.machinery.SourceFileLoader("t", sys.argv[1])
+s = importlib.util.spec_from_loader("t", l); m = importlib.util.module_from_spec(s)
+l.exec_module(m); T = sys.argv[2]
+def archive(name, members):
+    with tarfile.open(T + "/" + name, "w:gz") as t:
+        for kind, path, extra in members:
+            i = tarfile.TarInfo(path)
+            if kind == "dir": i.type = tarfile.DIRTYPE; t.addfile(i)
+            elif kind == "sym": i.type = tarfile.SYMTYPE; i.linkname = extra; t.addfile(i)
+            elif kind == "hard": i.type = tarfile.LNKTYPE; i.linkname = extra; t.addfile(i)
+            else: d = extra.encode(); i.size = len(d); t.addfile(i, io.BytesIO(d))
+    return T + "/" + name
+def unpack(label, path):
+    stage = T + "/stage-" + label
+    try:
+        m.fetch_from_file(path, stage); r = "unpacked"
+    except SystemExit:
+        r = "refused"
+    print("%s: %s stage=%s outside=%s" % (label, r, os.path.exists(stage), sorted(os.listdir(T + "/outside"))))
+    return stage
+st = unpack("bookmark", archive("ok.tgz", [("dir", "home", None), ("dir", "home/.local", None),
+                                           ("sym", "home/.local/Shared", "/shared"), ("file", "dconf/50-template", "[x]")]))
+print("link=%s" % (os.readlink(st + "/home/.local/Shared") if os.path.islink(st + "/home/.local/Shared") else "none"))
+unpack("through", archive("bad1.tgz", [("sym", "evil", T + "/outside"), ("file", "evil/x", "pwn")]))
+unpack("hardlink", archive("bad2.tgz", [("hard", "h", "/etc/hostname")]))
+st = unpack("absname", archive("bad3.tgz", [("sym", "/abs", "/shared")]))
+# the filter STRIPS a leading "/" from a member's name: it lands INSIDE the stage
+print("absname-inside=%s" % os.path.islink(st + "/abs"))
+unpack("dotdot", archive("bad4.tgz", [("sym", "../up", "/shared")]))
+PY
+)"
+  has 'an absolute symbolic link is carried'         "${out}" 'bookmark: unpacked stage=True'
+  has 'as the link, not its target'                  "${out}" 'link=/shared'
+  has 'nothing is written THROUGH such a link'       "${out}" 'through: refused stage=False outside=[]'
+  has 'a hard link outside is still refused'         "${out}" 'hardlink: refused stage=False'
+  has 'a link with an absolute NAME lands inside'    "${out}" 'absname-inside=True'
+  has 'a link named with .. is refused'              "${out}" 'dotdot: refused stage=False'
 )
 
 echo '== the background generator reads its knobs when it draws, not when it loads =='
@@ -7765,7 +7881,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1487  # update when tests are added; a wrong number is the point
+EXPECTED=1507  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

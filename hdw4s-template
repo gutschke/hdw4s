@@ -61,6 +61,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
 import hashlib
 import re
 
@@ -115,6 +116,7 @@ KEEP_FILES = [
     "config/user-dirs.dirs",            # which folders exist, and hidden ones
     "config/user-dirs.locale",          # (see user_dirs_folders below)
     "config/gtk-3.0/settings.ini",
+    "config/gtk-3.0/bookmarks",         # Files' sidebar; see bookmark_targets
     "config/gtk-4.0/settings.ini",
     "data/gnome-shell/extensions",
     "data/applications",
@@ -830,6 +832,142 @@ def user_dirs_folders(gen, author_home, notes):
         fh.writelines(out)
 
 
+# Where every desktop's home is, author and visitor alike (the slot accounts'
+# passwd entry), so a path under it in the author's desktop is the same path in
+# a visitor's.
+SESSION_HOME = "/home/user"
+BOOKMARK_CHASE = 8      # links followed from one bookmark, to end a loop
+
+
+def plan_home_path(home, rel, plan, depth=0):
+    """What it takes for the session path ~/REL to exist in the template's
+    home half the way it exists in the author's HOME, WITHOUT ITS CONTENTS:
+    a directory on the way becomes ("dir", path), created empty; a symbolic
+    link becomes ("link", path, target) -- its target text, verbatim -- and,
+    when that target is under the home too, is chased the same way. Appended
+    to PLAN; nothing is created here, so a bookmark that fails leaves nothing
+    behind. Nothing on the host is ever followed -- each step is an lstat,
+    because root is reading what a desktop wrote. Returns why it could not,
+    or None."""
+    if depth > BOOKMARK_CHASE:
+        return "more than %d symbolic links in a row" % BOOKMARK_CHASE
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if ".." in parts:
+        return "not a path inside the home"
+    cur = ""
+    for i, part in enumerate(parts):
+        cur = os.path.join(cur, part)
+        if home_linked(home, cur + "/"):
+            return None     # a settings directory: it is the profile's copy
+        try:
+            st = os.lstat(os.path.join(home, cur))
+        except ValueError:
+            return "it is not a valid path"
+        except OSError:
+            return "~/%s is not there" % cur
+        if stat.S_ISLNK(st.st_mode):
+            # A link ABOVE a directory every desktop links to its profile
+            # (~/.local, above .local/share) would point every visitor's
+            # data directory at one shared place.
+            if any(pre.startswith(cur + "/") for pre in HOME_LINKED):
+                return "~/%s is a symbolic link, and every desktop keeps " \
+                       "its own data under it" % cur
+            target = os.readlink(os.path.join(home, cur))
+            plan.append(("link", cur, target))
+            rest = parts[i + 1:]
+            if target.startswith("/"):
+                if not (target + "/").startswith(SESSION_HOME + "/"):
+                    return None     # outside the home: the visitor's own
+                nxt = target[len(SESSION_HOME):]
+            else:
+                nxt = os.path.normpath(os.path.join(os.path.dirname(cur),
+                                                    target))
+                if nxt == ".." or nxt.startswith("../"):
+                    return None     # climbs out of the home
+            return plan_home_path(home, "/".join([nxt] + rest), plan,
+                                  depth + 1)
+        if not stat.S_ISDIR(st.st_mode):
+            return "~/%s is not a folder" % cur
+        plan.append(("dir", cur, bool(i == len(parts) - 1 and
+                                      os.listdir(os.path.join(home, cur)))))
+    return None
+
+
+def carry_home_path(gen, home, rel, notes):
+    """plan_home_path, then carry it out -- only if all of it can be. Never
+    creates through a link the template itself already holds: os.makedirs
+    would follow it, as root. Returns why not, or None."""
+    plan = []
+    try:
+        why = plan_home_path(home, rel, plan)
+    except (OSError, ValueError) as e:
+        why = "it could not be read (%s)" % type(e).__name__
+    if why:
+        return why
+    for step in plan:
+        dst = os.path.join(gen, "home", step[1])
+        if not inside(os.path.dirname(dst), gen):
+            return "~/%s is reached through a link already carried" % step[1]
+    for step in plan:
+        dst = os.path.join(gen, "home", step[1])
+        if step[0] == "link":
+            if not os.path.lexists(dst):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.symlink(step[2], dst)
+        elif not os.path.isdir(dst):
+            os.makedirs(dst, exist_ok=True)
+            if step[2]:
+                notes.append("carried ~/%s EMPTY because a bookmark names "
+                             "it; \"hdw4s template keep ~/%s\" carries what "
+                             "is in it" % (step[1], step[1]))
+    return None
+
+
+def bookmark_targets(gen, home, notes):
+    """Files' bookmarks are the author saying "every visitor should have
+    this" (owner, 2026-10-02), so what each one names is carried with it: a
+    bookmark into the home brings the folders and links on its way
+    (carry_home_path), one whose folder is gone is dropped and reported, and
+    one outside the home -- /shared, another disk, a network place -- is
+    carried as it is, being the same place for everyone. One that carries a
+    user name or password is NOT: every visitor would receive it, and it is
+    reported without them. The file is GTK's, one "URI [label]" per line."""
+    f = os.path.join(gen, "profile", "config", "gtk-3.0", "bookmarks")
+    if not os.path.isfile(f) or os.path.islink(f):
+        return
+    out = []
+    with open(f, errors="replace") as fh:
+        for line in fh:
+            uri = line.split(" ", 1)[0].strip()
+            if not uri:
+                continue
+            try:
+                u = urllib.parse.urlsplit(uri)
+            except ValueError:
+                notes.append("left out a bookmark that is not a valid address")
+                continue
+            if "@" in u.netloc:
+                notes.append("left out a %s bookmark to %s: it carries a user "
+                             "name or password, which every visitor would "
+                             "receive" % (u.scheme, u.hostname or "a host"))
+                continue
+            shown = line.rstrip("\n")
+            if u.scheme == "file":
+                path = urllib.parse.unquote(u.path)
+                if (path + "/").startswith(SESSION_HOME + "/") or \
+                        path.rstrip("/") == SESSION_HOME:
+                    why = carry_home_path(gen, home,
+                                          path[len(SESSION_HOME):], notes)
+                    if why:
+                        notes.append("left out the bookmark %s: %s"
+                                     % (shown, why))
+                        continue
+            notes.append("every visitor's Files has the bookmark %s" % shown)
+            out.append(line if line.endswith("\n") else line + "\n")
+    with open(f, "w") as fh:
+        fh.writelines(out)
+
+
 def autostart_notes(gen, notes):
     d = os.path.join(gen, "profile", "config", "autostart")
     if not os.path.isdir(d):
@@ -952,6 +1090,7 @@ def harvest(author, home, inst):
 
     autostart_notes(gen, notes)
     user_dirs_folders(gen, home, notes)
+    bookmark_targets(gen, home, notes)
     normalise(gen)
     size = du(gen)
     if size > 200 * 1024 * 1024:
@@ -1264,17 +1403,41 @@ def fetch_from_host(src, stage):
             % r.returncode)
 
 
+def template_filter(member, dest):
+    """tarfile's "data" filter, except that a SYMBOLIC link may point anywhere.
+
+    A template legitimately carries links whose targets are absolute or leave
+    the home -- a Files bookmark's ~/.local/Shared -> /shared (owner,
+    2026-10-03: "copyfrom" refused exactly that). The link is created INSIDE the
+    staging directory and never followed here; a visitor's session follows it
+    later with its own uid, as for every template. What the filter guards
+    against is a LATER member written THROUGH such a link, and the "data"
+    filter refuses that on its own: it resolves each member's destination on
+    disk as it is extracted, so "evil/x" after "evil -> /etc" lands outside the
+    stage and is refused. The link's own name still passes every other check
+    (no absolute name, no "..", nothing outside); hard links and every other
+    member are filtered unchanged."""
+    try:
+        return tarfile.data_filter(member, dest)
+    except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
+        if not member.issym():
+            raise
+        safe = tarfile.data_filter(member.replace(linkname=".", deep=False), dest)
+        return safe.replace(linkname=member.linkname, deep=False)
+
+
 def fetch_from_file(path, stage):
     """Unpack an archive "template export" wrote into STAGE.
 
     THE "data" FILTER, because an archive is input from elsewhere and this runs
-    as root: it refuses absolute paths, "..", device files and links that point
-    outside the staging directory, and drops setuid bits -- so a doctored archive
-    cannot write anywhere but STAGE. Ownership is normalised afterwards anyway."""
+    as root: it refuses absolute paths, "..", device files and hard links that
+    point outside the staging directory, and drops setuid bits -- so a doctored
+    archive cannot write anywhere but STAGE. Symbolic links may point anywhere
+    (template_filter). Ownership is normalised afterwards anyway."""
     os.makedirs(stage, mode=0o755)
     try:
         with tarfile.open(path, "r:*") as t:
-            t.extractall(stage, filter="data")
+            t.extractall(stage, filter=template_filter)
     except (OSError, tarfile.TarError) as e:
         shutil.rmtree(stage, ignore_errors=True)
         die("could not unpack %s: %s; nothing was published here." % (path, e))
