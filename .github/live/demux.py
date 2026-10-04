@@ -2650,7 +2650,9 @@ def test_a_reaped_visitor_is_not_handed_back_the_same_dead_address(rig):
 # docstring's "the unit file is the oracle for that half", which was true when
 # it was written and is now the weaker of the two.
 #
-# Directives read from the RUNNING unit, not from the packaged file:
+# Directives read from the RUNNING unit, not from the packaged file. This was
+# before 2.4.11 moved every runtime path under /run/hdw4s, so the directory is
+# now /run/hdw4s/demux; the wipe it shows is unchanged:
 #
 #     RuntimeDirectory=hdw4s-demux   RuntimeDirectoryPreserve=no
 #     DynamicUser=yes                Restart=on-failure
