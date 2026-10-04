@@ -692,6 +692,23 @@ What stays shared:
     Documents, Desktop, Downloads, Pictures, Music, Videos
     everything else in the home directory, including ~/.ssh
 
+Which of those folders a home has, and where they are, belongs to the home:
+`~/.config/user-dirs.dirs` and `~/.config/user-dirs.locale` say it. A named
+desktop with its own profile reads and writes a copy of both in the profile,
+as every program in it expects, and keeps that copy in step with the home's
+in both directions while it runs. So a folder moved inside the desktop the
+supported way -- `xdg-user-dirs-update --set`, or an answer to the "Update
+standard folders" dialog -- reaches the home within seconds, and from there
+every desktop on the same home, including one already running on another
+machine. Which side changed is decided by content, never by the clock; when
+both did, the home's copy wins and the journal says so. Those two files are
+all this writes in the home: it never creates `~/.config`, and it never
+replaces either file where it is a symbolic link. While the home has a
+`user-dirs.dirs`, the profile's `user-dirs.conf` switches off the login run of
+`xdg-user-dirs-update`, so that no machine recreates default folders in a home
+whose owner moved or hid them; a home without one still gets the usual first
+run, and its result is carried home.
+
 That last line covers files the software writes as well as the user's own, and
 three of them come from the streaming server rather than from the desktop:
 
@@ -723,7 +740,9 @@ inotify does not cross NFS. It is not removed and not masked: the package is a
 hard dependency of the file manager, and masking it would reach the account's
 real login session on the same machine. The session sets the keys that
 Settings -> Search -> Search Locations writes, so a user can turn it back on for
-their own session where they would think to look. The cost is that searching
+their own session where they would think to look -- until the desktop next
+starts, because while `HDW4S_INDEXING` is `off` they are written again at every
+start; the setting is the lasting way. The cost is that searching
 inside documents stops working; searching by name still works, but walks the
 tree instead of consulting an index.
 
@@ -737,7 +756,8 @@ per machine rather than per session; the file manager skips anything over its
 own size limit; and this is something a user can see and probably wants. What
 tips it is that a desktop delivered as a video stream pays for a wall of
 thumbnails twice, once over the network and again in the encoder.
-`HDW4S_THUMBNAILS=on` gives them back.
+`HDW4S_THUMBNAILS=on` gives them back; while it is off, the file manager's own
+preference is set again at every start.
 
 The first two are what `HDW4S_DPI` set to a number stops -- `96` stops them
 outright, another number still applies itself once at startup and writes them

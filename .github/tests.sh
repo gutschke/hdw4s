@@ -26,7 +26,10 @@ set -o nounset -o pipefail
 #
 #   .github/tests.sh
 #
-# Needs bash, coreutils, python3 and a loopback interface. Anything that would
+# Needs bash, coreutils, python3, xdg-user-dirs and a loopback interface. The
+# last but one is the real xdg-user-dirs-update, run against the guard that
+# keeps it from recreating a home's folders; a stand-in would agree with
+# whatever the guard was written to expect. Anything that would
 # need systemd, nft or a live session is deliberately not here; those belong on
 # a real machine.
 #
@@ -3968,6 +3971,251 @@ PY
   out="$(run)"
   # shellcheck disable=SC2016
   has 'an older one in the home is not'       "${out}" 'XDG_MUSIC_DIR="$HOME/Music"'
+)
+
+echo '== a named desktop keeps its standard folders where its owner puts them =='
+# Owner, 2026-10-03: folders moved into ~/.local came back at the next login, and
+# no answer in the "Update standard folders" dialog would stick -- a one-way copy
+# from the home over the profile undid, at every start, whatever was done inside
+# the desktop. Three profiles stand for three machines sharing one home; "start"
+# and "loop" are the two places hdw4s-run-session calls the sync from. The
+# "$HOME" here is the literal text a user-dirs file carries, never an expansion.
+# shellcheck disable=SC2016
+( set +e; T="$(mktemp -d)"; trap 'chmod -R u+w "${T}"; rm -rf "${T}"' EXIT
+  blk="$(sed -n '/^user_dirs_absent=/,/^user_dirs_kept=..$/p' "${ROOT}/hdw4s-run-session" | sed '$d')"
+  case "${blk}" in
+    *'user_dirs_sync() {'*'user_dirs_guard() {'*) ok 'the sync is found in hdw4s-run-session';;
+    *) bad 'the sync is found in hdw4s-run-session' 'sed found no user_dirs_sync';;
+  esac
+  # sync <home> <profile> <"start", "loop", or several, one process> [PATH dir]
+  sync() { env -i PATH="${4:+${4}:}${PATH}" HOME="${T}/$1" XDG_CONFIG_HOME="${T}/$2/config" \
+             XDG_STATE_HOME="${T}/$2/state" bash -c "${blk}"'
+           for m in $0; do user_dirs_sync "${m}" || exit; done' "$3" 2>&1; }
+  # Everything in the home EXCEPT the two files the sync may write: path, type,
+  # mode, size, and the content of every file.
+  snap() { ( cd "${T}/$1" &&
+             find . \( -path ./.config/user-dirs.dirs -o -path ./.config/user-dirs.locale \) \
+                    -prune -o -printf '%p %y %m %s\n' | sort &&
+             find . -type f ! -path ./.config/user-dirs.dirs ! -path ./.config/user-dirs.locale \
+                    -exec sha256sum {} + | sort ); }
+  stock="$(printf '%s\n' 'XDG_DESKTOP_DIR="$HOME/Desktop"' 'XDG_MUSIC_DIR="$HOME/Music"')"
+  moved="$(printf '%s\n' 'XDG_DESKTOP_DIR="$HOME/.local/Desktop"' 'XDG_MUSIC_DIR="$HOME/.local/Music"')"
+  H="${T}/home/.config"
+  # hdw4s-session makes each profile's config directory before any of this runs.
+  mkdir -p "${H}" "${T}/home/Documents" "${T}/home/dotfiles" "${T}/A/config" "${T}/B/config" "${T}/C/config"
+  echo 'a letter' > "${T}/home/Documents/letter.txt"
+  echo 'other=1' > "${H}/other.conf"
+  printf '%s\n' "${stock}" > "${H}/user-dirs.dirs"
+  echo 'en_US.UTF-8' > "${H}/user-dirs.locale"
+  sync home A start >/dev/null; sync home B start >/dev/null; sync home C start >/dev/null
+  is  'a new profile is given the home'"'"'s folders' "$(cat "${T}/A/config/user-dirs.dirs")" "${stock}"
+  before="$(snap home)"
+
+  # "xdg-user-dirs-update --set" inside the desktop on machine A, with the home's
+  # file looking a day NEWER by the clock: content decides, not time.
+  printf '%s\n' "${moved}" > "${T}/A/config/user-dirs.dirs"
+  touch -d '+1 day' "${H}/user-dirs.dirs"
+  sync home A loop >/dev/null
+  is  'a folder moved inside one desktop reaches the home, whatever the clocks say' \
+      "$(cat "${H}/user-dirs.dirs")" "${moved}"
+  sync home B start >/dev/null
+  is  'the next desktop started on another machine has it' "$(cat "${T}/B/config/user-dirs.dirs")" "${moved}"
+  sync home C loop >/dev/null
+  is  'and one already running there follows it within a tick' "$(cat "${T}/C/config/user-dirs.dirs")" "${moved}"
+  sync home A start >/dev/null
+  is  'and the desktop that moved it keeps it across a restart' "$(cat "${T}/A/config/user-dirs.dirs")" "${moved}"
+
+  # The dialog's "Keep Old Names" writes the stripped locale over a home copy
+  # that says en_US.UTF-8, and the dialog asks whenever the two differ.
+  echo 'en_US' > "${T}/A/config/user-dirs.locale"
+  sync home A loop >/dev/null; sync home A start >/dev/null
+  is  'an answer given in the dialog sticks across a restart' "$(cat "${T}/A/config/user-dirs.locale")" 'en_US'
+  is  'and is the home'"'"'s answer now' "$(cat "${H}/user-dirs.locale")" 'en_US'
+
+  # Both changed since they last agreed: the home wins, and says so.
+  printf '%s\n' 'XDG_MUSIC_DIR="$HOME/Profile"' > "${T}/A/config/user-dirs.dirs"
+  printf '%s\n' 'XDG_MUSIC_DIR="$HOME/ByHand"' > "${H}/user-dirs.dirs"
+  out="$(sync home A start)"
+  is  'on a conflict the home'"'"'s copy wins' "$(cat "${T}/A/config/user-dirs.dirs")" 'XDG_MUSIC_DIR="$HOME/ByHand"'
+  is  'and the home is not overwritten' "$(cat "${H}/user-dirs.dirs")" 'XDG_MUSIC_DIR="$HOME/ByHand"'
+  has 'and the start logs it' "${out}" "the home's wins"
+
+  # A write to the home that fails half-way leaves nothing behind in it. "mv" is
+  # stood in for, so this needs no permission a root run would ignore.
+  mkdir -p "${T}/bin"; printf '#!/bin/sh\nexit 1\n' > "${T}/bin/mv"; chmod +x "${T}/bin/mv"
+  printf '%s\n' "${moved}" > "${T}/A/config/user-dirs.dirs"
+  out="$(sync home A loop "${T}/bin")"
+  is  'a failed write leaves the home'"'"'s file as it was' "$(cat "${H}/user-dirs.dirs")" 'XDG_MUSIC_DIR="$HOME/ByHand"'
+  has 'and says it could not write it' "${out}" 'could not write'
+  sync home A loop >/dev/null
+  is  'and the next tick writes it' "$(cat "${H}/user-dirs.dirs")" "${moved}"
+
+  # A user-dirs file that is a symbolic link in the home is its owner's
+  # arrangement: never replaced, and the profile follows what it points at.
+  echo 'en_US' > "${T}/home/dotfiles/locale"
+  rm -f "${H}/user-dirs.locale"; ln -s ../dotfiles/locale "${H}/user-dirs.locale"
+  before="$(snap home)"
+  echo 'de_DE' > "${T}/A/config/user-dirs.locale"
+  sync home A loop >/dev/null
+  is  'a link in the home is not replaced' "$(readlink "${H}/user-dirs.locale")" '../dotfiles/locale'
+  is  'nor is what it points at written' "$(cat "${T}/home/dotfiles/locale")" 'en_US'
+  is  'the profile follows it instead' "$(cat "${T}/A/config/user-dirs.locale")" 'en_US'
+  rm -f "${H}/user-dirs.locale"; echo 'en_US' > "${H}/user-dirs.locale"
+  before="$(snap home)"
+
+  # THE CROWN JEWEL. After all of the above, everything in the home other than
+  # the two files is exactly as it was, and no temporary file is left.
+  sync home A loop >/dev/null; sync home B loop >/dev/null; sync home C start >/dev/null
+  is  'nothing else in the home was written' "$(snap home)" "${before}"
+  is  'and no temporary file was left there' "$(find "${T}/home" -name '*.hdw4s-*' | wc -l)" '0'
+
+  # A brand-new home: the stock first run writes the profile's copy, and the
+  # sync carries it home.
+  mkdir -p "${T}/new/.config" "${T}/E/config"
+  printf '%s\n' "${stock}" > "${T}/E/config/user-dirs.dirs"
+  sync new E loop >/dev/null
+  is  'a brand-new home gets the first run'"'"'s file' "$(cat "${T}/new/.config/user-dirs.dirs" 2>&1)" "${stock}"
+  # And a home with no ~/.config is not given one.
+  mkdir -p "${T}/bare" "${T}/F/config"
+  printf '%s\n' "${stock}" > "${T}/F/config/user-dirs.dirs"
+  out="$(sync bare F 'loop loop')"
+  is  'a home with no ~/.config is not given one' "$(find "${T}/bare" -mindepth 1 | wc -l)" '0'
+  is  'which is said once, not every tick' "$(grep -c 'no ~/.config' <<<"${out}")" '1'
+  # Nor through a ~/.config that is a link to nowhere: nothing is made at the
+  # far end of it.
+  mkdir -p "${T}/dangle" "${T}/G/config"; ln -s ../nowhere/.config "${T}/dangle/.config"
+  printf '%s\n' "${stock}" > "${T}/G/config/user-dirs.dirs"
+  sync dangle G start >/dev/null; rc="$?"
+  is  'a dangling ~/.config is left dangling' "$([ -e "${T}/nowhere" ] && echo made || echo none)" 'none'
+  is  'and the start goes on' "${rc}" '0'
+
+  # A HOME FILE NOBODY CAN READ MUST NOT FAIL A START, on any machine sharing
+  # the home: one line, never the content, status 0, and both copies left as
+  # they are. chmod 000 does not stop root, so a run as root uses a directory
+  # in the file's place, which no account can read as a file.
+  cp "${T}/A/config/user-dirs.dirs" "${T}/A-before"
+  echo 'SECRET-LOOKING' > "${H}/user-dirs.dirs"; chmod 000 "${H}/user-dirs.dirs"
+  if [ -r "${H}/user-dirs.dirs" ]; then
+    printf '  --   %s\n' 'reading as root; a directory stands in for the unreadable file'
+    chmod 644 "${H}/user-dirs.dirs"; rm -f "${H}/user-dirs.dirs"; mkdir "${H}/user-dirs.dirs"
+  fi
+  ino="$(stat -c '%i %f' "${H}/user-dirs.dirs")"
+  out="$(sync home A start)"; rc="$?"
+  is  'an unreadable home file does not fail the start' "${rc}" '0'
+  is  'nor is it replaced, as though it were absent' "$(stat -c '%i %f' "${H}/user-dirs.dirs")" "${ino}"
+  is  'it is said in one line' "$(grep -c . <<<"${out}")" '1'
+  hasnt 'which does not carry the content' "${out}" 'SECRET-LOOKING'
+  is  'and this desktop'"'"'s copy is left as it was' "$(cat "${T}/A/config/user-dirs.dirs")" "$(cat "${T}/A-before")"
+)
+
+echo '== the guard keeps the login run from recreating folders in a home that has its own list =='
+# The real xdg-user-dirs-update, over a STALE profile copy that names only one
+# folder, in a home whose folders were moved under ~/.local: measured, it
+# recreates the rest. A runner without the program FAILS here with that reason,
+# rather than skipping: a guard nobody has seen refuse is not known to refuse.
+# shellcheck disable=SC2016
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  blk="$(sed -n '/^user_dirs_absent=/,/^user_dirs_kept=..$/p' "${ROOT}/hdw4s-run-session" | sed '$d')"
+  guard() { env -i PATH="${PATH}" HOME="${T}/home" XDG_CONFIG_HOME="${T}/prof" \
+              XDG_STATE_HOME="${T}/state" bash -c "${blk}"'
+            user_dirs_guard' 2>&1; }
+  login() { env -i PATH="${PATH}" HOME="${T}/home" XDG_CONFIG_HOME="${T}/prof" LANG=C.UTF-8 \
+              xdg-user-dirs-update >/dev/null 2>&1; }
+  defaults() { for d in Desktop Documents Music Pictures Public Templates Videos; do
+                 [ ! -e "${T}/home/${d}" ] || printf '%s ' "${d}"; done; }
+  mkdir -p "${T}/home/.config" "${T}/prof" "${T}/home/Downloads"
+  for d in Desktop Documents Music Pictures Public Templates Videos; do mkdir -p "${T}/home/.local/${d}"; done
+  printf '%s\n' 'XDG_MUSIC_DIR="$HOME/.local/Music"' > "${T}/home/.config/user-dirs.dirs"
+  stale='XDG_DOWNLOAD_DIR="$HOME/Downloads"'
+  if ! command -v xdg-user-dirs-update >/dev/null; then
+    for t in 'the guard is written' 'with the guard on, the login run recreates no folder' \
+             'RED ARM: without it, the same run does' 'a home with no list of its own is not guarded' \
+             'a guard of ours is taken back there' 'but an administrator'"'"'s user-dirs.conf is not'; do
+      bad "${t}" 'xdg-user-dirs-update is not installed (package xdg-user-dirs); the guard was NOT exercised'
+    done
+  else
+    guard >/dev/null
+    has 'the guard is written' "$(cat "${T}/prof/user-dirs.conf" 2>&1)" 'enabled=False'
+    printf '%s\n' "${stale}" > "${T}/prof/user-dirs.dirs"
+    login
+    is  'with the guard on, the login run recreates no folder' "$(defaults)" ''
+    # RED ARM, built in: the program really does recreate them, so the line
+    # above can fail.
+    rm -f "${T}/prof/user-dirs.conf"; printf '%s\n' "${stale}" > "${T}/prof/user-dirs.dirs"
+    login
+    is  'RED ARM: without it, the same run does' "$(defaults)" 'Desktop Documents Music Pictures Public Templates Videos '
+    rm -f "${T}/home/.config/user-dirs.dirs"
+    guard >/dev/null
+    is  'a home with no list of its own is not guarded' "$(ls "${T}/prof")" 'user-dirs.dirs'
+    printf '%s\n' 'x' > "${T}/home/.config/user-dirs.dirs"; guard >/dev/null
+    rm -f "${T}/home/.config/user-dirs.dirs"; guard >/dev/null
+    is  'a guard of ours is taken back there' "$([ -e "${T}/prof/user-dirs.conf" ] && echo kept || echo gone)" 'gone'
+    echo 'filename_encoding=locale' > "${T}/prof/user-dirs.conf"; guard >/dev/null
+    is  'but an administrator'"'"'s user-dirs.conf is not' "$(cat "${T}/prof/user-dirs.conf")" 'filename_encoding=locale'
+  fi
+)
+
+echo '== only a named desktop with its own profile keeps the two copies in step =='
+# shellcheck disable=SC2016  # matched as literal text in hdw4s-run-session
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  gate="$(sed -n '/^user_dirs_kept=..$/,/^fi$/p' "${ROOT}/hdw4s-run-session")"
+  [ -n "${gate}" ] && ok 'the gate is found' || bad 'the gate is found' 'sed found nothing'
+  mkdir -p "${T}/home/.config" "${T}/prof"
+  run() { env -i PATH="${PATH}" HOME="${T}/home" "$@" bash -c '
+          user_dirs_sync() { echo "sync $1"; }; user_dirs_guard() { echo guard; }
+          '"${gate}"'
+          echo "kept=${user_dirs_kept}"' | paste -sd ' '; }
+  is  'a named, isolated desktop syncs and guards at start' \
+      "$(run HDW4S_ISOLATION=profile XDG_CONFIG_HOME="${T}/prof")" 'sync start guard kept=1'
+  is  'an ephemeral one does not' \
+      "$(run HDW4S_SESSION_TYPE=ephemeral HDW4S_ISOLATION=profile XDG_CONFIG_HOME="${T}/prof")" 'kept='
+  is  'nor one without isolation' "$(run XDG_CONFIG_HOME="${T}/prof")" 'kept='
+  is  'nor one whose config home IS the home'"'"'s' \
+      "$(run HDW4S_ISOLATION=profile XDG_CONFIG_HOME="${T}/home/.config")" 'kept='
+  # And the loop at the end calls it every tick.
+  loop="$(sed -n '/^while :; do$/,/^done$/p' "${ROOT}/hdw4s-run-session")"
+  has 'the main loop keeps them in step while the desktop runs' "${loop}" \
+      '[ -z "${user_dirs_kept}" ] || user_dirs_sync loop || :'
+)
+
+echo '== every write into a named profile is one somebody decided on =='
+# Property 4 of the user-dirs ruling: a one-way copy into the profile silently
+# undoes what a person changed inside the desktop, and nothing fails. So every
+# line of the two session scripts that writes into $XDG_CONFIG_HOME or
+# $XDG_DATA_HOME -- a cp, mv or ln whose last word is there, a redirection, or
+# the sync's own writer; making a directory writes nothing a person edits -- is
+# listed here with the reason it may, and a new one fails
+# until somebody adds it, and its reason, on purpose.
+# shellcheck disable=SC2016
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  scan() { for f in "$@"; do
+             awk -v F="${f##*/}" -v P='"[^"]*(XDG_(CONFIG|DATA)_HOME|profile[}]/(config|data))' '
+               /^[[:space:]]*#/ { next }
+               $0 ~ ("(^|[^[:alnum:]_-])(cp|mv|ln)[[:space:]].*" P "[^\"]*\"[[:space:]]*([|][|]|&&|;)?[[:space:]]*$") ||
+               $0 ~ ("user_dirs_put[[:space:]]+" P) || $0 ~ (">[[:space:]]*" P) {
+                 sub(/^[[:space:]]+/, ""); print F ": " $0 }' "${f}"
+           done | sort; }
+  allowed='hdw4s-session: if ! cp -R --update=none "${profile}/data/." "${XDG_DATA_HOME}/" ||  ## ephemeral only: the template'"'"'s data half, into a home made for this visitor
+hdw4s-session: ln -s "${trash}" "${XDG_DATA_HOME}/Trash" ||  ## a link to the home'"'"'s own trash; it copies nothing
+hdw4s-session: > "${XDG_CONFIG_HOME}/autostart/tracker-miner-fs-3.desktop"  ## the product'"'"'s own file: the indexer is off (HDW4S_INDEXING)
+hdw4s-session: > "${XDG_DATA_HOME}/dbus-1/services/${svc}.service"  ## the product'"'"'s own shadow of the indexer'"'"'s service
+hdw4s-session: > "${XDG_CONFIG_HOME}/autostart/gnome-initial-setup-first-login.desktop"  ## ephemeral only: no first-run wizard for a visitor
+hdw4s-session: : > "${XDG_CONFIG_HOME}/${d}/First Run"  ## ephemeral only: the browsers'"'"' first-run markers
+hdw4s-session: > "${XDG_CONFIG_HOME}/autostart/pulseaudio.desktop"  ## the product'"'"'s own file: PipeWire is the audio server
+hdw4s-session: > "${XDG_CONFIG_HOME}/autostart/${entry}.desktop"  ## the product'"'"'s own files: autostart entries a remote desktop must not run
+hdw4s-run-session: user_dirs_put "${XDG_CONFIG_HOME}/${f}" "${HOME}/.config/${f}" || {  ## the user-dirs sync: refreshed from the home only when the profile did not change
+hdw4s-run-session: user_dirs_put "${XDG_CONFIG_HOME}/user-dirs.conf" \  ## the user-dirs guard: the product'"'"'s own file'
+  want="$(while IFS= read -r l; do printf '%s\n' "${l%%  ## *}"; done <<<"${allowed}" | sort)"
+  got="$(scan "${ROOT}/hdw4s-session" "${ROOT}/hdw4s-run-session")"
+  is  'every write into the profile is on the list' "$(comm -13 <(printf '%s\n' "${want}") <(printf '%s\n' "${got}"))" ''
+  is  'and every line on the list is still there' "$(comm -23 <(printf '%s\n' "${want}") <(printf '%s\n' "${got}"))" ''
+  is  'each with its reason' "$(grep -vc '  ## [^ ]' <<<"${allowed}")" '0'
+  # RED ARM: one more copy, of the shape that cost the owner his folders.
+  cp "${ROOT}/hdw4s-session" "${T}/hdw4s-session"
+  echo '  cp -f "${HOME}/.config/x" "${XDG_CONFIG_HOME}/x"' >> "${T}/hdw4s-session"
+  is  'RED ARM: a new one-way copy is caught' \
+      "$(comm -13 <(printf '%s\n' "${want}") <(scan "${T}/hdw4s-session" "${ROOT}/hdw4s-run-session"))" \
+      'hdw4s-session: cp -f "${HOME}/.config/x" "${XDG_CONFIG_HOME}/x"'
 )
 
 echo '== a named desktop gets a composed dconf profile unless it may lock =='
@@ -8204,7 +8452,7 @@ echo '== hdw4s check sees a named desktop that will not start =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1576  # update when tests are added; a wrong number is the point
+EXPECTED=1621  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

@@ -417,6 +417,227 @@ elif [ "${HDW4S_ISOLATION:-none}" = 'profile' ]; then
   reset_if_present org.gnome.nautilus.preferences show-image-thumbnails
 fi
 
+# --- a named desktop's standard folders: THE HOME IS THE AUTHORITY ----------
+#
+# Which folders a home has, and where, is a fact about the HOME, not about one
+# machine's profile: ~/.config/user-dirs.dirs and user-dirs.locale say it, and
+# only the home is common to every machine that mounts it. But under
+# HDW4S_ISOLATION=profile everything in this desktop reads and writes the
+# PROFILE's copy, in $XDG_CONFIG_HOME -- xdg-user-dirs-update at login, Files,
+# "xdg-user-dirs-update --set" (the supported way to move a folder) and the
+# answers to the "Update standard folders" dialog. So the profile's copy is a
+# cache of the home's, kept in step in BOTH directions, and this is the one
+# place that does it.
+#
+# WHY BOTH DIRECTIONS, from the two failures that shaped it:
+#  - 2026-09-29: with no copy in a profile, the login run recreated the default
+#    folders, so a home whose owner had hidden ~/Music as ~/.Music got a new
+#    ~/Music beside it -- on the shared home, from the first session on any
+#    machine. The repair was a one-way copy, home over profile, every start.
+#  - 2026-10-03: that copy silently undid every change made INSIDE the desktop
+#    at the next start. Folders moved with --set came back, and no answer in
+#    the dialog could stick: a home copy reading "en_US.UTF-8" was copied over
+#    the "en_US" the dialog had just written, and the dialog asks whenever the
+#    two differ (owner, moving his folders into ~/.local).
+# NOT a link from the profile into the home: measured, --set REPLACES a link
+# with a file. NOT a sync at start only: a machine whose desktop is still
+# running carries its stale copy until it restarts, and its login run is what
+# recreated folders in the first place.
+#
+# CONTENT, NEVER CLOCKS. The machines sharing a home can disagree about the
+# time, and the home's modification time is the file server's. Per file, this
+# profile records (in $XDG_STATE_HOME, on local disk) the content the home and
+# the profile last agreed on, and then:
+#   - the same in both: nothing to do;
+#   - only the profile changed since: it is written to the home;
+#   - only the home changed since (another machine, an edit by hand): the
+#     profile is refreshed from it;
+#   - both changed, or no record yet: THE HOME WINS, and that is logged;
+#   - only one side has the file: it is copied to the other. That is how a
+#     brand-new home gets the stock first run's file, carried home.
+# A missing file is never propagated as a deletion; nothing here removes one.
+#
+# WHAT THIS MAY WRITE IN THE HOME IS EXACTLY TWO FILES, ~/.config/user-dirs.dirs
+# and ~/.config/user-dirs.locale, each by renaming over it a temporary file made
+# beside it (~/.config/.user-dirs.*.hdw4s-XXXXXX) that is either renamed or
+# removed again. Nothing else, ever: not ~/.config itself (a home without one
+# keeps going without one, and the journal says so once), not a file that is a
+# symbolic link there (that is the home owner's arrangement; the profile follows
+# it instead), and never a deletion. tests.sh holds this to that list. The home
+# is the one thing on the machine that is never expendable, and a loop that
+# writes it is the riskiest code in this file -- keep it that small.
+#
+# A quiet tick costs reading six small files with builtins -- no process is
+# started -- so it can run every two seconds, from the loop at the end. It never
+# fails the session: a file it cannot read or write is left as it is and said
+# once. A session SIGKILLed between the temporary file and the rename leaves
+# that temporary file behind; it is not swept here, because a sweep is a
+# deletion in the home and the file may be another machine's, mid-write.
+user_dirs_absent=$'\001absent'
+user_dirs_said=' '
+
+# Once per distinct condition: a state that persists must not be said every two
+# seconds. Events -- a conflict, a write -- are said each time, and are rare.
+user_dirs_once() {
+  case "${user_dirs_said}" in *" $1 "*) return 0 ;; esac
+  user_dirs_said="${user_dirs_said}$1 "
+  echo "hdw4s: ${*:2}" >&2
+}
+
+# The content of $1 into user_dirs_v, or user_dirs_absent if there is no file.
+# Non-zero for a file that is there and cannot be read, which is NOT absent:
+# treating it as absent would copy the other side over it.
+user_dirs_read() {
+  user_dirs_v="${user_dirs_absent}"
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  user_dirs_v=''
+  { IFS= read -r -d '' user_dirs_v || :; } 2>/dev/null < "$1"
+}
+
+# Replace $1 with a copy of the file $2: a temporary file made in the same
+# directory, renamed over it, so that a reader on another machine sees the old
+# file or the new one and never half of either. The bytes are copied, never
+# re-typed through a shell variable, and the directory must already exist --
+# this makes no directory, anywhere. The mode of the file it replaces is kept.
+user_dirs_put() {
+  local tmp
+  tmp="$(mktemp "${1%/*}/.${1##*/}.hdw4s-XXXXXX" 2>/dev/null)" || return 1
+  # The mode is copied AFTER the bytes: copied first, a read-only file's mode
+  # made the temporary file unwritable and the write failed by accident.
+  if cp -- "$2" "${tmp}" 2>/dev/null &&
+     { [ ! -f "$1" ] || chmod --reference="$1" -- "${tmp}" 2>/dev/null || :; } &&
+     mv -f -- "${tmp}" "$1" 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "${tmp}"
+  return 1
+}
+
+# $1 is "start" or "loop", for the log. Whatever happens it returns 0, says at
+# most one line per condition, and never prints what a file contains: one bad
+# file in a shared home must not become a failed start on every machine that
+# mounts it -- that is the lockout this product has just been rid of.
+#
+# NEVER AS ROOT. It runs here, as the desktop's own account, and nowhere else:
+# not from an ExecStartPre=+ or =!, not from a root helper. As root, a
+# ~/.config that is a symbolic link would turn the write below into a root
+# write anywhere on the machine, and a local home is not root-squashed. The
+# EUID test is a builtin, so it costs a tick nothing.
+user_dirs_sync() {
+  local f h p s to state="${XDG_STATE_HOME}/hdw4s-user-dirs"
+  if [ "${EUID}" -eq 0 ]; then
+    user_dirs_once 'root' 'not keeping the standard folders in step: this is' \
+      'running as root, and a home is written only as its owner.'
+    return 0
+  fi
+  for f in user-dirs.dirs user-dirs.locale; do
+    user_dirs_read "${HOME}/.config/${f}" || {
+      user_dirs_once "home-${f}" "${HOME}/.config/${f} cannot be read; it and this" \
+        "desktop's copy are left as they are."
+      continue
+    }
+    h="${user_dirs_v}"
+    user_dirs_read "${XDG_CONFIG_HOME}/${f}" || {
+      user_dirs_once "profile-${f}" "${XDG_CONFIG_HOME}/${f} cannot be read;" \
+        'it and the home'"'"'s copy are left as they are.'
+      continue
+    }
+    p="${user_dirs_v}"
+    user_dirs_read "${state}/${f}" || user_dirs_v="${user_dirs_absent}"
+    s="${user_dirs_v}"
+    if [ "${h}" = "${p}" ]; then
+      [ "${h}" = "${user_dirs_absent}" ] || [ "${s}" = "${h}" ] ||
+        { mkdir -p -- "${state}" &&
+          user_dirs_put "${state}/${f}" "${XDG_CONFIG_HOME}/${f}"; }
+      continue
+    fi
+    if [ "${h}" = "${user_dirs_absent}" ] ||
+       { [ "${p}" != "${user_dirs_absent}" ] && [ "${h}" = "${s}" ]; }; then
+      to='home'
+    elif [ "${p}" = "${user_dirs_absent}" ] || [ "${p}" = "${s}" ]; then
+      to='profile'
+    else
+      echo "hdw4s: ~/.config/${f} and this desktop's copy both changed since they" \
+           "last agreed (at ${1}); the home's wins." >&2
+      to='profile'
+    fi
+    if [ "${to}" = 'home' ] && [ ! -d "${HOME}/.config" ]; then
+      user_dirs_once "noconfig" 'the home has no ~/.config, and a desktop does' \
+        'not create one there; folder changes made in this desktop stay on this' \
+        'machine.'
+      continue
+    fi
+    if [ "${to}" = 'home' ] && [ -L "${HOME}/.config/${f}" ]; then
+      echo "hdw4s: ~/.config/${f} is a symbolic link, which this desktop does not" \
+           'replace; the change made in the desktop is undone to match it.' >&2
+      to='profile'
+    fi
+    if [ "${to}" = 'home' ]; then
+      user_dirs_put "${HOME}/.config/${f}" "${XDG_CONFIG_HOME}/${f}" || {
+        user_dirs_once "write-${f}" "could not write ~/.config/${f}; the change" \
+          'made in this desktop is not in the home yet.'
+        continue
+      }
+    else
+      user_dirs_put "${XDG_CONFIG_HOME}/${f}" "${HOME}/.config/${f}" || {
+        user_dirs_once "refresh-${f}" "could not refresh ${XDG_CONFIG_HOME}/${f}" \
+          'from the home.'
+        continue
+      }
+    fi
+    # The record is what was just copied, read back: if the file changed in
+    # between, the next tick sees them disagree with it and settles it again.
+    if ! mkdir -p -- "${state}" ||
+       ! user_dirs_put "${state}/${f}" "${XDG_CONFIG_HOME}/${f}"; then
+      user_dirs_once "record-${f}" "could not record ${state}/${f}; the next" \
+        'disagreement over it is settled in the home'"'"'s favour.'
+    fi
+  done
+  return 0
+}
+
+# THE GUARD BEHIND THE SYNC. While the home has a user-dirs.dirs, the login run
+# of xdg-user-dirs-update in this desktop is switched off, so that no copy --
+# stale, half-written, or one the sync could not refresh -- can recreate the
+# default folders in a shared home: measured, a stale copy recreated seven of
+# them and rewrote the file. "--set" still works with it off (measured), and
+# so do Files and the dialog. A brand-new home, with no user-dirs.dirs yet,
+# still gets the stock first run, and the sync carries its result home.
+#
+# Written at every start, and taken away again (only if it is exactly ours) when
+# the home has no user-dirs.dirs, so a home that loses its file is not left
+# without its first run for good.
+user_dirs_guard_text='# Written by hdw4s at every start of this desktop: the home has its own
+# ~/.config/user-dirs.dirs, so the folders it names are not recreated here.
+enabled=False
+'
+user_dirs_guard() {
+  if [ -f "${HOME}/.config/user-dirs.dirs" ]; then
+    user_dirs_put "${XDG_CONFIG_HOME}/user-dirs.conf" \
+                  <(printf '%s' "${user_dirs_guard_text}") ||
+      echo "hdw4s: could not write ${XDG_CONFIG_HOME}/user-dirs.conf; the" \
+           'default folders may be recreated in the home.' >&2
+  elif user_dirs_read "${XDG_CONFIG_HOME}/user-dirs.conf" &&
+       [ "${user_dirs_v}" = "${user_dirs_guard_text}" ]; then
+    rm -f -- "${XDG_CONFIG_HOME}/user-dirs.conf"
+  fi
+  return 0
+}
+
+# A named desktop with its own profile only. An ephemeral desktop's ~/.config
+# IS its profile (hdw4s-session links it), and without isolation the desktop
+# writes the home's files directly: in both there is one copy and nothing to
+# keep in step. "|| :" also switches off "set -e" inside, which must never end a
+# desktop over its folder list.
+user_dirs_kept=''
+if [ "${HDW4S_SESSION_TYPE:-}" != 'ephemeral' ] &&
+   [ "${HDW4S_ISOLATION:-none}" = 'profile' ] && [ -n "${XDG_CONFIG_HOME:-}" ] &&
+   [ ! "${XDG_CONFIG_HOME}" -ef "${HOME}/.config" ]; then
+  user_dirs_kept=1
+  user_dirs_sync start || :
+  user_dirs_guard || :
+fi
+
 # Whether these desktops may see a camera.
 #
 # The same shape as the microphone, plus one moving part. The virtual camera is
@@ -1550,5 +1771,6 @@ while :; do
     echo "hdw4s: the streaming server exited with status ${rc}" >&2
     exit "${rc}"
   fi
+  [ -z "${user_dirs_kept}" ] || user_dirs_sync loop || :
   sleep 2
 done

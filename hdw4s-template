@@ -1031,8 +1031,10 @@ def harvest(author, home, inst):
                          "symbolic link" % rel)
             continue
         copy_entry(src, os.path.join(gen, "profile", rel))
-    # THE HOME'S user-dirs FILES WIN WHEN THE AUTHOR EDITED THEM THERE, as they
-    # do at every start of a named desktop (hdw4s-session). In this desktop
+    # THE HOME'S user-dirs FILES WIN WHEN THE AUTHOR EDITED THEM THERE. A named
+    # desktop keeps the two copies in step by content instead, both ways
+    # (user_dirs_sync in hdw4s-run-session); this is one publish on one
+    # machine, where both copies are local and their times agree. In this desktop
     # ~/.config is NOT where settings live -- XDG_CONFIG_HOME points into the
     # profile -- so an author who edited ~/.config/user-dirs.dirs to hide
     # folders (owner, 2026-09-30) changed a file nothing reads, and the
