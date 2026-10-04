@@ -1,3 +1,19 @@
+hdw4s (2.4.12) unstable; urgency=medium
+
+  * Named desktops now print to the browser by default, as ephemeral ones
+    already did: a printed document reaches the person's own browser as a
+    PDF and their own print dialog takes over, so it prints wherever they
+    are. HDW4S_PRINTING=machine keeps this machine's printers instead, for
+    a desktop that sits next to one it can reach. See HDW4S_PRINTING in
+    hdw4s(8).
+  * The browser print queue uses this machine's paper size (/etc/papersize)
+    instead of always A4, so a page is not scaled twice on its way to the
+    printer.
+  * Printed documents wait in the desktop's own profile until a browser
+    takes them, no longer in the home.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sun, 04 Oct 2026 13:44:57 -0700
+
 hdw4s (2.4.11) unstable; urgency=medium
 
   * New: /shared, a drop area every desktop can read and write, and every
