@@ -22,6 +22,9 @@ LC_ALL=C; PATH=/usr/sbin:/usr/bin:/sbin:/bin
 [ "$#" -ge 2 ] || { echo "usage: $0 <ssh-target> <unit> [timeout]" >&2; exit 2; }
 TARGET="$1"; UNIT="$2"; T="${3:-120}"
 
+# The unit and the timeout are expanded HERE, on purpose; everything the far
+# side must expand is escaped.
+# shellcheck disable=SC2087
 ssh -o ConnectTimeout=10 "${TARGET}" "bash -s" <<REMOTE
 set -u
 unit='${UNIT}'

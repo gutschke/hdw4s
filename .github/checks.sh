@@ -27,7 +27,10 @@ SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s
          debian/hdw4s-shared-sweep.postrm
          .github/checks.sh .github/tests.sh .github/clean-install-test.sh
          .github/purge-safety-test.sh .github/uid-invariant.sh
-         bash-completion/hdw4s)
+         bash-completion/hdw4s
+         hdw4s-teardown hdw4s-start hdw4s-is-slot hdw4s-shared-expose hdw4s-slot-scrub
+         hdw4s-old-layout
+         .github/package.sh .github/live/*.sh)
 # Every unit in the tree, found rather than listed. The list this replaces named
 # thirteen of the fifteen: hdw4s-incarnation@.service and hdw4s-refuse@.service
 # were never handed to systemd-analyze verify, so a syntax error in either would
