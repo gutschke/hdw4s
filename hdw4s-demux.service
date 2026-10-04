@@ -161,9 +161,14 @@ ReadWritePaths=/run/hdw4s/teardown
 # all. Like the line above, a no-op today: permissions decide while /run is
 # writable.
 ReadWritePaths=/run/hdw4s/start
-# NOT THE /shared TABLE. Every desktop may write there, so this takes nothing
-# from anyone; it is the one process strangers on the network talk to, and it
-# has no use for it. "-": the directory exists only once tmpfiles has run.
+# NOT THE /shared TABLE, as far as this goes. Every desktop may write there, so
+# this takes nothing from anyone; it is the one process strangers on the network
+# talk to, and it has no use for it. "-": the directory exists only once
+# tmpfiles has run. IT HOLDS ONLY UNTIL THE TABLE IS BOUND AGAIN: measured on a
+# development box (2026-10-04), the table was hidden here after a boot, but
+# once the expose service withdrew and re-bound it, the new mount propagated
+# into this namespace, read-write, on top of the hidden path. Not a guard to
+# rely on; making it one is filed.
 InaccessiblePaths=-/run/hdw4s/shared
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes

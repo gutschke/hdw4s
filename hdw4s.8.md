@@ -1071,8 +1071,9 @@ view away on purpose, turn the feature off and reboot.
 In `tmpfs` mode the package makes the store itself, at
 `/run/hdw4s/shared-store`, with a root only root can enter: desktops reach the
 table through `/shared` and no other way. The front door's router, the one
-process here that strangers on the network talk to, has no use for the table and
-cannot see it. In `source` mode,
+process here that strangers on the network talk to, has no use for the table; it
+is hidden from it at start, but a table bound again later (after an outage, say)
+becomes visible to it until the router restarts. In `source` mode,
 `HDW4S_SHARED_SOURCE` names one, and it must be exactly this, or it is refused
 and `/shared` stays empty:
 
