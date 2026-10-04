@@ -110,12 +110,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          deb="../hdw4s_${version}_all.deb"
-          sha256sum "${deb}" | sed 's|\.\./||' > SHA256SUMS
-          gh release create "${GITHUB_REF_NAME}" "${deb}" SHA256SUMS \
+          # BOTH packages: from 2.4.11 hdw4s depends on hdw4s-shared-sweep at
+          # the same version, which no archive carries, so a release with hdw4s
+          # alone could not be installed by following its own notes.
+          debs="../hdw4s_${version}_all.deb ../hdw4s-shared-sweep_${version}_all.deb"
+          for d in ${debs}; do [ -s "${d}" ] || { echo "missing ${d}" >&2; exit 1; }; done
+          # shellcheck disable=SC2086  # two plain file names, split on purpose
+          sha256sum ${debs} | sed 's|\.\./||' > SHA256SUMS
+          # shellcheck disable=SC2086
+          gh release create "${GITHUB_REF_NAME}" ${debs} SHA256SUMS \
             --title "${GITHUB_REF_NAME}" \
             --notes "Install with:
 
-              sudo apt install ./hdw4s_${version}_all.deb
+              sudo apt install ./hdw4s_${version}_all.deb ./hdw4s-shared-sweep_${version}_all.deb
 
             Verify with the attached SHA256SUMS."
