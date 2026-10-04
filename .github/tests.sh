@@ -2792,7 +2792,14 @@ if sys.argv[1] == "server":
     def slow(self, name, fileid):
         time.sleep(0.008); return real(self, name, fileid)
     m.Resolver.touch = slow
-    m.size_receive = lambda sock: sock.getsockopt(m.socket.SOL_SOCKET, m.socket.SO_RCVBUF)
+    # HELD at 212992 bytes, the default of the boxes this was measured on, and
+    # not at whatever default the kernel running it has: on a CI runner the
+    # default was 1 MiB, which made the slow-server test an easy one and failed
+    # its label (2026-10-03). The kernel doubles a request, so 106496 asks for it.
+    def held(sock):
+        sock.setsockopt(m.socket.SOL_SOCKET, m.socket.SO_RCVBUF, 106496)
+        return sock.getsockopt(m.socket.SOL_SOCKET, m.socket.SO_RCVBUF)
+    m.size_receive = held
 else:
     # The red arm the brief asks for: ONE forced stat failure.
     stat = os.stat
@@ -2841,8 +2848,8 @@ for i in range(1500):
       kill "${SP}"; wait "${SP}" 2>/dev/null
       kill "${P}" 2>/dev/null; umount "${S}"
     ' 2>&1)"
-    is  'a burst of 1200 opens at a slow server held at the default buffer: every file announced, the socket drops none' \
-        "$(sed -n 's/^burst //p' <<<"${out}" | awk '{print $1, $2, ($3 > 0 && $3 <= 212992) ? "default" : "rb=" $3}')" '1200/1200 0 default'
+    is  'a burst of 1200 opens at a slow server held at a 212992-byte buffer: every file announced, the socket drops none' \
+        "$(sed -n 's/^burst //p' <<<"${out}" | awk '{print $1, $2, "rb=" $3}')" '1200/1200 0 rb=212992'
     is  'the client logs its counts on SIGUSR1' "$(sed -n 's/^client-usr1 //p' <<<"${out}")" '1'
     is  'a stopped client exits 0' "$(sed -n 's/^client-exit //p' <<<"${out}")" '0'
     is  '  and logs its counts once at exit, with the forced stat failure counted' \
