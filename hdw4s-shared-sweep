@@ -58,7 +58,7 @@ import time
 
 sys.dont_write_bytecode = True
 
-VERSION = "2.4.10"
+VERSION = "2.4.11"
 PROG = "hdw4s-shared-sweep"
 
 # The relay's default group and port, so that an enabled relay needs no

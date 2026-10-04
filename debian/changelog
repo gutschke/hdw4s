@@ -1,3 +1,39 @@
+hdw4s (2.4.11) unstable; urgency=medium
+
+  * New: /shared, a drop area every desktop can read and write, and every
+    host that mounts its store. Off by default. HDW4S_SHARED=tmpfs keeps it
+    in memory on one machine; HDW4S_SHARED=source shows a store you provide
+    -- a filesystem of its own, local or over NFS -- so several machines
+    share one. Items nobody has used for 30 minutes, or older than 7 days,
+    are removed (by default). The guard and sweeper come in a new package,
+    hdw4s-shared-sweep, which a storage host can install on its own. See
+    "THE SHARED DROP AREA" in hdw4s(8).
+  * Named desktops: logging out from the GNOME menu now ends the desktop,
+    and the next visit starts it again. Logging out twice no longer locks
+    its owner out. A desktop that keeps failing to start is held after
+    three failures in twenty minutes, until that expires or the
+    administrator clears it; it says so on the page and in "hdw4s check",
+    and names the command that clears it.
+  * Named desktops: standard folders (Documents, Music, ...) moved with
+    xdg-user-dirs-update, or by editing ~/.config/user-dirs.dirs, now stay
+    moved, on every machine that shares the home, and an answer to the
+    "Update standard folders" question now sticks.
+  * The first visit to a desktop just added with "hdw4s enable" now gets
+    the desktop, instead of an error page until the second visit.
+  * Template: Files bookmarks are carried into new ephemeral desktops,
+    with the folders and links they name, and "template copyfrom" accepts
+    a template holding links to absolute paths such as /shared.
+  * Tab completion for hdw4s commands, sessions and settings in bash.
+  * Every desktop has a /run/lock of its own, so nothing one visitor leaves
+    there outlives their session.
+  * Everything hdw4s keeps under /run now lives in one directory,
+    /run/hdw4s. Reboot after installing this version. A reverse proxy that
+    reaches a session over its unix socket must now point at
+    /run/hdw4s/proxy/<instance>.sock; "hdw4s proxy <instance>" prints the
+    new configuration.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sun, 04 Oct 2026 00:55:29 -0700
+
 hdw4s (2.4.10) unstable; urgency=medium
 
   * Installs Selkies 2.0.0, the first final release of the 2.0 series
