@@ -7878,10 +7878,52 @@ echo '== the router, against stand-in slots =='
   fi
 )
 
+echo '== bash completion offers what the commands accept, and nothing they refuse =='
+# Driven without the bash-completion package: its three helpers are stood in
+# for, so this judges OUR choices (which words, from which table), not theirs.
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  mkdir -p "${SB}/etc" "${SB}/bin"
+  printf '# slots\n0 alice\n3 _hdw4s_0\n4 bob\n' > "${SB}/etc/instances"
+  ln -s "${ROOT}/hdw4s" "${SB}/bin/hdw4s"
+  c() {
+    PATH="${SB}/bin:${PATH}" HDW4S_ETCDIR="${SB}/etc" bash -c '
+      _init_completion() { cur="${COMP_WORDS[COMP_CWORD]}"; prev="${COMP_WORDS[COMP_CWORD-1]}"
+                           words=("${COMP_WORDS[@]}"); cword=${COMP_CWORD}; }
+      _filedir() { :; }; _known_hosts_real() { :; }; compopt() { :; }
+      COMP_WORDBREAKS="${HDW4S_WB- =:}"  # "=" breaks words, as in bash'"'"'s default
+      complete() { :; }
+      . "$1"; shift
+      read -ra COMP_WORDS <<<"$1"; [[ "$1" == *" " ]] && COMP_WORDS+=("")
+      COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 )); COMPREPLY=()
+      _hdw4s; [ "${#COMPREPLY[@]}" -eq 0 ] || printf "%s\n" "${COMPREPLY[@]}" | sort | tr "\n" " "' _ "${ROOT}/bash-completion/hdw4s" "$1"
+  }
+  is  'an instance is offered, a pool seat is not' "$(c 'hdw4s show ')" 'alice bob '
+  # Readline replaces only what follows the last word break, and "=" is one by
+  # default: the value alone, or a real terminal types the key twice.
+  is  'a setting with fixed values offers exactly those' "$(c 'hdw4s set HDW4S_SHARED=')" \
+      'off source tmpfs '
+  is  'with the key itself where "=" breaks no word' "$(HDW4S_WB=' ' c 'hdw4s set HDW4S_SHARED=')" \
+      'HDW4S_SHARED=off HDW4S_SHARED=source HDW4S_SHARED=tmpfs '
+  is  'an instance is not offered a machine-wide setting' "$(c 'hdw4s set alice HDW4S_PROX')" 'HDW4S_PROXY_GROUP= '
+  is  'the pool is not offered a setting it fixes' "$(c 'hdw4s pool set HDW4S_ISO')" ''
+  is  'nor one that applies only to the whole machine' "$(c 'hdw4s pool set HDW4S_PROX')" ''
+  is  'but is offered one it reads from the machine file' "$(c 'hdw4s pool set HDW4S_EPHEMERAL_U')" 'HDW4S_EPHEMERAL_URL= '
+  # Every name offered is one "set" itself accepts: one table, two readers.
+  n=0
+  for k in $(PATH="${SB}/bin:${PATH}" HDW4S_ETCDIR="${SB}/etc" hdw4s __complete keys machine); do
+    HDW4S_ETCDIR="${SB}/etc" "${ROOT}/hdw4s" set "${k}=" 2>&1 | grep -q 'cannot be set from the command line' && n=$((n + 1))
+  done
+  is  'no offered name is one "set" refuses as unknown' "${n}" '0'
+  is  'every command in the usage is offered' \
+      "$(offered=" $(c 'hdw4s ') "
+         sed -n "/^Usage: hdw4s/,/^An instance/p" "${ROOT}/hdw4s" | awk '/^  [-a-z]/ { print $1 }' | sort -u |
+         while read -r w; do case "${offered}" in *" ${w} "*) ;; *) echo "${w}";; esac; done)" ''
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1507  # update when tests are added; a wrong number is the point
+EXPECTED=1516  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

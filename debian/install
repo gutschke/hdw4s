@@ -36,6 +36,9 @@ hdw4s-shared-expose      usr/lib/hdw4s
 hdw4s-tmpfiles.conf      usr/lib/tmpfiles.d
 # polkit's vendor directory: a package's own rules live here and go with it.
 60-hdw4s-slots.rules     usr/share/polkit-1/rules.d
+# Tab completion. debian/install cannot rename, so the tree keeps it in a
+# directory of its own under the name bash-completion looks it up by.
+bash-completion/hdw4s    usr/share/bash-completion/completions
 hdw4s.xorg.conf          usr/lib/hdw4s
 wrappers/*               usr/lib/hdw4s/wrappers
 hdw4s.conf               usr/share/hdw4s

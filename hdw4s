@@ -4578,7 +4578,31 @@ if [ -e "${SLOTS}" ] && [ ! -r "${SLOTS}" ]; then
       '  Check its permissions and run this again.'
 fi
 
+# For the bash completion, and for nothing else: the setting names a context
+# accepts and the values a setting takes, read from the very tables "set" and
+# "pool set" check against, so a completion can never offer what they refuse or
+# miss what they accept. Undocumented on purpose; reads only.
+#   __complete keys machine|instance|pool      __complete values <KEY>
+cmd_complete() {
+  local key
+  case "$1:$#" in
+    keys:2)
+      for key in "${!SETTABLE[@]}"; do
+        case "$2" in
+          instance) [ -z "${GLOBAL_ONLY[${key}]+set}" ] || continue;;
+          pool) [ -z "${POOL_FIXED[${key}]+set}" ] || continue
+                [ -n "${POOL_MACHINE[${key}]+set}" ] ||
+                  [ -z "${GLOBAL_ONLY[${key}]+set}" ] || continue;;
+        esac
+        echo "${key}"
+      done | sort;;
+    values:2)
+      case "${SETTABLE[$2]:-}" in *'|'*) tr '|' '\n' <<<"${SETTABLE[$2]}";; esac;;
+  esac
+}
+
 case "${1:-}" in
+  __complete) shift; cmd_complete "$@";;
   list)     shift
             case "$*" in ''|--seats) ;; *) usage_error;; esac
             cmd_list "$@";;

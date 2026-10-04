@@ -277,6 +277,8 @@ for sys in /usr/local /usr "${own}"; do
     rm -f "${sys}/share/man/man8/hdw4s.8.gz"
   [ ! -e "${sys}/share/man/man8/hdw4s-shared-sweep.8.gz" ] ||
     rm -f "${sys}/share/man/man8/hdw4s-shared-sweep.8.gz"
+  [ ! -e "${sys}/share/bash-completion/completions/hdw4s" ] ||
+    rm -f "${sys}/share/bash-completion/completions/hdw4s"
 done
 mandb -q 2>/dev/null || :
 

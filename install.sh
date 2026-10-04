@@ -300,6 +300,10 @@ echo ' done.'
 echo -n 'Installing documentation...'
 gzip -9c "${dst}/hdw4s.8" > "${man}/hdw4s.8.gz"
 gzip -9c "${dst}/hdw4s-shared-sweep.8" > "${man}/hdw4s-shared-sweep.8.gz"
+# Tab completion, where bash-completion looks for an installed program's own
+# file under the same prefix; loaded the first time "hdw4s" is completed.
+install -D -m0644 "${src}/bash-completion/hdw4s" \
+        "${sys}/share/bash-completion/completions/hdw4s"
 mandb -q 2>/dev/null || :
 echo ' done.'
 

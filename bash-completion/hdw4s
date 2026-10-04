@@ -1,0 +1,109 @@
+# bash completion for hdw4s(8)                                  -*- shell-script -*-
+# shellcheck shell=bash disable=SC2207
+# (SC2207: COMPREPLY=($(compgen ...)) is the completion idiom, and every word
+# offered here -- a command, a setting, a value, an account -- has no spaces.)
+#
+# The commands are listed here, but the setting names and their values are not:
+# they come from "hdw4s __complete", which reads the same tables "set" and
+# "pool set" check against, so this file cannot offer a setting they refuse.
+# Instances come from the slot table, which every user may read; the pool's
+# own seats (_hdw4s_*) are left out, because nobody is meant to type them.
+
+_hdw4s_instances() {
+  local slots="${HDW4S_ETCDIR:-/etc/hdw4s}/instances"
+  [ -r "${slots}" ] || return 0
+  awk '$1 ~ /^[0-9]+$/ && $2 !~ /^_hdw4s_/ { print $2 }' "${slots}"
+}
+
+# KEY=VALUE for a context: the names, then, once "=" is typed, the values of a
+# setting that has a fixed set of them.
+_hdw4s_setting() {
+  local ctx="$1" cur="$2" key
+  if [[ "${cur}" == *=* ]]; then
+    key="${cur%%=*}"
+    # Readline replaces only what follows the last word-break character, and
+    # "=" is one by default: offering "KEY=value" there typed "KEY=KEY=value"
+    # (seen on a real terminal, 2026-10-03). The prefix is wanted only where
+    # "=" has been taken out of COMP_WORDBREAKS.
+    local pre="${key}="; [[ "${COMP_WORDBREAKS}" == *=* ]] && pre=''
+    COMPREPLY=($(compgen -P "${pre}" -W "$(hdw4s __complete values "${key}" 2>/dev/null)" -- "${cur#*=}"))
+  else
+    COMPREPLY=($(compgen -S '=' -W "$(hdw4s __complete keys "${ctx}" 2>/dev/null)" -- "${cur}"))
+    compopt -o nospace
+  fi
+}
+
+_hdw4s() {
+  local cur prev words cword
+  _init_completion -n = || return
+
+  local cmds='list check show enable disable release set unset transport auth
+              noauth proxy seed reap keyring pool template firewall --version --help'
+  if [ "${cword}" -eq 1 ]; then
+    COMPREPLY=($(compgen -W "${cmds}" -- "${cur}"))
+    return
+  fi
+
+  local cmd="${words[1]}" n=$((cword - 1))
+  case "${cmd}" in
+    list)
+      [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -W '--seats' -- "${cur}")) ;;
+    show|disable|release|auth|noauth|proxy|keyring)
+      [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}")) ;;
+    enable)  # an instance is an account; enabling makes its slot
+      [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -u -- "${cur}")) ;;
+    transport)
+      case "${n}" in
+        1) COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}")) ;;
+        2) COMPREPLY=($(compgen -W 'tcp unix' -- "${cur}")) ;;
+      esac ;;
+    seed)
+      if [ "${n}" -eq 1 ]; then
+        COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}"))
+      elif [ "${prev}" = '--only' ]; then
+        :  # a home-relative path inside that account's home: nothing to offer
+      else
+        COMPREPLY=($(compgen -W '--only' -- "${cur}"))
+      fi ;;
+    set|unset)
+      # "set [<instance>] K=V", "unset [<instance>] K": a first word with no "="
+      # that names an instance makes the rest that instance's settings.
+      local ctx=machine
+      if [ "${n}" -ge 2 ] && [[ "${words[2]}" != *=* ]]; then ctx=instance; fi
+      if [ "${n}" -eq 1 ] && [ "${cmd}" = unset ]; then
+        COMPREPLY=($(compgen -W "$(hdw4s __complete keys machine 2>/dev/null) $(_hdw4s_instances)" -- "${cur}"))
+      elif [ "${n}" -eq 1 ] && [[ "${cur}" != *=* ]]; then
+        _hdw4s_setting machine "${cur}"
+        COMPREPLY+=($(compgen -W "$(_hdw4s_instances)" -- "${cur}"))
+      elif [ "${cmd}" = unset ]; then
+        [ "${n}" -eq 2 ] && [ "${ctx}" = instance ] &&
+          COMPREPLY=($(compgen -W "$(hdw4s __complete keys instance 2>/dev/null)" -- "${cur}"))
+      else
+        _hdw4s_setting "${ctx}" "${cur}"
+      fi ;;
+    pool)
+      case "${n}" in
+        1) COMPREPLY=($(compgen -W 'size show set unset proxy' -- "${cur}")) ;;
+        *) case "${words[2]}" in
+             set)   _hdw4s_setting pool "${cur}" ;;
+             unset) [ "${n}" -eq 2 ] &&
+                      COMPREPLY=($(compgen -W "$(hdw4s __complete keys pool 2>/dev/null)" -- "${cur}")) ;;
+           esac ;;
+      esac ;;
+    template)
+      case "${n}" in
+        1) COMPREPLY=($(compgen -W 'edit keep forget reset show copyfrom export' -- "${cur}")) ;;
+        2) case "${words[2]}" in
+             edit)          COMPREPLY=($(compgen -W '--yes' -- "${cur}")) ;;
+             keep|forget)   _filedir ;;
+             export)        _filedir ;;
+             copyfrom)      _known_hosts_real -- "${cur}"; _filedir ;;
+           esac ;;
+      esac ;;
+    firewall)
+      [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -W '--apply --check --print --restore' -- "${cur}")) ;;
+  esac
+} &&
+  complete -F _hdw4s hdw4s
+
+# ex: filetype=sh
