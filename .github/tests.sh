@@ -70,6 +70,11 @@ bad()  { echo "fail" >> "${RESULTS}"; printf '  FAIL %s\n' "$1"; [ $# -lt 2 ] ||
 is()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "expected [$3], got [$2]"; }
 has()  { case "$2" in *"$3"*) ok "$1";; *) bad "$1" "missing: $3";; esac; }
 hasnt(){ case "$2" in *"$3"*) bad "$1" "should not contain: $3";; *) ok "$1";; esac; }
+# An assertion that cannot mean anything here (as root, "unreadable" is not):
+# recorded, so the count stays honest, and printed as a skip with the reason.
+# It was CALLED below for weeks and defined nowhere -- the group died at it
+# whenever the suite ran as root, which it never had (2026-10-03, on a dev box).
+skip() { echo "ok" >> "${RESULTS}"; printf '  skip %s (%s)\n' "$1" "$2"; }
 
 # A sandbox with the CLI's functions loaded and every path it writes to
 # redirected somewhere disposable. The dispatcher is cut off so that sourcing
@@ -84,6 +89,13 @@ sandbox() {
   # returned -- and every test that depends on them then passed or failed for
   # reasons unrelated to what it names.
   cat > "${SB}/setup.sh" <<'SETUP'
+  # THE SANDBOX'S CONFIGURATION, BEFORE THE CLI IS LOADED. Loading it sources
+  # ${HDW4S_ETCDIR:-/etc/hdw4s}/hdw4s.conf at once, and this used to happen
+  # with the variable unset -- so on a machine with hdw4s configured, every
+  # group started from that machine's real settings (on a dev box: /shared
+  # "source" and "external", and seven assertions about tmpfs and a local
+  # sweep failed). On a workstation the file is absent, which hid it.
+  export HDW4S_ETCDIR="${SB}/etc"
   # shellcheck source=/dev/null
   . "${SB}/lib.sh"
   # The sourced script installs its own EXIT/ERR trap. An ERR trap fires even
@@ -4015,9 +4027,24 @@ echo '== a named desktop keeps its standard folders where its owner puts them ==
 # the desktop. Three profiles stand for three machines sharing one home; "start"
 # and "loop" are the two places hdw4s-run-session calls the sync from. The
 # "$HOME" here is the literal text a user-dirs file carries, never an expansion.
+# AS ROOT THIS GROUP IS SKIPPED, and says so: the sync refuses to run as root
+# by design (it would follow a link in a home as root), so as root every case
+# here would test a state the product refuses. Its cover as root is this same
+# group run unprivileged (the workstation suite, which is CI's shape) and the
+# throwaway named desktop on a dev box (private arm). UD_N is how many results
+# the group records; the last assertion checks it unprivileged, so adding a
+# case without raising UD_N goes red where it can be seen.
 # shellcheck disable=SC2016
-( set +e; T="$(mktemp -d)"; trap 'chmod -R u+w "${T}"; rm -rf "${T}"' EXIT
+( set +e; UD_N=29
+  if [ "${EUID}" -eq 0 ]; then
+    for _ in $(seq 0 "${UD_N}"); do echo ok >> "${RESULTS}"; done
+    printf '  skip %s (%s)\n' "${UD_N} user-dirs sync assertions, and their count" \
+      'the sync refuses root by design; covered unprivileged and on a throwaway desktop'
+    exit 0
+  fi
+  T="$(mktemp -d)"; trap 'chmod -R u+w "${T}"; rm -rf "${T}"' EXIT
   blk="$(sed -n '/^user_dirs_absent=/,/^user_dirs_kept=..$/p' "${ROOT}/hdw4s-run-session" | sed '$d')"
+  ud_before="$(grep -c . "${RESULTS}")"
   case "${blk}" in
     *'user_dirs_sync() {'*'user_dirs_guard() {'*) ok 'the sync is found in hdw4s-run-session';;
     *) bad 'the sync is found in hdw4s-run-session' 'sed found no user_dirs_sync';;
@@ -4141,6 +4168,7 @@ echo '== a named desktop keeps its standard folders where its owner puts them ==
   is  'it is said in one line' "$(grep -c . <<<"${out}")" '1'
   hasnt 'which does not carry the content' "${out}" 'SECRET-LOOKING'
   is  'and this desktop'"'"'s copy is left as it was' "$(cat "${T}/A/config/user-dirs.dirs")" "$(cat "${T}/A-before")"
+  is  'this group records exactly UD_N results' "$(( $(grep -c . "${RESULTS}") - ud_before ))" "${UD_N}"
 )
 
 echo '== the guard keeps the login run from recreating folders in a home that has its own list =='
@@ -8499,7 +8527,7 @@ echo '== hdw4s check sees a named desktop that will not start =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1629  # update when tests are added; a wrong number is the point
+EXPECTED=1630  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

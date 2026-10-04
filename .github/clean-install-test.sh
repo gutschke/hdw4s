@@ -152,7 +152,17 @@ deb="$(find_deb)"
   exit 1
 }
 deb="$(readlink -f "${deb}")"
-echo "Testing $(basename "${deb}") on a clean ${SUITE} system."
+# THE SECOND PACKAGE, from the first one's own Depends: from 2.4.11 hdw4s
+# depends on hdw4s-shared-sweep at the same version, which no archive carries,
+# so apt can install hdw4s only with it beside. Refused, not skipped, when it is
+# needed and missing: a clean install of hdw4s alone cannot succeed.
+debs=("${deb}")
+if dpkg-deb -f "${deb}" Depends | grep -q 'hdw4s-shared-sweep'; then
+  sweep="$(dirname "${deb}")/hdw4s-shared-sweep_$(dpkg-deb -f "${deb}" Version)_all.deb"
+  [ -f "${sweep}" ] || { echo "hdw4s depends on hdw4s-shared-sweep and ${sweep} is not there." >&2; exit 1; }
+  debs+=("$(readlink -f "${sweep}")")
+fi
+echo "Testing $(for d in "${debs[@]}"; do basename "${d}"; done | tr '\n' ' ')on a clean ${SUITE} system."
 
 # --- the throwaway root ------------------------------------------------------
 # Everything below removes files, so the target is derived here, once, and
@@ -328,7 +338,7 @@ for m in /proc /sys /dev /dev/pts /var/cache/apt/archives; do
   mounted="${m} ${mounted}"
 done
 printf 'nameserver %s\n' "${DNS}" > "${ROOT}/etc/resolv.conf"
-cp "${deb}" "${ROOT}/tmp/"
+cp "${debs[@]}" "${ROOT}/tmp/"
 
 # Package installs must not try to talk to a service manager that is not here.
 # The maintainer scripts already guard on /run/systemd/system, so this is
@@ -343,7 +353,8 @@ run() { unshare --fork --pid --mount-proc="${ROOT}/proc" \
 
 echo -n 'Installing the package...'
 run apt-get update -qq >/dev/null 2>&1
-if ! run apt-get install -y --no-install-recommends "/tmp/$(basename "${deb}")" \
+inst=(); for d in "${debs[@]}"; do inst+=("/tmp/$(basename "${d}")"); done
+if ! run apt-get install -y --no-install-recommends "${inst[@]}" \
        > "${ROOT}/tmp/install.log" 2>&1; then
   echo ' FAILED.'
   tail -30 "${ROOT}/tmp/install.log" >&2
@@ -445,7 +456,15 @@ echo -n 'Loading what a session loads...'
 if run /bin/bash -c '
   set -e
   PREFIX=/opt/selkies
-  eval "$(sed -n "/^smoke_test() {/,/^}/p" /usr/lib/hdw4s/hdw4s-update)"
+  # smoke_test and every function it calls, lifted from the installed updater.
+  # unexpected_damage arrived beside it and was never lifted here, so this step
+  # failed on every release since ("unexpected_damage: command not found").
+  # PATCH_MANIFEST is what a local Selkies patch writes; a clean install has none.
+  PATCH_MANIFEST=""
+  for f in smoke_test unexpected_damage; do
+    eval "$(sed -n "/^${f}() {/,/^}/p" /usr/lib/hdw4s/hdw4s-update)"
+    declare -F "${f}" >/dev/null || { echo "could not lift ${f} from hdw4s-update"; exit 1; }
+  done
   smoke_test' > "${ROOT}/tmp/smoke.log" 2>&1; then
   echo ' done.'
 else

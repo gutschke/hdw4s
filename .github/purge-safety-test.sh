@@ -7,6 +7,8 @@ export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 #   sudo .github/purge-safety-test.sh [--deb FILE] [--dirty] [--no-self-test]
 #
 #   --deb FILE       the package to test (default: the newest beside the tree)
+#   --sweep FILE     hdw4s-shared-sweep, when the package depends on it (default:
+#                    the one of the same version beside --deb)
 #   --dirty          do NOT blank the paths hdw4s owns before installing, so
 #                    the run reports on the machine's accumulated state as
 #                    well. Useful once; useless for attributing a leftover.
@@ -45,11 +47,13 @@ export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 # the package.
 
 DEB=''
+SWEEP=''
 CLEAN='yes'
 SELFTEST='yes'
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --deb) shift; DEB="${1:?--deb needs a path}";;
+    --sweep) shift; SWEEP="${1:?--sweep needs a path}";;
     --dirty) CLEAN='';;
     --no-self-test) SELFTEST='';;
     -h|--help) sed -n '/^#   sudo /,/^# Proving/p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
@@ -73,6 +77,18 @@ if [ -z "${DEB}" ] || [ ! -f "${DEB}" ]; then
   exit 1
 fi
 DEB="$(readlink -f "${DEB}")"
+# THE SECOND PACKAGE, derived from the first, never assumed. From 2.4.11 hdw4s
+# depends on hdw4s-shared-sweep, so a machine that has hdw4s has both, and a
+# purge test that installs one alone tests a machine that cannot exist. Taken
+# from the package's own Depends, and refused rather than skipped when it is
+# needed and not found.
+if dpkg-deb -f "${DEB}" Depends | grep -q 'hdw4s-shared-sweep'; then
+  if [ -z "${SWEEP}" ]; then
+    SWEEP="$(dirname "${DEB}")/hdw4s-shared-sweep_$(dpkg-deb -f "${DEB}" Version)_all.deb"
+  fi
+  [ -f "${SWEEP}" ] || { echo "hdw4s depends on hdw4s-shared-sweep and ${SWEEP} is not there; give it with --sweep." >&2; exit 1; }
+  SWEEP="$(readlink -f "${SWEEP}")"
+fi
 
 # --- the controls ------------------------------------------------------------
 # Run before the package itself, so a broken harness is reported as a broken
@@ -112,7 +128,8 @@ if [ -n "${SELFTEST}" ]; then
   done
   dirty=(); [ -n "${CLEAN}" ] || dirty=(--dirty)
   echo '=== control A: a postrm that eats homes. Must be REJECTED.'
-  if "$0" --deb "${ctl}/ctl-A.deb" --no-self-test "${dirty[@]}" \
+  sweep=(); [ -z "${SWEEP}" ] || sweep=(--sweep "${SWEEP}")
+  if "$0" --deb "${ctl}/ctl-A.deb" "${sweep[@]}" --no-self-test "${dirty[@]}" \
        > "${ctl}/A.out" 2>&1; then
     echo 'harness: control A PASSED. This test cannot see a deleted home and' >&2
     echo '  says nothing about the package. Its findings are void.' >&2
@@ -124,7 +141,7 @@ if [ -n "${SELFTEST}" ]; then
       echo 'harness: control A failed, but not on the homes it ate.' >&2
       sed 's/^/  /' "${ctl}/A.out" >&2; exit 3; }
   echo '=== control B: a package with nothing left to find. Must be ACCEPTED.'
-  if HDW4S_PURGE_TEST_NO_KNOWN=1 "$0" --deb "${ctl}/ctl-B.deb" --no-self-test \
+  if HDW4S_PURGE_TEST_NO_KNOWN=1 "$0" --deb "${ctl}/ctl-B.deb" "${sweep[@]}" --no-self-test \
        "${dirty[@]}" > "${ctl}/B.out" 2>&1; then
     echo '      control B passed, as it must.'
   else
@@ -142,6 +159,7 @@ fi
 # not a temporary file: this is the whole script re-entering itself.
 if [ -z "${HDW4S_PURGE_TEST_INNER:-}" ]; then
   inner=(--deb "${DEB}" --no-self-test)
+  [ -z "${SWEEP}" ] || inner+=(--sweep "${SWEEP}")
   [ -n "${CLEAN}" ] || inner+=(--dirty)
   HDW4S_PURGE_TEST_INNER=1 exec unshare -m --propagation private "$0" "${inner[@]}"
 fi
@@ -154,6 +172,7 @@ bad() { printf 'FAIL  %s\n' "$*"; fail=1; }
 # Copied out before /tmp is replaced: the package is often under /tmp and the
 # tmpfs below would hide it. This cost a run.
 cp "${DEB}" /dev/shm/hdw4s-purge-test.deb
+[ -z "${SWEEP}" ] || cp "${SWEEP}" /dev/shm/hdw4s-shared-sweep-purge-test.deb
 
 # overlayfs refuses "/" itself as a lowerdir, so the root is composed rather
 # than overlaid in one piece. Every write lands in a tmpfs upper layer.
@@ -188,7 +207,7 @@ if [ -n "${CLEAN}" ]; then
   # A leftover cannot be attributed to this purge unless the directory started
   # empty, and a machine that has run hdw4s before is full of paths that look
   # like leftovers and are not.
-  chroot "${R}" dpkg -P --force-depends hdw4s >/dev/null 2>&1 || :
+  chroot "${R}" dpkg -P --force-depends hdw4s hdw4s-shared-sweep >/dev/null 2>&1 || :
   # Emptied by deleting them in the overlay, NOT by mounting a tmpfs over each.
   # A tmpfs mount point cannot be rmdir'd, which reported every one of these as
   # "left behind (0 entries)" when it was in fact empty, and -- far worse --
@@ -231,6 +250,9 @@ must_survive=(
   /var/lib/hdw4s/carol/Documents/x
   /srv/people/dave/Maildir/cur/1.mail
   /srv/mail/shared/1.mail
+  # A /shared store's table and what a visitor left in it: hdw4s-shared-sweep's
+  # removal scripts touch only its own enable links, and this holds them to it.
+  /srv/hdw4s-shared/table/left-by-a-visitor.txt
   # Not homes, but not ours either: files belonging to another administrator
   # or another package, sitting in directories this package also writes to.
   /etc/dconf/profile/user
@@ -286,6 +308,8 @@ conf="${R}/etc/hdw4s/chrome-policies/hdw4s-ephemeral.json"
 echo '--- install'
 chroot "${R}" dpkg -i --force-depends /dev/shm/hdw4s-purge-test.deb \
   >/tmp/install.log 2>&1 || :
+[ -z "${SWEEP}" ] || chroot "${R}" dpkg -i --force-depends \
+  /dev/shm/hdw4s-shared-sweep-purge-test.deb >>/tmp/install.log 2>&1 || :
 chroot "${R}" dpkg-query -W -f="\${Status}\n" hdw4s 2>&1 | sed 's/^/      status: /'
 if [ -e "${conf}" ]; then
   ok 'the conffile was installed'
@@ -298,6 +322,7 @@ fi
 
 echo '--- remove (the first half of "apt purge")'
 chroot "${R}" dpkg -r --force-depends hdw4s >/tmp/remove.log 2>&1 || :
+[ -z "${SWEEP}" ] || chroot "${R}" dpkg -r --force-depends hdw4s-shared-sweep >>/tmp/remove.log 2>&1 || :
 if [ -e "${conf}" ]; then
   ok 'the conffile survives remove'
 else
@@ -306,6 +331,7 @@ fi
 
 echo '--- purge (the second half)'
 chroot "${R}" dpkg -P --force-depends hdw4s >/tmp/purge.log 2>&1 || :
+[ -z "${SWEEP}" ] || chroot "${R}" dpkg -P --force-depends hdw4s-shared-sweep >>/tmp/purge.log 2>&1 || :
 # The converse of the check above, and it needs saying: moving the deletion
 # out of the remove block is only correct if purge still performs it.
 if [ -e "${conf}" ]
@@ -335,9 +361,19 @@ else bad "another provider's userdb record was deleted"; fi
 if [ -e "${R}/run/userdb/eph.user" ]
 then bad 'our own ephemeral userdb record outlived the removal'
 else ok  'our own ephemeral userdb record was cleaned up'; fi
-if chroot "${R}" dpkg-query -W hdw4s >/dev/null 2>&1
-then bad 'dpkg still knows the package after purge'
-else ok  'dpkg has no record of the package after purge'; fi
+# "Not installed" is not a record: dpkg keeps a stub ("un", not-installed) for a
+# purged package another installed one names -- hdw4s-shared-sweep Replaces
+# hdw4s -- and "dpkg-query -W" exits 0 for that stub. Asked of the STATUS, so a
+# box with the sweep package installed no longer reads as a failed purge
+# (measured on a dev box, 2026-10-03: the control that must pass did not).
+for pkg in hdw4s ${SWEEP:+hdw4s-shared-sweep}; do
+  # shellcheck disable=SC2016  # a dpkg-query format, not a shell expansion
+  st="$(chroot "${R}" dpkg-query -W -f='${db:Status-Abbrev}' "${pkg}" 2>/dev/null || :)"
+  case "${st}" in
+    ''|un*|pn*) ok  "dpkg has no installed or configured record of ${pkg} after purge";;
+    *)          bad "dpkg still has ${pkg} as '${st% }' after purge";;
+  esac
+done
 
 echo '--- what purge left behind'
 for p in /etc/hdw4s /var/lib/hdw4s /usr/lib/hdw4s /usr/share/hdw4s \
