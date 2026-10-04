@@ -56,19 +56,36 @@ After=hdw4s-stream@%i.service
 # for ever -- the burst was never reached inside the window, so the window is the
 # bug and not the burst.
 #
-# Twenty minutes holds five of those cycles with room to spare, so a start that
-# cannot succeed gives up after five tries and about eight minutes, and stays
-# failed until somebody clears it.
+# SINCE 2026-10-03 THIS IS ONLY THE OUTER FUSE, and the reason is that it counts
+# STARTS, not failures -- more of them than anybody sees. Measured on systemd
+# 255: every dispatch of a start job is charged, so a tab that reconnects while
+# the desktop is still stopping costs 2 charges per logout and revisit, and 3
+# while a logout was itself a failure that restarted. The limit that stood here
+# (5 in 20 minutes) latched the owner out of his own desktop after TWO logouts.
 #
-# THE COST IS REAL AND IS ACCEPTED: the counter counts every start, including a
-# person's own "systemctl restart", so five restarts inside twenty minutes latch a
-# desktop that is perfectly fine. That is a "systemctl reset-failed" away, it is
-# what the tools in private/ already do before starting a session, and a session
-# start path whose failure has no latch will do the 2026-09-25 thing again for
-# some other reason. Do not widen the window back to something that cannot be
-# reached; if this latches on somebody, shorten the failure, not the guard.
-StartLimitIntervalSec=20min
-StartLimitBurst=5
+# What latches a desktop that cannot start is now hdw4s-ledger: it counts runs
+# that ended without success, three in twenty minutes, and the session refuses
+# before READY with status 75 (RestartPreventExitStatus= below). A logout is a
+# clean end and counts nowhere. This fuse remains for a loop that never reaches
+# that check -- an ExecStartPre= that always fails -- and is sized from both ends:
+#
+#   It must trip: one charge per cycle at the least, and the slowest cycle is
+#   TimeoutStartSec= + RestartSec= = 125 s, so 25 cycles take at most about 52
+#   minutes, inside the hour. A fast failure (about 5 s a cycle) trips in about
+#   two minutes. tests.sh derives this from the lines below.
+#
+#   Ordinary use must not reach it: at 3 charges per logout and revisit -- the
+#   larger measured figure, as margin -- six logouts in the hour cost 19 of the
+#   25, and the ledger's three failures cost about 10 before it refuses.
+#
+# THE COST: a desktop whose refusals keep being knocked on -- a tab left open
+# retries -- charges one per refused start, so the fuse can trip AFTER the ledger
+# has, and then holds for up to an hour from its first charge rather than the
+# ledger's twenty minutes. Both lift by themselves; reset-failed clears the fuse.
+# If this latches on somebody's ordinary use, re-measure the charges rather than
+# raising the numbers blind: the 2026-09-25 loop is what an unreachable limit is.
+StartLimitIntervalSec=1h
+StartLimitBurst=25
 
 [Service]
 # There is deliberately no User= here. The instance name is the account name,
@@ -220,6 +237,23 @@ ExecStartPre=+/usr/lib/hdw4s/hdw4s-webroot provision %i
 ExecStartPre=!/usr/lib/hdw4s/hdw4s-webroot gate %i
 ExecStartPre=/usr/bin/install -d -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
 ExecStart=/usr/lib/hdw4s/hdw4s-session %i
+# THE FAILURE LEDGER'S WRITER: one line per run that ended without success, read
+# by the session's own check before its next start (see hdw4s-ledger). It takes
+# only what systemd hands it -- $SERVICE_RESULT, $EXIT_CODE, $EXIT_STATUS -- and
+# never a file the session can write.
+#
+# "!" and NOT "+", for the reason the gate lines above give, and one more: "+"
+# keeps TemporaryFileSystem=, so a write meant for the host's /run could land in
+# a namespace and the ledger would never latch -- failing OPEN, silently. "!" is
+# root in this namespace, where the one writable piece of /run is the ledger
+# directory named in ReadWritePaths= below, which is the host's.
+#
+# "-": a ledger that cannot be written must never turn a clean end into a
+# failure. The writer says so at error priority instead.
+#
+# NOT IN hdw4s-ephemeral@.service, deliberately: a pool slot is reused, and one
+# visitor's crashes must not refuse the next visitor.
+ExecStopPost=-!/usr/lib/hdw4s/hdw4s-ledger record %i
 
 # WHICH WEB ROOT THE STREAMING SERVER ACCEPTED, read from what the server itself
 # announced at startup. It decides at startup whether to use the configured web root,
@@ -303,6 +337,12 @@ ReadWritePaths=/var/lib/hdw4s
 # read-only MOUNT and leaves the permissions to decide. No "-": hdw4s-stream@ has
 # made it by now, and a session that cannot listen should fail naming the path.
 ReadWritePaths=/run/hdw4s-stream/%i
+# The failure ledger, for its root writer above. Lifting the read-only mount
+# grants the occupant nothing: the directory is root's 0755 (tmpfiles) and each
+# file root's 0644, so the session can read its own record and write none. "-"
+# because a missing directory must not stop a desktop starting; the writer
+# reports it.
+ReadWritePaths=-/run/hdw4s-ledger
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
@@ -319,8 +359,16 @@ RestrictSUIDSGID=yes
 # was never chosen for it.
 LimitNOFILE=65536
 
+# A failure is restarted; a logout is not one (hdw4s-run-session exits 0 for it),
+# so a desktop its owner logged out of stays down until the next visit starts it.
 Restart=on-failure
 RestartSec=5
+# 75 is the session refusing to start because hdw4s-ledger says this desktop
+# keeps failing. Restarting that would be the loop the refusal exists to stop.
+# The check is advisory to the occupant's own uid -- an owner can defeat their
+# own refusal, and the start limit above still holds -- so it needs, and must be
+# given, no capability.
+RestartPreventExitStatus=75
 RuntimeDirectory=hdw4s/%i
 RuntimeDirectoryMode=0700
 Slice=hdw4s-%i.slice

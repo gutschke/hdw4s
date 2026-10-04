@@ -22,8 +22,11 @@ queued connection, then exit -- promptly, because a responder that lingers holds
 the door and would answer for a slot that has meanwhile recovered.
 """
 
+import html
 import os
 import socket
+import string
+import subprocess
 import sys
 import time
 
@@ -49,16 +52,96 @@ PAGE = b"""<!DOCTYPE html>
 </main></body></html>
 """
 
-RESPONSE = (
-    b"HTTP/1.1 503 Service Unavailable\r\n"
-    b"Retry-After: 5\r\n"
-    b"Content-Type: text/html; charset=utf-8\r\n"
-    b"Content-Length: " + str(len(PAGE)).encode() + b"\r\n"
-    b"Cache-Control: no-store\r\n"
-    b"Connection: close\r\n"
-    b"\r\n" + PAGE
-)
 
+
+def response(page, retry_after=5):
+    return (
+        b"HTTP/1.1 503 Service Unavailable\r\n"
+        b"Retry-After: " + str(retry_after).encode() + b"\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n"
+        b"Content-Length: " + str(len(page)).encode() + b"\r\n"
+        b"Cache-Control: no-store\r\n"
+        b"Connection: close\r\n"
+        b"\r\n" + page
+    )
+
+
+# The ordinary answer, as bytes. A module-level name because the router's test
+# harness (.github/live/demux.py) loads this file and serves exactly these bytes
+# as its stand-in for a slot with no desktop.
+RESPONSE = response(PAGE)
+
+
+# A NAMED DESKTOP THAT KEEPS FAILING IS REFUSED ON PURPOSE, and the page above
+# would then be false agency: "reload in a moment" into a refusal that lasts
+# twenty minutes. Before 2026-10-03 the owner met exactly that, reloaded, and saw
+# the same page until somebody with a root shell cleared it. So a latched start
+# gets a page of its own, written for the reader who can act on it -- usually
+# the administrator: which desktop, since when, when it lifts by itself, and the
+# exact commands.
+#
+# The facts come from hdw4s-ledger's "state" line, which is integers only, and
+# the instance name, which is escaped. Nothing else reaches the page: no reason
+# text, nothing the desktop's occupant wrote.
+LATCHED = string.Template("""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Desktop not being started</title>
+<style>
+  :root { color-scheme: light dark }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center;
+         justify-content: center; font: 16px/1.5 system-ui, sans-serif }
+  main { max-width: 34rem; padding: 2rem }
+  h1 { font-size: 1.25rem; margin: 0 0 .5rem }
+  p { margin: 0 0 .75rem; opacity: .8 }
+  pre { margin: 0; padding: .75rem; overflow-x: auto; border-radius: .25rem;
+        background: rgba(127,127,127,.15); font-size: .875rem }
+</style></head>
+<body><main>
+<h1>The desktop $name is not being started</h1>
+<p>It failed to start $count times within $minutes minutes, most recently at
+$last, so starts are refused until it is looked at. Reloading shows this page
+again.</p>
+<p>It will be tried again on the first visit after $lifts.</p>
+<p>An administrator can find the cause and clear it sooner, on the machine:</p>
+<pre>journalctl -u $unit
+systemctl reset-failed $unit
+rm -f /run/hdw4s-ledger/$name</pre>
+</main></body></html>
+""")
+
+
+def when(epoch):
+    return time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(epoch))
+
+
+def page_for(instance):
+    """The latched page and its Retry-After, or None for the ordinary one.
+
+    SHARED WITH THE EPHEMERAL POOL, so anything unexpected -- no instance, no
+    ledger, a tool that fails, a line that does not parse -- is the ordinary
+    page and never an exception: a responder that fails is a front door that
+    latches, which is the failure this whole program exists to prevent.
+    """
+    try:
+        if not instance:
+            return None
+        tool = os.path.join(os.environ.get("HDW4S_LIBDIR", "/usr/lib/hdw4s"),
+                            "hdw4s-ledger")
+        out = subprocess.run([tool, "state", instance], capture_output=True,
+                             text=True, timeout=5, check=True).stdout.split()
+        if len(out) != 6 or out[0] != "latched":
+            return None
+        count, _, window, last, lifts = (int(x) for x in out[1:])
+        name = html.escape(instance)
+        page = LATCHED.substitute(name=name, unit=html.escape("hdw4s@%s.service" % instance),
+                              count=count, minutes=window // 60,
+                              last=when(last), lifts=when(lifts))
+        return page.encode(), max(5, lifts - int(time.time()))
+    except Exception as e:  # noqa: BLE001 -- see the docstring
+        print("hdw4s-refuse: no ledger state for %r (%s); the ordinary page"
+              % (instance, type(e).__name__))
+        return None
 
 def main():
     if int(os.environ.get("LISTEN_FDS", "0")) < 1:
@@ -66,6 +149,10 @@ def main():
         # anything is waiting, and nothing waiting is the good case.
         print("hdw4s-refuse: no socket was passed; nothing to answer")
         return 0
+
+    instance = sys.argv[1] if len(sys.argv) > 1 else ""
+    latched = page_for(instance)
+    answer = response(*latched) if latched else RESPONSE
 
     listener = socket.socket(fileno=3)
     listener.setblocking(False)
@@ -79,7 +166,7 @@ def main():
             time.sleep(0.05)
             continue
         try:
-            conn.sendall(RESPONSE)
+            conn.sendall(answer)
         except OSError:
             # The client gave up first. It still came out of the queue, which is
             # the part that matters.
@@ -89,7 +176,8 @@ def main():
         answered += 1
         quiet_since = time.monotonic()
 
-    print("hdw4s-refuse: answered %d connection(s)" % answered)
+    print("hdw4s-refuse: answered %d connection(s)%s"
+          % (answered, " with the latched page" if latched else ""))
     return 0
 
 

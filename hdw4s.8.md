@@ -346,6 +346,29 @@ retiring one takes a single command:
 An account wanting desktops on *several machines* at once is a different thing
 and is supported; see `HDW4S_ISOLATION`.
 
+**Logging out ends the desktop.** Logging out from the desktop's own menu stops
+its session cleanly; nothing starts it again until somebody visits its address,
+and that visit starts a fresh desktop with no login screen. An open browser tab
+that reconnects counts as a visit. A desktop nobody is connected to costs
+nothing, so this is also how to restart one from inside it.
+
+**A desktop that keeps failing is not started again.** Each run that ends in
+failure -- not a logout, not a stop -- is recorded in
+`/run/hdw4s-ledger/<instance>`. After three inside twenty minutes the next start
+refuses before the desktop comes up, and a visitor gets a page naming the
+desktop, when it last failed, when it will be tried again by itself, and the
+commands below. `hdw4s check` reports it, and the journal says so once at
+warning priority. Find the cause in `journalctl -u hdw4s@<instance>`, then:
+
+    systemctl reset-failed hdw4s@<instance>.service
+    rm -f /run/hdw4s-ledger/<instance>
+
+The unit's own start limit stays behind this as a fuse, for a failure that
+happens before the session's check can run; it is sized so that ordinary use,
+logouts included, does not reach it, and it also lifts by itself, within an
+hour. A visit to a desktop that is refusing starts no desktop and is not counted
+as a failure, so it does not keep the refusal alive.
+
 ## CONFIGURATION
 
 Two files are read in order, the second overriding the first:
@@ -1324,6 +1347,11 @@ therefore open every desktop on the machine, so a session refuses to start as on
     table bound onto it while `/shared` is on and a store passes. See
     **THE SHARED DROP AREA**.
 
+  * `/run/hdw4s-ledger/<instance>`:
+    A named desktop's failed runs inside the last twenty minutes, one line each,
+    written by root when a run ends. Three refuse the next start; see
+    **INSTANCES**. Removing it clears the refusal.
+
   * `/run/hdw4s-stream/<instance>/s/`:
     Where the session's streaming server listens. Made by
     `hdw4s-stream@<instance>.service` when the session starts, removed when it
@@ -1420,6 +1448,10 @@ One state it does not see, and the omission is deliberate rather than pending: a
 slot the router has already let to a visitor who never arrived is listening,
 unfailed and unserviceable. Whether a slot is let is the router's own record,
 not systemd's, so the answer has to come from the router.
+
+It also reports any named desktop that has failed or is refusing to start (see
+**INSTANCES**), whether or not anything else is wrong: such a desktop refuses
+its owner on every visit while every running session looks fine.
 
 The third question is asked of every session that is running now: is it
 serving the incarnation token its own start published? A returning browser tab

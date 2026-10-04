@@ -19,11 +19,16 @@ Type=oneshot
 # "systemctl show -p TriggeredBy" is the cheap way to tell: it names the socket
 # when this is right and is empty when it is not.
 Sockets=hdw4s-proxy@%i.socket
-ExecStart=/usr/lib/hdw4s/hdw4s-refuse
+# The instance, so that a named desktop refused by its failure ledger gets a
+# page saying so (hdw4s-ledger state): /run is readable here under
+# ProtectSystem=strict, and the ledger is world-readable by design. An ephemeral
+# slot has no ledger and gets the ordinary page.
+ExecStart=/usr/lib/hdw4s/hdw4s-refuse %i
 
-# It reads a socket and writes a fixed string. Nothing else is needed, and the
-# unit runs at the moment a slot is already misbehaving, which is the worst time
-# to be running an unconfined process as root.
+# It reads a socket, reads one world-readable ledger file through hdw4s-ledger,
+# and writes one of two pages. Nothing else is needed, and the unit runs at the
+# moment a slot is already misbehaving, which is the worst time to be running an
+# unconfined process as root.
 DynamicUser=yes
 CapabilityBoundingSet=
 LockPersonality=yes

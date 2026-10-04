@@ -2812,8 +2812,10 @@ echo '== /shared: the bind source is made with no mode, so tmpfiles never re-mod
 # A mode on this line would make every "systemd-tmpfiles --create" -- a package
 # upgrade runs one -- chmod the TABLE bound there back to 0755.
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
-  line="$(grep -v '^#' "${ROOT}/hdw4s-tmpfiles.conf" | grep .)"
-  is 'one line, no mode, no owner, no age' "${line}" 'd /run/hdw4s-shared - - - -'
+  # THIS line, by its path: the file also makes the named desktops' failure
+  # ledger (since 2026-10-03), which is never bound over and does take a mode.
+  line="$(grep -v '^#' "${ROOT}/hdw4s-tmpfiles.conf" | grep ' /run/hdw4s-shared ')"
+  is 'one line for it, no mode, no owner, no age' "${line}" 'd /run/hdw4s-shared - - - -'
   mkdir -p "${T}/run/hdw4s-shared"; chmod 0777 "${T}/run/hdw4s-shared"
   printf '%s\n' "${line}" | systemd-tmpfiles --create --root="${T}" - 2>/dev/null
   is 'a table bound there stays 0777 through a tmpfiles run' "$(stat -c %a "${T}/run/hdw4s-shared")" '777'
@@ -7601,10 +7603,37 @@ echo '== a session start that keeps failing has to stop, and this one could not 
   # THE RED ARM, against systemd's own default, which is the value this unit
   # carried while it looped. If the arithmetic above cannot fail, it is not a
   # check -- and a default is exactly the number nobody writes down.
+  real_window="${window}"
   window='10'
   [ "${window}" -ge "${need}" ] \
     && bad 'CONTROL: the default ten-second window is rejected' 'it passed' \
     || ok  'CONTROL: the default ten-second window is rejected'
+  window="${real_window}"
+
+  # AND THE OTHER END, since 2026-10-03: ORDINARY USE MUST NOT REACH IT. The
+  # limit counts start-job DISPATCHES, not visible starts -- measured on systemd
+  # 255, 2 charges per logout and revisit, 3 while a logout was a failure that
+  # restarted. Five in twenty minutes therefore latched the owner out of his own
+  # desktop after two logouts. The hidden term is the larger measured figure,
+  # as margin; six logouts is the number the unit's real-unit arm drives.
+  charges_per_logout=3; logouts=6
+  ordinary=$(( 1 + logouts * charges_per_logout ))
+  [ "${ordinary}" -lt "${burst}" ] \
+    && ok "six logouts and revisits do not reach it (${ordinary} charges < ${burst})" \
+    || bad 'six logouts and revisits do not reach it' \
+           "${ordinary} charges reach a burst of ${burst}: ordinary use latches the desktop"
+  # The failure ledger must refuse before the fuse trips, or the page that names
+  # the latch is never the one shown: each failed run costs up to 3 charges
+  # (dispatch, entering auto-restart, the restart).
+  threshold="$(sed -n 's/^THRESHOLD=\([0-9]*\)$/\1/p' "${ROOT}/hdw4s-ledger")"
+  [ -n "${threshold}" ] && [ $(( threshold * 3 + 1 )) -lt "${burst}" ] \
+    && ok "the ledger refuses before the fuse trips ($(( threshold * 3 + 1 )) < ${burst})" \
+    || bad 'the ledger refuses before the fuse trips' "threshold [${threshold}] burst [${burst}]"
+  # RED ARM: the numbers that latched the owner out.
+  burst=5
+  [ "${ordinary}" -lt "${burst}" ] \
+    && bad 'CONTROL: the 5-in-20-minutes limit that latched the owner is rejected' 'it passed' \
+    || ok  'CONTROL: the 5-in-20-minutes limit that latched the owner is rejected'
 )
 
 echo '== the tool and the router agree about what a setting means =='
@@ -7749,7 +7778,7 @@ echo '== the session says, in one word, how the startup hold ended =='
   fi
 )
 
-echo '== a logout ends an ephemeral desktop cleanly, and anything else is still a failure =='
+echo '== a logout ends a desktop cleanly, of either kind, and anything else is still a failure =='
 # THE DEFECT, measured twice on 2026-09-27: after a GNOME logout the ephemeral unit
 # stayed "failed", so "hdw4s check" exited 1 until somebody ran reset-failed. The
 # session script answered every exit of GNOME with status 1.
@@ -7771,8 +7800,26 @@ echo '== a logout ends an ephemeral desktop cleanly, and anything else is still 
   # shellcheck disable=SC2016 # expanded by the stand-in's own shell, on purpose
   is 'an ephemeral desktop whose GNOME was killed still fails' \
      "$(ended ephemeral 'kill -KILL $BASHPID')" '1'
-  is 'a named desktop logged out of still exits 1, so its unit restarts it' \
-     "$(ended '' 'exit 0')" '1'
+  # A NAMED DESKTOP TOO, since 2026-10-03. It used to exit 1 on purpose so that
+  # Restart=on-failure would hand its owner a fresh desktop; the start limit
+  # counted every one of those, and two logouts latched the owner out of his own
+  # desktop. A logout now ends it, and the next visit starts it.
+  is 'a named desktop logged out of ends with success, and is not restarted' \
+     "$(ended '' 'exit 0')" '0'
+  is 'a named desktop whose GNOME failed still fails'   "$(ended '' 'exit 1')" '1'
+  # shellcheck disable=SC2016 # expanded by the stand-in's own shell, on purpose
+  is 'a named desktop whose GNOME was killed still fails' \
+     "$(ended '' 'kill -KILL $BASHPID')" '1'
+  # RED ARM: an exit decision that says "success" for everything must be caught
+  # by the assertion above -- the cheap wrong repair for the lockout.
+  red="${fn//exit 1/exit 0}"
+  if [ "${red}" = "${fn}" ]; then
+    bad 'the logout red arm mutates the exit decision' 'nothing was replaced'
+  else
+    redrc="$(HDW4S_SESSION_TYPE='' bash -c "set -eu; ${red}
+      exit 1 & session_pid=\$!; sleep 0.2; gnome_exited" >/dev/null 2>&1; echo "$?")"
+    is 'RED ARM: an exit decision that always succeeds would be caught' "${redrc}" '0'
+  fi
 )
 
 echo '== the teardown ends a desktop that is still starting =='
@@ -7920,10 +7967,244 @@ echo '== bash completion offers what the commands accept, and nothing they refus
          while read -r w; do case "${offered}" in *" ${w} "*) ;; *) echo "${w}";; esac; done)" ''
 )
 
+echo '== a named desktop latches on failed runs, never on starts or logouts =='
+# THE DEFECT, 2026-10-03, on the owner's own desktop: two logouts and the start
+# limit refused every later visit until somebody ran reset-failed. The limit
+# counted STARTS. What latches now is hdw4s-ledger, which counts runs that ended
+# WITHOUT SUCCESS, three in twenty minutes.
+#
+# Real: hdw4s-ledger itself. Stood in for: systemd, by the three variables it
+# hands an ExecStopPost= ($SERVICE_RESULT, $EXIT_CODE, $EXIT_STATUS), and
+# /run/hdw4s-ledger, by a temporary directory. Nothing here shows that systemd
+# runs the writer, nor which values it really passes -- that is the real-unit arm.
+( set +e
+  # One level down, so that a name escaping it would still land in OUR temporary
+  # directory -- where the test can see it -- and not in the machine's /tmp.
+  T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  L="${T}/l"; mkdir "${L}"
+  export HDW4S_LEDGER_DIR="${L}"
+  led="${ROOT}/hdw4s-ledger"
+  rec() { SERVICE_RESULT="$1" EXIT_CODE="$2" EXIT_STATUS="$3" "${led}" record alice 2>/dev/null; }
+  chk() { "${led}" check alice 2>/dev/null; echo "$?"; }
+  entries() { [ -e "${L}/alice" ] && grep -c . "${L}/alice" || echo 0; }
+
+  # Positive control first: nothing recorded, nothing refused.
+  is 'an empty ledger refuses nothing' "$(chk)" '0'
+  # SUCCESSES NEVER COUNT, however many: a logout, a stop, a restart.
+  for _ in 1 2 3 4 5 6; do rec success exited 0; done
+  is 'six successful ends refuse nothing'  "$(chk)" '0'
+  is 'and record nothing'                  "$(entries)" '0'
+  rec exit-code exited 1; rec exit-code exited 1
+  is 'two failed runs refuse nothing'      "$(chk)" '0'
+  rec signal killed SEGV
+  is 'the third failed run refuses the next start with 75' "$(chk)" '75'
+  is 'and the record holds three entries'  "$(entries)" '3'
+  # FIXED FORMAT (threat review L-a): epoch, systemd's result word, code/status.
+  is 'every entry is epoch, result, code/status' \
+     "$(grep -cvE '^[0-9]+ [a-z-]+ [a-z]*/[A-Z0-9]*$' "${L}/alice")" '0'
+  is 'the record is readable by its owner and written by nobody else' \
+     "$(stat -c %a "${L}/alice")" '644'
+  # A REFUSAL IS NOT A FAILURE (threat review L-c): otherwise every knock on the
+  # door -- the owner's own reconnecting tab -- keeps the latch alive for ever,
+  # and the time the page says it lifts is false.
+  st1="$("${led}" state alice)"
+  for _ in 1 2 3 4 5; do rec exit-code exited 75; done
+  is 'refused starts append nothing'       "$(entries)" '3'
+  is 'and do not move when it lifts'       "$("${led}" state alice)" "${st1:-none}"
+  read -r w n th win last lifts <<< "${st1}"
+  is 'the state line says latched, three of three, in twenty minutes' "${w} ${n} ${th} ${win}" 'latched 3 3 1200'
+  # Lifts when the oldest of the three leaves the window: stated, then seen.
+  first="$(head -n1 "${L}/alice" | cut -d' ' -f1)"
+  is 'it lifts twenty minutes after the oldest counted failure' "${lifts}" "$(( first + 1200 ))"
+  sed -i "s/^[0-9]*/$(( $(date +%s) - 1201 ))/" "${L}/alice"
+  is 'and once the entries expire, the next start is allowed' "$(chk)" '0'
+  # Expired entries stop counting, but fresh ones beside them still do.
+  rec exit-code exited 1; rec exit-code exited 1
+  is 'two fresh failures beside three expired ones refuse nothing' "$(chk)" '0'
+  rec timeout '' ''
+  is 'a third fresh one does'                "$(chk)" '75'
+  is 'and the writer pruned the expired ones' "$(entries)" '3'
+
+  # ONE WARNING LINE, AT THE LATCH: the run that crosses the threshold says so at
+  # priority 4 when there is a journal to say it to; the runs before it do not.
+  rm -f "${L}/alice"
+  w1="$(SERVICE_RESULT=exit-code EXIT_CODE=exited EXIT_STATUS=1 JOURNAL_STREAM=x "${led}" record alice 2>&1)"
+  SERVICE_RESULT=exit-code EXIT_CODE=exited EXIT_STATUS=1 "${led}" record alice 2>/dev/null
+  w3="$(SERVICE_RESULT=exit-code EXIT_CODE=exited EXIT_STATUS=1 JOURNAL_STREAM=x "${led}" record alice 2>&1)"
+  hasnt 'the first failure is not a warning'   "${w1}" '<4>'
+  is  'the third is exactly one warning line'  "$(printf '%s\n' "${w3}" | grep -c '^<4>')" '1'
+  has 'and it names the commands that clear it' "${w3}" 'systemctl reset-failed hdw4s@alice.service; rm -f'
+
+  # A name that would leave the directory is refused, not written.
+  SERVICE_RESULT=exit-code EXIT_CODE=exited EXIT_STATUS=1 "${led}" record '../x' 2>/dev/null
+  is 'a name with a slash is refused'      "$?" '2'
+  [ ! -e "${L}/../x" ] && ok 'and writes nothing outside the ledger' \
+                       || bad 'and writes nothing outside the ledger' "${L}/../x exists"
+)
+
+echo '== the named session refuses before READY, from its main process, and only when latched =='
+# Real: hdw4s-session's own refuse_if_latched, cut out of the script, and the
+# real hdw4s-ledger. Stood in for: the ledger directory.
+( set +e
+  L="$(mktemp -d)"; trap 'rm -rf "${L}"' EXIT
+  fn="$(sed -n '/^refuse_if_latched() {/,/^}/p' "${ROOT}/hdw4s-session")"
+  has 'the refusal is where this test looks for it' "${fn}" 'refuse_if_latched() {'
+  run() {  # $1 the kind, $2 the ledger directory; prints the exit status
+    HDW4S_SESSION_TYPE="$1" HDW4S_LEDGER_DIR="$2" instance=alice \
+      bash -c "set -eu; ${fn}
+      refuse_if_latched; exit 0" >/dev/null 2>&1
+    echo "$?"
+  }
+  is 'a named desktop with no failures starts' "$(run desktop "${L}")" '0'
+  now="$(date +%s)"
+  printf '%s exit-code exited/1\n' "${now}" "${now}" "${now}" > "${L}/alice"
+  is 'a latched named desktop exits 75'        "$(run desktop "${L}")" '75'
+  # Named only (threat review L-d): a pool slot is reused, and one visitor's
+  # crashes must not refuse the next visitor.
+  is 'an ephemeral desktop is never refused by it' "$(run ephemeral "${L}")" '0'
+  # Fails open: a ledger it cannot read is no reason to refuse a desktop.
+  is 'an unreadable ledger starts the desktop'  "$(run desktop /nonexistent/dir)" '0'
+  # It must run before anything else the main process does that could report
+  # ready or fail for another reason -- the X server, the bus.
+  is 'it runs before the X server is started' \
+     "$(awk '/^refuse_if_latched$/ { r = NR } /\/usr\/lib\/xorg\/Xorg / { x = NR }
+             END { print (r && x && r < x) ? "before" : "not" }' "${ROOT}/hdw4s-session")" 'before'
+)
+
+echo '== the unit wires the ledger as measured: writer after, check in the main process =='
+( set +e
+  f="${ROOT}/hdw4s@.service"
+  refused="$(sed -n 's/^REFUSED=\([0-9]*\)$/\1/p' "${ROOT}/hdw4s-ledger")"
+  # "none" for an empty read, or two missing values would compare equal.
+  is 'the unit does not restart the refusal status the ledger exits with' \
+     "$(sed -n 's/^RestartPreventExitStatus=//p' "${f}")" "${refused:-none}"
+  is 'and the session exits with that same status' \
+     "$(grep -c "^    ${refused}) exit ${refused} ;;$" "${ROOT}/hdw4s-session")" '1'
+  # "!" not "+": "+" keeps TemporaryFileSystem=, so the write could land in a
+  # namespace and never latch (threat review L-b). "-": a ledger that cannot be
+  # written must never make a clean end a failure.
+  is 'the writer runs after every run, as root in the namespace, never fatal' \
+     "$(grep -cx 'ExecStopPost=-!/usr/lib/hdw4s/hdw4s-ledger record %i' "${f}")" '1'
+  is 'and may write the host ledger directory' \
+     "$(grep -cx 'ReadWritePaths=-/run/hdw4s-ledger' "${f}")" '1'
+  # MEASURED: a refusing ExecStartPre= is restarted for ever.
+  is 'the check is not an ExecStartPre=' "$(grep -c '^ExecStartPre=.*hdw4s-ledger' "${f}")" '0'
+  is 'tmpfiles makes the ledger directory root'"'"'s' \
+     "$(grep -cx 'd /run/hdw4s-ledger 0755 root root -' "${ROOT}/hdw4s-tmpfiles.conf")" '1'
+  is 'the refusal unit is told which desktop it is refusing' \
+     "$(grep -cx 'ExecStart=/usr/lib/hdw4s/hdw4s-refuse %i' "${ROOT}/hdw4s-refuse@.service")" '1'
+  # NAMED ONLY (threat review L-d), with its red arm: a planted line is seen.
+  e="${ROOT}/hdw4s-ephemeral@.service"
+  is 'the ephemeral unit carries no ledger writer or check' "$(grep -c 'hdw4s-ledger' "${e}")" '0'
+  is 'RED ARM: a planted ledger line in the ephemeral unit is seen' \
+     "$( { cat "${e}"; echo 'ExecStopPost=-!/usr/lib/hdw4s/hdw4s-ledger record %i'; } | grep -c 'hdw4s-ledger')" '1'
+)
+
+echo '== a latched desktop gets a page that says so; anything else, the ordinary one =='
+# THE DEFECT: "Reload in a moment" into a refusal that lasts twenty minutes. Real:
+# hdw4s-refuse, run as systemd runs it -- a listening socket on fd 3, LISTEN_FDS=1
+# -- with a connection already queued, and the real hdw4s-ledger. Stood in for:
+# the ledger directory.
+( set +e
+  L="$(mktemp -d)"; trap 'rm -rf "${L}"' EXIT
+  page() {  # $1 the instance argument (may be empty); prints the response body
+    HDW4S_LEDGER_DIR="${L}" python3 - "${ROOT}/hdw4s-refuse" "$1" <<'PY'
+import os, socket, subprocess, sys, tempfile
+d = tempfile.mkdtemp()
+path = os.path.join(d, "s")
+srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(8)
+cli = socket.socket(socket.AF_UNIX); cli.connect(path)
+def child():
+    os.dup2(srv.fileno(), 3)
+argv = [sys.argv[1]] + ([sys.argv[2]] if sys.argv[2] else [])
+env = dict(os.environ, LISTEN_FDS="1", LISTEN_PID="0")
+p = subprocess.Popen(argv, preexec_fn=child, env=env, pass_fds=(srv.fileno(),),
+                     stdout=subprocess.DEVNULL)
+data = b""
+while True:
+    b = cli.recv(65536)
+    if not b:
+        break
+    data += b
+p.wait(10)
+sys.stdout.write(data.decode().split("\r\n\r\n", 1)[-1])
+sys.stdout.write("\nRC=%d\n" % p.returncode)
+PY
+  }
+  transient="$(page alice)"
+  has 'the ordinary page still says to reload'  "${transient}" 'Reload in a moment'
+  now="$(date +%s)"
+  printf '%s exit-code exited/1\n' "${now}" "${now}" "${now}" > "${L}/alice"
+  latched="$(page alice)"
+  [ "${latched}" != "${transient}" ] && ok 'a latched desktop gets a different page' \
+                                     || bad 'a latched desktop gets a different page' 'the bodies are identical'
+  has   'it names the unit'                 "${latched}" 'hdw4s@alice.service'
+  has   'and the exact command'             "${latched}" 'systemctl reset-failed hdw4s@alice.service'
+  has   'and how the record is cleared'     "${latched}" 'rm -f /run/hdw4s-ledger/alice'
+  has   'and when it lifts by itself'       "${latched}" "$(date -d "@$(( now + 1200 ))" '+%Y-%m-%d %H:%M')"
+  hasnt 'and does not say to reload in a moment' "${latched}" 'Reload in a moment'
+  has   'and the responder exits cleanly'   "${latched}" 'RC=0'
+  # SHARED WITH THE POOL (threat review L-e): no instance, a malformed ledger, a
+  # name that must be escaped -- the ordinary page, never a crash, which would
+  # latch the door.
+  is 'with no instance it is the ordinary page' "$(page '')" "${transient}"
+  printf 'garbage\n<script>\n' > "${L}/alice"
+  is 'a malformed ledger gives the ordinary page' "$(page alice)" "${transient}"
+  # A name carrying markup is refused by the ledger, so it never reaches the page
+  # at all -- and the page still answers.
+  is 'a name carrying markup gives the ordinary page' "$(page '<b>x')" "${transient}"
+)
+
+echo '== hdw4s check sees a named desktop that will not start =='
+# THE DEFECT: the failed-unit query named only the pool's units and the session
+# loop looked only at running ones, so the owner's latched desktop left this
+# command -- and its timer -- green.
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  sed '/^case "${1:-}" in/,$d' "${ROOT}/hdw4s" > "${SB}/lib.sh"
+  HDW4S_ETCDIR="${SB}/etc"; mkdir -p "${HDW4S_ETCDIR}" "${SB}/ledger"
+  RUNDIR="${SB}/run"
+  HDW4S_INCARNATION_DIR="${SB}/run/hdw4s-incarnation"
+  HDW4S_WEBROOT_DIR="${SB}/webroot"
+  mkdir -p "${HDW4S_INCARNATION_DIR}" "${HDW4S_WEBROOT_DIR}"
+  export HDW4S_ETCDIR HDW4S_RUNDIR="${RUNDIR}" HDW4S_INCARNATION_DIR HDW4S_WEBROOT_DIR
+  export HDW4S_LEDGER_DIR="${SB}/ledger"
+  # shellcheck source=/dev/null
+  . "${SB}/lib.sh" 2>/dev/null || :
+  trap - ERR
+  trap 'rm -rf "${SB}"' INT TERM QUIT HUP EXIT
+  SLOTS="${HDW4S_ETCDIR}/instances"; RUNDIR="${SB}/run"
+  # A named desktop and no pool: the shape of the owner's machine, and the shape
+  # in which the pool's failed-unit query never runs at all.
+  printf '%s\n' '0 alice desktop' > "${SLOTS}"
+  STUB_FAILED=''
+  # shellcheck disable=SC2317
+  systemctl() {
+    case "$*" in
+      *'list-units --failed'*) printf '%s' "${STUB_FAILED}";;
+      *) echo 'inactive';;
+    esac
+    return 0
+  }
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a named desktop at rest passes' "${rc}" '0'
+  STUB_FAILED='hdw4s@alice.service failed failed'
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a failed named desktop fails the check' "${rc}" '1'
+  has 'and names it'           "${out}" 'hdw4s@alice.service has failed'
+  has 'and names the remedy'   "${out}" 'systemctl reset-failed hdw4s@alice.service'
+  STUB_FAILED=''
+  now="$(date +%s)"
+  printf '%s exit-code exited/1\n' "${now}" "${now}" "${now}" > "${SB}/ledger/alice"
+  out="$( ( cmd_check ) 2>&1 )"; rc=$?
+  is  'a latched named desktop fails the check, even after reset-failed' "${rc}" '1'
+  has 'and says it is refusing to start' "${out}" 'alice is refusing to start: it failed 3 times'
+  has 'and how the record is cleared'    "${out}" 'rm -f /run/hdw4s-ledger/alice'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1516  # update when tests are added; a wrong number is the point
+EXPECTED=1576  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

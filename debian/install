@@ -4,6 +4,7 @@ hdw4s-run-session        usr/lib/hdw4s
 hdw4s-firewall           usr/lib/hdw4s
 hdw4s-ephemeral-slots    usr/lib/hdw4s
 hdw4s-refuse             usr/lib/hdw4s
+hdw4s-ledger             usr/lib/hdw4s
 hdw4s-teardown           usr/lib/hdw4s
 hdw4s-start              usr/lib/hdw4s
 hdw4s-incarnation        usr/lib/hdw4s

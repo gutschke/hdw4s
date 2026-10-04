@@ -168,6 +168,8 @@ rm -f /etc/sysusers.d/hdw4s-sysusers.conf /etc/sysusers.d/hdw4s-shared-sysusers.
 # The stream directories, made per session start. /run clears at a reboot; an
 # uninstall should not wait for one.
 rm -rf --one-file-system /run/hdw4s-stream
+# The named desktops' failure ledger, likewise.
+rm -rf --one-file-system /run/hdw4s-ledger
 # /shared: the timer that re-binds the table, then the table itself and a tmpfs
 # store, then the directory desktops bound it from and its tmpfiles line.
 #

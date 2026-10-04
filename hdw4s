@@ -1461,6 +1461,59 @@ cmd_check() {
     fi
   fi
 
+  # ---- is a named desktop refusing to start? --------------------------------
+  #
+  # INVISIBLE HERE UNTIL 2026-10-03. The failed-unit query above names only the
+  # pool's units, and the loop below looks only at sessions that are RUNNING --
+  # so a named desktop latched into failed, refusing its owner on every visit,
+  # left this command, its timer and anything watching them green. That was the
+  # state the owner's own desktop was in.
+  #
+  # Two witnesses, because either can be present without the other: systemd's
+  # failed state (the start limit, or the last run failing), and the failure
+  # ledger hdw4s-ledger keeps, which refuses the next start whether or not
+  # anybody has since run reset-failed. A logout is no longer a failure, so a
+  # failed named desktop here is a real one.
+  local named_bad=0 failed_named units unit ninst nstate word count window last lifts
+  failed_named="$(systemctl list-units --failed --plain --no-legend 'hdw4s@*' 2>/dev/null |
+                  awk '$1 ~ /^hdw4s@.+[.]service$/ { print $1 }' || :)"
+  units="${failed_named}"
+  while read -r idx inst _; do
+    case "${idx}" in ''|\#*) continue;; esac
+    case "${inst}" in *:*) continue;; esac
+    ! ephemeral_shaped "$(type_of "${inst}")" || continue
+    units="${units}"$'\n'"hdw4s@${inst}.service"
+  done < <(sort -n "${SLOTS}")
+  while read -r unit; do
+    [ -n "${unit}" ] || continue
+    ninst="${unit#hdw4s@}"; ninst="${ninst%.service}"
+    # Integers only, by the ledger's own contract; anything else reads as clear.
+    nstate="$("${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-ledger" state "${ninst}" 2>/dev/null || :)"
+    read -r word count _ window last lifts <<< "${nstate:-clear}"
+    if [ "${word}" = 'latched' ]; then
+      printf '%s\n' \
+        "hdw4s: the named desktop ${ninst} is refusing to start: it failed ${count} times" \
+        "  in $(( window / 60 )) minutes, most recently at $(date -d "@${last}" '+%Y-%m-%d %H:%M %Z')," \
+        "  and every visit before $(date -d "@${lifts}" '+%Y-%m-%d %H:%M %Z') is refused." \
+        '  Find the cause, then clear it:' \
+        "    journalctl -u ${unit}" \
+        "    systemctl reset-failed ${unit}" \
+        "    rm -f /run/hdw4s-ledger/${ninst}" >&2
+    elif printf '%s\n' "${failed_named}" | command grep -qxF -- "${unit}"; then
+      printf '%s\n' \
+        "hdw4s: the named desktop ${unit} has failed." \
+        '  Its last run ended in failure, or its start limit refused it; a visit' \
+        '  may start it again, or may be refused until the limit lifts. Find the' \
+        '  cause, then clear it:' \
+        "    journalctl -u ${unit}" \
+        "    systemctl reset-failed ${unit}" \
+        "    rm -f /run/hdw4s-ledger/${ninst}" >&2
+    else
+      continue
+    fi
+    named_bad=$(( named_bad + 1 ))
+  done < <(printf '%s\n' "${units}" | sort -u)
+
   while read -r idx inst _; do
     case "${idx}" in ''|\#*) continue;; esac
     # A legacy second session and an orphaned slot are "list"'s business: the
@@ -1582,7 +1635,7 @@ cmd_check() {
   done < <(sort -n "${SLOTS}")
 
   if [ "${bad}" -gt 0 ] || [ "${pool_bad}" -gt 0 ] || [ "${slice_bad}" -gt 0 ] ||
-     [ "${webrtc_bad}" -gt 0 ] || [ "${SHARED_BAD}" -gt 0 ]; then
+     [ "${webrtc_bad}" -gt 0 ] || [ "${SHARED_BAD}" -gt 0 ] || [ "${named_bad}" -gt 0 ]; then
     [ "${bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${bad} of ${live} running session(s) failed this check." >&2
     [ "${pool_bad}" -eq 0 ] || printf '%s\n' '' \
@@ -1594,6 +1647,10 @@ cmd_check() {
     [ "${webrtc_bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${webrtc_bad} of ${live} running session(s) started without the WebRTC" \
       '  they are configured to offer.' >&2
+    # Its own sentence: a named desktop that will not start is neither a running
+    # session nor the pool.
+    [ "${named_bad}" -eq 0 ] || printf '%s\n' '' \
+      "hdw4s: ${named_bad} named desktop(s) failed or are refusing to start." >&2
     # Its own sentence too: the drop area is not a session and not the pool.
     [ "${SHARED_BAD}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${SHARED_BAD} thing(s) are wrong with /shared." >&2

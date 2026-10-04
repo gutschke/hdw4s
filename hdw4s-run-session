@@ -1511,22 +1511,27 @@ stream_pid="$!"
 ) &
 children+=($!)
 
-# A LOGOUT ENDS AN EPHEMERAL DESKTOP, AND THAT IS NOT A FAILURE. The GNOME
+# A LOGOUT ENDS A DESKTOP, AND THAT IS NOT A FAILURE -- of either kind. The GNOME
 # session exits with status 0 when its occupant logs out, and this script used
 # to answer every exit of it with status 1 -- so the unit was left "failed"
 # after an ordinary logout and "hdw4s check" reported the machine unhealthy
-# until somebody ran reset-failed (measured twice, 2026-09-27). An ephemeral
-# desktop has Restart=no and is over when its occupant leaves, so a clean exit
-# is a clean end. Anything else -- a non-zero status, a signal -- is still a
-# failure, and still visible as one.
+# until somebody ran reset-failed (measured twice, 2026-09-27). Anything else --
+# a non-zero status, a signal -- is still a failure, and still visible as one.
 #
-# A NAMED desktop keeps status 1 on purpose: its unit restarts on failure, and
-# that restart is what gives its person a fresh desktop after logging out.
+# A NAMED DESKTOP USED TO KEEP STATUS 1 ON PURPOSE, so that Restart=on-failure
+# would give its person a fresh desktop after logging out. That is gone, for
+# three reasons. The owner: "if i log out from the GNOME menu, i don't want to
+# auto-login without user action". A desktop nobody is connected to need not
+# exist: the next visit starts one, with no login screen, through the socket
+# activation that already exists. And the restart was a failure on purpose,
+# which the start limit counted -- on 2026-10-03 two logouts latched the owner
+# out of his own desktop. Now a logout leaves the unit inactive, never failed,
+# and nothing restarts it.
 gnome_exited() {
   local rc=0
   wait "${session_pid}" 2>/dev/null || rc="$?"
-  if [ "${rc}" -eq 0 ] && [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
-    echo 'hdw4s: the GNOME session ended cleanly (a logout); this ephemeral desktop is over' >&2
+  if [ "${rc}" -eq 0 ]; then
+    echo 'hdw4s: the GNOME session ended cleanly (a logout); this desktop is over until the next visit' >&2
     exit 0
   fi
   echo "hdw4s: the GNOME session exited (status ${rc})" >&2

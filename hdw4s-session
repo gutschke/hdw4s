@@ -54,6 +54,32 @@ export HDW4S_SESSION_TYPE
   exit 1
 }
 
+# A NAMED DESKTOP THAT KEEPS FAILING IS NOT STARTED AGAIN, and this is where that
+# is decided: here, in the main process and before READY, because both other
+# places were measured to fail -- a refusing ExecStartPre= is restarted for
+# ever (RestartPreventExitStatus= judges the main process only), and a refusal
+# after READY latches the front door's socket. hdw4s-ledger says what it counts
+# and why that is failures rather than starts.
+#
+# Advisory to this uid: it runs as the owner, so an owner can defeat it, and
+# loses only their own protection -- the unit's start limit still holds. A
+# ledger that cannot be read is no reason to refuse a desktop, so anything
+# other than the refusal status starts it.
+#
+# Named only. An ephemeral slot is reused by the next visitor, and one visitor's
+# crashes must not refuse the next one; its unit has no writer either.
+refuse_if_latched() {
+  local rc=0
+  [ "${HDW4S_SESSION_TYPE}" = 'desktop' ] || return 0
+  "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-ledger" check "${instance}" || rc="$?"
+  case "${rc}" in
+    0) ;;
+    75) exit 75 ;;
+    *) echo "hdw4s: could not read the failure ledger (status ${rc}); starting anyway" >&2 ;;
+  esac
+}
+refuse_if_latched
+
 : "${XDG_RUNTIME_DIR:?must be set by the unit}"
 
 CONF='/etc/hdw4s/hdw4s.conf'

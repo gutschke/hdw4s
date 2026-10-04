@@ -1,0 +1,165 @@
+#!/bin/bash -e
+export LC_ALL='C'
+export PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+# A NAMED DESKTOP'S FAILED STARTS, counted -- so that a desktop which cannot
+# start stops being started, while one its owner keeps logging out of never is.
+#
+#   hdw4s-ledger record <instance>   ExecStopPost=, as root: one line per run
+#                                    that ended without success
+#   hdw4s-ledger check <instance>    the session, as its owner, before READY:
+#                                    exit 75 if starts are refused now
+#   hdw4s-ledger state <instance>    one line for "hdw4s check" and the
+#                                    refusal page; see state() below
+#
+# WHY NOT systemd's START LIMIT, which did this job until 2026-10-03. It counts
+# STARTS, not failures, and more of them than are visible: measured on systemd
+# 255, every dispatch of a start job is charged, so a returning tab that knocks
+# while the desktop is still stopping costs two or three. On the owner's own
+# desktop two logouts latched it: six charges, the trip, and every later visit
+# refused until somebody ran reset-failed. A logout is now a clean end and
+# charges nothing here; the start limit stays on the unit as an outer fuse only,
+# for a loop that never reaches the check (hdw4s@.service says how it is sized).
+#
+# WHY THE CHECK IS IN THE MAIN PROCESS AND NOT IN ExecStartPre=, both measured:
+# a refusing ExecStartPre= is restarted by Restart=on-failure for ever, because
+# RestartPreventExitStatus= judges only the main process; and a refusal AFTER
+# readiness lets the socket re-trigger the relay until the SOCKET latches. So it
+# refuses before READY, from the main process, with the one status the unit
+# names in RestartPreventExitStatus=.
+#
+# WHAT IT TRUSTS, which is the whole of why it cannot be forged:
+#   * The writer runs as root and reads only what systemd hands it --
+#     $SERVICE_RESULT, $EXIT_CODE, $EXIT_STATUS -- plus the instance name and
+#     the clock. It never reads a file the session can write: a "reason" copied
+#     out of the session's own directories would be a symlink root follows, and
+#     free text on a web page.
+#   * The ledger lives in /run/hdw4s-ledger, made by tmpfiles as root's 0755;
+#     each file is root's 0644, replaced by rename. The owner can READ their
+#     own record and nothing else.
+#   * The CHECK runs as the owner and is therefore advisory to that uid: an
+#     owner who defeats it loses only their own protection, and the outer fuse
+#     still holds. Nothing is bought by giving it privilege.
+#
+# A REFUSAL IS NOT A FAILURE. A run that ended in the refusal status appends
+# nothing, and neither does a start systemd's fuse refused (it never runs, so
+# there is no ExecStopPost=). Otherwise every arrival -- the owner's own
+# reconnecting tab, a monitor, anybody who can reach the door -- would keep the
+# latch alive for ever, and the time the page says it lifts would be false.
+
+LEDGER_DIR="${HDW4S_LEDGER_DIR:-/run/hdw4s-ledger}"  # a test hook, not a setting
+# Three failed runs inside twenty minutes: the panel's measured working value.
+# Do not change either without re-running the arms that measured them.
+THRESHOLD=3
+WINDOW=1200
+# The status the session exits with when this refuses it. hdw4s@.service names
+# the same number in RestartPreventExitStatus=, and tests.sh compares the two.
+REFUSED=75
+
+usage() {
+  echo 'usage: hdw4s-ledger record|check|state <instance>' >&2
+  exit 2
+}
+[ "$#" -eq 2 ] || usage
+verb="$1" instance="$2"
+
+# The instance becomes a file name. systemd's %i of a unit "hdw4s enable" made
+# is already a plain account name; this refuses anything that could leave the
+# directory, rather than trusting that.
+case "${instance}" in
+  ''|.*|*/*|*[!A-Za-z0-9_.@-]*)
+    echo "hdw4s-ledger: refusing the instance name '${instance}'" >&2
+    exit 2 ;;
+esac
+file="${LEDGER_DIR}/${instance}"
+
+# Said at warning priority when there is a journal to say it to, and plainly
+# when run by hand -- a "<4>" on a terminal is rubbish.
+say() {
+  local prio="$1"; shift
+  if [ -n "${JOURNAL_STREAM:-}" ]; then printf '<%s>%s\n' "${prio}" "$*" >&2
+  else printf '%s\n' "$*" >&2; fi
+}
+
+# The epoch of every entry still inside the window, oldest first. Anything that
+# is not a well-formed line is ignored rather than trusted: the file is root's,
+# so a malformed one means a bug, and a bug must not lock anybody out.
+recent() {
+  local now="$1"
+  [ -r "${file}" ] || return 0
+  awk -v since="$(( now - WINDOW ))" \
+    '$1 ~ /^[0-9]+$/ && $1 > since { print $1 }' "${file}" | sort -n
+}
+
+when() { date -d "@$1" '+%Y-%m-%d %H:%M %Z'; }
+
+# "latched <count> <threshold> <window> <last> <lifts>" or
+# "clear <count> <threshold> <window> 0 0" -- integers only, so every reader can
+# print it without escaping anything. <lifts> is when the THRESHOLD-th newest
+# entry leaves the window; refusals append nothing, so it does not move.
+state() {
+  local now n last lifts
+  now="$(date +%s)"
+  mapfile -t ts < <(recent "${now}")
+  n="${#ts[@]}"
+  if [ "${n}" -ge "${THRESHOLD}" ]; then
+    last="${ts[n-1]}"
+    lifts=$(( ts[n-THRESHOLD] + WINDOW ))
+    echo "latched ${n} ${THRESHOLD} ${WINDOW} ${last} ${lifts}"
+  else
+    echo "clear ${n} ${THRESHOLD} ${WINDOW} 0 0"
+  fi
+}
+
+case "${verb}" in
+  record)
+    # Nothing to record for a success, or for our own refusal (see the header).
+    : "${SERVICE_RESULT:?record is run by systemd as ExecStopPost=}"
+    [ "${SERVICE_RESULT}" != 'success' ] || exit 0
+    [ "${EXIT_CODE:-}:${EXIT_STATUS:-}" != "exited:${REFUSED}" ] || exit 0
+    # A FIXED FORMAT: epoch, systemd's own result word, code/status -- each
+    # reduced to the characters they can legitimately carry.
+    now="$(date +%s)"
+    result="${SERVICE_RESULT//[!a-z-]/}"
+    code="${EXIT_CODE:-}"; code="${code//[!a-z]/}"
+    status="${EXIT_STATUS:-}"; status="${status//[!A-Z0-9]/}"
+    # Temp file and rename, in the root-only directory, so a reader never sees
+    # half a file. Entries already outside the window are dropped as it goes.
+    tmp="$(mktemp "${LEDGER_DIR}/.${instance}.XXXXXX")" || {
+      say 3 "hdw4s: cannot write the failure ledger for ${instance} in ${LEDGER_DIR};" \
+            'a desktop that keeps failing will be stopped only by the start limit.'
+      exit 1
+    }
+    { [ ! -r "${file}" ] ||
+        awk -v since="$(( now - WINDOW ))" '$1 ~ /^[0-9]+$/ && $1 > since' "${file}"
+      echo "${now} ${result} ${code}/${status}"
+    } > "${tmp}"
+    chmod 0644 "${tmp}"
+    mv -f "${tmp}" "${file}"
+    n="$(recent "${now}" | wc -l)"
+    say 6 "hdw4s: recorded a failed run of ${instance} (${result}, ${code}/${status});" \
+          "${n} in the last $(( WINDOW / 60 )) minutes"
+    # THE LATCH, said once, at warning, at the run that crosses the threshold.
+    if [ "${n}" -eq "${THRESHOLD}" ]; then
+      read -r _ _ _ _ last lifts < <(state)
+      say 4 "hdw4s: ${instance} has failed ${n} times in $(( WINDOW / 60 )) minutes," \
+            "most recently at $(when "${last}"); it will not be started again before" \
+            "$(when "${lifts}"). To start it sooner, once the cause is fixed:" \
+            "systemctl reset-failed hdw4s@${instance}.service; rm -f ${file}"
+    fi
+    ;;
+  check)
+    read -r word n _ _ last lifts < <(state)
+    [ "${word}" = 'latched' ] || exit 0
+    say 5 "hdw4s: refusing to start ${instance}: it failed ${n} times in" \
+          "$(( WINDOW / 60 )) minutes, most recently at $(when "${last}")." \
+          "Starts are refused until $(when "${lifts}"), or until an administrator runs:" \
+          "systemctl reset-failed hdw4s@${instance}.service; rm -f ${file}"
+    exit "${REFUSED}"
+    ;;
+  state)
+    state
+    ;;
+  *) usage ;;
+esac

@@ -18,6 +18,7 @@ export PYTHONDONTWRITEBYTECODE=1
 cd "$(dirname "$0")/.."
 
 SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s-wait
+         hdw4s-ledger
          hdw4s-stream-dir
          hdw4s-ephemeral-slots hdw4s-incarnation hdw4s-webroot
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird

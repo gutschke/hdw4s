@@ -23,7 +23,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-templat
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
          hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index hdw4s-names.js
          hdw4s-title.js
-         hdw4s-refuse hdw4s-refuse@.service
+         hdw4s-refuse hdw4s-refuse@.service hdw4s-ledger
          hdw4s-teardown hdw4s-teardown@.service hdw4s-teardown@.path
          hdw4s-slot-scrub@.service
          hdw4s-start hdw4s-start@.service hdw4s-start@.path
@@ -180,7 +180,7 @@ chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wa
            "${dst}"/hdw4s-duration "${dst}"/hdw4s-template \
            "${dst}"/hdw4s-is-slot "${dst}"/hdw4s-slot-scrub "${dst}"/hdw4s-shared-sweep \
            "${dst}"/hdw4s-ephemeral-slots "${dst}"/hdw4s-webroot \
-           "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse \
+           "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse "${dst}"/hdw4s-ledger \
            "${dst}"/hdw4s-incarnation "${dst}"/hdw4s-stream-dir \
            "${dst}"/hdw4s-shared-expose \
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*

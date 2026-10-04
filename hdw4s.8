@@ -196,6 +196,18 @@ hdw4s release alice:2
 .IP "" 0
 .P
 An account wanting desktops on \fIseveral machines\fR at once is a different thing and is supported; see \fBHDW4S_ISOLATION\fR\.
+.P
+\fBLogging out ends the desktop\.\fR Logging out from the desktop's own menu stops its session cleanly; nothing starts it again until somebody visits its address, and that visit starts a fresh desktop with no login screen\. An open browser tab that reconnects counts as a visit\. A desktop nobody is connected to costs nothing, so this is also how to restart one from inside it\.
+.P
+\fBA desktop that keeps failing is not started again\.\fR Each run that ends in failure \-\- not a logout, not a stop \-\- is recorded in \fB/run/hdw4s\-ledger/<instance>\fR\. After three inside twenty minutes the next start refuses before the desktop comes up, and a visitor gets a page naming the desktop, when it last failed, when it will be tried again by itself, and the commands below\. \fBhdw4s check\fR reports it, and the journal says so once at warning priority\. Find the cause in \fBjournalctl \-u hdw4s@<instance>\fR, then:
+.IP "" 4
+.nf
+systemctl reset\-failed hdw4s@<instance>\.service
+rm \-f /run/hdw4s\-ledger/<instance>
+.fi
+.IP "" 0
+.P
+The unit's own start limit stays behind this as a fuse, for a failure that happens before the session's check can run; it is sized so that ordinary use, logouts included, does not reach it, and it also lifts by itself, within an hour\. A visit to a desktop that is refusing starts no desktop and is not counted as a failure, so it does not keep the refusal alive\.
 .SH "CONFIGURATION"
 Two files are read in order, the second overriding the first:
 .IP "" 4
@@ -607,6 +619,9 @@ The address the front door listens on, written by \fBhdw4s transport\fR\.
 \fB/run/hdw4s\-shared/\fR
 What every desktop binds as \fB/shared\fR: made empty at every boot, with the table bound onto it while \fB/shared\fR is on and a store passes\. See \fBTHE SHARED DROP AREA\fR\.
 .TP
+\fB/run/hdw4s\-ledger/<instance>\fR
+A named desktop's failed runs inside the last twenty minutes, one line each, written by root when a run ends\. Three refuse the next start; see \fBINSTANCES\fR\. Removing it clears the refusal\.
+.TP
 \fB/run/hdw4s\-stream/<instance>/s/\fR
 Where the session's streaming server listens\. Made by \fBhdw4s\-stream@<instance>\.service\fR when the session starts, removed when it stops\.
 .TP
@@ -649,6 +664,8 @@ The first is whether the memory limit on the desktop slice is a number this mach
 The second is whether the machine can hand anybody a desktop\. On a box with ephemeral slots configured it reports a slot table that exists and cannot be read, slot identities that were never minted, a front door with nothing bound to its port, a slot whose socket has no listener, and any unit of the pool's that has latched into \fBfailed\fR\. Each of those is a state in which an arrival is refused while every session on the machine looks fine, because there are none: an ephemeral pool starts a desktop when somebody knocks, so ZERO RUNNING SESSIONS IS THE NORMAL STATE OF A HEALTHY IDLE MACHINE, and it is also what a pool that can start nothing looks like\. The count alone cannot tell them apart, which is why the summary line says how many slot doors are listening as well as how many sessions are running\.
 .P
 One state it does not see, and the omission is deliberate rather than pending: a slot the router has already let to a visitor who never arrived is listening, unfailed and unserviceable\. Whether a slot is let is the router's own record, not systemd's, so the answer has to come from the router\.
+.P
+It also reports any named desktop that has failed or is refusing to start (see \fBINSTANCES\fR), whether or not anything else is wrong: such a desktop refuses its owner on every visit while every running session looks fine\.
 .P
 The third question is asked of every session that is running now: is it serving the incarnation token its own start published? A returning browser tab compares its saved token against the served one to decide whether it is looking at the desktop it had\. A session serving nothing makes that comparison empty on both sides, which reads as "unchanged" \-\- so the tab resumes into whichever session now holds the slot, instead of asking\.
 .P
