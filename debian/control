@@ -34,6 +34,7 @@ Rules-Requires-Root: no
 Package: hdw4s
 Architecture: all
 Depends: ${misc:Depends},
+         hdw4s-shared-sweep (= ${binary:Version}),
          curl,
          ca-certificates,
          dbus-daemon,
@@ -89,3 +90,27 @@ Description: headless GNOME desktop streamed to a web browser
  A session may optionally be isolated from any other desktop belonging to the
  same account, which allows a browser session to coexist with a desktop that is
  already logged in against the same shared home directory.
+
+# The /shared tool on its own, for the machine that owns a store shared by
+# several desktop machines -- a storage node or a hypervisor that runs no
+# desktops and must not need hdw4s's dependencies to sweep it. hdw4s depends on
+# it at the same version, so a desktop machine always has the tool its
+# expose service and "hdw4s check" call. It carries hdw4s-duration because the
+# tool parses durations and that grammar must stay one file; Replaces lets it
+# take that file over from an hdw4s built before the split.
+Package: hdw4s-shared-sweep
+Architecture: all
+Depends: ${misc:Depends}, python3
+Replaces: hdw4s (<< 2.4.11~)
+Description: guard, sweeper and usage relay for the hdw4s /shared drop area
+ A /shared drop area is a filesystem every desktop can read and write, kept
+ safe by its mount flags and kept tidy by this tool. It refuses to touch a
+ store that is not a whole filesystem of its own mounted nosymfollow, nodev,
+ noexec and nosuid, widens what is left there so everybody can use it,
+ removes anything that is not a regular file or a directory, and expires
+ what nobody has used for a configurable time.
+ .
+ Installed by hdw4s on every desktop machine. Install it on its own on the
+ machine that owns a store shared over NFS or by bind mounts into containers,
+ and run the sweeper there, where access times are truthful. An optional relay
+ lets NFS clients report reads that never reach the server.

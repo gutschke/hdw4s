@@ -1,0 +1,121 @@
+[Unit]
+Description=Accept "this was used" from NFS clients of the /shared store at %f
+Documentation=man:hdw4s-shared-sweep(8)
+# OFF BY DEFAULT and never enabled by the package. Without it nothing changes
+# except that an item read only from an NFS client's cache can expire early.
+BindsTo=%i.mount
+After=%i.mount hdw4s-shared-harden@%i.service network.target
+
+[Service]
+# MULTICAST BY DEFAULT (owner): enabled, it needs no configuration. It joins
+# the group on every interface that is up, multicast-capable, not loopback
+# and has an IPv4 address (re-checked every minute, and every membership is
+# re-issued then, so a snooping switch with no querier keeps the group), and
+# it accepts announcements only from sources on a subnet connected to the
+# interface they arrived on. A drop-in may narrow all of it:
+#   Environment=HDW4S_SHARED_RELAY_INTERFACES=vmbr1          (names, comma)
+#   Environment=HDW4S_SHARED_RELAY_ALLOW=192.0.2.10          (single hosts)
+#   IPAddressAllow=192.0.2.10                                (and the kernel's
+#   IPAddressDeny=any                                         filter, which an
+#                                                             unprivileged
+#                                                             container ignores)
+# UNICAST instead: HDW4S_SHARED_RELAY_LISTEN= names the ONE address to bind
+# (never a wildcard), and HDW4S_SHARED_RELAY_ALLOW= is then required.
+# The silence threshold is how long a client NAMED in the allow list may send
+# no heartbeat before the server warns.
+Environment=HDW4S_SHARED_RELAY_GROUP=239.255.47.48 HDW4S_SHARED_RELAY_PORT=4748
+Environment=HDW4S_SHARED_RELAY_INTERFACES= HDW4S_SHARED_RELAY_ALLOW=
+Environment=HDW4S_SHARED_RELAY_LISTEN= HDW4S_SHARED_RELAY_SILENCE=30m
+Environment=HDW4S_SHARED_RELAY_HEARTBEAT=10m
+ExecStart=/usr/lib/hdw4s/hdw4s-shared-sweep --relay-server --dir %f/table --group ${HDW4S_SHARED_RELAY_GROUP} --port ${HDW4S_SHARED_RELAY_PORT} --interface=${HDW4S_SHARED_RELAY_INTERFACES} --allow=${HDW4S_SHARED_RELAY_ALLOW} --listen=${HDW4S_SHARED_RELAY_LISTEN} --silence ${HDW4S_SHARED_RELAY_SILENCE} --heartbeat ${HDW4S_SHARED_RELAY_HEARTBEAT}
+Restart=on-failure
+RestartSec=10s
+# Renewed daily. ProtectSystem= and ReadOnlyPaths= are fixed when the unit
+# STARTS: a filesystem the host mounts later (a new homes dataset, an NFS
+# remount) arrives in this unit's namespace WRITABLE (measured in a namespace
+# model, deletion review F4). The tool's gate still refuses anything off the
+# table's mount, but the sandbox should not quietly decay into code alone, so
+# a long-running process gets a fresh, fully read-only view once a day: the
+# timeout counts as a failure and Restart= brings it back within RestartSec=.
+# A homes tree mounted at runtime still needs InaccessiblePaths= on its
+# PARENT, which does cover later child mounts.
+RuntimeMaxSec=1d
+# Counters on demand: "systemctl kill -s USR1 <this unit>" logs them.
+#
+# NOT ROOT. The only thing it does to a file is move its atime, which needs
+# ownership or CAP_FOWNER, so it has exactly that and nothing else: no read of
+# root-only files, no write to /proc/sys or /sys, whatever happens in the
+# parser. It never replies, and sending is refused by the kernel (the filter
+# below fails any send with EPERM), so it cannot reflect or amplify.
+#
+# A FIXED user (hdw4s-shared-sysusers.conf), NOT DynamicUser=. DynamicUser=
+# IMPLIES RestrictSUIDSGID=, and that answers openat2 with ENOSYS, because it
+# cannot inspect openat2's struct open_how: the server then dropped every
+# announcement as resolve-ENOSYS (measured twice in the packaged unit,
+# 2026-10-02; the second time with RestrictSUIDSGID= no longer DECLARED --
+# systemctl show still said yes). What DynamicUser= implies and is still
+# wanted is stated below by name: ProtectSystem=strict, ProtectHome=,
+# PrivateTmp=, RemoveIPC=, NoNewPrivileges=. RestrictSUIDSGID= is replaced by
+# a deny of every call that changes a mode or an owner or makes a node or a
+# link: with CAP_FOWNER the server could otherwise make a file set-id.
+User=hdw4s-shared-relay
+Group=hdw4s-shared-relay
+RemoveIPC=yes
+AmbientCapabilities=CAP_FOWNER
+CapabilityBoundingSet=CAP_FOWNER
+# The STORE ROOT, not %f/table. ReadWritePaths= bind-mounts its path onto
+# itself, and a bind of table would make the table a mount root inside this
+# unit -- which the guard's form (ii), the only form a destructive mode
+# accepts, refuses as "stacked". Bound at the store root, the bind's root is
+# the filesystem's /, and table sits directly beneath it as on the host. The
+# root itself is root's and 0755 and holds only table; the gate confines every
+# write to beneath the table regardless.
+ReadWritePaths=%f
+# No IPAddressDeny= by default: the kernel's filter cannot say "on-link",
+# which is the default acceptance; the code holds it (and a drop-in adds the
+# filter when it names single hosts, above).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectSystem=strict
+# ProtectSystem=strict does NOT make /run read-only: measured 2026-10-02 on
+# systemd 255 (a container, measured 2026-10-02), /run and /run/lock were writable inside this unit,
+# and writes landed on the host's /run, whatever ReadWritePaths= said. So
+# /run is made read-only here by name. A more specific ReadWritePaths= below
+# it (a store under /run in tmpfs mode) still wins for that path.
+ReadOnlyPaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+# RestrictSUIDSGID= is OFF, declared and implied (no DynamicUser=): see User=.
+RestrictSUIDSGID=no
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~sendto sendmsg sendmmsg connect
+SystemCallFilter=~chmod fchmod fchmodat fchmodat2 chown fchown fchownat lchown mknod mknodat link linkat
+# A blocked call FAILS with EPERM rather than killing the process with SIGSYS:
+# Python may probe a call at start, and a server that dies on a probe is not
+# a server. The filter is a layer; R4's "no packet ever comes back" is the
+# proof that it never replies.
+SystemCallErrorNumber=EPERM
+MemoryMax=128M
+TasksMax=4
+CPUQuota=20%
+
+[Install]
+# Wanted by the store's own mount, like the sweep timer and the watcher: an
+# enabled relay starts whenever that store is mounted, a reboot included, and
+# stops with it (BindsTo= above). Without this section the unit was "static":
+# "systemctl enable" refused it, and an enabled relay could not survive a boot.
+WantedBy=%i.mount

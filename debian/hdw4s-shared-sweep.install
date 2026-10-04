@@ -1,0 +1,18 @@
+# What the hdw4s-shared-sweep package carries -- and, because debian/rules
+# derives hdw4s's exclusions from the first column, what hdw4s does NOT.
+hdw4s-shared-sweep                  usr/lib/hdw4s
+# The duration grammar, here and not in hdw4s, because this package must run
+# on a node with no hdw4s and the grammar must stay ONE file. Installed BESIDE
+# its callers rather than under a library directory, because hdw4s-demux and
+# this tool find it by their own location and hdw4s runs it as a command:
+# several callers, one file, and nothing to configure.
+hdw4s-duration                      usr/lib/hdw4s
+# The relay server's fixed system user. Named as it is installed, because
+# debian/install cannot rename; postinst creates the user.
+hdw4s-shared-sysusers.conf          usr/lib/sysusers.d
+hdw4s-shared-harden@.service        usr/lib/systemd/system
+hdw4s-shared-sweep@.service         usr/lib/systemd/system
+hdw4s-shared-sweep@.timer           usr/lib/systemd/system
+hdw4s-shared-watch@.service         usr/lib/systemd/system
+hdw4s-shared-relay-server@.service  usr/lib/systemd/system
+hdw4s-shared-relay-client@.service  usr/lib/systemd/system

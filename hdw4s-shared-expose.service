@@ -1,0 +1,30 @@
+[Unit]
+Description=Bind the HDW4S /shared table where desktops see it, or take it away
+Documentation=man:hdw4s(8)
+# A store an administrator provides may be a network mount; asking before it is
+# there only costs a refusal and the next run 30 seconds later, but there is no
+# reason to.
+After=local-fs.target remote-fs.target
+# Never latched into start-limit-hit, however often something starts it: the
+# timer is its rate, and a unit shown "failed" for a burst of starts during a
+# package install is a re-guard that cannot run until somebody resets it.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/hdw4s/hdw4s-shared-expose
+# NO SANDBOXING THAT MAKES A MOUNT NAMESPACE -- no ProtectSystem=, PrivateTmp=,
+# ProtectHome=, ReadWritePaths= or anything else of the kind -- and that is the
+# unit's whole point rather than an omission. The table is bound onto
+# /run/hdw4s-shared in the HOST's namespace, from where it propagates into every
+# desktop. Done from a private namespace, the bind would succeed, the guard run
+# beside it would accept it, and no desktop would ever see it.
+#
+# Bounded, because the guard and the health stat are bounded inside the script
+# and anything that still hangs is a store that should count as gone.
+TimeoutStartSec=60s
+# Run every 30 seconds by its timer. Left alone, systemd writes lines each time
+# saying nothing happened; filtered at notice, a run that changes nothing
+# writes nothing. The script says what it binds and mounts at notice, and what
+# it unbinds and refuses at warning.
+LogLevelMax=notice

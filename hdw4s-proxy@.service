@@ -96,6 +96,12 @@ SupplementaryGroups=hdw4s-relay
 # namespace refuses it instead: an empty /run, with only this instance's directory
 # bound back in. A symlink to anywhere else in /run resolves to nothing here.
 #
+# Outside /run it sees what every namespaced service on the machine sees,
+# /shared included: the table, mounted nosymfollow. So stream.sock may be pointed
+# at a socket somebody bound in the table -- which every desktop can already
+# connect to directly, and which the sweep removes -- so it opens no path between
+# desktops. The barrier above is about /run, where the other desktops' streams are.
+#
 # <instance>, not <instance>/s: "s" is removed at every stop and remade at every
 # start, and a pool relay outlives its session, so a bind of "s" would go on showing
 # the removed one. <instance> is root's and permanent.

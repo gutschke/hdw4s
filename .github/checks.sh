@@ -22,6 +22,8 @@ SCRIPTS=(hdw4s hdw4s-session hdw4s-run-session hdw4s-firewall hdw4s-update hdw4s
          hdw4s-ephemeral-slots hdw4s-incarnation hdw4s-webroot
          install.sh uninstall.sh wrappers/firefox wrappers/thunderbird
          debian/postinst debian/prerm debian/postrm
+         debian/hdw4s-shared-sweep.postinst debian/hdw4s-shared-sweep.prerm
+         debian/hdw4s-shared-sweep.postrm
          .github/checks.sh .github/tests.sh .github/clean-install-test.sh
          .github/purge-safety-test.sh .github/uid-invariant.sh)
 # Every unit in the tree, found rather than listed. The list this replaces named
@@ -790,20 +792,40 @@ for u in "${RULES_EXEMPT[@]}"; do
   [ -e "${u}" ] || bad "${u}" 'is exempted in RULES_EXEMPT but no such unit exists'
 done
 
-# debian/install, which is what actually puts the file on disk. Its unit lines
-# are globs now, so this expands them the same way dh_install will and checks
-# that every unit falls into one.
+# debian/install (the hdw4s package) and debian/hdw4s-shared-sweep.install,
+# which are what actually put the files on disk. hdw4s's unit lines are globs,
+# so this expands them the way dh_install will, MINUS what debian/rules
+# excludes from hdw4s: every name in the shared tool's list, as a substring,
+# which is what dh_install -X does. Each unit must land in EXACTLY ONE package:
+# none is a unit nobody ships, two is a dpkg file conflict at install time.
+# package.sh asserts the same thing again on the built .debs.
 shipped="$(awk '$2 == "usr/lib/systemd/system" {print $1}' debian/install)"
+sweep_list="$(sed -e 's/#.*//' debian/hdw4s-shared-sweep.install 2>/dev/null | awk 'NF {print $1}')"
+# shellcheck disable=SC2016  # a make expression, matched literally
+rules_exclusion='dh_install -phdw4s $(addprefix -X,$(SWEEP_FILES))'
 if [ -z "${shipped}" ]; then
   bad 'debian/install' 'ships no units into usr/lib/systemd/system'
+elif [ -z "${sweep_list}" ]; then
+  bad 'debian/hdw4s-shared-sweep.install' 'is missing or empty'
+elif ! grep -qF "${rules_exclusion}" debian/rules; then
+  # The exclusion this mirrors. Without it hdw4s would ship every shared unit
+  # too, and this section would be checking a rule that is not there.
+  bad 'debian/rules' 'no longer excludes the shared tool list from hdw4s'
 else
   for u in "${UNITS[@]}"; do
-    hit=''
-    for pat in ${shipped}; do
-      # shellcheck disable=SC2254  # pat is a glob on purpose
-      case "${u}" in ${pat}) hit='yes'; break;; esac
-    done
-    [ -n "${hit}" ] || bad "${u}" 'is not matched by any debian/install line'
+    n=0
+    grep -qxF "${u}" <<<"${sweep_list}" && n=$((n + 1))
+    excluded=''
+    while read -r x; do
+      case "${u}" in *"${x}"*) excluded='yes'; break;; esac
+    done <<<"${sweep_list}"
+    if [ -z "${excluded}" ]; then
+      for pat in ${shipped}; do
+        # shellcheck disable=SC2254  # pat is a glob on purpose
+        case "${u}" in ${pat}) n=$((n + 1)); break;; esac
+      done
+    fi
+    [ "${n}" = 1 ] || bad "${u}" "is shipped by ${n} packages, not exactly one (debian/*install)"
   done
 fi
 okif 'every unit is in every manifest'
@@ -917,17 +939,21 @@ echo
 section 'documentation'
 # A converter that silently writes nothing is the failure mode worth guarding:
 # ronn exits 0 after producing an empty file when it dislikes an argument.
-if [ ! -s hdw4s.8 ]; then
-  bad 'hdw4s.8' 'missing or empty'
-else
-  note 'hdw4s.8 non-empty' "$(wc -l < hdw4s.8) lines"
-fi
-if out="$(groff -man -Tutf8 -ww hdw4s.8 2>&1 >/dev/null)" && [ -z "${out}" ]; then
-  note 'groff warnings' 'none'
-else
-  printf '%s\n' "${out}"
-  bad 'groff' 'warnings above'
-fi
+# Every manual page this tree ships, each from its own markdown source.
+MANPAGES=(hdw4s.8 hdw4s-shared-sweep.8)
+for page in "${MANPAGES[@]}"; do
+  if [ ! -s "${page}" ]; then
+    bad "${page}" 'missing or empty'
+  else
+    note "${page} non-empty" "$(wc -l < "${page}") lines"
+  fi
+  if out="$(groff -man -Tutf8 -ww "${page}" 2>&1 >/dev/null)" && [ -z "${out}" ]; then
+    note "${page} groff warnings" 'none'
+  else
+    printf '%s\n' "${out}"
+    bad "${page} groff" 'warnings above'
+  fi
+done
 for section in NAME SYNOPSIS DESCRIPTION COMMANDS CONFIGURATION \
                'SHARED HOME DIRECTORIES' 'REVERSE PROXY AND SECURITY' FILES \
                DIAGNOSTICS UPDATES LIMITATIONS; do
@@ -947,21 +973,23 @@ if command -v ronn >/dev/null; then
   # generator's version, so both differ between machines and neither says
   # anything about content. Everything else must match exactly.
   strip() { grep -v '^\.\\"' "$1" | grep -v '^\.TH '; }
-  if ronn --roff --pipe --manual='hdw4s' --organization='hdw4s' \
-          --date='2000-01-01' hdw4s.8.md > "${regen}" 2>/dev/null &&
-     [ -s "${regen}" ]; then
-    if diff -q <(strip "${regen}") <(strip hdw4s.8) >/dev/null; then
-      note 'hdw4s.8 matches its source' 'yes'
+  for page in "${MANPAGES[@]}"; do
+    if ronn --roff --pipe --manual='hdw4s' --organization='hdw4s' \
+            --date='2000-01-01' "${page}.md" > "${regen}" 2>/dev/null &&
+       [ -s "${regen}" ]; then
+      if diff -q <(strip "${regen}") <(strip "${page}") >/dev/null; then
+        note "${page} matches its source" 'yes'
+      else
+        bad "${page}" "differs from ${page}.md -- regenerate it"
+        diff <(strip "${page}") <(strip "${regen}") | head -10
+      fi
     else
-      bad 'hdw4s.8' 'differs from hdw4s.8.md -- regenerate it'
-      diff <(strip hdw4s.8) <(strip "${regen}") | head -10
+      bad "${page}" 'could not be regenerated for comparison'
     fi
-  else
-    bad 'hdw4s.8' 'could not be regenerated for comparison'
-  fi
+  done
   rm -f "${regen}"
 else
-  skip 'hdw4s.8 matches its source' 'ronn is not installed (apt package: ronn)'
+  skip 'manual pages match their source' 'ronn is not installed (apt package: ronn)'
 fi
 
 # Whatever Python ships in this package, parsed. The list is derived rather
@@ -1180,6 +1208,12 @@ if [ "${declared}" = "${version}" ]; then
 else
   bad 'hdw4s --version' "says ${declared}, changelog says ${version}"
 fi
+declared="$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' hdw4s-shared-sweep)"
+if [ "${declared}" = "${version}" ]; then
+  note 'hdw4s-shared-sweep --version' "${declared}"
+else
+  bad 'hdw4s-shared-sweep --version' "says ${declared}, changelog says ${version}"
+fi
 
 # The camera and the microphone are asked for with "--webcam-on-start=demand",
 # a value only a streaming server carrying capture-on-demand understands. An
@@ -1325,6 +1359,10 @@ okif 'show defaults match the session scripts'
 # ships, which is otherwise discovered by a person trying to install it.
 if command -v apt-cache >/dev/null; then
   missing=''
+  # A package built from this source is not in the archive and need not be:
+  # hdw4s depends on hdw4s-shared-sweep at its own version. Matched as spelled.
+  # shellcheck disable=SC2016  # a substvar, matched literally
+  ours_suffix='(=${binary:Version})'
   while read -r dep; do
     [ -n "${dep}" ] || continue
     # Split alternatives: apt-cache treats "mawk|gawk" as a regular expression
@@ -1339,7 +1377,9 @@ if command -v apt-cache >/dev/null; then
   done < <(awk '/^Depends:/ { d = 1; sub(/^Depends:/, "") }
                 /^[A-Z][A-Za-z-]*:/ && !/^Depends:/ { d = 0 }
                 d { print }' debian/control |
-           tr -d ' ' | tr ',' '\n' | grep -v '^[$]' | grep .)
+           tr -d ' ' | tr ',' '\n' | grep -v '^[$]' | grep . |
+           grep -vxFf <(awk '/^Package:/ {print $2}' debian/control |
+                        sed "s/\$/${ours_suffix}/"))
   if [ -z "${missing}" ]; then
     note 'dependencies exist' 'ok'
   else

@@ -39,7 +39,11 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-templat
          chrome-policies/hdw4s-ephemeral.json chrome-policies/hdw4s-author.json
          chrome-author-policy.json
          hdw4s-updater.{service,timer} hdw4s-reaper.{service,timer}
+         hdw4s-shared-sweep hdw4s-shared-sweep.8 hdw4s-shared-sweep@.{service,timer}
+         hdw4s-shared-{harden,watch,relay-server,relay-client}@.service
+         hdw4s-shared-sysusers.conf
          hdw4s-check.{service,timer}
+         hdw4s-shared-expose hdw4s-shared-expose.{service,timer} hdw4s-tmpfiles.conf
          install.sh uninstall.sh LICENSE)
 
 for f in "${SOURCES[@]}"; do
@@ -174,15 +178,17 @@ if [ "${src}" != "${dst}" ]; then
 fi
 chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
            "${dst}"/hdw4s-duration "${dst}"/hdw4s-template \
-           "${dst}"/hdw4s-is-slot "${dst}"/hdw4s-slot-scrub \
+           "${dst}"/hdw4s-is-slot "${dst}"/hdw4s-slot-scrub "${dst}"/hdw4s-shared-sweep \
            "${dst}"/hdw4s-ephemeral-slots "${dst}"/hdw4s-webroot \
            "${dst}"/hdw4s-gate-index "${dst}"/hdw4s-refuse \
            "${dst}"/hdw4s-incarnation "${dst}"/hdw4s-stream-dir \
+           "${dst}"/hdw4s-shared-expose \
            "${dst}"/{install,uninstall}.sh "${dst}"/wrappers/*
 # Imported, not executed: the systemd units, and the WebRTC signalling adapter
 # that /opt/selkies/bin/python loads.
 chmod 0644 "${dst}"/hdw4s-selkies-webrtc "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
-           "${dst}"/*.conf "${dst}"/hdw4s.8* "${dst}"/hdw4s-names.js \
+           "${dst}"/*.conf "${dst}"/hdw4s.8* "${dst}"/hdw4s-shared-sweep.8 \
+           "${dst}"/hdw4s-names.js \
            "${dst}"/hdw4s-title.js
 
 # The settings layer every ephemeral session starts from, and the Chrome policy
@@ -270,6 +276,10 @@ echo ' done.'
 
 echo -n 'Linking...'
 ln -sf "${dst}/hdw4s" "${sys}/sbin/hdw4s"
+# The /shared tool is run by hand on a machine that owns a store, so it is on
+# the PATH too. Its units are templates on a store's path: none is enabled
+# here; hdw4s starts the ones for a store it owns at boot.
+ln -sf "${dst}/hdw4s-shared-sweep" "${sys}/sbin/hdw4s-shared-sweep"
 # The units to link, taken from the list of files this script already copied
 # rather than written out a second time. Two lists in one file is two lists: the
 # copy above and the loop below disagreed about nothing for months and then a
@@ -289,6 +299,7 @@ echo ' done.'
 
 echo -n 'Installing documentation...'
 gzip -9c "${dst}/hdw4s.8" > "${man}/hdw4s.8.gz"
+gzip -9c "${dst}/hdw4s-shared-sweep.8" > "${man}/hdw4s-shared-sweep.8.gz"
 mandb -q 2>/dev/null || :
 echo ' done.'
 
@@ -402,6 +413,17 @@ install -d -m0755 /etc/polkit-1/rules.d
 install -m0644 "${dst}/60-hdw4s-slots.rules" /etc/polkit-1/rules.d/60-hdw4s-slots.rules
 install -m0644 "${dst}/hdw4s-sysusers.conf" /etc/sysusers.d/hdw4s-sysusers.conf
 systemd-sysusers /etc/sysusers.d/hdw4s-sysusers.conf
+# The /shared relay server's fixed user, the same way.
+install -m0644 "${dst}/hdw4s-shared-sysusers.conf" /etc/sysusers.d/hdw4s-shared-sysusers.conf
+systemd-sysusers /etc/sysusers.d/hdw4s-shared-sysusers.conf
+# The directory every desktop binds as /shared, which must exist before any
+# desktop starts once the feature is on -- made at every boot by tmpfiles, and
+# now, before the minter below writes the drop-ins that bind it. Copied into the
+# ADMINISTRATOR's tmpfiles directory for the reason the sysusers file above is.
+# The expose timer is not enabled: the minter starts it when /shared is on.
+install -d -m0755 /etc/tmpfiles.d
+install -m0644 "${dst}/hdw4s-tmpfiles.conf" /etc/tmpfiles.d/hdw4s-tmpfiles.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/hdw4s-tmpfiles.conf
 systemctl enable --now hdw4s-ephemeral-slots.service
 # The front door, enabled as a SOCKET only. The router behind it is started by
 # the first connection and must not also be enabled, or a second copy races for

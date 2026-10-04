@@ -10,6 +10,10 @@ DefaultDependencies=no
 After=local-fs.target
 # The stream root below is handed to a group systemd-sysusers creates.
 After=systemd-sysusers.service
+# /shared in the root namespace is bound from /run/hdw4s-shared, which tmpfiles
+# makes. Without this the two race, and a run that wins finds no source and
+# leaves /shared unbound (it says so, and "hdw4s check" is red).
+After=systemd-tmpfiles-setup.service
 Before=sockets.target shutdown.target
 Conflicts=shutdown.target
 # /run is tmpfs, so the records are gone at every boot and this is what puts

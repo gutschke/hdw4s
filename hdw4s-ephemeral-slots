@@ -133,6 +133,397 @@ if [ "${1:-}" = '--uid-window' ]; then
   exit 0
 fi
 
+# THE ROOT NAMESPACE'S /shared. Desktops bind /run/hdw4s-shared there; in the
+# root namespace it is a bind of that same PLAIN directory, made read-only and a
+# SLAVE of /run, so that the table the expose service binds onto
+# /run/hdw4s-shared arrives at /shared too, and leaves with it. Root then finds
+# the table where every desktop does, and finds nothing -- and cannot write --
+# while no table is shown (measured in a user namespace, every ordering).
+#
+# THE ONE TRAP IS ORDER. Made while a table is ALREADY bound at
+# /run/hdw4s-shared, the bind takes the table itself, and PINS it: it stays in
+# root after the expose service took it away -- after a drift, a dead store, a
+# withdrawn tmpfs -- and nothing in the guard notices (it accepts a pinned
+# view: measured). So this is never a .mount unit or an fstab line (a restart
+# of either is a late bind), it is refused while the exposure carries a mount,
+# and it is checked after it is made and taken away at once if it is pinned:
+# that closes the race against an expose run between the look and the bind.
+#
+# THE SHAPE IS POSITIVE, derived from /run's OWN line in the mount table, never
+# from a stat of /run/hdw4s-shared (which reports the table whenever one is
+# bound). The bottom mount at /shared -- the one whose parent is not itself
+# at /shared, by parent id, not by position: propagation can tuck a mount
+# beneath -- must be on /run's device with /run's root plus "/hdw4s-shared",
+# read-only, and a slave of /run's peer group. Everything above it must be a
+# copy of something mounted at the exposure. ANYTHING else is wrong, including
+# shapes nobody listed: on NFS a pin has root "/", not "/table".
+#
+# The mark in /var/lib records that this feature made /shared; at the boot that
+# turns it off, /run no longer remembers it was on. It goes ONLY when /shared
+# did: dropped while the directory stays, every later run reads /shared as the
+# administrator's and never touches it again.
+#
+# NEVER TAKEN AWAY WHILE A DESKTOP RUNS. /shared is the mount point of every
+# desktop's BindPaths=, and removing a directory that is a mount point in
+# ANOTHER mount namespace succeeds -- and DETACHES the mount there (measured):
+# each running desktop silently loses /shared. An upgrade runs this
+# live, after HDW4S_SHARED=off was written and before the reboot that was to
+# apply it.
+#
+# ONE IMPLEMENTATION, for the boot run, "hdw4s check" (--shared-view check),
+# an administrator (--shared-view release), and debian/prerm and uninstall.sh
+# (--shared-view release-for-removal). postrm runs after this
+# file is gone, so it cannot; a copy anywhere is how the mark once came to be
+# removed before the directory.
+SHARED_MARK="${HDW4S_SHARED_MARK:-/var/lib/hdw4s/.shared-mountpoint}"
+# What takes /shared away later, when it is kept now: the boot run, unless this
+# is the package going (prerm, uninstall.sh), after which nothing runs at boot.
+SHARED_LATER='The next boot with HDW4S_SHARED off removes it; or, once they have stopped:'
+SHARED_POINT="${HDW4S_SHARED_MOUNTPOINT:-/shared}"
+SHARED_EXPOSE="${HDW4S_SHARED_EXPOSE:-/run/hdw4s-shared}"
+# What the last run did about the bind: "bound <mount id>", the identity it is
+# taken away by, or "declined <reason>". /run, because the bind does not
+# survive a boot either.
+SHARED_VIEW_STATE="${HDW4S_SHARED_VIEW_STATE:-/run/hdw4s-shared-view}"
+MOUNTINFO="${HDW4S_MOUNTINFO:-/proc/self/mountinfo}"
+
+# The desktop instances that are in any state but inactive or failed, one per
+# line; empty when none. Non-zero when systemd cannot be asked, which is not
+# "none". systemctl puts a bullet before a failed unit even with --plain.
+desktops_running() {
+  local out
+  out="$(systemctl list-units --all --plain --no-legend 'hdw4s@*' 'hdw4s-ephemeral@*' \
+         2>/dev/null)" || return 1
+  printf '%s\n' "${out}" |
+    awk '{ sub(/^[^A-Za-z0-9_]+/, "") }
+         NF >= 3 && $3 != "inactive" && $3 != "failed" { print $1 }'
+}
+
+# Is anything mounted at this exact path? From the mount table only.
+mounted_at() { awk -v p="$1" '$5 == p { f = 1 } END { exit !f }' "${MOUNTINFO}"; }
+
+# THE SHAPE OF /shared, as one line: "<verdict> <bottom mount id or -> <detail>".
+#   good       the bind described above
+#   none       nothing is mounted at /shared
+#   deleted    the bind's source was removed and remade: it shows nothing
+#   foreign    the bottom is not /run's /hdw4s-shared: pinned, or not ours
+#   rw         the bottom is writable: root's writes land in the plain directory
+#   unshared   /run is not a shared mount, so nothing can arrive at /shared
+#   not-slave  the bottom sends mounts back to /run instead of only receiving
+#   stray      something above the bottom is not a copy of the exposure
+#   unknown    the table cannot be read, or a path in it is escaped
+view_shape() {
+  case "${SHARED_POINT}${SHARED_EXPOSE}" in
+    # The table escapes space, tab, newline and backslash; such a path is
+    # refused rather than unescaped, as hdw4s-shared-expose does.
+    *[[:space:]\\]*) echo 'unknown - a path the mount table would escape'; return;;
+  esac
+  [ -r "${MOUNTINFO}" ] || { echo "unknown - cannot read ${MOUNTINFO}"; return; }
+  awk -v p="${SHARED_POINT}" -v e="${SHARED_EXPOSE}" '
+    { j = 7; tags = ""; while (j < NF && $j != "-") { tags = tags " " $j; j++ }
+      id[NR] = $1; par[NR] = $2; dev[NR] = $3; root[NR] = $4; mp[NR] = $5
+      opts[NR] = $6; tag[NR] = tags " " }
+    # The mount on top at a path: the one no other mount at that path sits on.
+    function top(m,   n, k, t) {
+      t = 0
+      for (n = 1; n <= NR; n++) if (mp[n] == m) {
+        for (k = 1; k <= NR; k++) if (mp[k] == m && par[k] == id[n]) break
+        if (k > NR) t = n }
+      return t }
+    END {
+      # The filesystem the exposure directory itself lives on: the longest
+      # mount point above it, not counting whatever is mounted AT it.
+      best = ""
+      for (n = 1; n <= NR; n++)
+        if (mp[n] != e && (mp[n] == "/" || index(e, mp[n] "/") == 1) &&
+            length(mp[n]) > length(best)) best = mp[n]
+      r = top(best)
+      if (!r) { print "unknown - no mount holds " e; exit }
+      rel = (best == "/") ? e : substr(e, length(best) + 1)
+      want = (root[r] == "/") ? rel : root[r] rel
+      grp = ""; if (match(tag[r], / shared:[0-9]+ /)) grp = substr(tag[r], RSTART + 8, RLENGTH - 9)
+      cnt = 0
+      for (n = 1; n <= NR; n++) if (mp[n] == p) { at[id[n]] = n; cnt++ }
+      if (!cnt) { print "none -"; exit }
+      b = 0; nb = 0
+      for (n = 1; n <= NR; n++) if (mp[n] == p && !(par[n] in at)) { b = n; nb++ }
+      if (nb != 1) { print "unknown - " nb " mounts at the bottom of " p; exit }
+      if (root[b] ~ /\/\/deleted$/) { print "deleted " id[b] " root " root[b]; exit }
+      if (dev[b] != dev[r] || root[b] != want) {
+        print "foreign " id[b] " device " dev[b] " root " root[b] ", not " dev[r] " " want; exit }
+      if (opts[b] !~ /^ro(,|$)/) { print "rw " id[b] " options " opts[b]; exit }
+      if (grp == "") { print "unshared " id[b] " " best " is not a shared mount"; exit }
+      if (tag[b] ~ / shared:/ || index(tag[b], " master:" grp " ") == 0) {
+        print "not-slave " id[b] " propagation" tag[b] "not master:" grp; exit }
+      for (n = 1; n <= NR; n++) if (mp[n] == p && n != b) {
+        ok = 0
+        for (k = 1; k <= NR; k++) if (mp[k] == e && dev[k] == dev[n] && root[k] == root[n]) ok = 1
+        if (!ok) { print "stray " id[n] " device " dev[n] " root " root[n] " is not at " e; exit } }
+      print "good " id[b]
+    }' "${MOUNTINFO}"
+}
+
+say_declined() {
+  printf 'declined %s\n' "$1" > "${SHARED_VIEW_STATE}" 2>/dev/null || :
+}
+
+# MAKE THE BIND, when it is safe to: /shared is ours, nothing is mounted there,
+# the exposure directory exists and carries no mount. Gated on that observable
+# state and never on "this is a boot", so a fresh install and an off -> on
+# upgrade are the same safe ordering. Never fails: what it declined, it says,
+# and "hdw4s check" says it again.
+shared_view_bind() {
+  local shape made
+  if [ ! -e "${SHARED_MARK}" ]; then
+    # An administrator's /shared is never touched; "hdw4s check" says that
+    # desktops mount the table over it and root does not see the table there.
+    { [ -e "${SHARED_POINT}" ] || [ -L "${SHARED_POINT}" ]; } && return 0
+    install -d -m 0755 "${SHARED_MARK%/*}"
+    : > "${SHARED_MARK}"
+  fi
+  if [ -L "${SHARED_POINT}" ] || { [ -e "${SHARED_POINT}" ] && [ ! -d "${SHARED_POINT}" ]; }; then
+    echo "hdw4s: ${SHARED_POINT} is marked as this feature's but is not a directory; left alone." >&2
+    return 0
+  fi
+  [ -d "${SHARED_POINT}" ] || install -d -m 0755 "${SHARED_POINT}"
+  shape="$(view_shape)"
+  case "${shape}" in
+    good\ *) printf 'bound %s\n' "$(echo "${shape}" | cut -d' ' -f2)" > "${SHARED_VIEW_STATE}" || :
+             return 0;;
+    none\ *) ;;
+    *) echo "hdw4s: something else is at ${SHARED_POINT} (${shape}); it is left alone, and
+  root does not see the table there. \"hdw4s check\" reports it." >&2
+       say_declined "${shape%% *}"
+       return 0;;
+  esac
+  # Never on a missing source: the bind would fail and leave root's /shared
+  # the root filesystem's own directory, writable and not the table.
+  if [ ! -d "${SHARED_EXPOSE}" ] || [ -L "${SHARED_EXPOSE}" ]; then
+    echo "hdw4s: ${SHARED_EXPOSE} does not exist, so ${SHARED_POINT} is not bound in the root
+  namespace. Recreate it: systemd-tmpfiles --create; it is bound at the next boot." >&2
+    say_declined 'no-source'
+    return 0
+  fi
+  if mounted_at "${SHARED_EXPOSE}"; then
+    echo "hdw4s: a table is already shown at ${SHARED_EXPOSE}, so ${SHARED_POINT} is not bound in
+  the root namespace now -- made now, it would keep the table after it is taken
+  away. It takes effect at the next boot; desktops are not affected." >&2
+    say_declined 'exposed'
+    return 0
+  fi
+  if [ -n "$(ls -A -- "${SHARED_POINT}" 2>/dev/null)" ]; then
+    echo "hdw4s: ${SHARED_POINT} is not empty, so it is not bound in the root namespace: the
+  bind would hide what is there. Move it away; it is bound at the next boot." >&2
+    say_declined 'not-empty'
+    return 0
+  fi
+  # NEVER A PEER OF /run WHILE ATTACHED. A bind of /run/hdw4s-shared made with
+  # mount(8) is attached first and made a slave and read-only afterwards, BY
+  # PATH; in between it is a peer of /run, and a table bound at the exposure in
+  # that instant lands ON it -- after which the remount and the make-slave act
+  # on that copy, and unmounting it from /shared propagates back to /run and
+  # takes the table off /run/hdw4s-shared itself, from every desktop (measured).
+  # So the bind is cloned DETACHED (open_tree), made read-only and a slave
+  # while it is attached nowhere (mount_setattr), and only then attached at
+  # /shared (move_mount): from its first instant there it receives from /run
+  # and sends nothing back. Nothing is attached at all if any step fails.
+  if ! python3 - "${SHARED_EXPOSE}" "${SHARED_POINT}" <<'PY'
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+class MountAttr(ctypes.Structure):
+    _fields_ = [("attr_set", ctypes.c_uint64), ("attr_clr", ctypes.c_uint64),
+                ("propagation", ctypes.c_uint64), ("userns_fd", ctypes.c_uint64)]
+# The same numbers on every architecture: the new mount API came after the
+# syscall tables were unified.
+OPEN_TREE, MOVE_MOUNT, MOUNT_SETATTR = 428, 429, 442
+AT_FDCWD, AT_EMPTY_PATH, OPEN_TREE_CLONE = -100, 0x1000, 1
+MOVE_MOUNT_F_EMPTY_PATH, MOUNT_ATTR_RDONLY, MS_SLAVE = 0x4, 0x1, 1 << 19
+def call(what, *args):
+    r = libc.syscall(*args)
+    if r < 0:
+        e = ctypes.get_errno()
+        sys.exit("hdw4s: %s: %s" % (what, os.strerror(e)))
+    return r
+src, dst = (os.fsencode(a) for a in sys.argv[1:3])
+fd = call("open_tree", OPEN_TREE, AT_FDCWD, src, OPEN_TREE_CLONE | os.O_CLOEXEC)
+attr = MountAttr(MOUNT_ATTR_RDONLY, 0, MS_SLAVE, 0)
+call("mount_setattr", MOUNT_SETATTR, fd, b"", AT_EMPTY_PATH, ctypes.byref(attr), ctypes.sizeof(attr))
+call("move_mount", MOVE_MOUNT, fd, b"", AT_FDCWD, dst, MOVE_MOUNT_F_EMPTY_PATH)
+# Under a SHARED parent -- / on a stock systemd host and in LXC -- attaching
+# makes the mount shared again, in a new peer group of its own, still a slave
+# of /run: never a peer of /run, but sending to its own group. Made a slave
+# again THROUGH THE SAME FD, so it is this mount that changes, never whatever
+# a race may have stacked on top of it at the path. Measured: it then ends
+# master of /run's group only. Without this the shape check rejects it and the
+# bind is never made on any real machine.
+again = MountAttr(0, 0, MS_SLAVE, 0)
+call("mount_setattr", MOUNT_SETATTR, fd, b"", AT_EMPTY_PATH, ctypes.byref(again), ctypes.sizeof(again))
+PY
+  then
+    echo "hdw4s: could not bind ${SHARED_EXPOSE} at ${SHARED_POINT}; root does not see the table there." >&2
+    say_declined 'mount-failed'
+    return 0
+  fi
+  # Nothing was mounted at /shared a moment ago, so the bottom is this bind.
+  shape="$(view_shape)"
+  made="$(echo "${shape}" | cut -d' ' -f2)"
+  case "${shape}" in
+    good\ *)
+      # A table shown at the exposure that has no copy here arrived before the
+      # clone and after the look: root would see an empty /shared beside a
+      # shown table until it is next bound. Taken away, and left for the next
+      # boot, as when it was shown before the look.
+      if ! mounted_at "${SHARED_EXPOSE}" ||
+         [ "$(awk -v p="${SHARED_POINT}" '$5 == p { n++ } END { print n + 0 }' "${MOUNTINFO}")" -gt 1 ]; then
+        printf 'bound %s\n' "${made}" > "${SHARED_VIEW_STATE}" || :; return 0
+      fi
+      shape="behind ${made} a table was shown at ${SHARED_EXPOSE} before the bind, and none arrived on it";;
+  esac
+  # WRONG, OR PINNED: taken away again -- only when the one mount at /shared is
+  # the one this run attached. Its parent is the root filesystem and it is a
+  # slave, so unmounting it reaches nothing of /run's. Anything stacked on it
+  # is left, and said.
+  if [ "$(awk -v p="${SHARED_POINT}" '$5 == p { n++ } END { print n + 0 }' "${MOUNTINFO}")" -eq 1 ] &&
+     awk -v p="${SHARED_POINT}" -v m="${made}" '$5 == p && $1 == m { f = 1 } END { exit !f }' "${MOUNTINFO}" &&
+     umount -- "${SHARED_POINT}" 2>/dev/null && ! mounted_at "${SHARED_POINT}"; then
+    echo "hdw4s: the bind of ${SHARED_POINT} came out wrong (${shape}) and was taken away
+  again; root does not see the table there until the next boot." >&2
+  else
+    echo "hdw4s: the bind of ${SHARED_POINT} came out wrong (${shape}) and could NOT be taken
+  away: what is mounted there now is $(view_shape). Root may see, or write into,
+  something that is not the table; \"hdw4s check\" is red until a reboot." >&2
+  fi
+  if mounted_at "${SHARED_EXPOSE}"; then say_declined 'exposed'; else say_declined "${shape%% *}"; fi
+  return 0
+}
+
+# Take /shared away if this feature made it and nothing holds it. Says what it
+# kept and why; non-zero when it kept anything, so a caller can tell.
+shared_release() {
+  local busy shape rec
+  [ -e "${SHARED_MARK}" ] || return 0
+  if ! busy="$(desktops_running)"; then
+    echo "hdw4s: could not ask systemd which desktops are running, so ${SHARED_POINT} and
+  its mark (${SHARED_MARK}) are kept: removing it under a running desktop takes
+  /shared away from that desktop." >&2
+    return 1
+  fi
+  if [ -n "${busy}" ]; then
+    echo "hdw4s: ${SHARED_POINT} is kept, with its mark, while these desktops are running:
+$(printf '%s\n' "${busy}" | sed 's/^/    /')
+  Removing it now would take /shared away from each of them. ${SHARED_LATER}
+    umount ${SHARED_POINT}; rmdir ${SHARED_POINT} && rm ${SHARED_MARK}" >&2
+    return 1
+  fi
+  # The bind, by the identity recorded when it was made AND the shape: never an
+  # unmount by path of whatever happens to be there. Not while a table is
+  # shown on it: that is the expose service's to take away first.
+  shape="$(view_shape)"
+  if [ "${shape%% *}" != 'none' ]; then
+    rec="$(sed -n 's/^bound \([0-9][0-9]*\)$/\1/p' "${SHARED_VIEW_STATE}" 2>/dev/null || :)"
+    if [ "${shape%% *}" != 'good' ] || [ -z "${rec}" ] ||
+       [ "$(echo "${shape}" | cut -d' ' -f2)" != "${rec}" ]; then
+      echo "hdw4s: ${SHARED_POINT} is kept, with its mark: what is mounted there (${shape})
+  is not the bind this feature recorded making${rec:+ (mount ${rec})}." >&2
+      return 1
+    fi
+    if [ "$(awk -v p="${SHARED_POINT}" '$5 == p { n++ } END { print n + 0 }' "${MOUNTINFO}")" -ne 1 ]; then
+      echo "hdw4s: ${SHARED_POINT} is kept, with its mark, while a table is shown on it; it
+  goes at the next boot with HDW4S_SHARED off." >&2
+      return 1
+    fi
+    if ! umount -- "${SHARED_POINT}" 2>/dev/null ||
+       [ "$(view_shape | cut -d' ' -f1)" != 'none' ]; then
+      echo "hdw4s: the bind at ${SHARED_POINT} could not be taken away; it and its mark are kept." >&2
+      return 1
+    fi
+    rm -f -- "${SHARED_VIEW_STATE}"
+  fi
+  if [ -e "${SHARED_POINT}" ] || [ -L "${SHARED_POINT}" ]; then
+    # rmdir, never rm: one that is not empty is somebody's and stays.
+    if ! rmdir -- "${SHARED_POINT}" 2>/dev/null; then
+      echo "hdw4s: ${SHARED_POINT} could not be removed (it is not an empty directory, or
+  something is mounted there), so it and its mark (${SHARED_MARK}) are kept." >&2
+      return 1
+    fi
+  fi
+  rm -f -- "${SHARED_MARK}"
+}
+
+# FOR "hdw4s check": exit 0 with nothing or an information line, 3 with a
+# warning, 1 when it is wrong. Every shape that is not the bind is wrong, the
+# ones nobody listed included: the guard accepts a pinned /shared, so this is
+# the only thing that would ever notice one.
+shared_view_check() {
+  local shape why on=''
+  case "${HDW4S_SHARED:-off}" in tmpfs|source) on='yes';; esac
+  if [ ! -e "${SHARED_MARK}" ]; then
+    if [ -n "${on}" ] && { [ -e "${SHARED_POINT}" ] || [ -L "${SHARED_POINT}" ]; }; then
+      echo "hdw4s: ${SHARED_POINT} in the root namespace is not this feature's (there is no
+  ${SHARED_MARK}), so it is left as it is: desktops see the table there, root
+  does not. Use ${SHARED_EXPOSE}."
+    elif [ -n "${on}" ]; then
+      echo "hdw4s: ${SHARED_POINT} in the root namespace is made at the next boot." >&2
+      return 3
+    fi
+    return 0
+  fi
+  shape="$(view_shape)"
+  case "${shape}" in
+    good\ *) [ -n "${on}" ] && return 0
+             echo "hdw4s: /shared is off, and ${SHARED_POINT} is still bound in the root namespace;
+  it goes at the next boot with no desktop running." >&2
+             return 3;;
+    none\ *)
+             # UNMOUNTED BY HAND. Nothing of this feature unmounts a bind it
+             # recorded without removing the record. Every desktop and every
+             # namespaced service holds a copy of the bind; unmounted in root
+             # while a table was shown, the table copy on each is left behind
+             # in those namespaces and no longer leaves with the exposure --
+             # and nothing can see it from here (measured).
+             if grep -q '^bound ' "${SHARED_VIEW_STATE}" 2>/dev/null; then
+               echo "hdw4s: ${SHARED_POINT} in the root namespace was bound and has been unmounted
+  by hand. If a table was shown at the time, every desktop and service started
+  since the boot may keep a view of it that no longer goes away with the table:
+  restart them, or reboot. Never unmount ${SHARED_POINT} by hand; to take it away,
+  turn /shared off and reboot." >&2
+               return 1
+             fi
+             [ -n "${on}" ] || return 0
+             why="$(sed -n 's/^declined //p' "${SHARED_VIEW_STATE}" 2>/dev/null || :)"
+             if [ "${why}" = 'exposed' ]; then
+               echo "hdw4s: ${SHARED_POINT} in the root namespace is bound at the next boot (it was turned
+  on while a table was already shown); until then root sees an empty directory there." >&2
+               return 3
+             fi
+             echo "hdw4s: /shared is on and ${SHARED_POINT} in the root namespace is not bound to the
+  table${why:+ (${why})}: root sees a directory there that is not the table. The
+  boot run says why: journalctl -u hdw4s-ephemeral-slots.service" >&2
+             return 1;;
+    *) echo "hdw4s: ${SHARED_POINT} in the root namespace is not the bind of ${SHARED_EXPOSE}:
+  ${shape}
+  Root may be seeing, or writing into, something that is not the table. A
+  reboot makes it again; until then use ${SHARED_EXPOSE}." >&2
+       return 1;;
+  esac
+}
+
+if [ "${1:-}" = '--shared-view' ]; then
+  [ "$#" -eq 2 ] || die "--shared-view takes one of: release, release-for-removal, check."
+  case "$2" in
+    # "release" by hand: the boot run with /shared off still comes. The
+    # package going away says so, because after it nothing runs at boot.
+    release) shared_release || :; exit 0;;
+    release-for-removal)
+             SHARED_LATER='Nothing removes it once the package is gone; once they have stopped:'
+             shared_release || :; exit 0;;
+    check) rc=0; shared_view_check || rc=$?
+           trap '' INT TERM QUIT HUP EXIT ERR; exit "${rc}";;
+    *) die "--shared-view takes one of: release, release-for-removal, check, not '$2'.";;
+  esac
+fi
+
 case "${HDW4S_EPHEMERAL_SLOTS}" in
   ''|*[!0-9]*) die "HDW4S_EPHEMERAL_SLOTS must be a number, not '${HDW4S_EPHEMERAL_SLOTS}'." ;;
 esac
@@ -746,6 +1137,141 @@ case "${memtotal_kb}" in
     fi
     ;;
 esac
+
+# /SHARED, A PICNIC TABLE EVERY DESKTOP CAN REACH -- only when the administrator
+# asks for it with HDW4S_SHARED, and removed again when they stop asking. What
+# this run does is the part that has to exist before any desktop starts: the
+# desktops' drop-ins, the sweep's arguments, and starting the expose timer.
+# Everything that touches a store -- mounting, judging, binding, unbinding --
+# is hdw4s-shared-expose's, re-run every 30 seconds, because a store can come
+# and go while the machine is up and this runs once.
+#
+# THE DESKTOPS BIND /run/hdw4s-shared, NEVER THE STORE, AND NEVER OPTIONALLY.
+# That directory is made by tmpfiles at every boot, unconditionally, so the bind
+# source always exists: an empty root-owned directory until a store is judged
+# good and bound onto it. "BindPaths=-..." with a missing source is the trap
+# this layout exists to avoid -- measured on systemd 255, it exempts an existing
+# /shared on the root filesystem from ProtectSystem=strict and leaves it
+# WRITABLE from every desktop. If somebody deletes the directory by hand, a
+# desktop fails to start (226/NAMESPACE), loudly, which is the safe way round.
+#
+# OFF MEANS NONE OF THESE FILES EXIST. A stale drop-in is a /shared that nobody
+# turned on.
+shared_mode="${HDW4S_SHARED-}"
+# THE OLD SWITCH. HDW4S_SHARED_SIZE alone used to turn this on; now it is only
+# a size. Nothing turns off silently: a machine upgraded with only the old line
+# boots with /shared OFF and says so here, and "hdw4s check" says it again.
+if [ -z "${shared_mode}" ] && [ -n "${HDW4S_SHARED_SIZE:-}" ]; then
+  echo "hdw4s: WARNING: HDW4S_SHARED_SIZE is set and HDW4S_SHARED is not, so /shared
+  is OFF. HDW4S_SHARED_SIZE used to switch it on; it is now only the size of a
+  tmpfs table. To keep it, add HDW4S_SHARED=tmpfs to ${ETCDIR}/hdw4s.conf and
+  reboot." >&2
+fi
+[ -z "${HDW4S_SHARED_EXPIRY+set}" ] ||
+  echo "hdw4s: WARNING: HDW4S_SHARED_EXPIRY is retired and nothing reads it; items
+  on /shared now go after HDW4S_SHARED_IDLE (default 30m) unused. Delete the
+  line from ${ETCDIR}/hdw4s.conf." >&2
+case "${shared_mode:=off}" in
+  off|tmpfs|source) ;;
+  *)
+    # Not a die: the pool is minted by this same run, and a typo in an optional
+    # feature must not take every ephemeral desktop down with it. Off, said
+    # out loud, and "hdw4s check" goes red on the same value.
+    echo "hdw4s: WARNING: HDW4S_SHARED must be off, tmpfs or source, not '${shared_mode}';
+  /shared is OFF until it is." >&2
+    shared_mode='off'
+    ;;
+esac
+shared_drop="$(printf '%s\n' \
+  "# Generated by hdw4s-ephemeral-slots at boot from HDW4S_SHARED=${shared_mode}." \
+  '# Never "BindPaths=-...": see hdw4s-ephemeral-slots.' \
+  '[Service]' \
+  'BindPaths=/run/hdw4s-shared:/shared')"
+for unit in hdw4s@.service hdw4s-ephemeral@.service; do
+  f="${DROPDIR}/${unit}.d/50-shared.conf"
+  if [ "${shared_mode}" != 'off' ]; then
+    install -d -m 0755 "${DROPDIR}/${unit}.d"
+    if [ "$(cat "${f}" 2>/dev/null || :)" != "${shared_drop}" ]; then
+      printf '%s\n' "${shared_drop}" > "${f}"; reload='yes'
+    fi
+  elif [ -e "${f}" ]; then
+    rm -f "${f}"; reload='yes'
+  fi
+done
+# /shared ON THE ROOT FILESYSTEM: the desktops' mount point, and in the root
+# namespace the read-only view of the table (shared_view_bind, above). Made
+# here, with the mark that says this feature made it; removed when the feature
+# is turned off, and only then (shared_release). A /shared that existed before
+# (an administrator's own, or a mount point in fstab) is never touched, and one
+# that is not empty is never touched either.
+if [ "${shared_mode}" != 'off' ]; then
+  # Before the expose timer is started below: at boot nothing can have shown a
+  # table yet, because this run is what starts the service that does. Never
+  # fails the run that mints the pool: what it declined, it says.
+  shared_view_bind || :
+else
+  # Never fails the run that mints the pool: what it kept, it says.
+  shared_release || :
+fi
+
+# THE SWEEP'S SETTINGS, when this machine sweeps its own table
+# (HDW4S_SHARED_SWEEP=local, the default). Its units are templates named after
+# the escaped path of the store root and read the two settings from their
+# environment; this writes them, VERBATIM -- the tool parses them, with the one
+# grammar every duration here has -- into a drop-in for that one instance. The
+# units are started by hdw4s-shared-expose once the store is mounted, because
+# they are BindsTo= its mount -- and started again by every later run that
+# finds them stopped, for as long as the table is exposed.
+#
+# Only characters a duration can have reach a unit file: anything else could be
+# a "%" specifier or a quote, and is refused here, loudly, leaving the unit's
+# own defaults (30m, 7d) -- which "hdw4s check" then reports as a value it
+# cannot read.
+shared_store=''
+if [ "${shared_mode}" != 'off' ] && [ "${HDW4S_SHARED_SWEEP:-local}" = 'local' ]; then
+  shared_store="$("${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-shared-expose" --store 2>/dev/null || :)"
+fi
+shared_knobs=''
+if [ -n "${shared_store}" ]; then
+  shared_inst="$(systemd-escape --path -- "${shared_store}")"
+  shared_knobs="${DROPDIR}/hdw4s-shared-sweep@${shared_inst}.service.d/50-knobs.conf"
+  shared_env=''
+  for kv in "HDW4S_SHARED_IDLE=${HDW4S_SHARED_IDLE:-30m}" \
+            "HDW4S_SHARED_MAX_AGE=${HDW4S_SHARED_MAX_AGE:-7d}"; do
+    case "${kv#*=}" in
+      ''|*[!0-9A-Za-z]*)
+        echo "hdw4s: WARNING: ${kv%%=*}='${kv#*=}' is not a duration; the sweep of /shared
+  uses its own default instead until it is." >&2;;
+      *) shared_env="${shared_env}Environment=${kv}
+";;
+    esac
+  done
+  want="$(printf '%s\n' \
+    '# Generated by hdw4s-ephemeral-slots at boot from /etc/hdw4s/hdw4s.conf.' \
+    '[Service]' "${shared_env%
+}")"
+  install -d -m 0755 "${shared_knobs%/*}"
+  if [ "$(cat "${shared_knobs}" 2>/dev/null || :)" != "${want}" ]; then
+    printf '%s\n' "${want}" > "${shared_knobs}"; reload='yes'
+  fi
+fi
+# A drop-in for any OTHER store -- a re-run after the store or the sweep
+# setting changed -- would configure a sweep of something no longer ours.
+for f in "${DROPDIR}"/hdw4s-shared-sweep@*.service.d/50-knobs.conf; do
+  if [ -e "${f}" ] && [ "${f}" != "${shared_knobs}" ]; then
+    rm -f "${f}"; rmdir "${f%/*}" 2>/dev/null || :; reload='yes'
+  fi
+done
+
+# THE EXPOSE TIMER AND ITS FIRST RUN: started, never enabled, so that a machine
+# with /shared off runs nothing every 30 seconds. The service is started here
+# once, because the timer counts only from its last run (OnUnitActiveSec=; see
+# the timer for why it has nothing else). --no-block, because this runs at boot
+# ahead of everything either waits for.
+if [ "${shared_mode}" != 'off' ]; then
+  systemctl start --no-block hdw4s-shared-expose.timer hdw4s-shared-expose.service 2>/dev/null ||
+    echo 'hdw4s: WARNING: could not start hdw4s-shared-expose.timer; /shared stays empty.' >&2
+fi
 fi
 
 # NOT inside the guard above: a --template run writes 10-home.conf, and a

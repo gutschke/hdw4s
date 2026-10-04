@@ -94,6 +94,10 @@ sandbox() {
   CONF="${SB}/etc/hdw4s.conf"; SLOTS="${SB}/etc/instances"
   DROPIN="${SB}/dropin"; HDW4S_PROFILE_DIR="${SB}/profiles"
   ETCDIR="${SB}/etc"
+  # The root namespace's /shared, which "hdw4s check" asks the minter about:
+  # here, never the machine's own.
+  export HDW4S_SHARED_MARK="${SB}/shared-mark" HDW4S_SHARED_MOUNTPOINT="${SB}/shared-point" \
+         HDW4S_SHARED_VIEW_STATE="${SB}/shared-view"
   : > "${CONF}"
 SETUP
 }
@@ -1209,6 +1213,2620 @@ echo '== the boot run refuses a table that still offers the retired seat names =
   cli="$(sed -n "s/^SEAT_PREFIX=//p" "${ROOT}/hdw4s")"
   is  'the CLI spells the seat prefix' "${cli}" "'_hdw4s_'"
   is  'and the minter spells it the same' "$(sed -n "s/^SEAT_PREFIX=//p" "${ROOT}/hdw4s-ephemeral-slots")" "${cli}"
+)
+
+
+# THE /SHARED WIRING (seat B's group): the boot run's drop-ins and knobs, the
+# tmpfiles line, the expose service's decisions, and the "hdw4s check" rows.
+# The guard itself is hdw4s-shared-sweep's and is tested with it; here it is a
+# stand-in that answers as told, so that every branch of the CALLERS is seen
+# taking both directions. Real mounts are not made here (the suite runs
+# unprivileged, in CI too); what a mount, a bind and propagation do is the
+# integration's to show on a machine.
+group_shared_wiring() {
+echo '== /shared: the boot run binds it only when asked, never optionally, and takes it away =='
+# Off means NONE of its files: a drop-in left behind is a /shared nobody turned
+# on. On means the desktops bind /run/hdw4s-shared, which always exists, and
+# NEVER with "-": an optional bind whose source is missing leaves an existing
+# /shared on the root filesystem writable from every desktop (systemd 255).
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  mkdir -p "${SB}/etc" "${SB}/var"
+  printf '%s\n' '1 _hdw4s_0 ephemeral' > "${SB}/etc/instances"
+  # list-units answers from ${SB}/units, as systemctl prints it, and fails
+  # when ${SB}/units-fail exists: systemd that cannot be asked.
+  systemctl() { echo "systemctl $*" >> "${SB}/calls"
+                [ "$1" != 'list-units' ] ||
+                  { [ ! -e "${SB}/units" ] || cat "${SB}/units"; [ ! -e "${SB}/units-fail" ]; }; }
+  getent() { [ "$1 $2" = 'group hdw4s-relay' ] && echo 'hdw4s-relay:x:999:' && return 0
+             command getent "$@"; }
+  install() { local args=(); while [ $# -gt 0 ]; do
+                case "$1" in -g) shift 2;; *) args+=("$1"); shift;; esac; done
+              command install "${args[@]}"; }
+  # SB exported: the stand-ins run inside the boot run, which has nounset on,
+  # and one naming an unset SB fails the run instead of recording the call.
+  export -f systemctl getent install; export SB
+  boot() { : > "${SB}/calls"
+           HDW4S_ETCDIR="${SB}/etc" HDW4S_USERDB_DIR="${SB}/userdb" \
+           HDW4S_NS_DIR="${SB}/ns" HDW4S_PROFILE_ROOT="${SB}/profile" \
+           HDW4S_DROPIN_DIR="${SB}/system" HDW4S_PROXY_RUNDIR="${SB}/proxy" \
+           HDW4S_TEARDOWN_DIR="${SB}/teardown" HDW4S_START_DIR="${SB}/start" \
+           HDW4S_INVITE_DIR="${SB}/invite" HDW4S_INCARNATION_DIR="${SB}/incarn" \
+           HDW4S_STREAM_DIR="${SB}/stream" HDW4S_DCONF_DB_DIR="${SB}/no-dconf" \
+           HDW4S_SHARED_MARK="${SB}/var/.shared-mountpoint" \
+           HDW4S_SHARED_MOUNTPOINT="${SB}/shared" \
+           HDW4S_SHARED_EXPOSE="${SB}/run/hdw4s-shared" HDW4S_SHARED_VIEW_STATE="${SB}/view" \
+           "${ROOT}/hdw4s-ephemeral-slots" 2>&1; }
+  conf() { printf '%s\n' 'HDW4S_EPHEMERAL_SLOTS=0' "$@" > "${SB}/etc/hdw4s.conf"; }
+  d1="${SB}/system/hdw4s@.service.d/50-shared.conf"
+  d2="${SB}/system/hdw4s-ephemeral@.service.d/50-shared.conf"
+  tmpfs_knobs="${SB}/system/hdw4s-shared-sweep@run-hdw4s\\x2dshared\\x2dstore.service.d/50-knobs.conf"
+  any() { local f; for f in "$@"; do [ -e "${f}" ] && { echo there; return; }; done; echo absent; }
+
+  conf; out="$(boot)"; rc=$?
+  is  'off by default: the boot run succeeds' "${rc}" '0'
+  is  'and writes no drop-in for either desktop' "$(any "${d1}" "${d2}")" 'absent'
+  is  'and no sweep settings' "$(any "${SB}"/system/hdw4s-shared-sweep@*)" 'absent'
+  hasnt 'and starts nothing every 30 seconds' "$(cat "${SB}/calls")" 'hdw4s-shared-expose'
+  hasnt 'and says nothing about /shared' "${out}" 'HDW4S_SHARED'
+
+  conf HDW4S_SHARED=tmpfs HDW4S_SHARED_IDLE=45m HDW4S_SHARED_MAX_AGE=3d
+  out="$(boot)"; rc=$?
+  is  'tmpfs: the boot run succeeds' "${rc}" '0'
+  is  'named desktops bind /run/hdw4s-shared as /shared' \
+    "$(grep '^BindPaths=' "${d1}" 2>/dev/null)" 'BindPaths=/run/hdw4s-shared:/shared'
+  is  'and so do ephemeral ones' \
+    "$(grep '^BindPaths=' "${d2}" 2>/dev/null)" 'BindPaths=/run/hdw4s-shared:/shared'
+  # RED ARM in the assertion: "-/" anywhere in a directive line is the optional
+  # form, whatever path follows it.
+  hasnt 'never the optional form' "$(grep -h '^[A-Za-z]*Paths=' "${d1}" "${d2}" 2>/dev/null)" '=-'
+  hasnt 'and never the store, which may be absent or dead' "$(cat "${d1}" "${d2}" 2>/dev/null)" 'hdw4s-shared-store'
+  has 'the expose timer is started, with the first run' "$(cat "${SB}/calls")" \
+    'start --no-block hdw4s-shared-expose.timer hdw4s-shared-expose.service'
+  hasnt 'and never enabled' "$(cat "${SB}/calls")" 'enable'
+  has 'the sweep gets IDLE verbatim, under the store root it is named after' \
+    "$(cat "${tmpfs_knobs}" 2>/dev/null)" 'Environment=HDW4S_SHARED_IDLE=45m'
+  has 'and MAX_AGE' "$(cat "${tmpfs_knobs}" 2>/dev/null)" 'Environment=HDW4S_SHARED_MAX_AGE=3d'
+  is  'the mount point is marked as this feature'"'"'s to remove' \
+    "$(any "${SB}/var/.shared-mountpoint")" 'there'
+
+  conf HDW4S_SHARED=tmpfs HDW4S_SHARED_SWEEP=external; boot >/dev/null
+  is  'SWEEP=external: no sweep settings on this machine' \
+    "$(any "${SB}"/system/hdw4s-shared-sweep@*/50-knobs.conf)" 'absent'
+  is  'but the desktops still bind it' "$(any "${d1}")" 'there'
+
+  conf HDW4S_SHARED=source HDW4S_SHARED_SOURCE=/srv/hdw4s-shared; boot >/dev/null
+  is  'source: the sweep is named after HDW4S_SHARED_SOURCE' \
+    "$(any "${SB}/system/hdw4s-shared-sweep@srv-hdw4s\\x2dshared.service.d/50-knobs.conf")" 'there'
+  is  'and the tmpfs store'"'"'s settings went with the change' "$(any "${tmpfs_knobs}")" 'absent'
+
+  # A value that could be a "%" specifier or a quote never reaches a unit file.
+  conf HDW4S_SHARED=tmpfs 'HDW4S_SHARED_IDLE=30m%n'; out="$(boot)"
+  hasnt 'a duration with a stray character is not written' "$(cat "${tmpfs_knobs}" 2>/dev/null)" 'IDLE'
+  has 'and is refused out loud' "${out}" 'is not a duration'
+
+  # THE OLD SWITCH. Nothing turns off silently.
+  conf HDW4S_SHARED_SIZE=1G; out="$(boot)"; rc=$?
+  is  'HDW4S_SHARED_SIZE alone no longer turns it on' "$(any "${d1}" "${d2}")" 'absent'
+  has 'and the boot says so, with the line to add' "${out}" 'add HDW4S_SHARED=tmpfs'
+  is  'and still succeeds' "${rc}" '0'
+  conf HDW4S_SHARED=off HDW4S_SHARED_SIZE=1G; out="$(boot)"
+  hasnt 'but not when it was turned off on purpose' "${out}" 'HDW4S_SHARED_SIZE is set'
+  conf HDW4S_SHARED_EXPIRY=30m; out="$(boot)"
+  has 'the retired expiry is named as read by nothing' "${out}" 'HDW4S_SHARED_EXPIRY is retired'
+
+  # A typo in an optional feature must not take the pool down with it.
+  conf HDW4S_SHARED=yes; out="$(boot)"; rc=$?
+  is  'an unknown mode does not fail the boot run that mints the pool' "${rc}" '0'
+  has 'it is refused out loud' "${out}" "not 'yes'"
+  is  'and /shared stays off' "$(any "${d1}" "${d2}")" 'absent'
+
+  # Back to off, from on, without a reboot (an upgrade re-runs this).
+  conf HDW4S_SHARED=tmpfs; boot >/dev/null
+  mkdir -p "${SB}/shared"
+  conf; boot >/dev/null
+  is  'turned off: every drop-in is gone' "$(any "${d1}" "${d2}" "${tmpfs_knobs}")" 'absent'
+  is  'and the empty mount point this feature made' "$(any "${SB}/shared")" 'absent'
+  is  'and its mark' "$(any "${SB}/var/.shared-mountpoint")" 'absent'
+  # One that was there before the feature was turned on is not ours.
+  mkdir -p "${SB}/shared"; conf HDW4S_SHARED=tmpfs; boot >/dev/null; conf; boot >/dev/null
+  is  'a /shared that existed before is left alone' "$(any "${SB}/shared")" 'there'
+  rmdir "${SB}/shared"
+
+  # THE MARK GOES ONLY WITH THE DIRECTORY. It is the only record that /shared
+  # is this feature's; dropped while the directory stays, the next boot reads
+  # /shared as the administrator's and never touches it again.
+  conf HDW4S_SHARED=tmpfs; boot >/dev/null; mkdir -p "${SB}/shared"; : > "${SB}/shared/kept"
+  conf; out="$(boot)"; rc=$?
+  is  'turned off with /shared not empty: the boot run still succeeds' "${rc}" '0'
+  is  'and /shared is kept (rmdir, never rm)' "$(any "${SB}/shared/kept")" 'there'
+  is  'RED ARM: and so is its mark, because the rmdir failed' "$(any "${SB}/var/.shared-mountpoint")" 'there'
+  has 'and it says so' "${out}" 'could not be removed'
+  rm -f "${SB}/shared/kept"; rmdir "${SB}/shared"; rm -f "${SB}/var/.shared-mountpoint"
+
+  # NEVER WHILE A DESKTOP RUNS (design M4, measured): removing a directory that
+  # is a mount point in a desktop's namespace succeeds, and DETACHES /shared
+  # from that desktop. An upgrade re-runs this live, after HDW4S_SHARED=off was
+  # written and before the reboot that was to apply it.
+  conf HDW4S_SHARED=tmpfs; boot >/dev/null; mkdir -p "${SB}/shared"
+  printf '%s\n' 'hdw4s-ephemeral@_hdw4s_0.service loaded active running hdw4s ephemeral desktop _hdw4s_0' \
+    > "${SB}/units"
+  conf; out="$(boot)"; rc=$?
+  is  'turned off with a desktop active: the boot run still succeeds' "${rc}" '0'
+  is  'RED ARM: and /shared is NOT removed from under it' "$(any "${SB}/shared")" 'there'
+  is  'and its mark is kept for the run that can' "$(any "${SB}/var/.shared-mountpoint")" 'there'
+  has 'and it says which desktop' "${out}" 'hdw4s-ephemeral@_hdw4s_0.service'
+  has 'and that the boot run with it off will remove it' "${out}" 'The next boot with HDW4S_SHARED off removes it'
+  # Every state but inactive and failed is a desktop that holds the mount.
+  for st in activating deactivating reloading; do
+    printf '%s\n' "  hdw4s@alice.service loaded ${st} start hdw4s desktop alice" > "${SB}/units"
+    boot >/dev/null
+    is  "a desktop ${st} also keeps it" "$(any "${SB}/shared")" 'there'
+  done
+  # systemctl marks a failed unit with a bullet; it is still not running.
+  printf '%s\n' '\xe2\x97\x8f hdw4s@bob.service loaded failed failed hdw4s desktop bob' \
+         'hdw4s-ephemeral@_hdw4s_1.service loaded inactive dead hdw4s ephemeral desktop' > "${SB}/units"
+  printf '%b' "$(cat "${SB}/units")" > "${SB}/units.b"; mv "${SB}/units.b" "${SB}/units"
+  : > "${SB}/units-fail"
+  out="$(boot)"
+  is  'systemd that cannot be asked keeps it too' "$(any "${SB}/shared" "${SB}/var/.shared-mountpoint")" 'there'
+  has 'and says why' "${out}" 'could not ask systemd'
+  rm -f "${SB}/units-fail"; boot >/dev/null
+  is  'only inactive and failed desktops: /shared goes' "$(any "${SB}/shared")" 'absent'
+  is  'and only then its mark' "$(any "${SB}/var/.shared-mountpoint")" 'absent'
+  rm -f "${SB}/units"
+
+  # ONE IMPLEMENTATION FOR ALL THREE CALLERS. postrm runs after the package's
+  # files are gone, so the removal belongs to prerm, where the code still
+  # exists; uninstall.sh calls the same code. A copy in either would be the
+  # mark-before-rmdir defect again, kept in step by hand.
+  hasnt 'RED ARM: postrm no longer removes the mark itself' \
+    "$(cat "${ROOT}/debian/postrm")" 'rm -f /var/lib/hdw4s/.shared-mountpoint'
+  hasnt 'RED ARM: nor does uninstall.sh' "$(cat "${ROOT}/uninstall.sh")" \
+    'rm -f /var/lib/hdw4s/.shared-mountpoint'
+  has 'prerm calls the one implementation' "$(cat "${ROOT}/debian/prerm")" \
+    'hdw4s-ephemeral-slots --shared-view release-for-removal'
+  has 'and so does uninstall.sh' "$(cat "${ROOT}/uninstall.sh")" \
+    'hdw4s-ephemeral-slots" --shared-view release-for-removal'
+)
+
+echo '== the /shared tool: its guard, its sweep and its relay =='
+# hdw4s-shared-sweep is the ONE implementation of the /shared guard: the expose
+# service and "hdw4s check" call it rather than repeat it. So its refusals are
+# pinned here clause by clause, by the clause TOKEN it prints and never by a
+# word of its prose, because a guard refusing for the wrong reason passes every
+# test that only asks whether it refused.
+#
+# Most of this needs real mounts with real flags, which an unprivileged user
+# gets only inside a user namespace of its own (unshare -Urm). Where the kernel
+# refuses one -- Ubuntu's kernel.apparmor_restrict_unprivileged_userns=1, which
+# is the GitHub runner's default until the workflow turns it off -- every
+# assertion that needed it is recorded as FAILED with that reason, never
+# skipped: a guard nobody has seen refuse is not known to refuse.
+( set +e
+  W="${ROOT}/hdw4s-shared-sweep"
+  T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  # The parser, the source check and the rate limit, with the resolver stood
+  # in for: each layer has to be seen refusing on its own (threat T2), or a
+  # broken one hides behind the other for ever.
+  out="$(python3 - "${W}" <<'PY' 2>&1
+import importlib.machinery, importlib.util, os, random, struct, sys
+loader = importlib.machinery.SourceFileLoader("sweep", sys.argv[1])
+spec = importlib.util.spec_from_loader("sweep", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+H = m.REC_HEAD
+def rec(kind, name, fileid=7, flags=0):
+    return H.pack(kind, flags, len(name), fileid) + name
+V = bytes([1])
+good = V + rec(1, b"a/b.txt") + rec(2, b"", 0)
+print("accept", len(m.parse_datagram(good)))
+bad = {
+  "empty": b"", "version": bytes([2]) + rec(1, b"x"), "kind": V + rec(3, b"x"),
+  "flags": V + rec(1, b"x", flags=1),
+  "length": V + H.pack(1, 0, 9, 7) + b"x",
+  "trailing": V + rec(1, b"x") + b"\0",
+  "nul": V + rec(1, b"a\0b"), "dotdot": V + rec(1, b"a/../b"),
+  "absolute": V + rec(1, b"/etc/hostname"), "emptyname": V + rec(1, b""),
+  "dot": V + rec(1, b"./a"), "emptycomp": V + rec(1, b"a//b"),
+  "trailslash": V + rec(1, b"a/"), "utf8": V + rec(1, b"\xff\xfe"),
+  "long": V + rec(1, b"a" * 4097), "hbname": V + rec(2, b"x", 0),
+  "hbfileid": V + rec(2, b"", 5), "oversize": V + rec(1, b"a" * 4000) * 3,
+}
+taken = []
+for k, d in sorted(bad.items()):
+    try:
+        m.parse_datagram(d); taken.append(k)
+    except m.Malformed:
+        pass
+print("taken", ",".join(taken) or "none", len(bad))
+print("mapped", m.source_address(("::ffff:192.0.2.10", 1, 0, 0)))
+print("scoped", m.source_address(("fe80::1%eth0", 1, 0, 0)))
+class Stub:
+    def __init__(self): self.n = 0
+    def touch(self, name, fileid): self.n += 1; return "touched"
+allow = m.parse_allow("192.0.2.10")
+st = Stub(); srv = m.Server(-1, allow, st)
+for i in range(10000):
+    srv.handle(good, ("::ffff:198.51.%d.%d" % (i // 250, i % 250), 1, 0, 0))
+print("strangers", len(srv.sources), srv.other["received"], st.n)
+srv.handle(V + rec(1, b"a/../b"), ("192.0.2.10", 1))
+print("malformed-acts", st.n)
+big = V + b"".join(rec(1, b"f%03d" % i) for i in range(400))
+for _ in range(6):
+    srv.handle(big, ("192.0.2.10", 1))
+print("rate", st.n, srv.counts.get("drop-rate-source", 0))
+random.seed(1)
+st2 = Stub(); srv2 = m.Server(-1, allow, st2)
+for i in range(3000):
+    blob = bytes(random.getrandbits(8) for _ in range(random.randrange(0, 64)))
+    if i % 2: blob = V + blob
+    srv2.handle(blob, ("192.0.2.10", 1))
+print("fuzz", sum(v for k, v in srv2.counts.items() if k == "received"),
+      len([k for k in srv2.counts if k.startswith("drop-internal")]))
+import tempfile
+d = tempfile.mkdtemp(); fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+open(os.path.join(d, "x"), "w").close(); os.mkdir(os.path.join(d, "sub"))
+g = m.Gate(fd); refused = []
+for n in ("sub/../x", "..", ".", "", "a/b", "x\0"):
+    try:
+        g.unlink(fd, n, None)
+    except m.Unsafe:
+        refused.append(1)
+print("names", len(refused), os.path.exists(os.path.join(d, "x")))
+srv3 = m.Server(-1, m.parse_allow("192.0.2.10"), Stub()); srv3.started -= 200
+print("silence", srv3.silent(120), srv3.silent(1800))
+print("sandbox", m.unsandboxed(0, True, False), m.unsandboxed(0, True, True),
+      m.unsandboxed(0, False, False), m.unsandboxed(1000, True, False))
+m.initial_userns = lambda: True
+host = sorted(m._root_uids())
+m.initial_userns = lambda: False
+# The store rule accepting a root owned by the overflow uid says NOTHING: it is
+# every container's steady state and the guard runs there every 30 seconds.
+import io, types
+ov = int(open("/proc/sys/kernel/overflowuid").read())
+sd = tempfile.mkdtemp(); os.mkdir(os.path.join(sd, "table")); sfd = os.open(sd, os.O_RDONLY | os.O_DIRECTORY)
+err, sys.stderr = sys.stderr, io.StringIO()
+m._store_rule(sfd, types.SimpleNamespace(uid=ov, mode=0o40755), types.SimpleNamespace(root="/"))
+said, sys.stderr = sys.stderr.getvalue(), err
+print("overflow-quiet", len(said))
+print("rootuids", host, sorted(m._root_uids()) == [0, int(open("/proc/sys/kernel/overflowuid").read())])
+PY
+)"
+  is  'the relay parser takes a well-formed batch' "$(sed -n 's/^accept //p' <<<"${out}")" '2'
+  is  'and refuses every malformed case, the whole datagram' \
+      "$(sed -n 's/^taken //p' <<<"${out}")" 'none 18'
+  is  'a v4-mapped source is judged as the v4 address it is' \
+      "$(sed -n 's/^mapped //p' <<<"${out}")" '192.0.2.10'
+  is  'and a link-local source without its scope' "$(sed -n 's/^scoped //p' <<<"${out}")" 'fe80::1'
+  is  '10000 spoofed strangers: one bucket, nothing parsed, nothing touched' \
+      "$(sed -n 's/^strangers //p' <<<"${out}")" '0 10000 0'
+  is  'a malformed datagram from an allowed source touches nothing' \
+      "$(sed -n 's/^malformed-acts //p' <<<"${out}")" '0'
+  is  'the rate limit counts announcements, not datagrams' \
+      "$(sed -n 's/^rate //p' <<<"${out}")" '2000 400'
+  is  'random bytes never escape the per-datagram handler' \
+      "$(sed -n 's/^fuzz //p' <<<"${out}")" '3000 0'
+  is  'the deletion gate refuses every name that is not one component' \
+      "$(sed -n 's/^names //p' <<<"${out}")" '6 True'
+  is  'a silent allowed client is warned about after --silence, not before' \
+      "$(sed -n 's/^silence //p' <<<"${out}")" "['192.0.2.10'] []"
+  is  'root on the host with a writable / is seen as unsandboxed, nothing else' \
+      "$(sed -n 's/^sandbox //p' <<<"${out}")" 'True False False False'
+  is  'on the host only uid 0 owns a store root; in a container also the overflow uid' \
+      "$(sed -n 's/^rootuids //p' <<<"${out}")" '[0] True'
+  is  'a store root owned by the overflow uid is accepted without a word' \
+      "$(sed -n 's/^overflow-quiet //p' <<<"${out}")" '0'
+  is  'and the overflow uid is read from the kernel, never written down' \
+      "$(grep -c '65534' "${W}")" '0'
+
+  # PM P12: ProtectSystem=strict leaves /run WRITABLE inside the unit
+  # (measured on systemd 255, G3). Every unit of the tool's package that runs
+  # as root or holds a DAC/FOWNER capability must say ReadOnlyPaths=/run.
+  # harden@ is exempt by design: it remounts in the host's namespace.
+  need_ro='' missing_ro=''
+  while read -r u; do
+    case "${u}" in hdw4s-shared-harden@.service) continue;; esac
+    f="${ROOT}/${u}"
+    # One grep, no pipe: under pipefail "grep | grep -q" reads as false when
+    # the first grep is killed by SIGPIPE after the second has matched.
+    if ! grep -qx 'DynamicUser=yes' "${f}" ||
+       grep -qE '^(CapabilityBoundingSet|AmbientCapabilities)=.*(DAC_|FOWNER)' "${f}"; then
+      need_ro="${need_ro} ${u}"
+      grep -qx 'ReadOnlyPaths=/run' "${f}" || missing_ro="${missing_ro} ${u}"
+    fi
+  done < <(awk '!/^#/ && $2 == "usr/lib/systemd/system" && $1 ~ /\.service$/ {print $1}' \
+               "${ROOT}/debian/hdw4s-shared-sweep.install")
+  is  'the units that run as root or hold DAC/FOWNER are found' \
+      "${need_ro}" ' hdw4s-shared-sweep@.service hdw4s-shared-watch@.service hdw4s-shared-relay-server@.service'
+  is  'and every one makes /run read-only, which strict does not' "${missing_ro}" ''
+
+  # No state of the tree, however churned between the look and the call,
+  # raises out of a pass (S-fuzz on a box, 2026-10-02: the watcher died of an
+  # IsADirectoryError out of its fast path, which a visitor can cause at
+  # will). Every errno a racing tree can produce is forced AT each call the
+  # sweep, the watcher's pass and its fast path make.
+  out="$(python3 - "${W}" <<'PY' 2>&1
+# Every per-entry OSError the kernel can return at a call the sweep, the
+# watcher's pass or its fast path makes, injected AT the call: none may escape.
+import errno, importlib.machinery, importlib.util, os, shutil, sys, tempfile, time
+loader = importlib.machinery.SourceFileLoader("sweep", sys.argv[1])
+spec = importlib.util.spec_from_loader("sweep", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+ERRNOS = ("EISDIR", "ENOTDIR", "ENOTEMPTY", "ENOENT", "ELOOP", "EBUSY",
+          "EPERM", "EACCES", "EROFS", "EIO", "ENAMETOOLONG", "ESTALE")
+real = {"unlink": os.unlink, "rmdir": os.rmdir, "fchmod": os.fchmod,
+        "listdir": os.listdir, "open": os.open, "statx": m.statx}
+fired = {}
+def build():
+    d = tempfile.mkdtemp()
+    os.mkfifo(os.path.join(d, "fifo")); os.symlink("/etc", os.path.join(d, "ln"))
+    open(os.path.join(d, "f"), "w").close(); os.chmod(os.path.join(d, "f"), 0o600)
+    os.makedirs(os.path.join(d, "a", "b")); os.chmod(os.path.join(d, "a"), 0o700)
+    open(os.path.join(d, "a", "g"), "w").close()
+    return d
+def inject(site, code):
+    def boom(*a, **k):
+        # Only per-entry calls: never the table's own setup (statx of b"",
+        # listdir/open of the table fd itself before the walk starts).
+        if site == "statx" and a[1] in (b"", ""):
+            return real[site](*a, **k)
+        fired[site] = fired.get(site, 0) + 1
+        raise OSError(getattr(errno, code), os.strerror(getattr(errno, code)))
+    if site == "statx":
+        m.statx = boom
+    else:
+        setattr(os, site, boom)
+def restore():
+    for k in ("unlink", "rmdir", "fchmod", "listdir", "open"):
+        setattr(os, k, real[k])
+    m.statx = real["statx"]
+escapes = []
+for site in ("unlink", "rmdir", "fchmod", "statx", "listdir", "open"):
+    for code in ERRNOS:
+        for mode in ("sweep", "pass", "fast"):
+            d = build(); fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+            mnt = m.fstatx(fd).mnt_id
+            gate_table = fd
+            inject(site, code)
+            try:
+                c = m.Counts()
+                if mode == "sweep":
+                    m.sweep(fd, mnt, 1800, 86400, time.time() + 86400, c)
+                elif mode == "pass":
+                    m.sweep(fd, mnt, 0, 0, time.time(), c, expire=False)
+                else:
+                    m.fast_path(fd, [b"fifo", b"ln", b"f", b"a"], c)
+            except Exception as e:
+                escapes.append("%s/%s/%s:%s" % (site, code, mode, type(e).__name__))
+            finally:
+                restore(); os.close(fd); shutil.rmtree(d, ignore_errors=True)
+print("escapes", len(escapes), " ".join(escapes))
+print("fired", " ".join("%s=%s" % (k, "yes" if v else "no") for k, v in sorted(fired.items())))
+PY
+)"
+  is  'no errno forced at any call escapes the sweep, the pass or the fast path' \
+      "$(sed -n 's/^escapes //p' <<<"${out}" | sed 's/ *$//')" '0'
+  is  '  and every call site was actually reached by the fault' \
+      "$(sed -n 's/^fired //p' <<<"${out}")" 'fchmod=yes listdir=yes open=yes rmdir=yes statx=yes unlink=yes'
+
+  # The package's maintainer scripts (PM P14): debhelper does not act on
+  # template instances, so an upgrade restarts what is RUNNING onto the new
+  # code and starts nothing that was not; a removal stops every instance.
+  # systemctl is a stand-in that reports one active, one inactive and one
+  # failed instance and records everything else it is asked.
+  mkdir -p "${T}/bin"
+  cat > "${T}/bin/systemctl" <<'SH'
+#!/bin/sh
+if [ "$1" = 'list-units' ]; then
+  printf '%s\n' 'hdw4s-shared-watch@s.service loaded active running w' \
+                 'hdw4s-shared-relay-server@s.service loaded inactive dead r' \
+                 'hdw4s-shared-relay-client@s.service loaded failed failed c'
+  exit 0
+fi
+echo "$*" >> "${CALLS}"
+SH
+  chmod +x "${T}/bin/systemctl"
+  mscript() { CALLS="${T}/calls" PATH="${T}/bin:${PATH}" sh "${ROOT}/debian/hdw4s-shared-sweep.$1" "$2" >/dev/null 2>&1
+              tr '\n' ';' < "${T}/calls" 2>/dev/null; rm -f "${T}/calls"; }
+  if [ -d /run/systemd/system ]; then
+    is  'an upgrade restarts exactly the instances that were running' \
+        "$(mscript postinst configure)" 'daemon-reload;try-restart hdw4s-shared-watch@s.service;'
+    is  'a removal stops every instance' "$(mscript prerm remove)" \
+        'stop hdw4s-shared-watch@s.service;stop hdw4s-shared-relay-server@s.service;stop hdw4s-shared-relay-client@s.service;'
+    is  'and an upgrade stops none' "$(mscript prerm upgrade)" ''
+  else
+    for _ in 1 2 3; do bad 'maintainer scripts' 'no /run/systemd/system here: the scripts would do nothing'; done
+  fi
+
+  # IN-UNIT POSITIVE CONTROL for the calls each role makes (PM P15/P16). The
+  # packaged relay server dropped every announcement as resolve-ENOSYS while
+  # the same tool by hand worked: RestrictSUIDSGID= turns openat2 into ENOSYS.
+  # So each role's real calls run in a transient unit carrying that role's
+  # OWN syscall-shaping settings, read from its unit file, not retyped. What
+  # this cannot carry (DynamicUser, ProtectSystem, ReadWritePaths, the
+  # capability sets) needs root, and is the box's job: private/unit-probe.sh.
+  cat > "${T}/sysprobe.py" <<'PY'
+# Run each role's REAL system calls inside a transient unit carrying that
+# role's OWN syscall-shaping settings, read from its unit file, so a filter
+# (or an option that installs one) blocking a call the role needs goes red.
+# argv: tool  root(the tree with the unit files)  outer [EXTRA=VALUE]
+# EXTRA is one more property for every role: the control that shows the probe
+# can go red (RestrictSUIDSGID=yes reproduces the relay's ENOSYS).
+import importlib.machinery, importlib.util, os, socket, stat, subprocess, sys, tempfile, time
+TOOL, ROOT = sys.argv[1], sys.argv[2]
+# Settings that install seccomp filters or otherwise change which calls work.
+KEYS = ("SystemCallFilter", "SystemCallErrorNumber", "SystemCallArchitectures",
+        "RestrictSUIDSGID", "MemoryDenyWriteExecute", "RestrictNamespaces",
+        "LockPersonality", "RestrictRealtime", "PrivateDevices", "ProtectClock",
+        "ProtectKernelModules", "ProtectKernelLogs", "ProtectHostname",
+        "RestrictAddressFamilies", "NoNewPrivileges")
+ROLES = {"server": "hdw4s-shared-relay-server@.service",
+         "sweep": "hdw4s-shared-sweep@.service",
+         "watch": "hdw4s-shared-watch@.service",
+         "client": "hdw4s-shared-relay-client@.service"}
+
+def load():
+    l = importlib.machinery.SourceFileLoader("sweep", TOOL)
+    sp = importlib.util.spec_from_loader("sweep", l)
+    m = importlib.util.module_from_spec(sp); l.exec_module(m); return m
+
+def role(name):
+    """The calls the role makes, on scratch files; prints one verdict."""
+    m = load()
+    d = tempfile.mkdtemp(dir=os.environ.get("PROBE_DIR"))
+    fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+    open(os.path.join(d, "f"), "w").close()
+    if name == "server":
+        ino = os.stat(os.path.join(d, "f")).st_ino
+        r = m.Resolver(fd).touch(b"f", ino)
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0); s.bind(("::", 0))
+        # The multicast START path, as the server runs it: enumerate the
+        # interfaces, open the wildcard socket, join. Under the unit's own
+        # RestrictAddressFamilies= -- the real server died EAFNOSUPPORT here.
+        try:
+            srv = m.Server(-1, [], resolver=object(), group=m.RELAY_GROUP)
+            ms = m.multicast_socket(0)
+            names, _, _ = m.rejoin(ms, srv, None)
+            j = "joined" if names else "joined-none"
+        except OSError as e:
+            j = "start-%s" % e.strerror
+        print(name, r, j)
+    elif name in ("sweep", "watch"):
+        os.mkfifo(os.path.join(d, "fifo")); os.mkdir(os.path.join(d, "sub"))
+        os.chmod(os.path.join(d, "f"), 0o600)
+        c = m.Counts()
+        m.sweep(fd, m.fstatx(fd).mnt_id, 1800, 86400, time.time() + 86400, c)
+        bad = c.errors + sum(c.refused.values())
+        if name == "watch":
+            m.handle_of(fd); m.capabilities(); m.raise_fd_limit()
+            m.fast_path(fd, [b"x"], m.Counts())
+            # fanotify_init needs CAP_SYS_ADMIN; EPERM is "allowed, not
+            # privileged", ENOSYS is "the filter took it away".
+            r = m._libc.fanotify_init(0x1, os.O_RDONLY)
+            import ctypes
+            if r < 0 and ctypes.get_errno() != 1:
+                bad += 1
+        print(name, "ok" if bad == 0 and os.listdir(d) == [] else
+              "BLOCKED errors=%d left=%s" % (bad, os.listdir(d)))
+    else:
+        ino = m._libc.inotify_init1(0o2000000 | 0o4000)
+        w = m._libc.inotify_add_watch(ino, ("/proc/self/fd/%d" % fd).encode(), 0x20)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.sendto(b"x", ("127.0.0.1", 9))
+        print(name, "ok" if ino >= 0 and w >= 0 else "BLOCKED")
+
+def props(unit):
+    out = []
+    for line in open(os.path.join(ROOT, unit)):
+        k, _, v = line.strip().partition("=")
+        if k in KEYS:
+            out += ["-p", "%s=%s" % (k, v)]
+    return out
+
+if sys.argv[3] == "probe":
+    role(sys.argv[4]); sys.exit(0)
+for name, unit in ROLES.items():
+    extra = ["-p", sys.argv[4]] if len(sys.argv) > 4 else []
+    cmd = ["systemd-run", "--user", "--quiet", "--wait", "--pipe", "--collect",
+           "-E", "PROBE_DIR=%s" % os.environ["PROBE_DIR"]] + props(unit) + extra + \
+          [sys.executable, "-I", os.path.abspath(__file__), TOOL, ROOT, "probe", name]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    lines = [l for l in r.stdout.splitlines() if l.startswith(name + " ")]
+    print(lines[-1] if lines else "%s NORUN %s" % (name, (r.stderr.strip().splitlines() or ["?"])[-1]))
+PY
+  if systemd-run --user --quiet --wait --pipe --collect true 2>/dev/null; then
+    mkdir -p "${T}/probe"
+    out="$(PROBE_DIR="${T}/probe" python3 "${T}/sysprobe.py" "${W}" "${ROOT}" outer 2>&1)"
+    is  'in its own unit settings, the relay server touches an atime and joins its group' "$(sed -n 's/^server //p' <<<"${out}")" 'touched joined'
+    is  'and the sweep expires, widens and drops non-files' "$(sed -n 's/^sweep //p' <<<"${out}")" 'ok'
+    is  'and the watcher makes its calls' "$(sed -n 's/^watch //p' <<<"${out}")" 'ok'
+    is  'and the relay client watches and sends' "$(sed -n 's/^client //p' <<<"${out}")" 'ok'
+    out="$(PROBE_DIR="${T}/probe" python3 "${T}/sysprobe.py" "${W}" "${ROOT}" outer RestrictSUIDSGID=yes 2>&1)"
+    is  '  control: with RestrictSUIDSGID= it is red, as on the box' \
+        "$(sed -n 's/^server //p' <<<"${out}" | cut -d" " -f1)" 'resolve-ENOSYS'
+  else
+    for _ in 1 2 3 4 5; do
+      bad 'in-unit syscall control' 'systemd-run --user does not work here, so it did not run'
+    done
+  fi
+  # EFFECTIVE, not declared (systemd seat F7d). DynamicUser= implies
+  # RestrictSUIDSGID=, which answers openat2 with ENOSYS; a check reading the
+  # unit file missed it, twice. systemd-analyze security --offline computes
+  # the effective value from the file with no root. The relay SERVER runs
+  # openat2, so in its unit it must be off; the relay CLIENT is a DynamicUser
+  # unit, so in its unit it must read on -- the positive control that the
+  # analysis does see implications.
+  eff() { systemd-analyze security --offline=true --json=short "$1" 2>/dev/null |
+            python3 -c "import json,sys; print(*[x['set'] for x in json.load(sys.stdin) if x.get('json_field') == 'RestrictSUIDSGID'])" 2>/dev/null; }
+  is  'the relay client (DynamicUser=) reads RestrictSUIDSGID on, effectively' \
+      "$(eff "${ROOT}/hdw4s-shared-relay-client@.service")" 'True'
+  is  'and the relay server, which needs openat2, reads it off, effectively' \
+      "$(eff "${ROOT}/hdw4s-shared-relay-server@.service")" 'False'
+
+  # Every unit of the package an administrator ENABLES must have an [Install]
+  # section wanting it by its store's mount (%i.mount): without one it is
+  # "static", "systemctl enable" refuses it, and an enabled instance does not
+  # come back after a boot -- the relay units shipped that way. The ONE
+  # deliberately static unit is the sweep's service, which its timer starts.
+  static='hdw4s-shared-sweep@.service'
+  no_install=''
+  while read -r u; do
+    case " ${static} " in *" ${u} "*) continue;; esac
+    awk '/^\[Install\]/{f=1; next} /^\[/{f=0} f && $0 == "WantedBy=%i.mount" {found=1} END {exit !found}' \
+        "${ROOT}/${u}" || no_install="${no_install} ${u}"
+  done < <(awk '!/^#/ && $2 == "usr/lib/systemd/system" {print $1}' \
+               "${ROOT}/debian/hdw4s-shared-sweep.install")
+  is  'every unit an administrator enables is wanted by its store mount, the rest named static' \
+      "${no_install}" ''
+
+  # harden@ carries no setting that removes a system call, so what it does by
+  # hand is what it does in its unit; this pins that, so adding one makes
+  # somebody add its in-unit control first.
+  is  'harden@ has no syscall-shaping setting to run its control under' \
+      "$(grep -cE '^(SystemCallFilter|RestrictSUIDSGID|MemoryDenyWriteExecute|SystemCallArchitectures|RestrictNamespaces|PrivateDevices|ProtectClock|ProtectKernelModules)=' "${ROOT}/hdw4s-shared-harden@.service")" '0'
+
+  # PM P18: the relay server binds ONE named address, never a wildcard.
+  # (Multicast is the default since P19: an empty --listen means multicast.
+  # Unicast, configured by --listen, still names one address and its clients.)
+  "${W}" --relay-server --dir "${T}" --listen 127.0.0.1 >/dev/null 2>&1; rc=$?
+  "${W}" --relay-server --dir "${T}" --group 10.0.0.1 >/dev/null 2>&1; rc2=$?
+  is  'unicast without --allow is refused, and so is a group that is not multicast' \
+      "${rc} ${rc2}" '2 2'
+  n=0
+  for wild in '::' '0.0.0.0'; do
+    "${W}" --relay-server --dir "${T}" --allow 192.0.2.10 --listen="${wild}" >/dev/null 2>&1
+    [ "$?" = 2 ] && n=$((n + 1))
+  done
+  is  'and refuses a wildcard, v4 or v6' "${n}" '2'
+  "${W}" --dir "${T}" --idle 0 --max-age 7d >/dev/null 2>&1
+  is  'an idle window of 0 is refused as a usage error' "$?" '2'
+  "${W}" --dir "${T}" --idle 1m --max-age 7d >/dev/null 2>&1
+  is  'and so is one below the grammar floor' "$?" '2'
+  "${W}" --idle 30m --max-age 7d >/dev/null 2>&1
+  is  'and a missing directory' "$?" '2'
+  # Threat T7: noexec does not stop an import, so a root tool must never put
+  # its working directory on the import path.
+  mkdir "${T}/cwd"; printf 'open(%s, "w").write("x")\n' "'${T}/planted'" > "${T}/cwd/struct.py"
+  # Run as a script, Python puts the SCRIPT's directory first, not the working
+  # directory -- so the route that matters is the environment: PYTHONPATH.
+  (cd "${T}/cwd" && PYTHONPATH="${T}/cwd" "${W}" --version >/dev/null 2>&1)
+  is  'a struct.py in the working directory is never imported' \
+      "$([ -e "${T}/planted" ] && echo imported || echo not)" 'not'
+
+  # Form (i) on NFS (measured on a cluster): a bind of a SUBDIRECTORY of an
+  # NFS mount records mountinfo root "/" -- the path is in the source field --
+  # so the exposure of a store's table reads root "/", not "/table". It is
+  # recognised by IDENTITY: its root is the very inode (dev, ino) of the table
+  # of a sibling mount that passes form (ii). Fixture: the mountinfo and stat
+  # of that shape, with the guard of the sibling's table stood in for.
+  out="$(python3 - "${W}" <<'PY' 2>&1
+import importlib.machinery, importlib.util, sys
+l = importlib.machinery.SourceFileLoader("s", sys.argv[1]); sp = importlib.util.spec_from_loader("s", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m)
+# The REAL lines, as captured inside the container (PM P23).
+STORE = ("1356 1324 0:251 / /srv/hdw4s-shared rw,nosuid,nodev,noexec,nosymfollow "
+         "master:3169 - nfs4 192.0.2.1:/export/shared rw,vers=4.2,soft,addr=192.0.2.1")
+EXPO = ("3417 987 0:251 / /run/hdw4s-shared rw,nosuid,nodev,noexec,nosymfollow "
+        "master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1")
+P = m.parse_mountinfo
+class St(object):
+    def __init__(self, dev, ino): self.dev, self.ino = dev, ino
+TABLE = St((0, 251), 9)
+def judge(path):
+    if path == "/srv/hdw4s-shared/table": return TABLE
+    raise m.Refused("open", "not a store")
+def proved(line, st, others=()):
+    x = P(line)
+    return m.exposure_proved(x, st, [P(STORE), x] + [P(o) for o in others], judge)
+LOCAL_STORE = "20 1 0:40 / /run/s rw,nosuid,nodev,noexec,nosymfollow - tmpfs s rw"
+def ljudge(path):
+    if path == "/run/s/table": return St((0, 40), 5)
+    raise m.Refused("open", "not a store")
+def lproved(line, st):
+    x = P(line)
+    return m.exposure_proved(x, st, [P(LOCAL_STORE), x], ljudge)
+try:
+    print("real", proved(EXPO, St((0, 251), 9)))
+    print("tablex", proved(EXPO.replace("/export/shared/table", "/export/shared/tablex"), St((0, 251), 9)))
+    print("export", proved(EXPO.replace("/export/shared/table", "/other/table"), St((0, 251), 9)))
+    print("identity", proved(EXPO, St((0, 251), 2)))
+    print("normalised", proved(EXPO.replace("/export/shared/table", "//export/shared//table/"), St((0, 251), 9)))
+    LOC = "30 1 0:40 /table /run/hdw4s-shared rw,nosuid,nodev,noexec,nosymfollow - tmpfs s rw"
+    print("local", lproved(LOC, St((0, 40), 5)), lproved(LOC, St((0, 40), 6)),
+          lproved(LOC.replace(" /table ", " / "), St((0, 40), 5)))
+except Exception as e:
+    print("real ERROR", type(e).__name__)
+PY
+)"
+  is  'the real NFS exposure (root "/", source .../table) is proved by identity and source' \
+      "$(sed -n 's/^real //p' <<<"${out}")" 'True'
+  is  '  an NFS mount there with source .../tablex is refused' "$(sed -n 's/^tablex //p' <<<"${out}")" 'False'
+  is  '  so is one of another export' "$(sed -n 's/^export //p' <<<"${out}")" 'False'
+  is  '  so is the right source on the wrong inode' "$(sed -n 's/^identity //p' <<<"${out}")" 'False'
+  is  '  sources compare after normalising slashes' "$(sed -n 's/^normalised //p' <<<"${out}")" 'True'
+  is  'a local exposure needs root /table AND the identity; either alone is refused' \
+      "$(sed -n 's/^local //p' <<<"${out}")" 'True False False'
+
+  # ---- the relay's multicast receive path (owner, PM P19) ------------------
+  # Each layer alone, in-process (the logic), then on real sockets in a
+  # network namespace of its own (the kernel's part). Red, for each: the
+  # accept counter moves for what that layer must drop.
+  out="$(python3 - "${W}" <<'PY' 2>&1
+import importlib.machinery, importlib.util, ipaddress, sys
+l = importlib.machinery.SourceFileLoader("s", sys.argv[1]); sp = importlib.util.spec_from_loader("s", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m)
+class Stub:
+    def touch(self, name, fileid): return "touched"
+V = bytes([1]); H = m.REC_HEAD
+use = V + H.pack(1, 0, 1, 7) + b"f"; hb = V + H.pack(2, 0, 0, 0)
+NET = ipaddress.ip_network("10.200.0.0/24")
+def srv(allow=None):
+    s = m.Server(-1, [ipaddress.ip_network(a) for a in (allow or [])], Stub(), group=m.RELAY_GROUP)
+    s.joined = {5: [NET]}
+    return s
+def acc(s): return s.counts.get("accepted", 0)
+s = srv(); s.handle(use, ("10.200.0.2", 1), 5, m.RELAY_GROUP); print("positive", acc(s))
+s = srv(); s.handle(use, ("10.200.0.2", 1), 5, "10.200.0.1"); s.handle(use, ("10.200.0.2", 1), 5, "10.200.0.255")
+print("dst", acc(s), s.counts.get("drop-not-group", 0))
+s = srv(); s.handle(use, ("10.200.0.2", 1), 6, m.RELAY_GROUP); print("iface", acc(s), s.counts.get("drop-not-joined-interface", 0))
+s = srv(); s.handle(use, ("192.0.2.5", 1), 5, m.RELAY_GROUP); print("onlink", acc(s), s.counts.get("drop-not-on-link", 0))
+s = srv(["10.200.0.9/32"]); s.handle(use, ("10.200.0.2", 1), 5, m.RELAY_GROUP); print("allow", acc(s), s.counts.get("drop-not-allowed", 0))
+# M2: a million routed spoofers leave no per-source state.
+s = srv()
+for i in range(100000):
+    s.handle(hb, ("198.51.%d.%d" % (i // 250 % 250, i % 250), 1), 5, m.RELAY_GROUP)
+print("spoofed", len(s.sources), s.other["received"])
+# The log property, on a clock of the test's own. One named client, heard at
+# t=0, then silent for two hours; then heard again.
+def run(s, until, step=60, hbeat=600, silence=1800, start=0):
+    lines = []
+    t = start
+    while t <= until:
+        lines += [(t, lv, tx) for lv, tx in s.tick(t, silence, hbeat)]
+        t += step
+    return lines
+s = m.Server(-1, [ipaddress.ip_network("10.200.0.2/32")], Stub(), group=m.RELAY_GROUP, now=0)
+s.joined = {5: [NET]}; s.handle(hb, ("10.200.0.2", 1), 5, m.RELAY_GROUP, now=0)
+fail = run(s, 3600 + 1200)
+first = min([t for t, lv, _ in fail if lv == "warning"] or [10**9])
+print("fail-hour", len([1 for t, lv, _ in fail if 1200 <= t < 4800]), "first-warning-by", first <= 2 * 600 + 120)
+s.handle(hb, ("10.200.0.2", 1), 5, m.RELAY_GROUP, now=4900)
+rec = run(s, 5100, start=4920)
+print("recovered", len([1 for _, lv, _ in rec if lv == "notice"]))
+# M1: a thousand LEARNED on-link sources, one heartbeat each, then silence.
+s = m.Server(-1, [], Stub(), group=m.RELAY_GROUP, now=0); s.joined = {5: [NET]}
+for i in range(1000):
+    s.handle(hb, ("10.200.0.%d" % (i % 250 + 1), 1), 5, m.RELAY_GROUP, now=0)
+print("learned-hour", len(run(s, 3600 + 1200)))
+# Nothing ever received: one setup line in the first hour, never again.
+s = m.Server(-1, [], Stub(), group=m.RELAY_GROUP, now=0)
+print("never", len(run(s, 3 * 3600)))
+# The client: an hour of failing sends, then one that works.
+c = m.SendLog(); lines = []
+for i in range(200):
+    lines += c.result(False, 101, i * 20)
+lines += c.result(True, 0, 4100)
+print("client", len(lines), "ENETUNREACH" in lines[0][1], lines[-1][0])
+# A4: /proc/self/net unreadable (a sandbox that hides it) is an ERROR, never
+# "no interfaces": listing raises, and a rescan keeps the joins it has and
+# says so once.
+real_open = open
+def hidden(path, *a, **k):
+    if str(path) == "/proc/self/net/dev":
+        raise PermissionError(13, "Permission denied")
+    return real_open(path, *a, **k)
+m.open = hidden
+try:
+    m.multicast_interfaces(None); listing = "silent-empty"
+except OSError:
+    listing = "raises"
+said = []; m.log = lambda t, lv=None: said.append(t)
+s = srv(); s.joined = {5: [NET]}
+class Sock:
+    def setsockopt(self, *a): raise AssertionError("must not touch memberships")
+r1 = m.rejoin(Sock(), s, None); r2 = m.rejoin(Sock(), s, None)
+print("a4", listing, sorted(s.joined), len([x for x in said if "cannot list" in x]))
+del m.open
+g = ipaddress.ip_address(m.RELAY_GROUP)
+print("group", g in ipaddress.ip_network("239.255.0.0/16") and g not in ipaddress.ip_network("239.255.255.0/24"), m.RELAY_PORT != 4747)
+PY
+)"
+  is  'multicast: a group datagram from an on-link client on a joined interface is accepted' "$(sed -n 's/^positive //p' <<<"${out}")" '1'
+  is  '  layer PKTINFO destination alone: unicast and broadcast to the port are dropped' "$(sed -n 's/^dst //p' <<<"${out}")" '0 2'
+  is  '  layer PKTINFO interface alone: arrival on a non-joined interface is dropped' "$(sed -n 's/^iface //p' <<<"${out}")" '0 1'
+  is  '  layer on-link alone: a routed source is dropped with no --allow' "$(sed -n 's/^onlink //p' <<<"${out}")" '0 1'
+  is  '  and --allow narrows the on-link set' "$(sed -n 's/^allow //p' <<<"${out}")" '0 1'
+  is  'spoofed sources leave no per-source state (one bucket)' "$(sed -n 's/^spoofed //p' <<<"${out}")" '0 100000'
+  is  'a silent client: warned within two intervals, at most 3 lines in the failing hour' \
+      "$(sed -n 's/^fail-hour //p' <<<"${out}" | awk '{print ($1 <= 3 && $1 >= 1) ? "bounded" : "count=" $1, $3}')" 'bounded True'
+  is  '  and recovery is said, once per episode' "$(sed -n 's/^recovered //p' <<<"${out}")" '2'
+  is  '1000 learned spoofed sources going silent cost at most 3 lines in the hour' \
+      "$(sed -n 's/^learned-hour //p' <<<"${out}" | awk '{print ($1 <= 3) ? "bounded" : "count=" $1}')" 'bounded'
+  is  'nothing ever received: one setup line, never repeated' "$(sed -n 's/^never //p' <<<"${out}")" '1'
+  is  'the client: first error with its errno, hourly counts, one recovery line' \
+      "$(sed -n 's/^client //p' <<<"${out}")" '3 True notice'
+  is  'an unreadable /proc/self/net is an error: listing raises, a rescan keeps its joins and says so once' \
+      "$(sed -n 's/^a4 //p' <<<"${out}")" 'raises [5] 1'
+  is  'the default group is local scope, off the relative block; the port is not a registered one' \
+      "$(sed -n 's/^group //p' <<<"${out}")" 'True True'
+
+  # R7 (P28 M4): a burst of opens. Measured before the client had a pace, in
+  # the real units: 5000 opens sent 5000 records at once, the server took 2035
+  # and dropped 2965 for rate -- files already marked announced, so they would
+  # expire early. Properties, on a clock of the test's own: the client never
+  # sends faster than one source is accepted (the server's own bucket, fed
+  # what the client sends, drops nothing); a burst is DEFERRED, never dropped
+  # and never marked announced before it is sent; an overflow announces
+  # nothing and is said once.
+  out="$(python3 - "${W}" "${T}" <<'PY' 2>&1
+import importlib.machinery, importlib.util, os, struct, sys
+l = importlib.machinery.SourceFileLoader("s", sys.argv[1]); sp = importlib.util.spec_from_loader("s", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m)
+d = os.path.join(sys.argv[2], "r7"); os.makedirs(d)
+for i in range(5000):
+    open(os.path.join(d, "f%04d" % i), "w").close()
+fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+said = []; m.log = lambda t, lv=None: said.append(t)
+c = m.Client(fd, 7200)
+c.pace = m.Bucket(m.CLIENT_RATE, m.CLIENT_BURST); c.pace.t = 0.0
+srv = m.Bucket(m.RATE_SOURCE, m.BURST_SOURCE); srv.t = 0.0
+for i in range(5000):
+    c.pending[b"f%04d" % i] = True
+sent = dropped = 0; first = None; t = 0.0
+while t <= 70.0:
+    recs = c.records(t, c.pace.room(t))
+    if recs:
+        c.pace.take(len(recs), t)
+        if not srv.take(len(recs), t):
+            dropped += len(recs)
+        sent += len(recs)
+    if first is None:
+        first = (sent, len(c.pending), len(c.announced))
+    t += 0.2
+print("pace", dropped, sent, len(c.pending))
+print("deferred", first[0], first[0] + first[1] == 5000, first[2] == first[0])
+ov = struct.pack("<iIII", -1, m.IN_Q_OVERFLOW, 0, 0)
+c.pending.clear()
+for _ in range(3):
+    c.events(ov)
+print("overflow", len(c.pending), len([x for x in said if "overflowed" in x]), c.counts.get("overflow"))
+PY
+)"
+  is  'R7: paced, the client never sends faster than one source is accepted; all 5000 go out' \
+      "$(sed -n 's/^pace //p' <<<"${out}")" '0 5000 0'
+  is  '  a burst is deferred: what does not fit stays pending and is not marked announced' \
+      "$(sed -n 's/^deferred //p' <<<"${out}")" '1000 True True'
+  is  '  an overflow announces nothing, and three of them are said once' \
+      "$(sed -n 's/^overflow //p' <<<"${out}")" '0 1 3'
+
+  # On real sockets, in a network namespace with a veth pair.
+  MC_TESTS=7
+  if unshare -Urnm true 2>/dev/null; then
+    export W T
+    # shellcheck disable=SC2016  # expanded by the shell inside the namespace
+    out="$(unshare -Urnm bash -c '
+      set +e
+      # The sender is in a network namespace of its own, at the far end of a
+      # veth pair: a datagram whose source is one of the OWN addresses of the
+      # receiver is a martian and never reaches a socket.
+      ip link set lo up; ip link add va type veth peer name vb
+      ip addr add 10.200.0.1/24 dev va; ip link set va up
+      sysctl -qw net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.va.rp_filter=0
+      unshare -n sleep 120 & P=$!; sleep 0.3
+      ip link set vb netns "${P}"
+      nsenter -t "${P}" -n sh -c "ip link set lo up; ip addr add 10.200.0.2/24 dev vb; ip addr add 10.201.0.2/24 dev vb; ip link set vb up"
+      export P
+      M="${T}/mcstore"; mkdir -p "${M}"
+      mount -t tmpfs -o nosymfollow,nodev,noexec,nosuid,strictatime,mode=0755 m "${M}"
+      mkdir -m 0777 "${M}/table"; printf x > "${M}/table/f"
+      python3 - "${W}" "${M}" <<"PY"
+import importlib.machinery, importlib.util, os, socket, subprocess, sys
+l = importlib.machinery.SourceFileLoader("s", sys.argv[1]); sp = importlib.util.spec_from_loader("s", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m)
+table = os.path.join(sys.argv[2], "table")
+fd = os.open(table, os.O_RDONLY | os.O_DIRECTORY)
+srv = m.Server(fd, [], group=m.RELAY_GROUP)
+sock = m.multicast_socket(0); port = sock.getsockname()[1]
+names, _, _ = m.rejoin(sock, srv, ["va"])
+ino = os.stat(os.path.join(table, "f")).st_ino
+SEND = """
+import socket, struct, sys
+dst, src, port, ino = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+s.setsockopt(socket.IPPROTO_IP, 32, socket.inet_aton("0.0.0.0") + bytes(4) + struct.pack("@i", socket.if_nametoindex("vb")))
+s.bind((src, 0))
+s.sendto(bytes([1]) + struct.pack(">BBHQ", 1, 0, 1, ino) + b"f", (dst, port))
+"""
+def tx(dst, src="10.200.0.2"):
+    subprocess.check_call(["nsenter", "-t", os.environ["P"], "-n", sys.executable,
+                           "-c", SEND, dst, src, str(port), str(ino)])
+def drain():
+    buf = bytearray(9000)
+    while m.select.select([sock], [], [], 0.3)[0]:
+        n, anc, fl, addr = sock.recvmsg_into([buf], socket.CMSG_SPACE(12), socket.MSG_TRUNC)
+        i, d = m.pktinfo(anc); srv.handle(memoryview(buf)[:n], addr, i, d)
+c = lambda k: srv.counts.get(k, 0)
+tx(m.RELAY_GROUP); drain(); print("e2e", names, c("accepted"))
+# Another group joined on this host by another socket: its traffic reaches
+# the host (the other socket receives it on its own port -- the positive
+# control), and the same group sent to OUR port must not reach this socket.
+other = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+other.bind(("0.0.0.0", 0)); oport = other.getsockname()[1]
+other.setsockopt(socket.IPPROTO_IP, m.IP_ADD_MEMBERSHIP, m.mreqn("239.255.99.99", socket.if_nametoindex("va")))
+subprocess.check_call(["nsenter", "-t", os.environ["P"], "-n", sys.executable,
+                       "-c", SEND, "239.255.99.99", "10.200.0.2", str(oport), str(ino)])
+got = bool(m.select.select([other], [], [], 0.5)[0])
+r0 = c("received"); tx("239.255.99.99"); drain()
+print("other-group", c("received") - r0, got)
+other.close()
+a0, g0 = c("accepted"), c("drop-not-group")
+tx("10.200.0.1"); tx("10.200.0.255"); drain()
+print("unicast-broadcast", c("accepted") - a0, c("drop-not-group") - g0)
+a0, o0 = c("accepted"), c("drop-not-on-link"); tx(m.RELAY_GROUP, src="10.201.0.2"); drain()
+print("routed", c("accepted") - a0, c("drop-not-on-link") - o0)
+PY
+      # --relay-interfaces: read-only, every interface accounted for. Here:
+      # lo (loopback), va (joined), and a dummy that is up but not
+      # multicast-capable and one with multicast but no address.
+      ip link add nomc type dummy; ip link set nomc up
+      ip link add noaddr type dummy; ip link set noaddr multicast on; ip link set noaddr up
+      "${W}" --relay-interfaces | awk "{print \"ri\", \$1, \$2}" | sort -u
+      "${W}" --relay-interfaces | awk "\$2 == \"lo\" {print \"ri-lo-why\", \$5}"
+      "${W}" --relay-interfaces --interface noaddr >/dev/null; echo "ri-narrow-rc $?"
+      ip link del nomc; ip link del noaddr
+      # A bridge: the master carries the address, its port carries none. The
+      # server must join on the MASTER -- with IGMP snooping a join on a port
+      # receives nothing, silently (measured on two real storage hosts).
+      ip link add br9 type bridge; ip link add p9 type veth peer name q9
+      ip link set p9 master br9; ip addr add 10.209.0.1/24 dev br9
+      ip link set br9 up; ip link set p9 up
+      "${W}" --relay-interfaces | awk "\$2 == \"br9\" || \$2 == \"p9\" {print \"rb\", \$1, \$2}"
+      ip link del p9; ip link del br9
+      # M3: past igmp_max_memberships (20 per socket), a refused join is
+      # said ONCE and never again at a re-join; nothing dies.
+      for i in $(seq 0 24); do
+        ip link add "d${i}" type dummy; ip link set "d${i}" multicast on
+        ip addr add "10.210.${i}.1/24" dev "d${i}"; ip link set "d${i}" up
+      done
+      python3 - "${W}" <<"PY"
+import importlib.machinery, importlib.util, sys
+l = importlib.machinery.SourceFileLoader("s", sys.argv[1]); sp = importlib.util.spec_from_loader("s", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m)
+lines = []; m.log = lambda t, lv=None: lines.append(t)
+class Stub:
+    def touch(self, *a): return "touched"
+srv = m.Server(-1, [], Stub(), group=m.RELAY_GROUP); sock = m.multicast_socket(0)
+try:
+    for _ in range(3): m.rejoin(sock, srv, None)
+    print("joinlimit", len(srv.joined), len([x for x in lines if "could not join" in x]))
+except Exception as e:
+    print("joinlimit CRASH", type(e).__name__)
+PY
+      kill "${P}" 2>/dev/null
+    ' 2>&1)"
+    is  'multicast on real sockets: a group datagram is accepted, joined on the one named interface' \
+        "$(sed -n 's/^e2e //p' <<<"${out}")" "['va'] 1"
+    is  '  layer IP_MULTICAST_ALL=0 alone: another group joined on the host never arrives' \
+        "$(sed -n 's/^other-group //p' <<<"${out}")" '0 True'
+    is  '  unicast and broadcast to the port, sent for real, are dropped as not the group' \
+        "$(sed -n 's/^unicast-broadcast //p' <<<"${out}")" '0 2'
+    is  '  a routed source, sent for real, accepts nothing' "$(sed -n 's/^routed //p' <<<"${out}")" '0 1'
+    is  '--relay-interfaces says what it would join and skip, and why, joining nothing' \
+        "$(grep "^ri " <<<"${out}" | grep -E " (va|lo|nomc|noaddr)$" | paste -sd ";") $(sed -n 's/^ri-narrow-rc //p' <<<"${out}") $(sed -n 's/^ri-lo-why //p' <<<"${out}")" \
+        "ri join va;ri skip lo;ri skip noaddr;ri skip nomc 1 loopback"
+    is  'on a bridge it joins the master, never a port (a port carries no subnet)' \
+        "$(grep "^rb " <<<"${out}" | sort | paste -sd ";")" "rb join br9;rb skip p9"
+    is  'past the membership limit: joined 20, one line, no crash, however often it re-joins' \
+        "$(sed -n 's/^joinlimit //p' <<<"${out}")" '20 1'
+  else
+    for _ in $(seq "${MC_TESTS}"); do
+      bad 'the multicast relay on real sockets' 'unshare -Urnm is refused here, so none of them ran'
+    done
+  fi
+
+  # ---- everything below needs mounts --------------------------------------
+  NS_TESTS=72
+  # Deletion review F2 (P8 B3): a mount that reaches the WALKED table mid-walk
+  # through the exposure's mount peer group, not through the store. The
+  # reviewer's script, verbatim.
+  cat > "${T}/peer.py" <<'PY'
+# Mid-walk mount that arrives in the walked table BY WAY OF THE EXPOSURE'S peer
+# group (P8 B3). Run inside unshare -Urm. argv: tool base weaken(none|all) private(0|1)
+import importlib.machinery, importlib.util, os, subprocess, sys, time
+loader = importlib.machinery.SourceFileLoader("sweep", sys.argv[1])
+spec = importlib.util.spec_from_loader("sweep", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+B, weaken, private = sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+run = lambda *a: subprocess.check_call(list(a))
+P = os.path.join(B, "run"); os.makedirs(P, exist_ok=True)
+run("mount", "-t", "tmpfs", "run", P); run("mount", "--make-shared", P)
+ST, E = os.path.join(P, "store"), os.path.join(P, "expose")
+os.mkdir(ST); os.mkdir(E)
+run("mount", "-t", "tmpfs", "-o", "nosymfollow,nodev,noexec,nosuid,strictatime,mode=0755", "s", ST)
+if private: run("mount", "--make-private", ST)
+os.mkdir(os.path.join(ST, "table")); os.chmod(os.path.join(ST, "table"), 0o777)
+os.mkdir(os.path.join(ST, "table", "m"))
+run("mount", "--bind", os.path.join(ST, "table"), E)
+H = os.path.join(B, "home"); os.makedirs(H, exist_ok=True)
+run("mount", "-t", "tmpfs", "-o", "nosymfollow,nodev,noexec,nosuid", "h", H)
+with open(os.path.join(H, "precious"), "w") as f: f.write("x")
+os.chmod(os.path.join(H, "precious"), 0o600)
+if weaken == "all":
+    m.open_dir = lambda dfd, name, ino, mnt_id=None: os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=dfd)
+    m.Gate.beneath = lambda self, fd: True
+    m.Gate.entry = lambda self, dfd, name, ino: m.statx(dfd, name)
+inner = m.open_dir
+def hook(dfd, name, ino, mnt_id=None):
+    if name == "m":   # the "home" bound through the EXPOSURE, not the store
+        run("mount", "--bind", H, os.path.join(E, "m"))
+    return inner(dfd, name, ino, mnt_id)
+m.open_dir = hook
+g = m.guard(os.path.join(ST, "table"), "ii")
+c = m.Counts()
+m.sweep(g.fd, g.stx.mnt_id, 1800, 7 * 86400, time.time() + 86400 * 30, c)
+seen = os.path.exists(os.path.join(ST, "table", "m", "precious"))
+print("private=%d weaken=%s appeared-in-store=%s precious=%s refused=%s" % (
+    private, weaken, seen, "kept" if os.path.exists(os.path.join(H, "precious")) else "DELETED",
+    ",".join(sorted(c.refused)) or "none"))
+PY
+  # The depth budget (PM P10, A5): a 12-deep tree, a budget of 8.
+  cat > "${T}/budget.py" <<'PY'
+import importlib.machinery, importlib.util, os, sys, time
+loader = importlib.machinery.SourceFileLoader("sweep", sys.argv[1])
+spec = importlib.util.spec_from_loader("sweep", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+fd = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY)
+d = os.dup(fd)
+for _ in range(12):
+    os.mkdir("d", dir_fd=d); n = os.open("d", os.O_RDONLY, dir_fd=d); os.close(d); d = n
+os.close(d)
+before = len(os.listdir("/proc/self/fd"))
+c = m.Counts()
+try:
+    m.sweep(fd, m.fstatx(fd).mnt_id, 1800, 86400, time.time() + 3600, c, max_depth=8)
+    crashed = "no"
+except Exception as e:
+    crashed = type(e).__name__
+print("budget", crashed, c.too_deep, len(os.listdir("/proc/self/fd")) - before)
+PY
+  # The owner's worry is deletion outside the table. These run the sweep
+  # directly on a filesystem that is NOT dedicated (an "outside" beside the
+  # table), i.e. as if the guard and the store rule had both failed, and
+  # plant the escape mid-walk. Each case runs with the full gate, then with
+  # one layer weakened, so that a green result cannot come from a case that
+  # never reached a destructive call.
+  cat > "${T}/escape.py" <<'PY'
+import importlib.machinery, importlib.util, os, subprocess, sys, time
+loader = importlib.machinery.SourceFileLoader("sweep", sys.argv[1])
+spec = importlib.util.spec_from_loader("sweep", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+F, case, weaken = sys.argv[2], sys.argv[3], sys.argv[4].split(",")
+T, O = os.path.join(F, "table"), os.path.join(F, "outside")
+later = time.time() + 86400
+def put(p, mode=0o644):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as f: f.write("canary")
+    os.chmod(p, mode)
+real_open_dir = m.open_dir
+if "beneath" in weaken:
+    m.Gate.beneath = lambda self, fd: True
+if "opendir" in weaken:
+    m.open_dir = lambda dfd, name, ino, mnt_id=None: os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=dfd)
+if "entrymnt" in weaken:
+    m.Gate.entry = lambda self, dfd, name, ino: m.statx(dfd, name)
+if "nlink" in weaken:
+    def fchmod(self, fd, mode): os.fchmod(fd, mode)
+    m.Gate.fchmod = fchmod
+if case == "rename-out":
+    put(os.path.join(T, "victim", "f1")); os.makedirs(O, exist_ok=True)
+    inner = m.open_dir
+    def hook(dfd, name, ino, mnt_id=None):
+        fd = inner(dfd, name, ino, mnt_id)
+        if name == "victim":
+            os.rename(os.path.join(T, "victim"), os.path.join(O, "victim"))
+        return fd
+    m.open_dir = hook
+elif case == "mount-in":
+    os.makedirs(os.path.join(T, "m"))
+    inner = m.open_dir
+    def hook(dfd, name, ino, mnt_id=None):
+        if name == "m":
+            subprocess.check_call(["mount", "-t", "tmpfs", "x", os.path.join(T, "m")])
+            put(os.path.join(T, "m", "f1"))
+        return inner(dfd, name, ino, mnt_id)
+    m.open_dir = hook
+elif case == "hardlink":
+    put(os.path.join(O, "f1"), 0o600)
+    os.link(os.path.join(O, "f1"), os.path.join(T, "hl"))
+fd = os.open(T, os.O_RDONLY | os.O_DIRECTORY)
+c = m.Counts()
+m.sweep(fd, m.fstatx(fd).mnt_id, 1800, 7 * 86400, later if case != "hardlink" else time.time(), c)
+if case == "rename-out":
+    print("outside", "kept" if os.path.exists(os.path.join(O, "victim", "f1")) else "deleted")
+elif case == "mount-in":
+    print("outside", "kept" if os.path.exists(os.path.join(T, "m", "f1")) else "deleted")
+    subprocess.call(["umount", os.path.join(T, "m")])
+else:
+    print("outside", "%o" % (os.stat(os.path.join(O, "f1")).st_mode & 0o777))
+print("refused", ",".join(sorted(c.refused)) or "none")
+PY
+  cat > "${T}/onepass.py" <<'PY'
+import importlib.machinery, importlib.util, os, sys, time
+loader = importlib.machinery.SourceFileLoader("sweep", sys.argv[1])
+spec = importlib.util.spec_from_loader("sweep", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+fd = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY)
+m.sweep(fd, m.fstatx(fd).mnt_id, 1.5, 86400, time.time(), m.Counts())
+PY
+  # The resolver with the parser bypassed (threat T2 (iii)): every name below
+  # would be refused by the parser first, which is exactly why it is not used.
+  cat > "${T}/resolver.py" <<'PY'
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("sweep", sys.argv[1])
+spec = importlib.util.spec_from_loader("sweep", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+fd = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY)
+r = m.Resolver(fd)
+ino = os.stat(os.path.join(sys.argv[2], "f")).st_ino
+for name in (b"/etc/hostname", b"ln/g", b".", b"m/f"):
+    print(name.decode(), r.touch(name, ino))
+# "..", from a table that is a SUBDIRECTORY of its mount, so leaving it does
+# not also cross a mount: otherwise RESOLVE_NO_XDEV refuses it and hides
+# whether RESOLVE_BENEATH does.
+sub = m.Resolver(os.open(os.path.join(sys.argv[2], "sub"), os.O_RDONLY | os.O_DIRECTORY))
+print("updot", sub.touch(b"../f", ino))
+before = os.stat(os.path.join(sys.argv[2], "f"))
+print("f", r.touch(b"f", ino))
+after = os.stat(os.path.join(sys.argv[2], "f"))
+print("moved", after.st_atime_ns > before.st_atime_ns, after.st_mtime_ns == before.st_mtime_ns)
+print("wrong", r.touch(b"f", ino + 1))
+PY
+  if ! unshare -Urm true 2>/dev/null; then
+    for _ in $(seq "${NS_TESTS}"); do
+      bad 'the /shared guard and sweep in a user namespace' \
+          'unshare -Urm is refused here, so none of them ran (kernel.apparmor_restrict_unprivileged_userns?)'
+    done
+    exit 0
+  fi
+  export -f ok bad is has hasnt
+  export RESULTS W T
+  # shellcheck disable=SC2016  # expanded by the shell inside the namespace
+  unshare -Urm bash -c '
+  set +e
+  fl=nosymfollow,nodev,noexec,nosuid,strictatime
+  store() { mkdir -p "$1"; mount -t tmpfs -o "${2:-${fl}},mode=0755" s "$1"; mkdir -m 0777 "$1/table"; }
+  clause() { "${W}" --guard "$@" 2>&1 >/dev/null | sed -n "s/^hdw4s-shared-sweep: refused [^:]*: \([a-z-]*\): .*/\1/p"; }
+  S="${T}/store"; D="${S}/table"; store "${S}"
+  out="$("${W}" --guard "${D}")"
+  has "the store table passes form (ii)" "${out}" " form=ii "
+  mkdir "${T}/exposure"; mount --bind "${D}" "${T}/exposure"
+  has "its bind passes form (i)" "$("${W}" --guard "${T}/exposure" --form i)" " form=i "
+  mkdir "${T}/stack"; mount -t tmpfs -o ${fl} t "${T}/stack"; mkdir "${T}/stack/x"
+  mkdir "${T}/s2"; store "${T}/s2"; mount --bind "${T}/stack/x" "${T}/s2/table"
+  is  "a mount stacked on the table is refused" "$(clause "${T}/s2/table" --form ii)" "stacked"
+  mkdir "${T}/unmounted"
+  is  "an unmounted store (its empty mount point) is refused" "$(clause "${T}/unmounted/table")" "open"
+  mkdir -p "${T}/stack/sub/table"; chmod 755 "${T}/stack/sub"
+  is  "a directory of a larger filesystem is refused" "$(clause "${T}/stack/sub/table" --form ii)" "not-mount-child"
+  mkdir "${T}/s3"; mount -t tmpfs -o ${fl} t "${T}/s3"; mkdir -p "${T}/s3/x/table"
+  mkdir "${T}/s3b"; mount --bind "${T}/s3/x" "${T}/s3b"
+  is  "a store that is not a whole filesystem is refused" "$(clause "${T}/s3b/table" --form ii)" "fs-root"
+  touch "${S}/extra"
+  is  "a store root holding anything else is refused" "$(clause "${D}")" "store-extra"
+  rm "${S}/extra"; chmod 775 "${S}"
+  is  "a group-writable store root is refused" "$(clause "${D}")" "store-owner"
+  chmod 755 "${S}"
+  for f in nosymfollow nodev noexec nosuid; do
+    o="$(printf %s "${fl}" | tr , "\n" | grep -vx "${f}" | paste -sd,)"
+    store "${T}/no-${f}" "${o}"
+    is "a store without ${f} is refused, naming it" \
+       "$("${W}" --guard "${T}/no-${f}/table" 2>&1 | sed -n "s/.*: flags: the mount lacks //p")" "${f}"
+  done
+  store "${T}/relatime" nosymfollow,nodev,noexec,nosuid,relatime
+  is  "a store without strictatime is refused, naming it" \
+      "$("${W}" --guard "${T}/relatime/table" 2>&1 | sed -n "s/.*: flags: the mount lacks //p")" "strictatime"
+  mkdir "${D}/notable"; mkdir "${T}/wrongbind"; mount --bind "${D}/notable" "${T}/wrongbind"
+  is  "a bind of anything but the table is refused" "$(clause "${T}/wrongbind")" "no-sibling"
+  rmdir "${D}/notable" 2>/dev/null; umount "${T}/wrongbind"
+  is  "--harden refuses / before remounting anything" \
+      "$("${W}" --harden / 2>&1 | sed -n "s/^hdw4s-shared-sweep: refused [^:]*: \([a-z-]*\): .*/\1/p")" "store-extra"
+  store "${T}/soft" nodev,noexec,nosuid,strictatime
+  "${W}" --harden "${T}/soft" >/dev/null 2>&1
+  is  "--harden adds a missing nosymfollow, and the guard then accepts" "$?" "0"
+
+  # The sweep. Times are judged with --now, because ctime -- part of "last
+  # used" -- cannot be set back from user space.
+  now="$(date +%s)"; later=$((now + 3600))
+  sw() { "${W}" --dir "${D}" --idle 30m --max-age 7d "$@" 2>&1; }
+  ln -s /etc/hostname "${D}/link"; mkfifo "${D}/fifo"
+  printf p > "${D}/private"; chmod 6700 "${D}/private"
+  mkdir -m 700 "${D}/d"; mkdir -m 000 "${D}/zero"
+  out="$(sw)"
+  is  "a symlink and a fifo are removed, the link never followed" \
+      "$([ -e "${D}/link" ] || [ -L "${D}/link" ] || [ -e "${D}/fifo" ] && echo kept || echo gone) $(cat /etc/hostname >/dev/null && echo intact)" "gone intact"
+  is  "a private file is widened to rw for all, set-id bits gone" "$(stat -c %a "${D}/private")" "766"
+  is  "a private directory is widened to 0777" "$(stat -c %a "${D}/d")" "777"
+  is  "and so is a 0000 one" "$(stat -c %a "${D}/zero")" "777"
+  is  "nothing in use is expired" "$(ls -A "${D}" | sort | paste -sd " ")" "d private zero"
+  sw --now "${later}" >/dev/null
+  is  "an hour later, everything idle is gone" "$(ls -A "${D}" | wc -l)" "0"
+  # ONE pass, because a directory is judged on its times from BEFORE the pass
+  # removed its children. Judged after, each removal makes its parent look
+  # fresh and a nest goes one level per idle window. The CLI floor is two
+  # minutes, so this calls the sweep directly with a window of 1.5 s.
+  mkdir -p "${D}/a/b/c/e"; sleep 2
+  python3 "${T}/onepass.py" "${W}" "${D}"
+  is  "a nest of empty directories goes in ONE pass" "$(ls -A "${D}" | wc -l)" "0"
+  printf x > "${D}/young"
+  "${W}" --dir "${D}" --idle 30d --max-age 2m --now "${later}" >/dev/null 2>&1
+  is  "an item older than the maximum age goes however recently used" \
+      "$([ -e "${D}/young" ] && echo kept || echo gone)" "gone"
+  printf x > "${D}/future"; touch -d "@$((now + 400 * 86400))" "${D}/future"
+  sw --now "${later}" >/dev/null
+  is  "a timestamp in the future does not keep an item for ever" \
+      "$([ -e "${D}/future" ] && echo kept || echo gone)" "gone"
+  # A DIRECTORY is judged idle by its mtime and ctime, never its atime: any
+  # listing moves that, and the rescans of the relay client on an NFS mount
+  # were seen moving the atime of an empty directory on the server (R1c) --
+  # counted, it would keep every watched empty directory for ever. For a file
+  # the atime does count; the file beside it, read as recently, is the
+  # positive control. (No apostrophes: this is inside a single-quoted bash -c.)
+  mkdir "${D}/listed"; touch -a -d "@$((later - 60))" "${D}/listed"
+  printf x > "${D}/read"; touch -a -d "@$((later - 60))" "${D}/read"
+  sw --now "${later}" >/dev/null
+  is  "an empty directory whose only recent time is its atime is expired" \
+      "$([ -e "${D}/listed" ] && echo kept || echo gone)" "gone"
+  is  "  while a file whose atime is as recent is kept" \
+      "$([ -e "${D}/read" ] && echo kept || echo gone)" "kept"
+  rm -f "${D}/read"; rmdir "${D}/listed" 2>/dev/null
+  mkdir "${D}/m"; mkdir "${T}/other"; mount -t tmpfs -o ${fl} o "${T}/other"
+  printf k > "${T}/other/keep"; mount --bind "${T}/other" "${D}/m"
+  sw --now "${later}" >/dev/null
+  is  "nothing on another mount inside the table is touched" "$(cat "${T}/other/keep")" "k"
+  umount "${D}/m"; rmdir "${D}/m"
+  canary="CANARY$$x"; printf x > "${D}/${canary}"; printf x > "${D}/$(printf "${canary}\377\nz")"
+  out="$(sw --now "${later}")"
+  is  "names that are not UTF-8 or carry a newline are swept" "$(ls -A "${D}" | wc -l)" "0"
+  hasnt "and no name from the table is ever logged" "${out}" "${canary}"
+  python3 -c "
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+for i in range(3000):
+    os.mkdir(\"d\", dir_fd=fd); nfd = os.open(\"d\", os.O_RDONLY, dir_fd=fd); os.close(fd); fd = nfd
+open(\"/proc/self/fd/%d/leaf\" % fd, \"w\").write(\"x\")
+" "${D}"
+  out="$(sw --now "${later}")"; rc=$?
+  is  "a 3000-deep tree neither crashes the sweep nor survives it" "${rc} $(ls -A "${D}" | wc -l)" "0 0"
+  "${W}" --check --dir "${D}" --idle 30m >/dev/null; rc=$?
+  is  "--check is green on a tidy table" "${rc}" "0"
+  esc() { local F; F="$(mktemp -d -p "${T}")"; mount -t tmpfs -o ${fl} f "${F}"
+          mkdir -m 777 "${F}/table"
+          python3 "${T}/escape.py" "${W}" "${F}" "$1" "$2" 2>&1 | paste -sd " "
+          umount -l "${F}"; }
+  is  "a directory renamed OUT of the table mid-walk: nothing in it is touched" \
+      "$(esc rename-out none)" "outside kept refused escaped"
+  is  "  control: without the beneath check it would have been deleted" \
+      "$(esc rename-out beneath | cut -d" " -f1-2)" "outside deleted"
+  is  "a mount appearing on a name mid-walk: nothing on it is touched" \
+      "$(esc mount-in none | cut -d" " -f1-2)" "outside kept"
+  is  "  with the open-time check gone, the gate still refuses it" \
+      "$(esc mount-in opendir | cut -d" " -f1-2)" "outside kept"
+  is  "  and with the beneath check gone too, the entry mount check does" \
+      "$(esc mount-in opendir,beneath | cut -d" " -f1-2)" "outside kept"
+  is  "  control: with all three gone it would have been deleted" \
+      "$(esc mount-in opendir,beneath,entrymnt | cut -d" " -f1-2)" "outside deleted"
+  is  "a hard link from outside is never re-moded through the table" \
+      "$(esc hardlink none)" "outside 600 refused linked"
+  is  "  control: without the link-count check it would have been widened" \
+      "$(esc hardlink nlink | cut -d" " -f1-2)" "outside 666"
+  ln -s "${S}" "${T}/via"
+  is  "--dir through a symbolic link in its path is refused" "$(clause "${T}/via/table")" "path"
+  # On a mount WITHOUT nosymfollow, so the flag cannot do the resolver its
+  # job: each layer has to be seen refusing on its own.
+  R="${T}/resolve"; mkdir "${R}"; mount -t tmpfs -o nodev,noexec,nosuid r "${R}"
+  printf x > "${R}/f"; touch -a -d "2 hours ago" "${R}/f"; mkdir "${R}/sub"
+  printf x > "${R}/sub/g"; ln -s sub "${R}/ln"
+  printf x > "${T}/x"; mkdir "${R}/m"; mount -t tmpfs -o ${fl} o "${R}/m"; printf x > "${R}/m/f"
+  out="$(python3 "${T}/resolver.py" "${W}" "${R}")"
+  is  "the resolver alone refuses ../x"           "$(sed -n "s|^updot ||p" <<<"${out}")" "resolve-EXDEV"
+  is  "and an absolute name"                     "$(sed -n "s|^/etc/hostname ||p" <<<"${out}")" "resolve-EXDEV"
+  is  "and a symlink as an intermediate component" "$(sed -n "s|^ln/g ||p" <<<"${out}")" "resolve-ELOOP"
+  is  "and a directory"                          "$(sed -n "s|^\. ||p" <<<"${out}")" "not-regular"
+  is  "and a mount crossing"                     "$(sed -n "s|^m/f ||p" <<<"${out}")" "resolve-EXDEV"
+  is  "it moves the atime of a regular file and nothing else" \
+      "$(sed -n "s/^f //p; s/^moved //p" <<<"${out}" | paste -sd " ")" "touched True True"
+  is  "and refuses a wrong fileid"               "$(sed -n "s/^wrong //p" <<<"${out}")" "fileid"
+  umount "${R}/m"
+  printf x > "${D}/stale"
+  out="$("${W}" --check --dir "${D}" --idle 30m --now "${later}")"; rc=$?
+  is  "--check is red when nobody is sweeping" "${rc} $(cut -d: -f1 <<<"${out}")" "1 red"
+  "${W}" --check --dir "${T}/unmounted" --idle 30m >/dev/null; rc=$?
+  is  "--check is red on a directory the guard refuses" "${rc}" "1"
+  rm -f "${D}/stale"
+
+  # PM P10, A7: a destructive mode accepts form (ii) only, and form (i) needs
+  # a sibling that is a store. The case: a flagged /table directory of a
+  # filesystem that is NOT a store (here, it holds something else at its
+  # root), bound where an exposure would be.
+  X="${T}/notstore"; mkdir "${X}"; mount -t tmpfs -o ${fl} x "${X}"
+  mkdir -m 777 "${X}/table"; printf h > "${X}/home-file"; printf k > "${X}/table/keep"
+  mkdir "${T}/fake"; mount --bind "${X}/table" "${T}/fake"
+  is  "a /table of a filesystem that is not a store has no sibling: refused" \
+      "$(clause "${T}/fake" --form i)" "no-sibling"
+  "${W}" --dir "${T}/fake" --idle 30m --max-age 7d --now "${later}" >/dev/null 2>&1; rc=$?
+  is  "and the sweep refuses it, touching nothing" "${rc} $(cat "${X}/table/keep")" "1 k"
+  "${W}" --check --dir "${T}/fake" --idle 30m >/dev/null; rc=$?
+  is  "and --check is red on it" "${rc}" "1"
+  printf k > "${D}/keep"
+  "${W}" --dir "${T}/exposure" --idle 30m --max-age 7d --now "${later}" >/dev/null 2>&1; rc=$?
+  is  "even a real exposure (form i) is refused by the sweep: form (ii) only" \
+      "${rc} $(cat "${D}/keep")" "1 k"
+  rm -f "${D}/keep"
+
+  # A5: the depth budget. Iterative, no crash, no descriptor left open, and
+  # what it did not enter is counted -- and --check says so.
+  B="${T}/budget"; store "${B}"
+  is  "a tree deeper than the budget: no crash, counted, no fd leaked" \
+      "$(python3 "${T}/budget.py" "${W}" "${B}/table" | sed -n "s/^budget //p")" "no 1 0"
+  out="$("${W}" --check --dir "${B}/table" --idle 30m --max-depth 8)"; rc=$?
+  is  "and --check warns about it" "${rc} $(cut -d: -f1 <<<"${out}")" "3 warn"
+
+  # F2: full gate keeps it; with the three mount/beneath/entry checks off it
+  # is deleted (so the case does reach a destructive call); and with the
+  # store --make-private it never reaches the store at all.
+  peer() { local B; B="$(mktemp -d -p "${T}")"; python3 "${T}/peer.py" "${W}" "${B}" "$1" "$2" 2>&1 | tail -1; }
+  is  "a mount arriving through the exposure peer group mid-walk is not touched" \
+      "$(peer none 0 | cut -d" " -f3-4)" "appeared-in-store=True precious=kept"
+  # (appeared-in-store is read AFTER the sweep, so here it is False: the
+  # file it looks for is the one that was deleted.)
+  is  "  control: with the three checks removed it would have been deleted" \
+      "$(peer all 0 | cut -d" " -f4)" "precious=DELETED"
+  is  "  and a private store never receives it, gate or no gate" \
+      "$(peer none 1 | cut -d" " -f3-4) $(peer all 1 | cut -d" " -f3-4)" \
+      "appeared-in-store=False precious=kept appeared-in-store=False precious=kept"
+
+  # The budget is computed after the descriptor limit is raised: a 1000-deep
+  # tree is expired completely from the default soft limit of 1024, where the
+  # budget once came out at 768 and left the bottom unexpired at every pass.
+  L="${T}/limit"; store "${L}"
+  python3 -c "
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+for i in range(1000):
+    os.mkdir(\"d\", dir_fd=fd); n = os.open(\"d\", os.O_RDONLY, dir_fd=fd); os.close(fd); fd = n
+" "${L}/table"
+  ( ulimit -Sn 1024; "${W}" --dir "${L}/table" --idle 30m --max-age 7d --now "${later}" >/dev/null 2>&1 )
+  is  "a tree deeper than the default soft fd limit allows still expires completely" \
+      "$(ls -A "${L}/table" | wc -l)" "0"
+
+  # A rename puts a directory deeper than mkdir can (measured: two 2100-deep
+  # chains, one renamed into the bottom of the other). Where the kernel then
+  # refuses to resolve it (AppArmor, about 8 KiB of path), the sweep cannot
+  # reach it -- and must SAY so: either everything expires, or --check warns.
+  N="${T}/renamed"; store "${N}"
+  python3 -c "
+import os, sys
+root = os.open(sys.argv[1], os.O_RDONLY)
+def chain(name, n):
+    os.mkdir(name, dir_fd=root); fd = os.open(name, os.O_RDONLY, dir_fd=root)
+    for i in range(n):
+        os.mkdir(\"d\", dir_fd=fd); x = os.open(\"d\", os.O_RDONLY, dir_fd=fd); os.close(fd); fd = x
+    return fd
+a = chain(\"A\", 2100); os.close(chain(\"B\", 2100))
+os.rename(\"B\", \"B\", src_dir_fd=root, dst_dir_fd=a)
+" "${N}/table"
+  "${W}" --dir "${N}/table" --idle 30m --max-age 7d --now "${later}" >/dev/null 2>&1
+  "${W}" --check --dir "${N}/table" --idle 30m >/dev/null 2>&1; rc=$?
+  is  "a tree renamed deeper than reach is expired, or --check warns: never silent" \
+      "$([ "$(ls -A "${N}/table" | wc -l)" = 0 ] || [ "${rc}" = 3 ] && echo said || echo silent)" "said"
+
+  # The in-unit probe (systemd seat F5): role-aware, never red or green by
+  # construction. The sweep files /etc/shadow (root with DAC_OVERRIDE reads
+  # it, P12) instead of counting it, and the watcher passes when the KERNEL
+  # refuses its mark outside the initial user namespace -- said as such.
+  PS="${T}/probestore"; store "${PS}"
+  out="$("${W}" --probe-sandbox --dir "${PS}/table" --probe-role sweep 2>&1)"; rc=$?
+  is  "the sweep probe files /etc/shadow, expires its canary and passes" \
+      "${rc} $(grep -c "^filed r /etc/shadow" <<<"${out}") $(grep -c "control sweep: expired=1 left=0" <<<"${out}")" "0 1 1"
+  out="$(python3 - "${W}" "${PS}/table" <<"PY" 2>&1
+import ctypes, errno, importlib.machinery, importlib.util, sys
+l = importlib.machinery.SourceFileLoader("s", sys.argv[1]); sp = importlib.util.spec_from_loader("s", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m)
+class Libc(object):
+    def __getattr__(self, n): return getattr(m._libc_real, n)
+    def fanotify_mark(self, *a):
+        ctypes.set_errno(errno.EPERM); return -1
+m._libc_real, m._libc = m._libc, Libc()
+m.initial_userns = lambda: False
+print("good", m._probe_role(sys.argv[2], "watch", None, 0))
+PY
+)"
+  is  "the watch probe passes on a kernel-refused mark, and says so" \
+      "$(grep -c "mark=EPERM-by-kernel" <<<"${out}") $(sed -n "s/^good //p" <<<"${out}")" "1 True"
+
+  # And binds exactly the address given, not a wildcard: read from the
+  # socket table of the kernel while it runs.
+  RL="${T}/relaylisten"; store "${RL}"
+  port=$((30000 + RANDOM % 20000))
+  "${W}" --relay-server --dir "${RL}/table" --allow 127.0.0.1 --listen 127.0.0.1 --port "${port}" >/dev/null 2>&1 &
+  rp=$!; sleep 1
+  hexport="$(printf %04X "${port}")"
+  bound="$(awk -v p=":${hexport}" "\$2 ~ p\"\$\" {print \$2}" /proc/net/udp /proc/net/udp6 2>/dev/null | paste -sd " ")"
+  kill "${rp}" 2>/dev/null; wait "${rp}" 2>/dev/null
+  is  "the relay server binds exactly the address it was given" "${bound}" "0100007F:${hexport}"
+
+  # DRY RUN (owner, first switch-on): every change that passes the checks is
+  # logged as "would ..." and NOT made -- names logged only here, on request.
+  DR="${T}/dryrun"; store "${DR}"; DT="${DR}/table"
+  mkdir -m 700 "${DT}/d"; printf x > "${DT}/d/old"; chmod 600 "${DT}/d/old"
+  mkdir "${DT}/empty"; ln -s /etc "${DT}/ln"; mkfifo "${DT}/fifo"
+  before="$(cd "${DT}" && find . -printf "%p %m %y %i\n" | sort)"
+  out="$("${W}" --dir "${DT}" --idle 2m --max-age 10m --dry-run --now "${later}" 2>&1)"; rc=$?
+  after="$(cd "${DT}" && find . -printf "%p %m %y %i\n" | sort)"
+  is  "--dry-run changes nothing: every name, type and mode as before" \
+      "${rc} $([ "${before}" = "${after}" ] && echo unchanged || echo CHANGED)" "0 unchanged"
+  is  "and logs what it would do, each kind, by table-relative name" \
+      "$(grep -c "would expire d/old" <<<"${out}") $(grep -c "would remove-non-file ln" <<<"${out}") $(grep -c "would rmdir empty" <<<"${out}") $(grep -c "would widen d$" <<<"${out}")" "1 1 1 1"
+  is  "and its summary says nothing was changed" "$(grep -c "dry-run: would have .* NOTHING was changed" <<<"${out}")" "1"
+  "${W}" --dir "${DT}" --idle 2m --max-age 10m --dry-run=2 >/dev/null 2>&1
+  is  "a dry-run value that is neither on nor off is refused, not guessed" "$?" "2"
+  out="$("${W}" --dir "${DT}" --idle 2m --max-age 10m --now "${later}" 2>&1)"
+  is  "without it the same pass is real, and logs no name" \
+      "$(ls -A "${DT}" | wc -l) $(grep -c "would\|d/old" <<<"${out}")" "0 0"
+
+  # A6: the test clock says it is a test clock.
+  has "--now warns that it is not the real time" \
+      "$("${W}" --dir "${D}" --idle 30m --max-age 7d --now "${later}" 2>&1)" "WARNING: --now"
+
+  # A8: --any-fstype widens the fstype list and nothing else.
+  n=0
+  for st in no-nosymfollow no-nodev no-noexec no-nosuid relatime; do
+    o="$(timeout 10 "${W}" --relay-client --store "${T}/${st}" --idle 30m --to 127.0.0.1 --port 9 --any-fstype 2>&1)"
+    [ "$?" = 1 ] && grep -q ": flags: the mount lacks " <<<"${o}" && n=$((n + 1))
+  done
+  is  "--any-fstype still refuses each missing flag" "${n}" "5"
+
+  # A2: inside a user namespace the overflow uid is accepted as root, read
+  # from the kernel.
+  is  "in a user namespace, the overflow uid of the kernel is accepted as root" \
+      "$(python3 -c "
+import importlib.machinery, importlib.util, sys
+l = importlib.machinery.SourceFileLoader(\"s\", sys.argv[1]); sp = importlib.util.spec_from_loader(\"s\", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m); print(sorted(m._root_uids()))" "${W}")" \
+      "[0, $(cat /proc/sys/kernel/overflowuid)]"
+  '
+)
+
+echo '== the relay: a burst is paced to what the server'"'"'s socket holds, and every loss is counted (P36) =='
+# Measured on an NFS client and its ZFS server, 2026-10-03 (R7): 50000 opens
+# in 20 s; the client sent its first ~1000 records as the opens arrived, ONE
+# RECORD PER DATAGRAM, and the server's socket -- at rmem_default, 212992
+# bytes, about 220 such datagrams -- dropped 278 of them while the server was
+# busy on ZFS.
+# The kernel's drop counter said 278; nothing the server or the client logged
+# did, and the client could not even say what it had sent. Written from that:
+# the burst must arrive whole at a SLOW server with a DEFAULT-sized buffer,
+# the server's own counts must carry the kernel's drops, and the client must
+# count every open it does not send and say so on demand and at exit.
+( set +e
+  W="${ROOT}/hdw4s-shared-sweep"
+  T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  out="$(python3 - "${W}" "${T}" <<'PY' 2>&1
+import importlib.machinery, importlib.util, os, socket, struct, sys
+l = importlib.machinery.SourceFileLoader("s", sys.argv[1]); sp = importlib.util.spec_from_loader("s", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m)
+d = os.path.join(sys.argv[2], "p36"); os.makedirs(os.path.join(d, "sub"))
+for i in range(5000):
+    open(os.path.join(d, "f%04d" % i), "w").close()
+long = [b"L%03d" % i + b"x" * 246 for i in range(300)]
+for n in long:
+    open(os.path.join(d, os.fsdecode(n)), "w").close()
+fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+m.log = lambda t, lv=None: None
+def drive(c, names, until=70.0):
+    c.pace.t = c.grams.t = 0.0
+    for n in names:
+        c.pending[n] = True
+    t, sent, most, charge, first, tally = 0.0, 0, 0, 0, None, True
+    while t <= until:
+        recs = c.records(t, c.pace.room(t), c.grams.room(t))
+        sizes = []; grams = m.pack(recs, sizes)
+        if recs:
+            c.pace.take(len(recs), t); c.grams.take(len(grams), t)
+        tally = tally and sum(sizes) == len(recs)
+        most = max(most, len(grams)); charge = max(charge, len(grams) * m.GRAM_CHARGE)
+        sent += len(recs)
+        if first is None:
+            first = len(recs)
+        t += m.CLIENT_TICK
+    return sent, most, charge, first, len(c.pending), tally
+c = m.Client(fd, 7200)
+sent, most, charge, first, left, tally = drive(c, [b"f%04d" % i for i in range(5000)])
+print("short", sent, left, most <= m.CLIENT_GRAM_BURST, charge <= m.SERVER_RCVBUF, tally)
+c = m.Client(fd, 7200)
+sent, most, charge, first, left, tally = drive(c, long, 20.0)
+print("long", first, sent, most <= m.CLIENT_GRAM_BURST, charge <= m.SERVER_RCVBUF)
+print("stock", m.SERVER_RCVBUF <= 2 * 212992)
+c = m.Client(fd, 7200)
+for n in (b"gone", b"sub", b"f0001", b"\xff"):
+    c.pending[n] = True
+c.announced[b"f0001"] = 0.5
+c.records(1.0)
+c.events(struct.pack("<iIII", 999, m.IN_OPEN, 0, 8) + b"f0002\0\0\0")
+print("discards", " ".join("%s=%d" % kv for kv in sorted(c.counts.items())), len(c.pending))
+r = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); r.bind(("127.0.0.1", 0))
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+for _ in range(2000):
+    s.sendto(b"x", r.getsockname())
+hexport = "%04X" % r.getsockname()[1]
+proc = [l.split()[-1] for l in open("/proc/net/udp") if l.split()[1].endswith(":" + hexport)]
+kd = m.kernel_drops(r)
+print("kdrops", kd is not None and kd > 0, [str(kd)] == proc)
+big = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+big.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 << 20)
+had = big.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+small = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+small.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+print("grow", had > m.SERVER_RCVBUF and m.size_receive(big) == had, m.size_receive(small) >= m.SERVER_RCVBUF)
+PY
+)"
+  is  'paced in datagrams: 5000 queued opens all go out, never more datagrams at once than the server is sized for' \
+      "$(sed -n 's/^short //p' <<<"${out}")" '5000 0 True True True'
+  is  '  and with long names the DATAGRAM cap binds, not the record cap' \
+      "$(sed -n 's/^long //p' <<<"${out}")" '80 300 True True'
+  is  '  and the server'"'"'s buffer for that burst is what a stock rmem_max grants' \
+      "$(sed -n 's/^stock //p' <<<"${out}")" 'True'
+  is  'every pending open the client does not send is counted, by reason' \
+      "$(sed -n 's/^discards //p' <<<"${out}")" \
+      'coalesced=1 discard-not-regular=1 discard-not-utf8=1 discard-stat-ENOENT=1 discard-unknown-wd=1 0'
+  is  'the server reads its socket'"'"'s kernel drops from the socket, the same number /proc/net/udp shows' \
+      "$(sed -n 's/^kdrops //p' <<<"${out}")" 'True True'
+  is  'the server grows a small receive buffer to the burst, and never shrinks a larger one' \
+      "$(sed -n 's/^grow //p' <<<"${out}")" 'True True'
+
+  # The real client and the real server, run through main() as their units
+  # run them, multicast across a veth pair. The ONE stand-in: the server's
+  # touch sleeps 8 ms first (the measured server was committing to ZFS). And
+  # the server is held at the kernel's DEFAULT buffer (rmem_default, 212992 on
+  # the measured server and on a stock kernel): its size_receive is replaced
+  # by a read, so the burst test proves the CLIENT's pacing alone -- the
+  # server's own enlargement is a second, separate layer. Red on the unpaced
+  # client: the burst overflows the socket.
+  P36_TESTS=6
+  if unshare -Urnm true 2>/dev/null; then
+    export W T
+    # shellcheck disable=SC2016  # expanded by the shell inside the namespace
+    out="$(unshare -Urnm bash -c '
+      set +e
+      ip link set lo up; ip link add va type veth peer name vb
+      ip addr add 10.200.0.1/24 dev va; ip link set va up
+      unshare -n sleep 300 & P=$!; sleep 0.3
+      ip link set vb netns "${P}"
+      nsenter -t "${P}" -n sh -c "ip link set lo up; ip addr add 10.200.0.2/24 dev vb; ip link set vb up"
+      S="${T}/p36store"; mkdir -p "${S}"
+      mount -t tmpfs -o nosymfollow,nodev,noexec,nosuid,strictatime,mode=0755 s "${S}"
+      mkdir -m 0777 "${S}/table"; D="${S}/table"; N=1200
+      python3 -c "
+import os, sys
+for i in range(int(sys.argv[2])):
+    p = os.path.join(sys.argv[1], \"f%06d\" % i); open(p, \"w\").close(); os.utime(p, (1e9, 1e9))
+open(os.path.join(sys.argv[1], \"forced\"), \"w\").close()
+" "${D}" "${N}"
+      cat > "${T}/p36run.py" <<"PY"
+import errno, importlib.machinery, importlib.util, os, sys, time
+l = importlib.machinery.SourceFileLoader("s", os.environ["W"]); sp = importlib.util.spec_from_loader("s", l)
+m = importlib.util.module_from_spec(sp); l.exec_module(m)
+if sys.argv[1] == "server":
+    real = m.Resolver.touch
+    def slow(self, name, fileid):
+        time.sleep(0.008); return real(self, name, fileid)
+    m.Resolver.touch = slow
+    m.size_receive = lambda sock: sock.getsockopt(m.socket.SOL_SOCKET, m.socket.SO_RCVBUF)
+else:
+    # The red arm the brief asks for: ONE forced stat failure.
+    stat = os.stat
+    def forced(p, *a, **k):
+        if p == b"forced":
+            raise OSError(errno.EIO, "forced")
+        return stat(p, *a, **k)
+    m.os.stat = forced
+sys.exit(m.main(["hdw4s-shared-sweep"] + sys.argv[2:]))
+PY
+      fresh() { python3 -c "
+import os, sys
+print(sum(os.stat(os.path.join(sys.argv[1], \"f%06d\" % i)).st_atime > 1.5e9 for i in range(int(sys.argv[2]))))" "${D}" "${N}"; }
+      port=$((30000 + RANDOM % 20000)); hexport="$(printf %04X "${port}")"
+      drops() { awk -v p=":${hexport}" "\$2 ~ p\"\$\" {print \$NF}" /proc/net/udp; }
+      python3 "${T}/p36run.py" server --relay-server --dir "${D}" --interface=va --port "${port}" 2>"${T}/p36s.log" & SP=$!
+      sleep 1
+      nsenter -t "${P}" -n python3 "${T}/p36run.py" client --relay-client --store "${S}" --idle 30m \
+        --port "${port}" --interface=vb --any-fstype 2>"${T}/p36c.log" & CP=$!
+      sleep 2
+      python3 -c "
+import os, sys, time
+t0 = time.monotonic()
+for i in range(int(sys.argv[2])):
+    d = t0 + i / 2500.0 - time.monotonic()
+    if d > 0: time.sleep(d)
+    os.close(os.open(os.path.join(sys.argv[1], \"f%06d\" % i), os.O_RDONLY | os.O_NOATIME))
+os.close(os.open(os.path.join(sys.argv[1], \"forced\"), os.O_RDONLY | os.O_NOATIME))
+" "${D}" "${N}"
+      for _ in $(seq 30); do [ "$(fresh)" = "${N}" ] && break; sleep 1; done
+      echo "burst $(fresh)/${N} $(drops) $(ss -uamn "sport = :${port}" | sed -n "s/.*skmem:(.*,rb\([0-9]*\),.*/\1/p")"
+      kill -USR1 "${CP}"; sleep 1.5
+      kill -TERM "${CP}"; wait "${CP}"; echo "client-exit $?"
+      echo "client-usr1 $(grep -c "counts: .*pending [0-9]*$" "${T}/p36c.log")"
+      echo "client-exit-line $(grep -c "(at exit)" "${T}/p36c.log") $(grep "(at exit)" "${T}/p36c.log" | grep -o "discard-stat-EIO=[0-9]*\|records-sent=[0-9]*" | paste -sd " ")"
+      # The old shape, on purpose: one record per datagram, back to back.
+      nsenter -t "${P}" -n python3 -c "
+import socket, struct, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.IPPROTO_IP, 32, socket.inet_aton(\"0.0.0.0\") + bytes(4) + struct.pack(\"@i\", socket.if_nametoindex(\"vb\")))
+for i in range(1500):
+    s.sendto(bytes([1]) + struct.pack(\">BBHQ\", 1, 0, 7, 0) + b\"f000000\", (\"239.255.47.48\", int(sys.argv[1])))
+" "${port}"
+      sleep 1; d2="$(drops)"; kill -USR1 "${SP}"; sleep 6
+      echo "flood ${d2} $(grep "counts:" "${T}/p36s.log" | tail -1 | grep -o "drop-kernel-datagrams=[0-9]*")"
+      kill "${SP}"; wait "${SP}" 2>/dev/null
+      kill "${P}" 2>/dev/null; umount "${S}"
+    ' 2>&1)"
+    is  'a burst of 1200 opens at a slow server held at the default buffer: every file announced, the socket drops none' \
+        "$(sed -n 's/^burst //p' <<<"${out}" | awk '{print $1, $2, ($3 > 0 && $3 <= 212992) ? "default" : "rb=" $3}')" '1200/1200 0 default'
+    is  'the client logs its counts on SIGUSR1' "$(sed -n 's/^client-usr1 //p' <<<"${out}")" '1'
+    is  'a stopped client exits 0' "$(sed -n 's/^client-exit //p' <<<"${out}")" '0'
+    is  '  and logs its counts once at exit, with the forced stat failure counted' \
+        "$(sed -n 's/^client-exit-line //p' <<<"${out}")" '1 discard-stat-EIO=1 records-sent=1200'
+    flood="$(sed -n 's/^flood //p' <<<"${out}")"
+    is  'flooded the old way, the socket drops datagrams' "$(awk '{print ($1 > 0)}' <<<"${flood}")" '1'
+    is  '  and the server'"'"'s own counts line carries the same number' \
+        "$(awk '{print "drop-kernel-datagrams=" $1 == $2}' <<<"${flood}")" '1'
+  else
+    for _ in $(seq "${P36_TESTS}"); do
+      bad 'the relay burst on real sockets' 'unshare -Urnm is refused here, so none of them ran'
+    done
+  fi
+)
+
+echo '== /shared: the bind source is made with no mode, so tmpfiles never re-modes the table =='
+# A mode on this line would make every "systemd-tmpfiles --create" -- a package
+# upgrade runs one -- chmod the TABLE bound there back to 0755.
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  line="$(grep -v '^#' "${ROOT}/hdw4s-tmpfiles.conf" | grep .)"
+  is 'one line, no mode, no owner, no age' "${line}" 'd /run/hdw4s-shared - - - -'
+  mkdir -p "${T}/run/hdw4s-shared"; chmod 0777 "${T}/run/hdw4s-shared"
+  printf '%s\n' "${line}" | systemd-tmpfiles --create --root="${T}" - 2>/dev/null
+  is 'a table bound there stays 0777 through a tmpfiles run' "$(stat -c %a "${T}/run/hdw4s-shared")" '777'
+  # RED ARM: the same run with a mode on the line does re-mode it, so the
+  # assertion above can fail.
+  printf '%s\n' 'd /run/hdw4s-shared 0755 - - -' | systemd-tmpfiles --create --root="${T}" - 2>/dev/null
+  is 'RED ARM: a mode on the line would have made it 0755' "$(stat -c %a "${T}/run/hdw4s-shared")" '755'
+  rmdir "${T}/run/hdw4s-shared"
+  printf '%s\n' "${line}" | systemd-tmpfiles --create --root="${T}" - 2>/dev/null
+  is 'made fresh, it is 0755: nobody writes to /shared before a store is bound' \
+    "$(stat -c %a "${T}/run/hdw4s-shared")" '755'
+)
+
+echo '== /shared: the expose service binds only what the guard accepts, and unmounts only its own =='
+# mount and umount are stand-ins that edit a stand-in of the kernel's mount
+# table; the guard is a stand-in answering as told, and naming the mount id it
+# was asked about the way the real one does. Every refusal must leave nothing
+# of ours bound and exit non-zero; every acceptance must bind exactly once; and
+# NOTHING this service did not mount itself may ever be unmounted by it -- on a
+# desktop host /home may be a bind of a homes server, and a lazy unmount aimed
+# at the wrong mount is the other way to lose what is on it.
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  mkdir -p "${T}/etc" "${T}/run/hdw4s-shared" "${T}/elsewhere" "${T}/run/hdw4s-shared-store/table"
+  printf 'MemTotal:       16777216 kB\n' > "${T}/meminfo"
+  printf '%s\n' '1 0 0:1 / / rw - ext4 /dev/root rw' > "${T}/mountinfo"
+  E="${T}/run/hdw4s-shared"; S="${T}/run/hdw4s-shared-store"
+  # The stand-ins' shared helpers: the topmost mount at a path, and adding one.
+  cat > "${T}/mi.sh" <<'MI'
+mi_top() { awk -v p="$1" '$5 == p { on[$1] = $2 } END { for (i in on) { t = 1
+           for (j in on) if (on[j] == i) t = 0; if (t) print i } }' "${T}/mountinfo"; }
+# mi_add ROOT PATH [OPTS] [FSTYPE SOURCE DEV]: a mount on top of whatever is at PATH.
+mi_add() { local id parent; id=$(( $(awk '{print $1}' "${T}/mountinfo" | sort -n | tail -1) + 1 ))
+           parent="$(mi_top "$2")"
+           echo "${id} ${parent:-1} ${6:-0:9} $1 $2 rw${3:-} - ${4:-tmpfs} ${5:-hdw4s-shared} rw" >> "${T}/mountinfo"; }
+MI
+  cat > "${T}/guard" <<'STUB'
+#!/bin/bash
+. "${T}/mi.sh"
+echo "$(pwd) $*" >> "${T}/guard.log"
+case "$1" in
+  --harden) [ ! -e "${T}/harden-says" ] || cat "${T}/harden-says" >&2
+            [ "$(cat "${T}/harden" 2>/dev/null || echo 0)" = 0 ] && exit 0
+            echo "hdw4s-shared-sweep: refused $2: store-extra: stand-in" >&2; exit 1;;
+  --guard)  id="$(mi_top "$2")"
+            [ -n "${id}" ] || { echo "hdw4s-shared-sweep: refused $2: form-i: not a mount root" >&2; exit 1; }
+            v="$(cat "${T}/guard-$4" 2>/dev/null || echo 0)"
+            [ "${v}" = 0 ] && { echo "accepted $2 form=$4 fstype=tmpfs mount=${id}"; exit 0; }
+            echo "hdw4s-shared-sweep: refused $2: $(cat "${T}/clause" 2>/dev/null || echo flags): stand-in" >&2
+            exit "${v}";;
+esac
+exit 2
+STUB
+  chmod +x "${T}/guard"
+  # shellcheck source=/dev/null
+  mount()  { . "${T}/mi.sh"; echo "mount $*" >> "${T}/mounts"
+             case "$*" in
+               # A bind of an NFS store's table shows root "/" and the path in
+               # its SOURCE, as the kernel lists it (measured on a box).
+               *--bind*) if [ -e "${T}/nfs-store" ]; then
+                           mi_add / "${*: -1}" ',nosymfollow' nfs4 "$(cat "${T}/nfs-store")/table" 0:251
+                         else mi_add /table "${*: -1}" ',nosymfollow'; fi;;
+               *tmpfs*)  mi_add / "${*: -1}" ',nosymfollow' tmpfs;;
+             esac; }
+  umount() { . "${T}/mi.sh"; echo "umount $*" >> "${T}/mounts"
+             local top; top="$(mi_top "${*: -1}")"
+             [ -n "${top}" ] && sed -i "/^${top} /d" "${T}/mountinfo"; }
+  # systemctl: a start marks a unit active; show answers from that, and from
+  # what a test says about how a stopped unit last ended.
+  systemctl()  { echo "systemctl $*" >> "${T}/mounts"
+                 local u
+                 case "$1" in
+                   show) case "$3" in
+                           ActiveState) if grep -xF -- "$5" "${T}/active" >/dev/null 2>&1
+                                        then echo active; else echo inactive; fi;;
+                           ExecMainCode)   cat "${T}/code" 2>/dev/null || echo 2;;
+                           ExecMainStatus) cat "${T}/status" 2>/dev/null || echo 15;;
+                         esac;;
+                   start) shift; [ "$1" != --no-block ] || shift
+                          for u in "$@"; do echo "${u}" >> "${T}/active"; done;;
+                 esac; }
+  export -f mount umount systemctl
+  export T HDW4S_ETCDIR="${T}/etc" HDW4S_MEMINFO="${T}/meminfo" \
+         HDW4S_MOUNTINFO="${T}/mountinfo" HDW4S_SHARED_STATE="${T}/state" \
+         HDW4S_SHARED_EXPOSE="${E}" HDW4S_SHARED_STORE="${S}" HDW4S_SHARED_TOOL="${T}/guard"
+  conf() { printf '%s\n' "$@" > "${T}/etc/hdw4s.conf"; }
+  # Run from inside a directory that is not /, as an administrator might: the
+  # guard must still be run from /, so nothing here is on its import path.
+  expose() { : > "${T}/mounts"; : > "${T}/guard.log"
+             ( cd "${T}/elsewhere" && "${ROOT}/hdw4s-shared-expose" "$@" 2>&1 ); }
+  at() { awk -v p="$1" '$5 == p' "${T}/mountinfo" | wc -l; }
+  reset() { printf '%s\n' '1 0 0:1 / / rw - ext4 /dev/root rw' > "${T}/mountinfo"
+            rm -rf "${T}/state" "${T}/harden" "${T}/guard-i" "${T}/clause" \
+                   "${T}/active" "${T}/code" "${T}/status"; }
+  # A mount somebody else made, at the exposure's path, on top of whatever is there.
+  foreign() { . "${T}/mi.sh"; mi_add / "${E}" '' tmpfs foreign 0:99; }
+
+  conf HDW4S_SHARED=tmpfs HDW4S_SHARED_SIZE=10%
+  echo 1 > "${T}/guard-i"   # form (i) refuses even what was just bound
+  out="$(expose)"; rc=$?
+  m="$(cat "${T}/mounts")"
+  # 10% of 16 GiB, in bytes: the kernel would have taken 10% of the HOST.
+  has 'a percentage is worked out from meminfo, not handed to the kernel' "${m}" 'size=1717986918,'
+  has 'with an inode cap derived from it' "${m}" 'nr_inodes=104858,'
+  has 'and every flag' "${m}" 'nosymfollow,nodev,noexec,nosuid,strictatime'
+  # A store root only root can pass through: no desktop reaches the table by
+  # the store's own path (ls /run/hdw4s-shared-store/table as a seat fails).
+  has 'the tmpfs store root is 0700' "${m}" ',mode=0700,'
+  has 'and the store is made private before anything is bound from it' \
+    "$(sed -n '/tmpfs/,/--bind/p' "${T}/mounts")" "mount --make-private -- ${S}"
+  hasnt 'never a percentage on the mount' "${m}" 'size=10%'
+  has 'the table is bound onto /run/hdw4s-shared' "${m}" "mount --bind -- ${S}/table ${E}"
+  # What was bound is not trusted for having been bound.
+  is  'what was bound is judged, and taken away when it fails' "$(at "${E}")" '0'
+  has 'by a lazy unmount that does not resolve the path through the store' "${m}" "umount -l -c -- ${E}"
+  is  'and the run fails' "${rc}" '1'
+  is  'the guard ran from /, never from where it was started' \
+    "$(cut -d' ' -f1 "${T}/guard.log" | sort -u)" '/'
+
+  reset; out="$(expose)"; rc=$?
+  is  'accepted: the run succeeds' "${rc}" '0'
+  is  'and binds exactly once' "$(grep -c -- '--bind' "${T}/mounts")" '1'
+  is  'and records which mount it made, as the kernel lists it' "$(cat "${T}/state/exposure" 2>/dev/null)" \
+    "$(awk -v p="${E}" '$5 == p {print $1, $3, $4, $8, $9}' "${T}/mountinfo")"
+  has 'and starts the local sweep of that store' "$(cat "${T}/mounts")" \
+    'start --no-block hdw4s-shared-sweep@'
+  out="$(expose)"; rc=$?
+  is  'already exposed and accepted: nothing to do' "$(grep -c -- 'mount' "${T}/mounts")" '0'
+  is  'and nothing to say' "${out}" ''
+  hasnt 'and a running sweep and watcher are not started again' "$(cat "${T}/mounts")" ' start '
+
+  # KEPT RUNNING, not only started at the bind (measured on a box: a deploy
+  # stopped the watcher, the table stayed bound, nothing started it again).
+  inst="$(systemd-escape --path -- "${S}")"
+  W="hdw4s-shared-watch@${inst}.service"; TM="hdw4s-shared-sweep@${inst}.timer"
+  sed -i "/^hdw4s-shared-watch@/d" "${T}/active"; echo 2 > "${T}/code"; echo 15 > "${T}/status"
+  out="$(expose)"; rc=$?
+  has 'a watcher stopped while the table stays bound is started by the next run' \
+    "$(cat "${T}/mounts")" "start --no-block ${W}"
+  is  'and that run binds nothing' "$(grep -c -- '--bind' "${T}/mounts")" '0'
+  has 'and says so' "${out}" 'which was not running'
+  sed -i "/^hdw4s-shared-sweep@/d" "${T}/active"; out="$(expose)"
+  has 'so is a sweep timer that was stopped' "$(cat "${T}/mounts")" "start --no-block ${TM}"
+  # Ended by itself with status 0: the kernel refused it a watch here.
+  sed -i "/^hdw4s-shared-watch@/d" "${T}/active"; echo 1 > "${T}/code"; echo 0 > "${T}/status"
+  out="$(expose)"
+  hasnt 'a watcher that ended by itself with status 0 is left alone' "$(cat "${T}/mounts")" "start --no-block ${W}"
+
+  # DRIFT: the exposure loses a flag. Its own mount, refused for its flags
+  # alone: unmounted, and NOT rebound in the same run.
+  echo 1 > "${T}/guard-i"; out="$(expose)"; rc=$?
+  is  'drift: the exposure is unmounted' "$(at "${E}")" '0'
+  is  'and not rebound in the same run' "$(grep -c -- '--bind' "${T}/mounts")" '0'
+  is  'and the run fails' "${rc}" '1'
+  has 'naming the clause' "${out}" 'flags: stand-in'
+  is  'and the heal is marked, so it is never invisible' \
+    "$([ -s "${T}/state/drift" ] && echo marked || echo unmarked)" 'marked'
+  rm -f "${T}/guard-i"; expose >/dev/null
+
+  # IDENTITY IS THREE FACTS FROM THE MOUNT TABLE, each enough to refuse.
+  # Our recorded mount, but the kernel now says it has a different root:
+  rm -f "${T}/state/drift"
+  sed -i "s| /table ${E} | /elsewhere ${E} |" "${T}/mountinfo"
+  sed -i "s| /table | /elsewhere |" "${T}/state/exposure"
+  echo 1 > "${T}/guard-i"; out="$(expose)"
+  is  'a recorded mount whose root is not /table is NOT unmounted' "$(at "${E}")" '1'
+  has 'and why is said' "${out}" 'not /table'
+  is  'and no heal is marked' "$([ -e "${T}/state/drift" ] && echo marked || echo unmarked)" 'unmarked'
+  reset; expose >/dev/null
+  # Our recorded mount, but the store now mounted there is another filesystem:
+  sed -i "s|^\([0-9]*\) \([0-9]*\) 0:9 / ${S} \(.*\) - tmpfs hdw4s-shared rw$|\1 \2 0:7 / ${S} \3 - nfs4 server:/other rw|" "${T}/mountinfo"
+  echo 1 > "${T}/guard-i"; out="$(expose)"
+  is  'an exposure that no longer shows the store'"'"'s filesystem is NOT unmounted' "$(at "${E}")" '1'
+  has 'and why is said' "${out}" 'the store is nfs4'
+  # And the record and the kernel must agree on the whole entry, not the id alone.
+  reset; expose >/dev/null; sed -i 's/ 0:9 / 0:8 /' "${T}/state/exposure"
+  echo 1 > "${T}/guard-i"; out="$(expose)"
+  is  'a mount whose id matches but whose device does not is NOT unmounted' "$(at "${E}")" '1'
+  reset; expose >/dev/null
+
+  # THE DELETION-SAFETY ARMS. A mount stacked on top of the live exposure is
+  # somebody else's: left where it is, and so is ours beneath it.
+  foreign; out="$(expose)"; rc=$?
+  is  'a mount stacked on the exposure is NOT unmounted' "$(at "${E}")" '2'
+  is  'no unmount is even attempted' "$(grep -c 'umount' "${T}/mounts")" '0'
+  is  'nothing is bound on top of it either' "$(grep -c -- '--bind' "${T}/mounts")" '0'
+  is  'and the run fails' "${rc}" '1'
+  has 'saying whose it is not' "${out}" 'is not one this service made'
+  out="$(conf HDW4S_SHARED=off; expose)"; rc=$?
+  is  'not even when /shared is turned off' "$(at "${E}")" '2'
+  is  'which then fails, rather than claiming it is clean' "${rc}" '1'
+  conf HDW4S_SHARED=tmpfs HDW4S_SHARED_SIZE=10%
+
+  # A foreign mount alone there, with nothing of ours: the same.
+  reset; foreign; out="$(expose)"; rc=$?
+  is  'a mount this service did not make is NOT unmounted' "$(at "${E}")" '1'
+  is  'nor bound over' "$(grep -c -- '--bind' "${T}/mounts")" '0'
+
+  # Our own mount, but the guard says it is not even shaped like the exposure:
+  # left in place -- only a lost FLAG on our own mount is a reason to unmount.
+  reset; expose >/dev/null; echo 1 > "${T}/guard-i"; echo form-i > "${T}/clause"
+  out="$(expose)"; rc=$?
+  is  'our own mount refused for its shape is left in place' "$(at "${E}")" '1'
+  has 'and the refusal is named' "${out}" 'form-i'
+  # And a guard that could not tell (2) is no licence to unmount.
+  echo 2 > "${T}/guard-i"; rm -f "${T}/clause"; out="$(expose)"; rc=$?
+  is  'a guard that could not tell unmounts nothing' "$(at "${E}")" '1'
+  is  'and the run fails' "${rc}" '1'
+
+  # A flag the tool added back in place is a repair, and it is said.
+  reset; expose >/dev/null
+  echo 'hdw4s-shared-sweep: added nosymfollow to the store.' > "${T}/harden-says"
+  out="$(expose)"; rm -f "${T}/harden-says"
+  has 'a repair --harden made is said' "${out}" 'added nosymfollow'
+
+  echo 1 > "${T}/harden"; out="$(expose)"; rc=$?
+  is  'a store the guard refuses is unbound' "$(at "${E}")" '0'
+  is  'and nothing is bound in its place' "$(grep -c -- '--bind' "${T}/mounts")" '0'
+  is  'and the run fails' "${rc}" '1'
+
+  # A STORE THAT DOES NOT ANSWER: a stat that hangs, as on a dead NFS mount.
+  # The stat is a stand-in that sleeps; the run must not wait for it, and takes
+  # its own mount away on the recorded identity, without a guard that would
+  # block on the same dead store.
+  reset; expose >/dev/null
+  stat() { sleep 20; }; export -f stat
+  start="${SECONDS}"; out="$(HDW4S_SHARED_HEALTH_SECONDS=1 expose)"; rc=$?
+  unset -f stat
+  is  'a store that does not answer is given up on, not waited for' \
+    "$([ $(( SECONDS - start )) -lt 10 ] && echo promptly || echo "after $(( SECONDS - start ))s")" 'promptly'
+  is  'and the table is unbound' "$(at "${E}")" '0'
+  is  'and the run fails' "${rc}" '1'
+  hasnt 'and the shell does not announce the abandoned child' "${out}" 'Killed'
+  has 'saying the guard was skipped, and why' "${out}" 'the guard is SKIPPED'
+  is  'without ever asking the guard about the exposure' "$(grep -c -- '--guard' "${T}/guard.log")" '0'
+  # Even then, only our own.
+  reset; expose >/dev/null; foreign
+  stat() { sleep 20; }; export -f stat
+  out="$(HDW4S_SHARED_HEALTH_SECONDS=1 expose)"; unset -f stat
+  is  'a dead store is no licence to unmount a foreign mount either' "$(at "${E}")" '2'
+
+  reset; conf HDW4S_SHARED=tmpfs HDW4S_SHARED_SIZE=lots; out="$(expose)"; rc=$?
+  is  'a size that is not one mounts nothing' "$(grep -c 'tmpfs' "${T}/mounts")" '0'
+  is  'and fails' "${rc}" '1'
+
+  reset; conf HDW4S_SHARED=source; out="$(expose)"; rc=$?
+  is  'source with no HDW4S_SHARED_SOURCE binds nothing' "$(grep -c -- '--bind' "${T}/mounts")" '0'
+  is  'and fails' "${rc}" '1'
+
+  reset; conf HDW4S_SHARED=tmpfs HDW4S_SHARED_SWEEP=external; out="$(expose)"
+  hasnt 'SWEEP=external starts no sweep here' "$(cat "${T}/mounts")" 'hdw4s-shared-sweep@'
+  out="$(expose)"
+  hasnt 'nor keeps one running' "$(cat "${T}/mounts")" ' start '
+
+  out="$(conf HDW4S_SHARED=off; expose)"; rc=$?
+  is  'off: our table is taken away' "$(at "${E}")" '0'
+  is  'and that is a success' "${rc}" '0'
+
+  # AN NFS STORE, as a container sees one bound in: the exposure's root is "/"
+  # and its source is the store's source plus /table. That is this service's
+  # own bind, and it must be recognised as one -- and nothing else with root
+  # "/" may be.
+  reset; mkdir -p "${T}/src/table"; echo '192.0.2.1:/export/shared' > "${T}/nfs-store"
+  mi_add / "${T}/src" ',nosymfollow' nfs4 192.0.2.1:/export/shared 0:251
+  conf HDW4S_SHARED=source "HDW4S_SHARED_SOURCE=${T}/src" HDW4S_SHARED_SWEEP=external
+  out="$(expose)"; rc=$?
+  is  'NFS: this service'"'"'s own bind of the table is accepted' "${rc}:$(at "${E}")" '0:1'
+  out="$(expose)"; rc=$?
+  is  'NFS: and recognised as its own on the next run' "${rc}:$(grep -c -- 'mount' "${T}/mounts")" '0:0'
+  echo 1 > "${T}/guard-i"; out="$(expose)"
+  is  'NFS: and taken away when it loses a flag' "$(at "${E}")" '0'
+  rm -f "${T}/guard-i"; expose >/dev/null
+  # Recorded, but now showing a different directory of the same server.
+  sed -i "s#:/export/shared/table\\( \\|\$\\)#:/export/shared/other\\1#" "${T}/mountinfo" "${T}/state/exposure"
+  echo 1 > "${T}/guard-i"; out="$(expose)"
+  is  'NFS: an exposure that does not show the store'"'"'s table is NOT unmounted' "$(at "${E}")" '1'
+  has 'and why is said' "${out}" 'not the store'"'"'s table 192.0.2.1:/export/shared/table'
+  rm -f "${T}/nfs-store"; rm -rf "${T}/src"; conf HDW4S_SHARED=tmpfs HDW4S_SHARED_SIZE=10%
+
+  # THE REAL LINES, captured from the kernel's mount table in a container on a
+  # development box (store an NFSv4 mount bound in; this service's bind of its
+  # table on top of /run/hdw4s-shared), with only the two mount POINTS moved
+  # into this sandbox. Every other field -- ids, device, root, optional fields,
+  # type, source -- is as read. The code before this rule refused its own bind
+  # here ("has root /, not /table") and left it stranded.
+  reset; mkdir -p "${T}/src/table"
+  conf HDW4S_SHARED=source "HDW4S_SHARED_SOURCE=${T}/src" HDW4S_SHARED_SWEEP=external
+  fixture() { printf '%s\n' \
+    '1 0 0:1 / / rw - ext4 /dev/root rw' \
+    "1356 1324 0:251 / ${T}/src rw,nosuid,nodev,noexec,nosymfollow master:412 - nfs4 192.0.2.1:/export/shared rw,vers=4.2,soft,proto=tcp" \
+    "3417 987 0:251 / ${E} rw,nosuid,nodev,noexec,nosymfollow shared:900 master:412 - nfs4 ${1:-192.0.2.1:/export/shared/table} rw,vers=4.2,soft,proto=tcp" \
+    > "${T}/mountinfo"
+    mkdir -p "${T}/state"; echo "3417 0:251 / nfs4 ${1:-192.0.2.1:/export/shared/table}" > "${T}/state/exposure"; }
+  fixture; out="$(expose)"; rc=$?
+  is  'real NFS lines: the exposure is recognised as this service'"'"'s own' "${rc}:$(at "${E}")" '0:1'
+  hasnt 'and not refused for its root' "${out}" 'has root /'
+  fixture; echo 1 > "${T}/guard-i"; out="$(expose)"
+  is  'real NFS lines: and taken away when the guard finds a flag gone' "$(at "${E}")" '0'
+  rm -f "${T}/guard-i"
+  # Recorded (so the mount id matches), but showing something that is not the
+  # store's table: the SECOND proof alone must refuse to unmount it.
+  for other in 192.0.2.1:/export/shared/tablex 192.0.2.1:/other-export/table 192.0.2.2:/export/shared/table; do
+    fixture "${other}"; echo 1 > "${T}/guard-i"; out="$(expose)"
+    is  "real NFS lines: an exposure showing ${other} is NOT unmounted" "$(at "${E}")" '1'
+  done
+  # Spelled with a doubled or a trailing "/", it is still the store's table.
+  fixture '192.0.2.1://export/shared//table/'; echo 1 > "${T}/guard-i"; out="$(expose)"
+  is  'real NFS lines: a doubled or trailing "/" does not hide the store'"'"'s table' "$(at "${E}")" '0'
+  # A mount stacked on the exposure from a different export: not ours, left.
+  fixture; rm -f "${T}/guard-i"
+  echo "3500 3417 0:252 / ${E} rw - nfs4 192.0.2.1:/export/shared/tablex rw" >> "${T}/mountinfo"
+  out="$(expose)"
+  is  'real NFS lines: an NFS mount stacked on the exposure is NOT unmounted' "$(at "${E}")" '2'
+  rm -f "${T}/guard-i"; rm -rf "${T}/src"; conf HDW4S_SHARED=tmpfs HDW4S_SHARED_SIZE=10%
+
+  # Uninstall's withdrawal: exactly what was recorded, the table and the tmpfs
+  # store, and not a mount that merely sits at the store's path.
+  reset; conf HDW4S_SHARED=tmpfs; expose >/dev/null
+  out="$(expose --withdraw)"; rc=$?
+  is  'withdraw: the table and the tmpfs store this service mounted go' "$(at "${E}") $(at "${S}")" '0 0'
+  is  'and that is a success' "${rc}" '0'
+  reset; . "${T}/mi.sh"; mi_add / "${S}" '' tmpfs foreign 0:99
+  out="$(expose --withdraw)"; rc=$?
+  is  'withdraw leaves a store mount it has no record of' "$(at "${S}")" '1'
+
+  # The bind source deleted by hand: refused, and NOT recreated -- a desktop
+  # start fails 226 in that state, loudly, and that is the safe way round.
+  reset; conf HDW4S_SHARED=tmpfs; rmdir "${E}"; out="$(expose)"; rc=$?
+  is  'a missing bind source binds nothing' "$(grep -c -- '--bind' "${T}/mounts")" '0'
+  is  'and is not quietly recreated' "$([ -e "${E}" ] && echo recreated || echo absent)" 'absent'
+  has 'and says what desktops will do' "${out}" '226'
+)
+
+echo '== /shared: the expose service against the REAL guard, with real mounts =='
+# The groups above stub the guard, so a change in what the guard answers cannot
+# reach them -- and one did: a new refusal clause ("no-sibling") turned "the
+# store was taken away" into "left mounted", and nothing went red until a
+# reviewer ran the real tool. These run hdw4s-shared-expose with the tool
+# beside it, on real tmpfs mounts, in a user namespace (unshare -Urm). Where
+# that is refused every assertion FAILS rather than skips, as the tool's own
+# real-mount group does.
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  N=16
+  if ! unshare -Urm true 2>/dev/null; then
+    for _ in $(seq "${N}"); do
+      bad 'the expose service against the real guard' \
+          'unshare -Urm is refused here, so none of these ran (kernel.apparmor_restrict_unprivileged_userns?)'
+    done
+    exit 0
+  fi
+  export -f ok bad is has hasnt
+  export RESULTS T ROOT
+  # shellcheck disable=SC2016  # expanded by the shell inside the namespace
+  unshare -Urm --propagation private bash -c '
+  set +e
+  mkdir -p "${T}/run" "${T}/etc" "${T}/src"
+  mount -t tmpfs run "${T}/run"; mount --make-shared "${T}/run"
+  install -d -m 0755 "${T}/run/hdw4s-shared"
+  E="${T}/run/hdw4s-shared"; S="${T}/run/hdw4s-shared-store"
+  export HDW4S_SHARED_STATE="${T}/state" HDW4S_ETCDIR="${T}/etc" HDW4S_SHARED_EXPOSE="${E}" \
+         HDW4S_SHARED_STORE="${S}" HDW4S_SHARED_TOOL="${ROOT}/hdw4s-shared-sweep"
+  conf() { printf "%s\n" "$@" > "${T}/etc/hdw4s.conf"; }
+  expose() { "${ROOT}/hdw4s-shared-expose" "$@" 2>&1; }
+  n_at() { findmnt -n --mountpoint "$1" | wc -l; }
+  # Each case starts clean, so that one failing does not decide the next: the
+  # TEST takes away whatever is left, here, in its own namespace.
+  fresh() { local d; for d in "${E}" "${S}"; do
+              while [ "$(n_at "${d}")" -gt 0 ]; do umount -l "${d}"; done; done
+            rm -rf "${T}/state"; }
+
+  # SOURCE MODE: the store taken away under a bound table (F1).
+  mount -t tmpfs -o nosymfollow,nodev,noexec,nosuid,strictatime,mode=0755 store "${T}/src"
+  install -d -m 0777 "${T}/src/table"; : > "${T}/src/table/item"
+  conf HDW4S_SHARED=source "HDW4S_SHARED_SOURCE=${T}/src" HDW4S_SHARED_SWEEP=external
+  expose >/dev/null
+  is  "real guard: a source store is bound" "$(n_at "${E}")" 1
+  umount -l "${T}/src"
+  out="$(expose)"; rc=$?
+  is  "real guard: a store taken away is unbound (no-sibling)" "$(n_at "${E}")" 0
+  is  "and the item is no longer shown" "$(ls -A "${E}")" ""
+  is  "and the run fails" "${rc}" 1
+
+  # TMPFS MODE: the store root is 0700, and the real guard accepts it.
+  fresh
+  conf HDW4S_SHARED=tmpfs HDW4S_SHARED_SIZE=1M HDW4S_SHARED_SWEEP=external
+  out="$(expose)"; rc=$?
+  is  "real guard: a 0700 tmpfs store is accepted and bound" "${rc}:$(n_at "${E}")" 0:1
+  is  "its root is 0700" "$(stat -c %a "${S}")" 700
+
+  # DRIFT: a flag cleared on the exposure is unbound, marked, and healed.
+  mount -o remount,bind,symfollow,nodev,noexec,nosuid "${E}"
+  expose >/dev/null
+  is  "real guard: an exposure that lost nosymfollow is unbound" "$(n_at "${E}")" 0
+  is  "and the heal is marked" "$([ -s "${T}/state/drift" ] && echo marked)" marked
+  expose >/dev/null
+  is  "and the next run binds it again" "$(n_at "${E}")" 1
+
+  # P7: a foreign mount stacked on the exposure is left in place, and (the
+  # store being private) does not reach the table the sweep walks.
+  mount -t tmpfs foreign "${E}"; : > "${E}/FOREIGN"
+  out="$(expose)"
+  is  "real guard: a foreign mount stacked on the exposure is NOT unmounted" "$(n_at "${E}")" 2
+  is  "and its file is still there" "$([ -e "${E}/FOREIGN" ] && echo kept)" kept
+  is  "and it did not reach the store table (store is private)" "$(n_at "${S}/table")" 0
+  umount "${E}"
+
+  # TMPFS MODE, THE STORE UNMOUNTED BY HAND (F1, the other mode). The next run
+  # mounts a fresh store; the old exposure shows a filesystem no store holds
+  # any more, and must go -- and only then is the new one bound.
+  fresh; expose >/dev/null; : > "${E}/old-item"
+  umount -l "${S}"
+  out="$(expose)"; rc=$?
+  is  "real guard: after the tmpfs store is unmounted by hand, the old exposure is unbound" "$(n_at "${E}")" 0
+  is  "and its items are no longer shown" "$(ls -A "${E}")" ""
+  is  "and that run fails" "${rc}" 1
+  expose >/dev/null
+  is  "and the next run binds the fresh store" "$(n_at "${E}"):$(ls -A "${E}")" "1:"
+  '
+)
+
+echo '== /shared: the expose service never latches, and a reload does not run it =='
+# Measured on a box during a package install: each daemon-reload started the
+# expose service again, it hit its start limit a dozen times and showed failed.
+# Measured here (systemd 255, a user timer): OnActiveSec=0 re-fires at every
+# reload; OnUnitActiveSec= alone does not.
+( set +e
+  u="${ROOT}/hdw4s-shared-expose.service"; t="${ROOT}/hdw4s-shared-expose.timer"
+  is  'the service has no start limit to hit' \
+    "$(sed -n '/^\[Unit\]/,/^\[/p' "${u}" | grep -c '^StartLimitIntervalSec=0$')" '1'
+  is  'the timer has no OnActiveSec=, which re-fires at every daemon-reload' \
+    "$(grep -c '^OnActiveSec=' "${t}")" '0'
+  is  'and counts 30 seconds from the last run' "$(grep '^OnUnitActiveSec=' "${t}")" 'OnUnitActiveSec=30s'
+)
+
+echo '== desktops do not share /run/lock with the host or with each other =='
+# Measured from inside a pool seat: /run/lock was writable and a file planted
+# there was visible on the host, and so to every later occupant of every seat.
+# Both desktop units give the session a tmpfs of its own there. Read from the
+# unit files: the live reading is from inside a seat on a box.
+( set +e
+  for u in hdw4s@.service hdw4s-ephemeral@.service; do
+    is  "${u}: one private tmpfs at /run/lock" \
+      "$(grep -c '^TemporaryFileSystem=/run/lock:' "${ROOT}/${u}")" '1'
+    has "${u}: writable by every program, as the host's is" \
+      "$(grep '^TemporaryFileSystem=/run/lock:' "${ROOT}/${u}")" 'mode=1777'
+    # Nothing else may mount at or beneath it: namespace mounts are applied
+    # sorted by destination, and a second one there could land on either side.
+    is  "${u}: and nothing else is mounted there" \
+      "$(grep -E '^[A-Za-z]+(Paths|FileSystem)=.*-?/(run|var)/lock' "${ROOT}/${u}" | grep -vc '^TemporaryFileSystem=/run/lock:')" '0'
+  done
+)
+
+echo '== /shared: hdw4s check is red when desktops should have it and do not =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  # Every unit reads active unless a test says otherwise for the sweep's two.
+  systemctl() { case "$1 ${*: -1}" in
+                  'show hdw4s-shared-sweep@'*) echo "${STUB_TIMER:-active}";;
+                  'show hdw4s-shared-watch@'*) echo "${STUB_WATCH:-active}";;
+                  show*) echo active;;
+                esac; }
+  : > "${SLOTS}"
+  mkdir -p "${SB}/plain" "${SB}/cwd"
+  cat > "${SB}/tool" <<'STUB'
+#!/bin/bash
+echo "$(pwd) $*" >> "${STUB_LOG}"
+[ -z "${STUB_OUT:-}" ] || echo "${STUB_OUT}"
+exit "${STUB_RC:-0}"
+STUB
+  chmod +x "${SB}/tool"
+  export STUB_LOG="${SB}/tool.log" HDW4S_SHARED_TOOL="${SB}/tool"
+  chk() { ( cd "${SB}/cwd" && cmd_check ) 2>&1; }
+
+  out="$(chk)"; rc=$?
+  is  'off: check is not affected' "${rc}" '0'
+  hasnt 'and says nothing about /shared' "${out}" '/shared'
+
+  HDW4S_SHARED_SIZE=1G; out="$(chk)"; rc=$?
+  is  'the old switch alone is said, and not counted' "${rc}" '0'
+  has 'with the line to add' "${out}" 'add HDW4S_SHARED=tmpfs'
+  unset HDW4S_SHARED_SIZE
+
+  HDW4S_SHARED=sometimes; out="$(chk)"; rc=$?
+  is  'a mode that is not one is red' "${rc}" '1'
+  has 'and named' "${out}" "HDW4S_SHARED is 'sometimes'"
+  # The early return for a machine with no slot table must not skip /shared.
+  rm -f "${SLOTS}"; out="$(chk)"; rc=$?; : > "${SLOTS}"
+  is  'and red with no slot table to check too' "${rc}" '1'
+  has 'saying so' "${out}" 'thing(s) are wrong with /shared'
+
+  HDW4S_SHARED=tmpfs; HDW4S_SHARED_EXPOSE="${SB}/plain"; export HDW4S_SHARED_EXPOSE
+  out="$(chk)"; rc=$?
+  is  'on and nothing bound is red' "${rc}" '1'
+  has 'and says what desktops see' "${out}" 'empty /shared'
+  has 'and where the reason is' "${out}" 'journalctl -u hdw4s-shared-expose.service'
+
+  # A mount point that certainly exists, standing in for a bound table; the
+  # tool is a stand-in answering as told.
+  HDW4S_SHARED_EXPOSE=/proc
+  : > "${STUB_LOG}"; out="$(chk)"; rc=$?
+  is  'bound and the tool is content: green' "${rc}" '0'
+  has 'the tool is asked about the exposure, with IDLE verbatim' "$(cat "${STUB_LOG}")" \
+    '--check --dir /proc --idle 30m'
+  is  'and from /, whatever directory check was run in' "$(cut -d' ' -f1 "${STUB_LOG}")" '/'
+  STUB_RC=3 STUB_OUT='warn: the store is over 90% full'; export STUB_RC STUB_OUT
+  out="$(chk)"; rc=$?
+  is  'a warning is said, and not counted' "${rc}" '0'
+  has 'and passed on' "${out}" 'over 90% full'
+  STUB_RC=1 STUB_OUT='red: nobody is sweeping'
+  out="$(chk)"; rc=$?
+  is  'a red row from the tool is red' "${rc}" '1'
+  has 'and passed on' "${out}" 'nobody is sweeping'
+  # The sweep this machine runs itself: its timer down is red, nothing would
+  # ever expire; the watcher down is a warning, the timer widens instead.
+  unset STUB_RC STUB_OUT
+  STUB_TIMER=inactive; out="$(chk)"; rc=$?; STUB_TIMER=active
+  is  'the sweep timer not running is red' "${rc}" '1'
+  has 'and named' "${out}" 'the sweep of /shared is not running'
+  STUB_WATCH=inactive; out="$(chk)"; rc=$?; STUB_WATCH=active
+  is  'the watcher not running is said, and not counted' "${rc}" '0'
+  has 'and named' "${out}" 'the watcher of /shared is not running'
+  HDW4S_SHARED_SWEEP=external STUB_TIMER=inactive; out="$(chk)"; rc=$?
+  HDW4S_SHARED_SWEEP=local STUB_TIMER=active
+  is  'with SWEEP=external there is no local sweep to miss' "${rc}" '0'
+
+  STUB_RC=2 STUB_OUT='Traceback'; export STUB_RC STUB_OUT
+  out="$(chk)"; rc=$?
+  is  'a tool that could not tell is red, not green' "${rc}" '1'
+  has 'and says it could not tell' "${out}" 'could not be told'
+  unset STUB_RC STUB_OUT
+
+  # The effective size of a tmpfs table is said, the default included.
+  out="$(chk)"
+  has 'the effective size is said' "${out}" 'tmpfs table of'
+  has 'and that it is the default' "${out}" '10% of this machine'"'"'s memory, the default'
+  HDW4S_SHARED_SIZE=lots; out="$(chk)"; rc=$?; unset HDW4S_SHARED_SIZE
+  is  'a size that is not one is red' "${rc}" '1'
+
+  # A HEAL IS NEVER INVISIBLE: a drift mark under a day old is said, not counted.
+  mkdir -p "${SB}/state"; export HDW4S_SHARED_STATE="${SB}/state"
+  date +%s > "${SB}/state/drift"
+  out="$(chk)"; rc=$?
+  is  'a recent heal is not a failure' "${rc}" '0'
+  has 'but is said, with when' "${out}" 'drift healed at'
+  echo $(( $(date +%s) - 90000 )) > "${SB}/state/drift"
+  out="$(chk)"
+  hasnt 'a heal over a day old is no longer said' "${out}" 'drift healed'
+  date +%s > "${SB}/state/drift"
+  HDW4S_SHARED_EXPOSE="${SB}/plain"; out="$(chk)"; rc=$?; HDW4S_SHARED_EXPOSE=/proc
+  is  'unbound is red, mark or no mark' "${rc}" '1'
+  rm -f "${SB}/state/drift"
+
+  HDW4S_SHARED_IDLE=soon; out="$(chk)"; rc=$?
+  is  'an IDLE that cannot be read is red' "${rc}" '1'
+  unset HDW4S_SHARED_IDLE
+  HDW4S_SHARED_MAX_AGE=0; out="$(chk)"; rc=$?
+  is  'a MAX_AGE of 0 is red: expiry is a promise' "${rc}" '1'
+  unset HDW4S_SHARED_MAX_AGE
+  HDW4S_SHARED_EXPIRY=30m; out="$(chk)"; rc=$?
+  is  'the retired expiry is said, and not counted' "${rc}" '0'
+  has 'and named' "${out}" 'HDW4S_SHARED_EXPIRY is set, and nothing reads it'
+)
+
+echo '== /shared: the settings are machine-wide and read at boot =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  for k in HDW4S_SHARED HDW4S_SHARED_SIZE HDW4S_SHARED_SOURCE HDW4S_SHARED_SWEEP \
+           HDW4S_SHARED_IDLE HDW4S_SHARED_MAX_AGE; do
+    [ -n "${GLOBAL_ONLY[${k}]:-}" ] && ok "${k} is machine-wide only" \
+      || bad "${k} is machine-wide only" 'not in GLOBAL_ONLY'
+  done
+  has 'the hint says reboot' "$(set_hint '' HDW4S_SHARED_IDLE=1h)" 'reboot to use it'
+  ( check_value HDW4S_SHARED_MAX_AGE 0 ) 2>/dev/null && bad 'MAX_AGE 0 is refused by set' \
+    || ok 'MAX_AGE 0 is refused by set'
+  ( check_value HDW4S_SHARED_MAX_AGE 7d ) 2>/dev/null && ok 'and 7d is accepted' \
+    || bad 'and 7d is accepted'
+  ( check_value HDW4S_SHARED tmpfs ) 2>/dev/null && ok 'tmpfs is a mode' || bad 'tmpfs is a mode'
+  ( check_value HDW4S_SHARED on ) 2>/dev/null && bad '"on" is not a mode' || ok '"on" is not a mode'
+  [ -z "${SETTABLE[HDW4S_SHARED_EXPIRY]:-}" ] && ok 'the retired expiry cannot be set' \
+    || bad 'the retired expiry cannot be set'
+)
+}
+group_shared_wiring
+
+echo '== /shared in the root namespace: the read-only view, on real mounts, by the shipped boot run =='
+# Design C2 (PM P33): root's /shared is a read-only SLAVE bind of the plain
+# /run/hdw4s-shared, so the table arrives there with the exposure and leaves
+# with it. Its one trap is order -- made while a table is already shown, the
+# bind takes the table itself and PINS it -- so every refusal and the shape
+# check are exercised HERE, by the shipped script, on real mounts in a user
+# namespace: /run a shared tmpfs, the store a private tmpfs, the expose
+# service's bind and lazy unbind done as it does them. Where the namespace is
+# refused every assertion FAILS rather than skips.
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  N=224
+  if ! unshare -Urm true 2>/dev/null; then
+    for _ in $(seq "${N}"); do
+      bad '/shared in the root namespace, on real mounts' \
+          'unshare -Urm is refused here, so none of these ran (kernel.apparmor_restrict_unprivileged_userns?)'
+    done
+    exit 0
+  fi
+  # RED COPIES, made out here where quoting is plain. Each must have taken.
+  # (1) the check after the bind removed: whatever the bind came out as is kept.
+  # shellcheck disable=SC2016  # the pattern names the script's own variables
+  sed 's/^  made="\$(echo "\${shape}" | cut -d. . -f2)"$/&; printf "bound %s\\n" "${made}" > "${SHARED_VIEW_STATE}"; return 0/' \
+    "${ROOT}/hdw4s-ephemeral-slots" > "${T}/red-noverify"
+  # (2) the refusal while exposed removed.
+  # shellcheck disable=SC2016  # the pattern names the script's own ${SHARED_EXPOSE}
+  sed 's/^  if mounted_at "${SHARED_EXPOSE}"; then$/  if false; then/' \
+    "${ROOT}/hdw4s-ephemeral-slots" > "${T}/red-norefuse"
+  chmod +x "${T}/red-noverify" "${T}/red-norefuse"
+  is  'RED ARM: the edit removing the check after the bind took' \
+    "$(grep -c '; return 0$' "${T}/red-noverify")" "$(( $(grep -c '; return 0$' "${ROOT}/hdw4s-ephemeral-slots") + 1 ))"
+  # THE RACE INJECTOR: a table bound at the exposure at one chosen instant of
+  # the bind, as an expose run would. For the bind made with mount(8) (the
+  # previous mechanism): before the bind, or before its make-slave. For the
+  # bind made with the mount API: before the syscall named in INJECT_AT, by a
+  # sitecustomize the minter's python3 picks up from PYTHONPATH. Both are
+  # armed at once, so the same assertions judge either mechanism.
+  mkdir -p "${T}/inject"
+  cat > "${T}/inject/sitecustomize.py" <<'PY'
+import ctypes, os, subprocess
+# INJECT_AT=<syscall>[#<n>]: before the n-th call of it (default the first).
+_name, _, _nth = os.environ.get("INJECT_AT", "").partition("#")
+_at = {"open_tree": 428, "mount_setattr": 442, "move_mount": 429}.get(_name)
+_nth = int(_nth or 1)
+_seen = [0]
+if _at is not None:
+    _CDLL = ctypes.CDLL
+    class CDLL(_CDLL):
+        def __getattr__(self, name):
+            f = _CDLL.__getattr__(self, name)
+            if name != "syscall":
+                return f
+            def syscall(*args):
+                if args and args[0] == _at:
+                    _seen[0] += 1
+                if args and args[0] == _at and _seen[0] == _nth and not os.environ.get("INJECTED"):
+                    os.environ["INJECTED"] = "1"
+                    subprocess.run(["mount", "--bind", os.environ["S"] + "/table", os.environ["E"]], check=True)
+                return f(*args)
+            # CDLL caches what it hands out on the instance: cache this one
+            # instead, or the second call bypasses it.
+            f.restype = ctypes.c_long
+            setattr(self, name, syscall)
+            return syscall
+    ctypes.CDLL = CDLL
+PY
+  is  'RED ARM: the edit removing the refusal while exposed took' \
+    "$(grep -c '^  if false; then$' "${T}/red-norefuse")" '1'
+  export -f ok bad is has hasnt
+  export RESULTS T ROOT
+  # shellcheck disable=SC2016  # expanded by the shell inside the namespace
+  # IN FOUR TOPOLOGIES (PM P35), each named in every line it prints:
+  #   private  the namespace's mounts private;
+  #   shared   shared, as on every machine this ships to, where / is shared
+  #            (systemd on a stock host, and LXC), with no peers;
+  #   peer     shared, with a PEER: a second mount namespace copied from this
+  #            one and left shared, so /shared's parent has a peer there;
+  #   desktop  shared, with a desktop already running when the bind is made:
+  #            a SLAVE namespace with its own bind of the exposure at /shared.
+  # Under a shared parent move_mount makes what it attaches shared again; the
+  # first mount-API cut was green with private mounts only and never made the
+  # bind on any real target (review of 16e9d96, S1).
+  for V in private shared peer desktop; do
+  export V
+  case "${V}" in private) prop=private;; *) prop=shared;; esac
+  unshare -Urm --propagation "${prop}" bash -c '
+  set +e
+  ok()  { echo ok >> "${RESULTS}"; printf "  ok   [parent %s] %s\n" "${V}" "$1"; }
+  bad() { echo fail >> "${RESULTS}"; printf "  FAIL [parent %s] %s\n" "${V}" "$1"; [ $# -lt 2 ] || printf "       %s\n" "$2"; }
+  SB="${T}/sb-${V}"; mkdir -p "${SB}/etc" "${SB}/var" "${T}/run"
+  printf "%s\n" "1 _hdw4s_0 ephemeral" > "${SB}/etc/instances"
+  mount -t tmpfs run "${T}/run"; mount --make-shared "${T}/run"
+  E="${T}/run/hdw4s-shared"; S="${T}/run/hdw4s-shared-store"; P="${T}/shared-${V}"
+  MARK="${SB}/var/.shared-mountpoint"; VIEW="${SB}/view"
+  mkdir -p "${E}" "${S}"
+  mount -t tmpfs -o mode=0700,nosymfollow,nodev,noexec,nosuid,strictatime store "${S}"
+  mount --make-private "${S}"; mkdir -m 0777 "${S}/table"; echo item > "${S}/table/f"
+  # As hdw4s-shared-expose binds and unbinds.
+  expose() { mount --bind "${S}/table" "${E}"; }
+  unexpose() { umount -l -c "${E}"; }
+  n_at() { awk -v p="$1" "\$5 == p { n++ } END { print n + 0 }" /proc/self/mountinfo; }
+  # The expose timer starts last; record whether /shared was bound by then.
+  systemctl() { echo "systemctl $*" >> "${SB}/calls"
+                if [ "${1:-} ${2:-}" = "start --no-block" ]; then
+                  [ "$(n_at "${P}")" -gt 0 ] && echo bound-before-start >> "${SB}/calls"; fi
+                [ "${1:-}" != list-units ] || { [ ! -e "${SB}/units" ] || cat "${SB}/units"; }; }
+  getent() { [ "$1 $2" = "group hdw4s-relay" ] && echo "hdw4s-relay:x:999:" && return 0
+             command getent "$@"; }
+  install() { local args=(); while [ $# -gt 0 ]; do
+                case "$1" in -g) shift 2;; *) args+=("$1"); shift;; esac; done
+              command install "${args[@]}"; }
+  export -f systemctl getent install n_at; export SB P
+  env_() { env HDW4S_ETCDIR="${SB}/etc" HDW4S_USERDB_DIR="${SB}/userdb" \
+           HDW4S_NS_DIR="${SB}/ns" HDW4S_PROFILE_ROOT="${SB}/profile" \
+           HDW4S_DROPIN_DIR="${SB}/system" HDW4S_PROXY_RUNDIR="${SB}/proxy" \
+           HDW4S_TEARDOWN_DIR="${SB}/teardown" HDW4S_START_DIR="${SB}/start" \
+           HDW4S_INVITE_DIR="${SB}/invite" HDW4S_INCARNATION_DIR="${SB}/incarn" \
+           HDW4S_STREAM_DIR="${SB}/stream" HDW4S_DCONF_DB_DIR="${SB}/no-dconf" \
+           HDW4S_SHARED_MARK="${MARK}" HDW4S_SHARED_MOUNTPOINT="${P}" \
+           HDW4S_SHARED_EXPOSE="${E}" HDW4S_SHARED_VIEW_STATE="${VIEW}" "$@"; }
+  boot() { : > "${SB}/calls"; env_ "${1:-${ROOT}/hdw4s-ephemeral-slots}" 2>&1; }
+  view() { env_ "${ROOT}/hdw4s-ephemeral-slots" --shared-view "$1" 2>&1; }
+  checkrc() { view check >/dev/null; echo $?; }
+  # "<exit>:<shape>" -- the shape word the check names, so that a red is told
+  # apart from a script that merely failed (which also exits 1).
+  vc() { local o r; o="$(view check)"; r=$?
+         printf "%s:%s\n" "${r}" "$(printf "%s\n" "${o}" | sed -n "s/^  \([a-z-]*\) [-0-9].*/\1/p" | head -n 1)"; }
+  conf() { printf "%s\n" HDW4S_EPHEMERAL_SLOTS=0 HDW4S_SHARED_SWEEP=external "$@" > "${SB}/etc/hdw4s.conf"; }
+  # The DESKTOP stand-in: started on our own /shared (so it is marked), with
+  # BindPaths= done as an rbind of the exposure, as systemd does; and the
+  # systemctl stand-in then lists it as running.
+  # Its pid in a file: arms call fresh inside $(...), where a variable dies.
+  desk() { nsenter -t "$(cat "${SB}/desk.pid")" -m -- "$@"; }
+  start_desktop() {
+    mkdir -p "${P}"; : > "${MARK}"
+    unshare -m --propagation slave -- sleep 900 </dev/null >/dev/null 2>&1 & D=$!
+    echo "${D}" > "${SB}/desk.pid"
+    until [ "$(readlink "/proc/${D}/ns/mnt")" != "$(readlink /proc/self/ns/mnt)" ]; do sleep 0.05; done
+    desk mount --rbind "${E}" "${P}"
+    printf "%s\n" "hdw4s-ephemeral@_hdw4s_0.service loaded active running stand-in" > "${SB}/units"
+    desk awk -v p="${P}" "\$5 == p { on[\$1] = \$2 } END { for (a in on) { t = 1; for (b in on) if (on[b] == a) t = 0; if (t) print a } }" \
+      /proc/self/mountinfo > "${SB}/desk-top"; }
+  # An arm that needs the bind made by the boot run does not run where the
+  # topology declines it -- and says so, by name, in place of a result.
+  needbind() { [ "${V}" != peer ] && return 0
+               echo "  skip [parent peer] $1: it presupposes the bind, which this topology declines"; return 1; }
+  # Each case starts clean: whatever is left is taken away here, by the test.
+  fresh() { [ ! -s "${SB}/desk.pid" ] || { kill "$(cat "${SB}/desk.pid")"; rm -f "${SB}/desk.pid"; }
+            while [ "$(n_at "${P}")" -gt 0 ]; do umount -l "${P}"; done
+            while [ "$(n_at "${E}")" -gt 0 ]; do umount -l "${E}"; done
+            rmdir "${P}" 2>/dev/null; rm -f "${MARK}" "${VIEW}" "${SB}/units"
+            [ "${V}" != desktop ] || start_desktop; }
+  # The PEER: a copy of this namespace, left shared, so every shared mount
+  # here -- /shared'"'"'s parent included -- has a peer there.
+  if [ "${V}" = peer ]; then
+    unshare -m --propagation unchanged -- sleep 900 </dev/null >/dev/null 2>&1 & PEER=$!
+    until [ "$(readlink "/proc/${PEER}/ns/mnt")" != "$(readlink /proc/self/ns/mnt)" ]; do sleep 0.05; done
+  fi
+  # Say the topology from the mount table, not from the variable.
+  parent="$(findmnt -n -o TARGET -T "${P%/*}")"
+  ptag="$(awk -v m="${parent}" "\$5 == m { for (i = 7; \$i != \"-\"; i++) printf \"%s \", \$i }" /proc/self/mountinfo)"
+  pid="$(awk -v m="${parent}" "\$5 == m { print \$3 }" /proc/self/mountinfo)"
+  peers=0; [ -z "${PEER:-}" ] ||
+    peers="$(awk -v t="${ptag%% *}" "{ for (i = 7; \$i != \"-\"; i++) if (\$i == t) n++ } END { print n + 0 }" "/proc/${PEER}/mountinfo")"
+  echo "  topology [parent ${V}]: /shared'"'"'s parent ${parent} is [${ptag% }], with ${peers} peer(s) in another namespace"
+  fresh
+
+  # THE ORDERING C2 IS FOR (positive control: if this is not green, nothing
+  # below means anything).
+  conf HDW4S_SHARED=tmpfs; out="$(boot)"; rc=$?
+  is  "the boot run with /shared on succeeds" "${rc}" 0
+  if [ "${V}" = peer ]; then
+    # WITH A PEER, the bind is NOT made, and that is measured, not wished: the
+    # second make-slave makes it a slave of its own new group (whose other
+    # member is the peer'"'"'s copy), so it reads "master:<its group>
+    # propagate_from:<run>" and the shape check refuses it. It fails SAFE
+    # (PM P35 P-d): declined, nothing left mounted, the check red and naming
+    # why. Whether any target has such a peer is a census on the boxes.
+    is  "with a peer: the bind is declined, and nothing is left at /shared" "$(n_at "${P}")" 0
+    is  "and it is recorded why" "$(cat "${VIEW}")" "declined not-slave"
+    has "and the check is red and names it" "$(view check)" "(not-slave)"
+    is  "red, not a warning" "$(checkrc)" 1
+  else
+  [ "${rc}" -eq 0 ] || printf "       %s\n" "${out}" | tail -n 5
+  is  "root /shared is bound, by the boot run, before the expose timer starts" \
+    "$(grep -c bound-before-start "${SB}/calls")" 1
+  is  "and marked as this feature'"'"'s" "$([ -e "${MARK}" ] && echo marked)" marked
+  is  "its shape passes the check" "$(checkrc)" 0
+  is  "unexposed, root sees nothing there" "$(ls -A "${P}")" ""
+  touch "${P}/x" 2>/dev/null && w=WRITABLE || w=refused
+  is  "and cannot write there (the bind is read-only)" "${w}" refused
+  expose
+  is  "exposed, the table arrives at root /shared" "$(ls -A "${P}")" f
+  touch "${P}/y" 2>/dev/null && w=WRITABLE || w=refused
+  is  "and root writes reach the table" "${w}:$(ls "${S}/table" | tr "\n" " ")" "WRITABLE:f y "
+  is  "and the shape still passes" "$(checkrc)" 0
+  rm -f "${S}/table/y"; unexpose
+  is  "unexposed again, it leaves root /shared too" "$(ls -A "${P}")" ""
+  boot >/dev/null
+  is  "a second run leaves the one bind alone" "$(n_at "${P}"):$(checkrc)" 1:0
+  fi
+  if [ "${V}" = desktop ]; then
+    # P-e: the desktop running when the bind was made keeps its view.
+    is  "the running desktop'"'"'s own /shared is still the top there" \
+      "$(desk awk -v p="${P}" "\$5 == p { on[\$1] = \$2 } END { for (a in on) { t = 1; for (b in on) if (on[b] == a) t = 0; if (t) print a } }" /proc/self/mountinfo)" \
+      "$(cat "${SB}/desk-top")"
+    expose
+    is  "exposed, the running desktop sees the table" "$(desk ls -A "${P}")" f
+    desk touch "${P}/from-desktop" 2>/dev/null && w=WRITABLE || w=refused
+    is  "and writes reach it" "${w}:$(ls "${S}/table" | tr "\n" " ")" "WRITABLE:f from-desktop "
+    rm -f "${S}/table/from-desktop"; unexpose
+    is  "unexposed, it leaves the desktop too" "$(desk ls -A "${P}")" ""
+  fi
+
+  # C2-1: REFUSED WHILE EXPOSED -- a live postinst, an off->on upgrade, a hand run.
+  fresh; expose; out="$(boot)"; rc=$?
+  is  "with a table already shown, the run still succeeds" "${rc}" 0
+  is  "RED ARM: and makes no bind (it would pin the table)" "$(n_at "${P}")" 0
+  has "and says it takes effect at the next boot" "${out}" "It takes effect at the next boot"
+  is  "and the check warns rather than fails" "$(checkrc)" 3
+  out="$(boot "${T}/red-norefuse")"
+  has "RED ARM: without the refusal, the bind is made and found pinned" "${out}" "came out wrong (foreign"
+  is  "and taken away again by the check after it" "$(n_at "${P}")" 0
+  unexpose
+
+  # C2-1: THE RACE -- an expose run that binds between the look and the bind.
+  # THE PROPERTY (review of the first cut, R1): at no instant attached at
+  # /shared is the bind a PEER of /run, so nothing unmounted at /shared can
+  # propagate back and take the table off /run/hdw4s-shared. The first cut
+  # attached, then made it a slave by path; a table bound in between landed on
+  # it, and the clean-up unmounted the EXPOSURE (measured, reviewer e2b.sh).
+  export S E
+  race() {  # race <mount(8) word to inject before> <syscall to inject before>
+    fresh
+    eval "mount() { case \" \$* \" in *\" $1 \"*) command mount --bind \"\${S}/table\" \"\${E}\";; esac
+                     command mount \"\$@\"; }"
+    export -f mount
+    out="$(INJECT_AT="$2" PYTHONPATH="${T}/inject" boot)"
+    unset -f mount
+    printf "%s:%s" "$(n_at "${E}")" "$(n_at "${P}")"; }
+  r="$(race --make-slave mount_setattr)"
+  is  "RED ARM: a table bound after the bind is made and before it is a slave: the EXPOSURE survives" \
+    "${r%%:*}" 1
+  unexpose
+  is  "and root /shared keeps no table once it is taken away" "$(ls -A "${P}" 2>/dev/null)" ""
+  is  "and what is left at /shared passes the check, or is none" "$(c=$(checkrc); [ "${c}" != 1 ] && echo ok)" ok
+  r="$(race -- open_tree)"
+  is  "a table bound between the look and the bind: the exposure survives" "${r%%:*}" 1
+  is  "and the bind, which took the table, is taken away" "${r#*:}" 0
+  has "and it says so" "${out}" "came out wrong (foreign"
+  is  "and it is recorded as waiting for the next boot" "$(cat "${VIEW}")" "declined exposed"
+  unexpose
+  # After the attach and before it is made a slave again (shared parent): the
+  # table arrives on it as a copy; the fd-made slave keeps it, and nothing of
+  # /run is ever unmounted.
+  r="$(race --never-a-word "mount_setattr#2")"
+  is  "a table bound after the attach, before the second make-slave: the exposure survives" "${r%%:*}" 1
+  if [ "${V}" = peer ]; then
+    # With a peer the bind is not a slave of /run (see above). With a table on
+    # it, it is not taken away (R2: what is stacked on it is left, and said);
+    # it shows the table, follows it away, and the check is red.
+    is  "with a peer: root /shared shows it, and the check is RED" "$(ls -A "${P}"):$(checkrc)" f:1
+  else
+    is  "and root /shared shows it, and passes the check" "$(ls -A "${P}"):$(checkrc)" f:0
+  fi
+  unexpose
+  is  "and it leaves root /shared with it (no pin)" "$(ls -A "${P}")" ""
+  r="$(race --never-a-word move_mount)"
+  is  "a table bound just before the bind is attached: the exposure survives" "${r%%:*}" 1
+  unexpose
+  is  "and root /shared keeps no table once it is taken away" "$(ls -A "${P}" 2>/dev/null)" ""
+  # R2: when the bind cannot be taken away again, the log must not say it was.
+  fresh; umount() { return 1; }
+  mount() { case " $* " in *" -o ro -- "*) command mount --bind "${S}/table" "${E}";; esac
+            command mount "$@"; }
+  export -f umount mount
+  out="$(INJECT_AT=open_tree PYTHONPATH="${T}/inject" boot)"
+  unset -f umount mount
+  has "a wrong bind that cannot be taken away is said to be still there" "${out}" "could NOT be taken"
+  hasnt "and never said to be taken away" "${out}" "was taken away"
+  is  "and the check is red on it" "$(vc)" 1:foreign
+  unexpose
+  fresh; mount() { case " $* " in *" -o ro -- "*) command mount --bind "${S}/table" "${E}";; esac
+                   command mount "$@"; }; export -f mount
+  INJECT_AT=open_tree PYTHONPATH="${T}/inject" boot "${T}/red-noverify" >/dev/null
+  unset -f mount
+  is  "RED ARM: without the check after the bind, the race leaves it bound" "$(n_at "${P}")" 1
+  unexpose
+  is  "RED ARM: and PINNED: the table stays in root after it was taken away" "$(ls -A "${P}")" f
+
+  # FINDING 1: NEVER ON A MISSING SOURCE.
+  fresh; rmdir "${E}"; out="$(boot)"
+  has "with no /run/hdw4s-shared the bind is not attempted" "${out}" "does not exist"
+  is  "and nothing is mounted at /shared" "$(n_at "${P}")" 0
+  is  "and the check is RED: a boot that left no bind" "$(checkrc)" 1
+  has "and says why" "$(view check)" "is not bound to the"
+  mkdir "${E}"
+
+  # C2-3: EVERY SHAPE BUT THE BIND IS RED, on real mounts.
+  fresh; conf HDW4S_SHARED=tmpfs; mkdir -p "${P}"; : > "${MARK}"
+  is  "no bind at all (feature on, /shared ours) is red" "$(checkrc)" 1
+  has "and says so" "$(view check)" "is not bound to the"
+  expose; mount --bind -o ro "${E}" "${P}"; mount --make-slave "${P}"; unexpose
+  is  "a PINNED bind is red, named as not /run" "$(vc)" 1:foreign
+  fresh; conf HDW4S_SHARED=tmpfs; boot >/dev/null; rmdir "${E}"; mkdir "${E}"
+  needbind "the deleted-source arm" &&
+  is  "a bind whose source was removed and remade is red, as deleted" "$(vc)" 1:deleted
+  fresh; mkdir -p "${P}"; : > "${MARK}"; mount -t tmpfs foreign "${P}"
+  is  "a foreign filesystem at the bottom is red" "$(vc)" 1:foreign
+  fresh; mkdir -p "${P}"; : > "${MARK}"; mount --bind "${E}" "${P}"; mount --make-slave "${P}"
+  is  "a writable bind is red" "$(vc)" 1:rw
+  fresh; mkdir -p "${P}"; : > "${MARK}"; mount --bind -o ro "${E}" "${P}"
+  is  "a bind that is a peer of /run, not its slave, is red" "$(vc)" 1:not-slave
+  fresh; boot >/dev/null; mount -t tmpfs stray "${P}"
+  needbind "the stray-mount arm" &&
+  is  "a mount on top of the bind that is not the table is red" "$(vc)" 1:stray
+  fresh; conf; mkdir -p "${P}"; : > "${MARK}"; expose; mount --bind -o ro "${E}" "${P}"
+  mount --make-slave "${P}"; unexpose
+  is  "pinned is red with /shared OFF too" "$(vc)" 1:foreign
+  fresh; conf HDW4S_SHARED=tmpfs; mkdir -p "${P}"; rm -f "${MARK}"
+  out="$(view check)"; rc=$?
+  is  "an administrator'"'"'s /shared (no mark) is not red" "${rc}" 0
+  has "and is named, with the path to use instead" "${out}" "Use ${E}"
+
+  # C2-4: TAKEN AWAY BY ITS RECORDED IDENTITY, never under a desktop or a table.
+  if needbind "the release arms (C2-4)"; then
+  fresh; conf HDW4S_SHARED=tmpfs; boot >/dev/null
+  printf "%s\n" "hdw4s-ephemeral@_hdw4s_0.service loaded active running x" > "${SB}/units"
+  out="$(view release-for-removal)"
+  is  "RED ARM: release with a desktop running keeps the bind, /shared and its mark" \
+    "$(n_at "${P}"):$([ -d "${P}" ] && [ -e "${MARK}" ] && echo kept)" 1:kept
+  has "and says which" "${out}" "hdw4s-ephemeral@_hdw4s_0.service"
+  hasnt "and, called by the package going, never promises a boot run that will not come" \
+    "${out}" "The next boot"
+  has "but says nothing will remove it" "${out}" "Nothing removes it once the package is gone"
+  out="$(view release)"
+  has "run by hand, with the package installed, it says the boot run will" "${out}" "The next boot with HDW4S_SHARED off"
+  [ "${V}" = desktop ] || rm -f "${SB}/units"; expose; out="$(view release)"
+  is  "release while a table is shown keeps it all" \
+    "$(n_at "${P}"):$([ -d "${P}" ] && [ -e "${MARK}" ] && echo kept)" 2:kept
+  unexpose; echo "bound 999999" > "${VIEW}"; out="$(view release)"
+  is  "release of a bind it did not record making keeps it all" \
+    "$(n_at "${P}"):$([ -e "${MARK}" ] && echo kept)" 1:kept
+  if [ "${V}" = desktop ]; then
+    has "and says why: the desktop" "${out}" "while these desktops are running"
+  else
+    has "and says so" "${out}" "not the bind this feature recorded making"
+  fi
+  rm -f "${VIEW}"; boot >/dev/null; conf; out="$(boot)"
+  if [ "${V}" = desktop ]; then
+    is  "turned off with the desktop running: the bind, /shared, its mark and its record are kept" \
+      "$(n_at "${P}"):$([ -e "${P}" ] && echo P)$([ -e "${MARK}" ] && echo M)$([ -e "${VIEW}" ] && echo V)" 1:PMV
+  else
+    is  "turned off with nothing running: the boot run unmounts it, removes /shared, then the mark" \
+      "$(n_at "${P}"):$([ -e "${P}" ] && echo P)$([ -e "${MARK}" ] && echo M)$([ -e "${VIEW}" ] && echo V)" 0:
+  fi
+  is  "and /run/hdw4s-shared is untouched" "$([ -d "${E}" ] && echo there)" there
+  fi
+  # Leave nothing running: fresh would start another desktop stand-in.
+  V=done fresh; [ -z "${PEER:-}" ] || kill "${PEER}"
+  '
+  done
+)
+
+echo '== /shared in the root namespace: the shape check, on the mount table a container really has =='
+# The NFS case (PM P23): there the exposure is nfs4 with root "/", so a pin is
+# NOT "root /table" and a check that looked for that would pass it. The lines
+# are the real ones captured inside the container; the bottom is found by
+# parent id, never by position, because propagation tucks mounts beneath.
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  : > "${T}/mark"
+  RUN='25 1 0:25 / /run rw,nosuid,nodev,noexec,relatime shared:5 - tmpfs tmpfs rw,mode=755'
+  EXPO='3417 25 0:251 / /run/hdw4s-shared rw,nosuid,nodev,noexec,nosymfollow master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1'
+  GOOD='3500 1 0:25 /hdw4s-shared /shared ro,relatime master:5 - tmpfs tmpfs rw,mode=755'
+  COPY='3501 3500 0:251 / /shared rw,nosuid,nodev,noexec,nosymfollow master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1'
+  PIN='3502 1 0:251 / /shared ro,nosuid,nodev,noexec,nosymfollow master:3169 - nfs4 192.0.2.1:/export/shared/table rw,vers=4.2,soft,addr=192.0.2.1'
+  # "<exit>:<shape word>": a red must NAME its shape, or a script that merely
+  # failed (exit 1 too) would pass for one.
+  chk() { local o r; printf '%s\n' "$@" > "${T}/mountinfo"
+          o="$(HDW4S_ETCDIR="${T}" HDW4S_SHARED=source HDW4S_SHARED_MARK="${T}/mark" \
+               HDW4S_SHARED_VIEW_STATE="${T}/view" HDW4S_MOUNTINFO="${T}/mountinfo" \
+               "${ROOT}/hdw4s-ephemeral-slots" --shared-view check 2>&1)"; r=$?
+          printf '%s:%s\n' "${r}" "$(printf '%s\n' "${o}" | sed -n 's/^  \([a-z-]*\) [-0-9].*/\1/p' | head -n 1)"; }
+  is  'NFS, exposed, the bind with the table propagated onto it: good' \
+    "$(chk "${RUN}" "${EXPO}" "${GOOD}" "${COPY}")" '0:'
+  is  'the same lines in the other order: still good (bottom by parent id)' \
+    "$(chk "${RUN}" "${EXPO}" "${COPY}" "${GOOD}")" '0:'
+  is  'RED ARM: an NFS PIN (root "/", not "/table") is red' "$(chk "${RUN}" "${EXPO}" "${PIN}")" '1:foreign'
+  is  'the same pin after the store was taken away is red' "$(chk "${RUN}" "${PIN}")" '1:foreign'
+  # Propagation tucked the pin BENEATH the bind: the bind's parent is now the
+  # pin, and the pin is the bottom whatever order the lines come in.
+  is  'a pin TUCKED BENEATH the bind is red' \
+    "$(chk "${RUN}" "${EXPO}" "${GOOD/3500 1 /3500 3502 }" "${PIN}")" '1:foreign'
+  is  'a bind that is also a peer of its own group is red' \
+    "$(chk "${RUN}" "${GOOD/ro,relatime/ro,relatime shared:77}")" '1:not-slave'
+  is  'with /run not shared nothing can ever arrive: red' "$(chk "${RUN/shared:5 /}" "${GOOD}")" '1:unshared'
+  is  'a deleted source is red, by name' \
+    "$(chk "${RUN}" "${GOOD/\/hdw4s-shared \/shared/\/hdw4s-shared\/\/deleted \/shared}")" '1:deleted'
+  is  'the good bind alone, unexposed: good' "$(chk "${RUN}" "${GOOD}")" '0:'
+  # Unmounted by hand (shape pass F1): the record says bound, nothing is there.
+  # It strands table copies in every slave namespace, which no read here can
+  # see; the record is the only witness, so it is red, with the remedy.
+  echo 'bound 3500' > "${T}/view"
+  is  'a recorded bind found unmounted is red (it was before, as "not bound")' "$(chk "${RUN}" "${EXPO}")" '1:'
+  o="$(HDW4S_ETCDIR="${T}" HDW4S_SHARED_MARK="${T}/mark" HDW4S_SHARED_VIEW_STATE="${T}/view" \
+       HDW4S_MOUNTINFO="${T}/mountinfo" "${ROOT}/hdw4s-ephemeral-slots" --shared-view check 2>&1)"
+  has 'RED ARM: and says what to do: restart them, or reboot' "${o}" 'restart them, or reboot'
+  has 'with /shared off too' "${o}" 'unmounted
+  by hand'
+  rm -f "${T}/view"
+)
+
+echo '== /shared: hdw4s check counts what the minter says about root /shared =='
+# The shape check's only channel to the administrator is "hdw4s check" reading
+# the minter's exit status; this is that mapping, end to end. HDW4S_SHARED is
+# written to the configuration, because the minter reads it from there and
+# never from the caller's environment -- as in production.
+( set +e; sandbox; . "${SB}/setup.sh"
+  systemctl() { case "$1 ${*: -1}" in show*) echo active;; esac; }
+  : > "${SLOTS}"; mkdir -p "${SB}/cwd"
+  printf '#!/bin/bash\nexit 0\n' > "${SB}/tool"; chmod +x "${SB}/tool"; export HDW4S_SHARED_TOOL="${SB}/tool"
+  HDW4S_SHARED_EXPOSE=/proc; export HDW4S_SHARED_EXPOSE
+  chk() { ( cd "${SB}/cwd" && cmd_check ) 2>&1; }
+  HDW4S_SHARED=tmpfs; echo HDW4S_SHARED=tmpfs > "${CONF}"
+  out="$(chk)"; rc=$?
+  is  'control: on, no mark, no /shared: a warning, green' "${rc}" '0'
+  has 'and says next boot' "${out}" 'made at the next boot'
+  : > "${HDW4S_SHARED_MARK}"; mkdir -p "${HDW4S_SHARED_MOUNTPOINT}"
+  out="$(chk)"; rc=$?
+  is  'RED ARM: ours and NOT bound: hdw4s check is RED (exit 1)' "${rc}" '1'
+  has 'and names it' "${out}" 'is not bound to the'
+  HDW4S_SHARED=off; echo HDW4S_SHARED=off > "${CONF}"; out="$(chk)"; rc=$?
+  is  'off, ours, not bound: green' "${rc}" '0'
 )
 
 echo '== template edit needs no prior step, and a failed mint leaves no row =='
@@ -5147,7 +7765,7 @@ echo '== the router, against stand-in slots =='
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=882   # update when tests are added; a wrong number is the point
+EXPECTED=1487  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

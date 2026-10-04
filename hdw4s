@@ -1037,6 +1037,159 @@ cmd_list() {
 # It reports and returns non-zero. It restarts nothing: a check that repairs
 # what it finds is one nobody reads, and this one's whole value is that somebody
 # is told which slot and why.
+# ---- /shared ----------------------------------------------------------------
+#
+# The drop area's rows of "hdw4s check". RED when the feature is on and
+# desktops are not being given a table they should be, or nobody is removing
+# what is left on it; said and NOT counted for what is merely worth knowing.
+# Counted in SHARED_BAD, a counter of its own, because the summary has to name
+# the object a finding is about and /shared is neither a session nor the pool.
+#
+# THE JUDGEMENT IS NOT HERE. Whether /run/hdw4s-shared is an acceptable
+# exposure, whether anybody is sweeping it, how full it is: hdw4s-shared-sweep
+# --check answers all of it, with the same guard the expose service binds by.
+# What is here is what only this side knows -- the settings.
+#
+# NOTHING FROM THE TABLE IS PRINTED, only the tool's own lines, which carry
+# counts and clauses and never an item's name: what visitors leave there may
+# exist on disk, but its names are its content.
+SHARED_BAD=0
+shared_red() { printf '%s\n' "$@" >&2; SHARED_BAD=$(( SHARED_BAD + 1 )); }
+check_shared() {
+  local mode="${HDW4S_SHARED-}" expose="${HDW4S_SHARED_EXPOSE:-/run/hdw4s-shared}"
+  local tool="${HDW4S_SHARED_TOOL:-${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-shared-sweep}"
+  local idle="${HDW4S_SHARED_IDLE:-30m}" out rc bytes drift now store inst
+  local state="${HDW4S_SHARED_STATE:-/run/hdw4s-shared-expose}"
+  SHARED_BAD=0
+  # The old switch, said here as well as at boot: a machine upgraded with only
+  # HDW4S_SHARED_SIZE set has /shared OFF, and nothing else would say so.
+  if [ -z "${mode}" ] && [ -n "${HDW4S_SHARED_SIZE:-}" ]; then
+    printf '%s\n' \
+      'hdw4s: HDW4S_SHARED_SIZE is set and HDW4S_SHARED is not, so /shared is OFF.' \
+      '  HDW4S_SHARED_SIZE used to switch it on; it is now only the size of a tmpfs' \
+      "  table. To keep /shared, add HDW4S_SHARED=tmpfs to ${CONF} and reboot." >&2
+  fi
+  [ -z "${HDW4S_SHARED_EXPIRY+set}" ] || printf '%s\n' \
+    'hdw4s: HDW4S_SHARED_EXPIRY is set, and nothing reads it any more.' \
+    '  Items on /shared go after HDW4S_SHARED_IDLE (default 30m) unused;' \
+    "  delete the line from ${CONF}." >&2
+  # THE ROOT NAMESPACE'S /shared, judged by the code that makes it, and on or
+  # off: a bind left from when it was on is said, and a pinned or foreign one
+  # is red either way -- the guard below accepts a pinned view, so nothing
+  # else would ever notice one.
+  out="$(HDW4S_ETCDIR="${ETCDIR}" \
+         "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-ephemeral-slots" --shared-view check 2>&1)" &&
+    rc=0 || rc=$?
+  case "${rc}" in
+    0) [ -z "${out}" ] || printf '%s\n' "${out}";;
+    3) printf '%s\n' "${out}" >&2;;
+    1) shared_red "${out}";;
+    *) shared_red \
+         "hdw4s: whether /shared in the root namespace is right could not be told (exit ${rc})." \
+         "$(printf '%s\n' "${out}" | sed 's/^/  /')";;
+  esac
+  case "${mode:=off}" in
+    off) return 0;;
+    tmpfs|source) ;;
+    # RED, not a warning: a value here means somebody wanted /shared on, and
+    # it is off. Nothing turns off silently.
+    *) shared_red \
+         "hdw4s: HDW4S_SHARED is '${mode}', which is not off, tmpfs or source." \
+         '  /shared is off on this machine until it is one of those.'
+       return 0;;
+  esac
+  # The size a tmpfs table is given, from the same arithmetic as the mount --
+  # the default included -- so that a percentage nobody wrote is not a surprise.
+  if [ "${mode}" = 'tmpfs' ]; then
+    # The same configuration file this command read, and the value it read.
+    if bytes="$(HDW4S_ETCDIR="${ETCDIR}" HDW4S_SHARED_SIZE="${HDW4S_SHARED_SIZE:-}" \
+                "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-shared-expose" --size 2>/dev/null)"; then
+      if [ -n "${HDW4S_SHARED_SIZE:-}" ]; then
+        echo "hdw4s: /shared is a tmpfs table of ${bytes} bytes (HDW4S_SHARED_SIZE=${HDW4S_SHARED_SIZE})."
+      else
+        echo "hdw4s: /shared is a tmpfs table of ${bytes} bytes (10% of this machine's memory, the default)."
+      fi
+    else
+      shared_red "hdw4s: HDW4S_SHARED_SIZE='${HDW4S_SHARED_SIZE:-}' is not a size; no tmpfs table can be mounted."
+    fi
+  fi
+  idle_seconds "${idle}" ||
+    shared_red "hdw4s: HDW4S_SHARED_IDLE cannot be read: ${IDLE_WHY}" \
+      '  The sweep of /shared refuses it too, so nothing there is ever removed.'
+  if ! idle_seconds "${HDW4S_SHARED_MAX_AGE:-7d}" || [ "${IDLE_SECONDS:-0}" -le 0 ]; then
+    shared_red "hdw4s: HDW4S_SHARED_MAX_AGE='${HDW4S_SHARED_MAX_AGE:-}' cannot be used${IDLE_WHY:+: ${IDLE_WHY}}" \
+      '  It must be a duration above zero: what is left on /shared goes in the end.'
+  fi
+  # BOUNDED, like every look at the store: while a dead network store is still
+  # bound (up to 30 seconds), even asking whether it is a mount point can block.
+  timeout -k 2 10 mountpoint -q -- "${expose}" 2>/dev/null && rc=0 || rc=$?
+  if [ "${rc}" -eq 124 ]; then
+    shared_red \
+      "hdw4s: ${expose} did not answer within 10 seconds." \
+      '  A store that has stopped answering is still bound there; the service that' \
+      '  binds it takes it away within 30 seconds of noticing:' \
+      '    journalctl -u hdw4s-shared-expose.service'
+    return 0
+  elif [ "${rc}" -ne 0 ]; then
+    shared_red \
+      "hdw4s: /shared is on (HDW4S_SHARED=${mode}) and no table is bound at ${expose}." \
+      '  Every desktop sees an empty /shared it cannot write to. The reason is in' \
+      '  the log of the service that binds it:' \
+      '    journalctl -u hdw4s-shared-expose.service'
+    return 0
+  fi
+  # A HEAL IS NEVER INVISIBLE. The expose service takes the table away when it
+  # loses a flag and binds it again on its next run; that leaves a mark, and for
+  # a day the mark is said here. Said, not counted: the table is good now.
+  if [ -r "${state}/drift" ]; then
+    drift="$(head -n1 "${state}/drift" 2>/dev/null || :)"; now="$(date +%s)"
+    case "${drift}" in
+      ''|*[!0-9]*) ;;
+      *) [ $(( now - drift )) -ge 86400 ] ||
+           printf '%s\n' \
+             "hdw4s: /shared drift healed at $(date -d "@${drift}" '+%Y-%m-%d %H:%M:%S %Z')." \
+             '  The table lost a mount flag, was taken away from every desktop and bound' \
+             '  again. Find out who changed it:' \
+             '    journalctl -u hdw4s-shared-expose.service' >&2;;
+    esac
+  fi
+  # THE SWEEP THIS MACHINE RUNS ITSELF (SWEEP=local): its timer not running is
+  # red -- nothing on the table would ever expire -- and the watcher not
+  # running is a warning: widening falls back to the timer. The expose service
+  # starts both again within 30 seconds; this says it if that is not happening.
+  if [ "${HDW4S_SHARED_SWEEP:-local}" = 'local' ] &&
+     store="$(HDW4S_ETCDIR="${ETCDIR}" HDW4S_SHARED="${mode}" \
+              HDW4S_SHARED_SOURCE="${HDW4S_SHARED_SOURCE:-}" \
+              "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-shared-expose" --store 2>/dev/null)"; then
+    inst="$(systemd-escape --path -- "${store}")"
+    [ "$(systemctl show -p ActiveState --value "hdw4s-shared-sweep@${inst}.timer" \
+           2>/dev/null)" = 'active' ] ||
+      shared_red "hdw4s: the sweep of /shared is not running (hdw4s-shared-sweep@${inst}.timer)." \
+        '  Nothing left on the table is ever removed while it is not. The expose' \
+        '  service starts it again within 30 seconds; if it does not, see' \
+        '    journalctl -u hdw4s-shared-expose.service'
+    [ "$(systemctl show -p ActiveState --value "hdw4s-shared-watch@${inst}.service" \
+           2>/dev/null)" = 'active' ] ||
+      printf '%s\n' \
+        "hdw4s: the watcher of /shared is not running (hdw4s-shared-watch@${inst}.service)." \
+        '  New items are widened by the two-minute sweep instead of at once:' \
+        '    journalctl -u hdw4s-shared-watch@'"${inst}"'.service' >&2
+  fi
+  out="$(cd / && timeout -k 2 120 "${tool}" --check --dir "${expose}" --idle "${idle}" 2>&1)" &&
+    rc=0 || rc=$?
+  case "${rc}" in
+    0) ;;
+    # Warnings only: said, and not counted.
+    3) printf '%s\n' "${out}" | sed 's/^/hdw4s: \/shared: /' >&2;;
+    1) printf '%s\n' "${out}" | sed 's/^/hdw4s: \/shared: /' >&2
+       SHARED_BAD=$(( SHARED_BAD + 1 ));;
+    # "Could not tell" is not "fine", and not silent.
+    *) shared_red \
+         "hdw4s: whether /shared is healthy could not be told: hdw4s-shared-sweep --check exited ${rc}." \
+         "$(printf '%s\n' "${out}" | sed 's/^/  /')";;
+  esac
+}
+
 cmd_check() {
   local idx inst state served recorded live=0 bad=0 pool_bad=0 failed=''
   # A THIRD COUNTER, and not one of the two above, because the summary has to
@@ -1060,6 +1213,11 @@ cmd_check() {
   # check fails is the property; this one fails toward saying so.
   [ -d "${incarn}" ] && [ -x "${incarn}" ] || readable='no'
 
+  # /shared first, and outside everything below that is about sessions and the
+  # pool: a machine with no slot table can still have a drop area, and the
+  # early return for "no slot table" must not skip it.
+  check_shared
+
   # A table that is not there at all describes a machine where nobody has ever
   # configured a session, and that machine is not broken. A table that EXISTS
   # and cannot be read is a different answer wearing the same shape: the router
@@ -1078,6 +1236,11 @@ cmd_check() {
       exit 1
     fi
     echo 'hdw4s: no slot table, so no sessions to check.'
+    if [ "${SHARED_BAD}" -gt 0 ]; then
+      printf '%s\n' '' "hdw4s: ${SHARED_BAD} thing(s) are wrong with /shared." >&2
+      trap '' INT TERM QUIT HUP EXIT ERR
+      exit 1
+    fi
     return 0
   fi
 
@@ -1419,7 +1582,7 @@ cmd_check() {
   done < <(sort -n "${SLOTS}")
 
   if [ "${bad}" -gt 0 ] || [ "${pool_bad}" -gt 0 ] || [ "${slice_bad}" -gt 0 ] ||
-     [ "${webrtc_bad}" -gt 0 ]; then
+     [ "${webrtc_bad}" -gt 0 ] || [ "${SHARED_BAD}" -gt 0 ]; then
     [ "${bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${bad} of ${live} running session(s) failed this check." >&2
     [ "${pool_bad}" -eq 0 ] || printf '%s\n' '' \
@@ -1431,6 +1594,9 @@ cmd_check() {
     [ "${webrtc_bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${webrtc_bad} of ${live} running session(s) started without the WebRTC" \
       '  they are configured to offer.' >&2
+    # Its own sentence too: the drop area is not a session and not the pool.
+    [ "${SHARED_BAD}" -eq 0 ] || printf '%s\n' '' \
+      "hdw4s: ${SHARED_BAD} thing(s) are wrong with /shared." >&2
     trap '' INT TERM QUIT HUP EXIT ERR
     exit 1
   fi
@@ -1964,6 +2130,10 @@ declare -A GLOBAL_ONLY=(
   [HDW4S_EPHEMERAL_BACKGROUND]=1
   # Read by "hdw4s template edit", which acts for the machine.
   [HDW4S_EPHEMERAL_URL]=1
+  # /shared is one area for the whole machine, set up at boot by the run that
+  # has no instance in hand.
+  [HDW4S_SHARED]=1 [HDW4S_SHARED_SIZE]=1 [HDW4S_SHARED_SOURCE]=1
+  [HDW4S_SHARED_SWEEP]=1 [HDW4S_SHARED_IDLE]=1 [HDW4S_SHARED_MAX_AGE]=1
 )
 
 # Settings whose effect does not live in the configuration file at all. The
@@ -2020,6 +2190,12 @@ declare -A SETTABLE=(
   [HDW4S_EPHEMERAL_SHM_SIZE]='size'
   [HDW4S_EPHEMERAL_BACKGROUND]='color'
   [HDW4S_EPHEMERAL_URL]='url'
+  [HDW4S_SHARED]='off|tmpfs|source'
+  [HDW4S_SHARED_SIZE]='size'
+  [HDW4S_SHARED_SOURCE]='path'
+  [HDW4S_SHARED_SWEEP]='local|external'
+  [HDW4S_SHARED_IDLE]='duration'
+  [HDW4S_SHARED_MAX_AGE]='lifetime'
   [HDW4S_MICROPHONE]='no|yes'
   [HDW4S_WEBCAM]='no|yes'
   [HDW4S_WEBRTC]='no|yes'
@@ -2234,6 +2410,14 @@ check_value() {
     duration)
             idle_seconds "${value}" ||
               die "hdw4s: ${key}: ${IDLE_WHY}" "$(idle_syntax_help)";;
+    # The same grammar with no way to say "for ever". What is left on /shared
+    # is removed in the end whatever anybody does with it, and that promise is
+    # only as good as the one setting that could switch it off.
+    lifetime)
+            idle_seconds "${value}" ||
+              die "hdw4s: ${key}: ${IDLE_WHY}" "$(idle_syntax_help)"
+            [ "${IDLE_SECONDS}" -gt 0 ] ||
+              die "hdw4s: ${key} cannot be 0: whatever is left on /shared is removed in the end.";;
     # A bare number, or the "N,LOW-HIGH" form. The range has to be settable:
     # hdw4s-run-session turns a bare number into "N,8-N" precisely so the
     # setting caps the rate rather than merely starting there, and passes an
@@ -2519,6 +2703,12 @@ set_hint() {
       # conservative one.
       HDW4S_EPHEMERAL_HOME_SIZE|HDW4S_EPHEMERAL_PROFILE_SIZE|\
       HDW4S_EPHEMERAL_SHM_SIZE|HDW4S_EPHEMERAL_BACKGROUND) atboot='yes';;
+      # /shared: the boot run writes the desktops' drop-ins, the expose timer
+      # and the sweep's arguments from these, into /run, once. The expiry
+      # settings too -- they reach the sweep as arguments, not by its reading
+      # this file -- so "the next sweep" would have been the wrong answer.
+      HDW4S_SHARED|HDW4S_SHARED_SIZE|HDW4S_SHARED_SOURCE|HDW4S_SHARED_SWEEP|\
+      HDW4S_SHARED_IDLE|HDW4S_SHARED_MAX_AGE) atboot='yes';;
       # Read afresh by every "hdw4s template edit" to print its link, and by
       # nothing that runs in a session; "restart the affected sessions" was
       # printed for it, and no restart touches it.

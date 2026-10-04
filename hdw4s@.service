@@ -264,6 +264,22 @@ PrivateDevices=yes
 # collide with another account's desktop on this machine and there is nothing
 # left to clean up when the unit stops, however it stops.
 PrivateTmp=yes
+# ITS OWN /run/lock, a tmpfs that dies with the session. The machine's /run/lock
+# is one directory every session and the host share, writable by all (1777):
+# measured on a development box from inside a pool seat, a file planted there was
+# visible on the host and so to every later occupant of every seat -- state that
+# outlives the session, which this design assumes cannot happen. Not read-only:
+# what uses it is the old lock-file convention for serial lines (lockdev and its
+# descendants, e.g. an Arduino IDE probing /var/lock -> /run/lock), and such a
+# program may refuse to run where it cannot write a lock; with PrivateDevices=
+# there is no serial line in here to coordinate over, so a private lock
+# directory loses nothing. Measured (systemd 255, a unit with ProtectSystem=
+# strict and this line): a file written inside appears on the private tmpfs and
+# not on the host's. Nothing else in this unit mounts beneath /run/lock, so the
+# ordering of namespace mounts by destination has nothing to reorder; and no
+# "+" command here uses /run/lock (the web root's build lock is beside the web
+# root), so that "+" keeps this mount changes nothing for them.
+TemporaryFileSystem=/run/lock:mode=1777,nosuid,nodev,noexec,size=1M
 ProtectClock=yes
 ProtectControlGroups=yes
 # The session IS the home directory; it cannot be hidden or made read-only.

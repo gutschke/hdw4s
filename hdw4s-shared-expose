@@ -1,0 +1,574 @@
+#!/bin/bash -e
+# Put the /shared store's table where every desktop binds it -- or, when the
+# store is absent, unreachable or no longer what it must be, take it away.
+#
+#   hdw4s-shared-expose
+#
+# Run as root by hdw4s-shared-expose.service, every 30 seconds from its timer,
+# which hdw4s-ephemeral-slots starts at boot when HDW4S_SHARED is on. Each run
+# is a whole judgement, from nothing: the store can appear, vanish, stop
+# answering or lose a mount flag while the machine is up, and this is what
+# notices.
+#
+# THE LAYOUT, which is the design's and is only carried out here:
+#
+#   /run/hdw4s-shared        a plain directory tmpfiles makes at every boot;
+#                            every desktop has BindPaths=/run/hdw4s-shared:/shared
+#   the store                tmpfs:  a tmpfs this script mounts at
+#                                    /run/hdw4s-shared-store, with the flags
+#                            source: HDW4S_SHARED_SOURCE, mounted (and in a
+#                                    container bound in) by whoever provides it
+#   the exposure             <store>/table bound ONTO /run/hdw4s-shared;
+#                            a bind keeps the source mount's flags
+#
+# A desktop started before the bind sees an empty, root-owned /shared it cannot
+# write to, and gets the table through mount propagation once it is bound. One
+# started while the table is unbound for any reason sees the same: FAIL SOFT,
+# never an unflagged view and never a failed start.
+#
+# THE GUARD IS NOT HERE. Whether a directory is an acceptable store or an
+# acceptable exposure is decided by hdw4s-shared-sweep --guard, and only there:
+# two implementations of one safety rule, in two languages, is a defect this
+# project has shipped twice. This script asks it, and acts on the answer.
+#
+# NO MOUNT NAMESPACE. Its unit has no sandboxing that makes one (ProtectSystem=,
+# PrivateTmp=, ...) because the binds made here must land in the HOST's
+# namespace, from which they propagate into desktops. A bind made in a private
+# namespace would succeed, pass every check run from inside it, and reach
+# nobody.
+export LC_ALL='C'
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+set -o nounset -o pipefail
+
+trap 'rc="$?"
+      trap "" INT TERM QUIT HUP EXIT ERR
+      [ "${rc}" -eq 0 ] || [ -n "${SAID:-}" ] ||
+        echo "<3>Script ${0} failed unexpectedly" >&2
+      exit "${rc}"' INT TERM QUIT HUP EXIT ERR
+
+ETCDIR="${HDW4S_ETCDIR:-/etc/hdw4s}"
+EXPOSE="${HDW4S_SHARED_EXPOSE:-/run/hdw4s-shared}"
+TMPFS_STORE="${HDW4S_SHARED_STORE:-/run/hdw4s-shared-store}"
+# The literal is what install.sh rewrites when the package is put elsewhere.
+GUARD_TOOL="${HDW4S_SHARED_TOOL:-/usr/lib/hdw4s/hdw4s-shared-sweep}"
+# How long the guard may take. It opens and stats the store, which on a dead
+# NFS mount can block like any other stat; a guard that has not answered has
+# not accepted.
+GUARD_SECONDS="${HDW4S_SHARED_GUARD_SECONDS:-10}"
+# How long a stat of the store may take before the store counts as gone. A
+# soft NFS mount answers EIO by itself after its own timeouts; this is for one
+# that does not, and is shorter than the 30 s between runs.
+HEALTH_SECONDS="${HDW4S_SHARED_HEALTH_SECONDS:-5}"
+# The four flags a tmpfs store is mounted with, and that the bind therefore
+# carries. Asked for here only when this script mounts the tmpfs; judged only
+# by the guard.
+FLAGS='nosymfollow,nodev,noexec,nosuid'
+# Which mounts exist, read from the kernel's table rather than by touching a
+# path: a path on a dead store blocks, the table does not.
+MOUNTINFO="${HDW4S_MOUNTINFO:-/proc/self/mountinfo}"
+# The identity of every mount this script has made, by mount id, so that it
+# only ever unmounts one of those. /run: gone at a reboot, with the mounts.
+STATE="${HDW4S_SHARED_STATE:-/run/hdw4s-shared-expose}"
+# shellcheck source=/dev/null
+[ ! -r "${ETCDIR}/hdw4s.conf" ] || . "${ETCDIR}/hdw4s.conf"
+
+# Said where the journal keeps it. The service filters at notice, so that a
+# run every 30 seconds that changes nothing writes nothing; what is worth
+# keeping says so with a priority prefix. Run by hand there is no journal and
+# the prefix would be rubbish on a terminal.
+say() {
+  local prio="$1"; shift
+  if [ -n "${JOURNAL_STREAM:-}" ]; then
+    printf '<%s>hdw4s-shared-expose: %s\n' "${prio}" "$*" >&2
+  else
+    printf 'hdw4s-shared-expose: %s\n' "$*" >&2
+  fi
+}
+# A refusal: said at warning, and the run exits non-zero so that the unit shows
+# failed until a later run succeeds.
+refuse() { say 4 "$*"; SAID='yes'; exit 1; }
+
+# THE TOPMOST MOUNT AT A PATH, from the kernel's mount table, as one line:
+# "<mount id> <major:minor> <root> <fstype> <source>". Empty when nothing is
+# mounted there, "?" when the table does not say which one is on top. The
+# topmost is the one no other mount at the same path sits on. READ FROM THE
+# TABLE ONLY -- never a stat or an open of the path, either of which blocks on
+# a dead NFS store -- so it answers about a dead store too.
+#
+# Paths with characters the table escapes (space, tab, newline, backslash) are
+# refused at the top of this script rather than unescaped here; a source with
+# them arrives escaped, without spaces, and is compared as it arrives.
+mount_entry() {
+  awk -v p="$1" '$5 == p { on[$1] = $2; i = 7; while (i < NF && $i != "-") i++
+                           e[$1] = $1 " " $3 " " $4 " " $(i + 1) " " $(i + 2) }
+    END { n = 0
+          for (a in on) { top = 1; for (b in on) if (on[b] == a) top = 0
+                          if (top) { t = a; n++ } }
+          if (n == 1) print e[t]; else if (n > 1) print "?" }' "${MOUNTINFO}"
+}
+top_mount_at() { local e; e="$(mount_entry "$1")"; printf '%s\n' "${e%% *}"; }
+
+# An NFS source as the mount table spells it, made comparable: duplicate "/"
+# collapsed and a trailing "/" stripped. Nothing else is touched -- an IPv6
+# server is written "[addr]:/path", whose colons and brackets are left as they
+# are -- and the result is compared exactly.
+norm_src() {
+  local n="$1"
+  while [ "${n#*//}" != "${n}" ]; do n="${n//\/\//\/}"; done
+  printf '%s\n' "${n%/}"
+}
+
+# IS THE TOPMOST MOUNT AT PATH THE ONE THIS SCRIPT RECORDED MAKING? From the
+# mount table alone, three facts, all required:
+#   - the whole entry -- mount id, device, root, type, source -- is the one
+#     recorded when it was made;
+#   - it shows the TABLE, which the table spells differently by filesystem:
+#     a local one by its root, "/table" (and "/" for a tmpfs store); NFS by its
+#     source, the store's source plus "/table", with root "/" (see below);
+#   - where the store is still mounted, the exposure is of the store's type,
+#     and (local) of the store's source.
+# The record and the kernel's current table are two independent witnesses, and
+# neither shares a dead store's way of failing. Sets WHY when the answer is no.
+WHY=''
+is_ours() {
+  local path="$1" rec_file="$2" want_root="$3" entry rec root sentry
+  local fstype src sfstype ssrc nfs
+  WHY=''
+  entry="$(mount_entry "${path}")"
+  rec="$(cat -- "${rec_file}" 2>/dev/null || :)"
+  if [ -z "${entry}" ]; then WHY='nothing is mounted there'; return 1; fi
+  if [ "${entry}" = '?' ]; then WHY='the mount table does not say which mount is on top'; return 1; fi
+  if [ -z "${rec}" ] || [ "${entry}" != "${rec}" ]; then
+    WHY="the mount on top there (${entry}) is not one this service made (${rec:-none recorded})"
+    return 1
+  fi
+  # The fields: id, device, root, type, source.
+  read -r _ _ root fstype src <<< "${entry}"
+  # WHERE A BIND'S SUBDIRECTORY SHOWS IN THE TABLE DEPENDS ON THE FILESYSTEM.
+  # A local one records it in the ROOT field: a bind of <store>/table has root
+  # /table. NFS records the root as "/" and puts the path in the SOURCE:
+  # "server:/export/table". Measured on a container whose store is an NFSv4
+  # mount bound in: the exposure read "0:251 / /run/hdw4s-shared ... nfs4" with
+  # source "...:/export/shared/table", and a rule that wanted root /table refused
+  # this service's own bind. So for NFS the table is identified by its source
+  # (the store's source plus /table) with root "/"; for anything else by root.
+  case "${want_root}:${fstype}" in
+    /table:nfs|/table:nfs4) want_root='/'; nfs='yes';;
+    *) nfs='';;
+  esac
+  if [ "${root}" != "${want_root}" ]; then
+    WHY="the mount on top there has root ${root}, not ${want_root}"; return 1
+  fi
+  if [ "$3" = '/table' ] && [ -n "${STORE_PATH}" ]; then
+    sentry="$(mount_entry "${STORE_PATH}")"
+    case "${sentry}" in
+      '') ;;   # the store itself is gone; the record stands for it
+      '?') WHY='the mount table does not say which mount is the store'; return 1;;
+      *) read -r _ _ _ sfstype ssrc <<< "${sentry}"
+         # The same TYPE as the store, but not necessarily the same device: a
+         # store remounted, or a tmpfs store unmounted by hand and mounted
+         # afresh, is a new device, and this service's bind of the OLD one is
+         # exactly what must then be recognised and taken away. That it is this
+         # service's bind is the record's to say (the whole entry, device
+         # included, as it was made); this says it shows the store's table.
+         if [ "${fstype}" != "${sfstype}" ]; then
+           WHY="the mount on top there is ${fstype}, the store is ${sfstype}"
+           return 1
+         fi
+         if [ -n "${nfs}" ]; then
+           if [ "$(norm_src "${src}")" != "$(norm_src "${ssrc}/table")" ]; then
+             WHY="the mount on top there shows ${src}, not the store's table $(norm_src "${ssrc}/table")"
+             return 1
+           fi
+         elif [ "${src}" != "${ssrc}" ]; then
+           WHY="the mount on top there shows ${fstype} ${src}, the store is ${sfstype} ${ssrc}"
+           return 1
+         fi;;
+    esac
+  fi
+}
+
+# UNMOUNT ONE MOUNT THIS SCRIPT MADE, AND NOTHING ELSE. This is the only place
+# here that unmounts, and every way into it is the same:
+#
+#   1. IDENTITY (is_ours), always, from the mount table alone. Anything else --
+#      a mount stacked on top, a mount somebody else made, a record that is
+#      missing, a different root or filesystem -- is LEFT IN PLACE and named.
+#      On a desktop host, /home may be a bind of a homes server; a lazy unmount
+#      aimed at the wrong mount is the other way, beside deleting files, to
+#      lose what is on it.
+#   2. THE GUARD, ON TOP, while the store answers ("judged"): form (i) must
+#      either accept the mount or refuse it for a lost FLAG or a lost STORE
+#      ("no-sibling") alone -- a mount with the exposure's shape that should no
+#      longer be shown. Any other
+#      refusal, or a guard that could not tell, leaves it in place. SKIPPED,
+#      and said to be, only when the store is dead ("dead"), where it would
+#      block; and not asked ("identity") of a mount made a moment ago in this
+#      run onto a path where nothing was mounted, nor of the tmpfs store at
+#      withdrawal -- the guard has no form for a store root.
+#   3. IDENTITY AGAIN, immediately before the unmount, so that the check and
+#      the act are about the same mount. (The instant between that read and
+#      the unmount is not closed: only host root can mount there, and a
+#      detach destroys nothing.)
+#
+# Lazy (-l), because a desktop with a file open on the table must not be able
+# to keep a dead store bound; -c, so that umount does not first resolve the
+# path through the store it is taking away.
+detach() {
+  local path="$1" rec_file="$2" how="$3" reason="$4" want_root="$5" rec line clause rc
+  if [ -z "$(mount_entry "${path}")" ]; then
+    rm -f -- "${rec_file}"
+    return 0
+  fi
+  if ! is_ours "${path}" "${rec_file}" "${want_root}"; then
+    say 3 "left ${path} mounted: ${WHY}, so it is not this service's to take away"
+    return 1
+  fi
+  rec="$(cat -- "${rec_file}")"; rec="${rec%% *}"
+  case "${how}" in
+    judged)
+      line="$(guard i "${path}" 2>&1)" && rc=0 || rc=$?
+      case "${rc}" in
+        # Accepted: its mount id is NOT compared with the record here. The
+        # guard and is_ours read the same kernel fact about the same path, so
+        # they can only disagree through a mount stacked between the two
+        # looks -- which the second is_ours below catches. A comparison here
+        # was measured never to refuse anything those did not (its red arm
+        # turned no test red), and a layer that cannot refuse is not a layer.
+        0) ;;
+        # Refused for a reason that says this mount has the exposure's shape
+        # and has lost something it needs: a FLAG, or its store ("no-sibling":
+        # no mount of this filesystem in this namespace is a store any more --
+        # the store was taken away under it). Either way it is this service's
+        # own mount (is_ours, above and below) showing a table that should no
+        # longer be shown. Any other refusal leaves it in place.
+        1) clause="${line#*: refused "${path}": }"; clause="${clause%%:*}"
+           case "${clause}" in
+             flags|no-sibling) ;;
+             *) say 3 "left ${path} mounted: ${line}"
+                return 1;;
+           esac;;
+        124) say 4 "the guard did not answer about ${path}; taking it away on its" \
+                   "identity in the mount table alone";;
+        *) say 3 "left ${path} mounted: the guard could not tell (exit ${rc}): ${line}"
+           return 1;;
+      esac;;
+    dead)
+      say 4 "the store is not answering: the guard is SKIPPED for ${path}, which is" \
+            "taken away on its identity in the mount table alone";;
+  esac
+  if ! is_ours "${path}" "${rec_file}" "${want_root}"; then
+    say 3 "left ${path} mounted: it changed while it was being judged: ${WHY}"
+    return 1
+  fi
+  if ! umount -l -c -- "${path}"; then
+    say 3 "could not unmount ${path} (mount id ${rec})"
+    return 1
+  fi
+  rm -f -- "${rec_file}"
+  say 4 "unmounted ${path} (mount id ${rec}): ${reason}"
+}
+# The table, from where desktops see it.
+unexpose() { detach "${EXPOSE}" "${STATE}/exposure" "$1" "$2" /table; }
+
+# Does the store answer at all? Asked in a CHILD that can be abandoned, because
+# a stat on a dead NFS mount can block for as long as the mount's own timeouts
+# allow, and this is the thing that has to keep running when that happens.
+# Never waited for once abandoned: a child stuck in the kernel is killed and
+# left, and the unit's stop takes its cgroup with it.
+answers() {
+  local pid i limit=$(( HEALTH_SECONDS * 10 ))
+  stat -- "$1" >/dev/null 2>&1 &
+  pid=$!
+  for (( i = 0; i < limit; i++ )); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      wait "${pid}"
+      return $?
+    fi
+    sleep 0.1
+  done
+  kill -KILL "${pid}" 2>/dev/null || :
+  # Disowned, so that the shell does not announce the kill on stderr later.
+  disown "${pid}" 2>/dev/null || :
+  return 124
+}
+
+# Ask the one guard, or have it harden a store in place. Its one line of
+# reason goes to stderr on a refusal and carries the DIRECTORY and a clause,
+# never a name from the table; the exit status is the verdict, and ANY non-zero
+# one -- refused (1), could not tell (2), did not answer (124) -- is "not
+# accepted". Run from /, so that nothing in the table can be on the import path
+# of the tool it is judging (it is python3 -I as well).
+# Without JOURNAL_STREAM: what the tool says is captured and said again by
+# say(), at this service's own level, so the tool's "<N>" prefix would land in
+# the middle of the line as text.
+guard() {
+  ( cd / && unset JOURNAL_STREAM && timeout -k 2 "${GUARD_SECONDS}" "${GUARD_TOOL}" --guard "$2" --form "$1" )
+}
+harden() {
+  ( cd / && unset JOURNAL_STREAM && timeout -k 2 "${GUARD_SECONDS}" "${GUARD_TOOL}" --harden "$1" )
+}
+
+# THE SWEEP AND THE WATCHER of a store this machine sweeps itself
+# (HDW4S_SHARED_SWEEP=local) ARE KEPT RUNNING, by every run that finds the table
+# exposed -- not only the run that binds it. Measured on a development box: a
+# deploy stopped the watcher, the table stayed bound, no later run bound it
+# again, and so nothing started the watcher again; a file left there 0600 stayed
+# 0600 until the two-minute sweep. A package upgrade, or a watcher out of
+# restarts, ends the same way.
+#
+# Their units are templates over the escaped path of the store root and are
+# BindsTo= its mount, so they can only start once it is mounted -- which is why
+# this happens here, after the store is judged, and not at boot. Their settings
+# are a drop-in written by hdw4s-ephemeral-slots. Started, never enabled: /run
+# is gone at a reboot, and so is any reason for them to run. "start", never
+# "restart": a start of a running unit is nothing, so a run that finds them
+# running does nothing and says nothing.
+#
+# A WATCHER THAT ENDED BY ITSELF WITH STATUS 0 IS LEFT ALONE. That is how it
+# says the kernel refused it a watch here (and the timed sweep widens instead);
+# starting it again every 30 seconds would only write that line again. Stopped
+# by anything else -- a signal, a failure -- it is started.
+unit_state() { systemctl show -p "$2" --value "$1" 2>/dev/null || :; }
+keep_sweep() {
+  local inst t w
+  [ "${HDW4S_SHARED_SWEEP:-local}" = 'local' ] || return 0
+  inst="$(systemd-escape --path -- "$1")"
+  t="hdw4s-shared-sweep@${inst}.timer"; w="hdw4s-shared-watch@${inst}.service"
+  if [ "$(unit_state "${t}" ActiveState)" != 'active' ]; then
+    if systemctl start --no-block "${t}"; then
+      say 4 "started ${t}, which was not running"
+    else
+      say 3 "could not start ${t}; nothing on /shared expires until it runs"
+    fi
+  fi
+  case "$(unit_state "${w}" ActiveState)" in
+    active|activating|reloading|deactivating) ;;
+    *) if [ "$(unit_state "${w}" ExecMainCode)" = '1' ] &&
+          [ "$(unit_state "${w}" ExecMainStatus)" = '0' ]; then
+         :
+       elif systemctl start --no-block "${w}"; then
+         say 4 "started ${w}, which was not running"
+       else
+         say 4 "could not start ${w}; the timed sweep alone widens what is left"
+       fi;;
+  esac
+}
+
+# The size of a tmpfs table, in bytes, from HDW4S_SHARED_SIZE.
+#
+# A PERCENTAGE IS WORKED OUT HERE, never handed to the kernel. tmpfs reads
+# "size=10%" against the machine's physical memory, which in a container is the
+# HOST's: measured, a 16 GiB container would get a tenth of the hypervisor.
+# /proc/meminfo is the number the container runtime does get right.
+shared_bytes() {
+  local v="${HDW4S_SHARED_SIZE:-10%}" kb n
+  case "${v}" in
+    *%)
+      n="${v%\%}"
+      case "${n}" in ''|*[!0-9]*) return 1;; esac
+      [ "${n}" -ge 1 ] && [ "${n}" -le 100 ] || return 1
+      kb="$(awk '/^MemTotal:/ { print $2; exit }' "${HDW4S_MEMINFO:-/proc/meminfo}" \
+            2>/dev/null || :)"
+      case "${kb}" in ''|*[!0-9]*) return 1;; esac
+      echo $(( kb * 1024 * n / 100 ));;
+    *K) n="${v%K}"; case "${n}" in ''|*[!0-9]*) return 1;; esac; echo $(( n * 1024 ));;
+    *M) n="${v%M}"; case "${n}" in ''|*[!0-9]*) return 1;; esac; echo $(( n * 1048576 ));;
+    *G) n="${v%G}"; case "${n}" in ''|*[!0-9]*) return 1;; esac; echo $(( n * 1073741824 ));;
+    *[!0-9]*|'') return 1;;
+    *) echo "${v}";;
+  esac
+}
+
+# Mount the tmpfs store, once per boot. Its root is root's and 0700 -- nothing
+# but root ever needs to pass through it, and so no desktop can reach the table
+# by the store's own path, only by /shared -- and holds only "table", 0777 and
+# NOT sticky: anyone may leave, take or replace an item, which the sticky bit
+# would forbid.
+#
+# nr_inodes TOO, because size= caps the blocks and not the inodes. Left to the
+# kernel, the inode count is half the HOST's memory in pages, and every inode
+# is kernel memory that size= does not count: a table of empty files could
+# then cost far more than its size. One per 16 KiB of size.
+tmpfs_store() {
+  local bytes top
+  if [ -z "$(top_mount_at "${TMPFS_STORE}")" ]; then
+    bytes="$(shared_bytes)" ||
+      refuse "HDW4S_SHARED_SIZE must be a size such as 512M, 2G or 10%," \
+             "not '${HDW4S_SHARED_SIZE:-}'; nothing is exposed."
+    [ "${bytes}" -gt 0 ] || refuse 'HDW4S_SHARED_SIZE is zero; nothing is exposed.'
+    install -d -m 0755 -- "${TMPFS_STORE}"
+    mount -t tmpfs -o "size=${bytes},nr_inodes=$(( bytes / 16384 + 1 )),mode=0700,uid=0,gid=0,${FLAGS},strictatime" \
+      hdw4s-shared "${TMPFS_STORE}" ||
+      refuse "could not mount the tmpfs table at ${TMPFS_STORE}; nothing is exposed."
+    # PRIVATE, so that the exposure bound from it is not its mount peer: /run
+    # is shared, a tmpfs mounted under it joins that, and the bind of its table
+    # would then share a peer group with it -- anything mounted on
+    # /run/hdw4s-shared would appear on the table the sweep walks (measured, in
+    # a user namespace). Propagation INTO desktops follows the exposure's
+    # parent, /run, not the store, so it should be unaffected; T2 on a real box
+    # decides, and this is its own commit so that it can be reverted alone.
+    mount --make-private -- "${TMPFS_STORE}" ||
+      say 4 "could not make ${TMPFS_STORE} private; the exposure stays its mount peer"
+    # Recorded, so that "--withdraw" can take away this mount and only this one.
+    top="$(mount_entry "${TMPFS_STORE}")"
+    case "${top}" in ''|'?') ;; *) printf '%s\n' "${top}" > "${STATE}/store";; esac
+    say 5 "mounted a ${bytes}-byte tmpfs table at ${TMPFS_STORE}"
+  fi
+  # install, not mkdir: install sets the mode it is given whatever the umask.
+  [ -d "${TMPFS_STORE}/table" ] || install -d -m 0777 -- "${TMPFS_STORE}/table"
+}
+
+# THE STORE ROOT FOR THIS CONFIGURATION: one place says where a tmpfs store
+# lives. Empty when there is none.
+store_root() {
+  case "${HDW4S_SHARED:-off}" in
+    tmpfs)  echo "${TMPFS_STORE}";;
+    source) case "${HDW4S_SHARED_SOURCE:-}" in /*) echo "${HDW4S_SHARED_SOURCE}";; esac;;
+  esac
+}
+STORE_PATH="$(store_root)"
+# For hdw4s-ephemeral-slots, which names the sweep's units after it.
+if [ "${1:-}" = '--store' ]; then
+  [ -n "${STORE_PATH}" ] || { SAID='yes'; exit 1; }
+  echo "${STORE_PATH}"
+  exit 0
+fi
+# For "hdw4s check", which says how big the table is: the same arithmetic as
+# the mount, from the same function.
+if [ "${1:-}" = '--size' ]; then
+  shared_bytes || { SAID='yes'; exit 1; }
+  exit 0
+fi
+
+# The kernel's mount table escapes these characters; this script compares paths
+# against it unescaped, so it refuses them instead of guessing.
+case "${EXPOSE}${TMPFS_STORE}${HDW4S_SHARED_SOURCE:-}" in
+  *[[:space:]\\]*) refuse 'a /shared path contains a space or a backslash; refusing to act on it.';;
+esac
+# 0755: the records are mount ids and a time, and "hdw4s check" reads the drift
+# mark from here.
+install -d -m 0755 -- "${STATE}"
+# Without the mount table, "nothing is mounted there" and "cannot tell" look
+# the same, and the first is what would bind on top of something or forget a
+# mount. So it is not guessed.
+[ -r "${MOUNTINFO}" ] || refuse "cannot read ${MOUNTINFO}; doing nothing."
+
+# "hdw4s-shared-expose --withdraw": what uninstall runs. Takes away the table
+# and a tmpfs store this script mounted -- each only if it is the very mount
+# that was recorded -- and leaves anything else where it is.
+if [ "${1:-}" = '--withdraw' ]; then
+  rc=0
+  unexpose judged 'withdrawn' || rc=1
+  detach "${TMPFS_STORE}" "${STATE}/store" identity 'withdrawn' / || rc=1
+  [ "${rc}" -eq 0 ] || SAID='yes'
+  exit "${rc}"
+fi
+
+case "${HDW4S_SHARED:-off}" in
+  off)
+    # Nothing to expose, and nothing should be: a table bound by an earlier
+    # configuration is taken away rather than left reachable.
+    unexpose judged 'HDW4S_SHARED is off' || { SAID='yes'; exit 1; }
+    exit 0;;
+  tmpfs)
+    store="${TMPFS_STORE}"
+    tmpfs_store;;
+  source)
+    store="${HDW4S_SHARED_SOURCE:-}"
+    case "${store}" in
+      /*) ;;
+      *) unexpose judged 'no store' || :
+         refuse "HDW4S_SHARED=source needs HDW4S_SHARED_SOURCE, an absolute path;" \
+                "it is '${store}'. Nothing is exposed.";;
+    esac;;
+  *)
+    unexpose judged 'HDW4S_SHARED is not a value this understands' || :
+    refuse "HDW4S_SHARED must be off, tmpfs or source, not '${HDW4S_SHARED}'.";;
+esac
+table="${store}/table"
+
+# The bind source must exist and be a plain directory: it is what desktops
+# bind, and tmpfiles makes it at boot. Not recreated here -- a desktop that
+# cannot find it fails 226 at start, loudly, and that is what should happen.
+if [ ! -d "${EXPOSE}" ] || [ -L "${EXPOSE}" ]; then
+  refuse "${EXPOSE} is missing, so every desktop with /shared fails to start" \
+         '(226/NAMESPACE). Recreate it: systemd-tmpfiles --create'
+fi
+
+# 1. DOES THE STORE ANSWER? Before the guard, which opens it and would block on
+#    a dead store just as a stat does.
+answers "${table}" && rc=0 || rc=$?
+if [ "${rc}" -eq 124 ]; then
+  unexpose dead "the store at ${table} did not answer within ${HEALTH_SECONDS}s" || :
+  refuse "the store at ${table} does not answer; /shared is empty until it does."
+elif [ "${rc}" -ne 0 ]; then
+  # Usually a store that is not mounted: the empty mount point has no table.
+  unexpose judged "there is no ${table}" || :
+  refuse "there is no ${table}: is the store mounted? /shared is empty until it is."
+fi
+
+# 2. IS IT A STORE? Form (ii), by the tool's --harden: the table directly under
+#    the root of a whole filesystem that holds nothing else, root's and not
+#    writable by others -- judged FIRST, so a wrong HDW4S_SHARED_SOURCE (say /)
+#    is never remounted -- and then, if a flag is missing, that one mount
+#    remounted IN PLACE to add it, never a second mount beside it, so no
+#    unflagged view of the store is left anywhere. Then judged again with the
+#    flags.
+if why="$(harden "${store}" 2>&1 >/dev/null)"; then
+  # A repair it made is said on stderr, and is worth keeping in the journal.
+  [ -z "${why}" ] || say 4 "${why}"
+else
+  unexpose judged "the store failed the guard: ${why:-no answer}" || :
+  refuse "${store} is not an acceptable store: ${why:-the guard did not answer}"
+fi
+
+# 3. IS IT ALREADY EXPOSED, AND STILL ACCEPTABLE? Form (i): /run/hdw4s-shared is
+#    a bind of the table (root /table, or on NFS the store's source plus
+#    /table), with the flags -- and it is the mount this service made. Nothing
+#    to do.
+if [ -n "$(mount_entry "${EXPOSE}")" ]; then
+  if is_ours "${EXPOSE}" "${STATE}/exposure" /table &&
+     line="$(guard i "${EXPOSE}" 2>/dev/null)"; then
+    rec="$(cat -- "${STATE}/exposure")"
+    case " ${line} " in *" mount=${rec%% *} "*) keep_sweep "${store}"; exit 0;; esac
+  fi
+  # Something is mounted there and it is not, or is no longer, an acceptable
+  # exposure made by this service: a flag cleared since it was bound, or a
+  # mount stacked on top, or one somebody else made. Taken away ONLY if it is
+  # this service's own mount with a flag lost (see detach); anything else is
+  # left where it is and named. Either way NOT rebound in this run: the unit
+  # shows failed and "hdw4s check" is red until a run finds things right.
+  why="$(guard i "${EXPOSE}" 2>&1 >/dev/null || :)"
+  # A HEAL IS NEVER INVISIBLE: the next run binds the table again, so the
+  # moment it was taken away for drift is marked, and "hdw4s check" says so for
+  # a day afterwards.
+  if unexpose judged "the exposure failed the guard: ${why:-no answer}"; then
+    date +%s > "${STATE}/drift"
+  fi
+  refuse "the table at ${EXPOSE} is not an acceptable exposure: ${why:-no answer}"
+fi
+
+# 4. BIND IT -- onto nothing: the step above has made sure no mount is there --
+#    record which mount that made, and judge it: the flags have to have come
+#    with it, and the guard has to be talking about the same mount.
+mount --bind -- "${table}" "${EXPOSE}" ||
+  refuse "could not bind ${table} onto ${EXPOSE}; /shared is empty."
+entry="$(mount_entry "${EXPOSE}")"
+case "${entry}" in
+  ''|'?') refuse "bound ${table} onto ${EXPOSE} and cannot tell which mount that made;" \
+                 'left as it is.';;
+esac
+printf '%s\n' "${entry}" > "${STATE}/exposure"
+line="$(guard i "${EXPOSE}" 2>&1)" && rc=0 || rc=$?
+# The bind must show the store's table (is_ours: root /table on a local
+# filesystem, the store's source plus /table on NFS), and the guard must accept
+# that very mount.
+is_ours "${EXPOSE}" "${STATE}/exposure" /table || { line="${WHY}"; rc=1; }
+case "${rc}:  ${line} " in
+  0:*" mount=${entry%% *} "*) ;;
+  *) unexpose identity "what was bound failed the guard: ${line:-no answer}" || :
+     refuse "binding ${table} onto ${EXPOSE} did not give an acceptable exposure: ${line:-no answer}";;
+esac
+say 5 "bound ${table} onto ${EXPOSE}; desktops see it as /shared"
+keep_sweep "${store}"

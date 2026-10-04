@@ -1,0 +1,69 @@
+[Unit]
+Description=Sweep the /shared table of the store at %f: widen, drop non-files, expire
+Documentation=man:hdw4s-shared-sweep(8)
+# Instance: the escaped path of the store ROOT. Held to its mount, so an
+# unmount stops this rather than failing with EBUSY on a held descriptor.
+BindsTo=%i.mount
+After=%i.mount hdw4s-shared-harden@%i.service
+
+[Service]
+Type=oneshot
+# Defaults; a drop-in overrides them (hdw4s writes one under /run at boot from
+# HDW4S_SHARED_IDLE and HDW4S_SHARED_MAX_AGE). The values are passed through
+# verbatim and parsed by the tool, so the grammar is hdw4s-duration's alone.
+Environment=HDW4S_SHARED_IDLE=30m HDW4S_SHARED_MAX_AGE=7d
+# HDW4S_SHARED_DRYRUN=1 in a runtime drop-in makes every change that passes
+# the checks a logged "would ..." line instead (owner: for the first switch-on,
+# "disable actual deletions and just log what you would do"). Empty: real.
+Environment=HDW4S_SHARED_DRYRUN=
+ExecStart=/usr/lib/hdw4s/hdw4s-shared-sweep --dir %f/table --idle ${HDW4S_SHARED_IDLE} --max-age ${HDW4S_SHARED_MAX_AGE} --dry-run=${HDW4S_SHARED_DRYRUN}
+#
+# THE WRITE SAFETY IS ProtectSystem=strict, ReadOnlyPaths=/run, THE GUARD AND
+# THE GATE IN THE TOOL. Root walks a tree anybody can shape; everything outside
+# the store is read-only to it (strict alone leaves /run writable), and the
+# guard refuses a table without nosymfollow, nodev, noexec and nosuid on its
+# own filesystem. ProtectHome= does not cover a homes tree mounted somewhere
+# else: a machine that has one adds InaccessiblePaths= for it in a drop-in.
+ProtectSystem=strict
+# ProtectSystem=strict does NOT make /run read-only: measured 2026-10-02 on
+# systemd 255 (a container, measured 2026-10-02), /run and /run/lock were writable inside this unit,
+# and writes landed on the host's /run, whatever ReadWritePaths= said. So
+# /run is made read-only here by name. A more specific ReadWritePaths= below
+# it (a store under /run in tmpfs mode) still wins for that path.
+ReadOnlyPaths=/run
+# The STORE ROOT, not %f/table. ReadWritePaths= bind-mounts its path onto
+# itself, and a bind of table would make the table a mount root inside this
+# unit -- which the guard's form (ii), the only form a destructive mode
+# accepts, refuses as "stacked". Bound at the store root, the bind's root is
+# the filesystem's /, and table sits directly beneath it as on the host. The
+# root itself is root's and 0755 and holds only table; the gate confines every
+# write to beneath the table regardless.
+ReadWritePaths=%f
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Bounded, so a table shaped to make the walk expensive costs this unit and
+# nothing else on the machine.
+MemoryMax=1G
+TasksMax=8
+CPUQuota=50%
+Nice=10
+IOSchedulingClass=idle

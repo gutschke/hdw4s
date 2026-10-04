@@ -250,6 +250,12 @@ if [ "$1" = 'configure' ]; then
         echo '       "systemctl enable hdw4s-ephemeral-slots.service".' >&2
       }
     fi
+    # The directory every desktop binds as /shared must exist before the boot
+    # script below writes BindPaths= for it, and this runs before the
+    # debhelper block that would otherwise create it. Through tmpfiles with
+    # the package's own line, which has no mode: a mode here would chmod the
+    # table bound onto it back from 0777.
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/hdw4s-tmpfiles.conf || :
     /usr/lib/hdw4s/hdw4s-ephemeral-slots >/dev/null || {
       echo 'hdw4s: could not refresh the ephemeral slots; existing slots keep' >&2
       echo '       the previous client and may refuse to start. Run' >&2

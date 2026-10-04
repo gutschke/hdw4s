@@ -1,0 +1,18 @@
+[Unit]
+Description=Sweep the /shared table of the store at %f every two minutes
+Documentation=man:hdw4s-shared-sweep(8)
+BindsTo=%i.mount
+After=%i.mount
+
+[Timer]
+# Two minutes is how long a file copied in by somebody else can stay
+# unreadable where no watcher runs (an NFS client, a container on a host's
+# filesystem), and it is the "interval" in hdw4s check's "nobody is sweeping".
+OnActiveSec=1min
+OnUnitActiveSec=2min
+AccuracySec=10s
+
+[Install]
+# Wanted by the store's mount, not by timers.target: it runs while the store
+# is mounted and comes back with it.
+WantedBy=%i.mount

@@ -49,6 +49,16 @@ jobs:
             sleep 5
           done
 
+      # The /shared tool's tests mount real filesystems with real flags, which an
+      # unprivileged user may do only in a user namespace of its own (unshare
+      # -Urm). Ubuntu 24.04 restricts those through AppArmor by default. Without
+      # this the tests FAIL, deliberately, rather than skip: a guard nobody has
+      # seen refuse is not known to refuse.
+      - name: Allow unprivileged user namespaces
+        run: |
+          f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          [ ! -e "${f}" ] || sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       # Exactly what .github/checks.sh runs locally, so a green run here tells
       # a maintainer nothing they could not already have known before pushing.
       - name: Checks

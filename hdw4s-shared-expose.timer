@@ -1,0 +1,21 @@
+[Unit]
+Description=Re-judge the HDW4S /shared table every 30 seconds
+Documentation=man:hdw4s(8)
+
+[Timer]
+# Started at boot by hdw4s-ephemeral-slots when HDW4S_SHARED is on, and never
+# enabled: a machine with /shared off runs nothing every 30 seconds.
+#
+# 30 seconds is how long a store may have lost a flag, or stopped answering,
+# before desktops stop being handed it; it is also how long a desktop started
+# just after an NFS outage may still find the dead store bound. Each run is a
+# stat, two guard calls and nothing else when all is well.
+#
+# NO OnActiveSec=. Measured (systemd 255): a timer with OnActiveSec=0 fires its
+# service again at EVERY daemon-reload -- six reloads in three seconds, as a
+# package install does, gave four extra runs and "start-limit-hit". With
+# OnUnitActiveSec= alone the same six reloads gave none. The first run comes
+# from hdw4s-ephemeral-slots starting the service itself, beside this timer;
+# every later one is 30 seconds after the last.
+OnUnitActiveSec=30s
+AccuracySec=1s

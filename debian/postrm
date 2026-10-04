@@ -11,6 +11,15 @@ if [ "$1" = 'remove' ] || [ "$1" = 'purge' ]; then
   rm -rf /usr/lib/hdw4s/__pycache__
   rmdir --ignore-fail-on-non-empty /usr/lib/hdw4s 2>/dev/null || true
 
+  # /shared, after prerm withdrew the binds: the empty directories only
+  # (rmdir, never rm). /shared itself is prerm's, which still has the code
+  # that knows whether it may go (--shared-view release-for-removal).
+  # While its mark is still there, the root namespace's bind of
+  # /run/hdw4s-shared may stand, and removing a bind's source succeeds and
+  # leaves /shared showing a deleted directory for ever after.
+  [ -e /var/lib/hdw4s/.shared-mountpoint ] || rmdir /run/hdw4s-shared 2>/dev/null || :
+  rmdir /run/hdw4s-shared-store 2>/dev/null || :
+
   if [ -e /etc/sysctl.d/60-hdw4s.conf ]; then
     rm -f /etc/sysctl.d/60-hdw4s.conf
     sysctl -q --system 2>/dev/null || :

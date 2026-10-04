@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+# On PURGE, the enable links of this package's template instances, which
+# point at unit files that are gone. Found by name in the .wants directories
+# (an instance is wanted by its store's mount unit, not by a target), and only
+# links: a regular file of the same name is somebody else's.
+if [ "$1" = 'purge' ]; then
+  for l in /etc/systemd/system/*.wants/hdw4s-shared-*@*; do
+    [ -L "${l}" ] || continue
+    rm -f "${l}"
+  done
+  if [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
+  fi
+fi
+
+#DEBHELPER#
+
+exit 0

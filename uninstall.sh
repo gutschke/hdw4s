@@ -80,6 +80,17 @@ systemctl disable --now hdw4s-demux.socket >/dev/null 2>&1 || :
 # to disable -- but it may be RUNNING, and leaving it holding the port would
 # outlive the uninstall.
 systemctl stop hdw4s-demux.service >/dev/null 2>&1 || :
+# The /shared tool's units are templates on a store's path, enabled per store
+# (by an administrator, or by hdw4s at boot under /run) and never by
+# install.sh, so they are found by their enable links rather than listed. A
+# link in a mount unit's .wants is invisible to the target.wants sweep below,
+# and an instance left enabled would point into a directory about to go.
+for u in $(find /etc/systemd/system /run/systemd/system -path '*.wants/hdw4s-shared-*@*' \
+             -printf '%f\n' 2>/dev/null | sort -u) \
+         $(systemctl list-units --plain --no-legend --all 'hdw4s-shared-*@*' 2>/dev/null |
+           awk '{print $1}'); do
+  systemctl disable --now "${u}" >/dev/null 2>&1 || :
+done
 # The relay sockets, which hold the public ports open until they are stopped.
 for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 2>/dev/null |
            awk '{print $1}'); do
@@ -153,10 +164,37 @@ fi
 # The relay's group declaration, copied there by install.sh. The group itself is
 # left: systemd-sysusers never deletes one, and a gid removed while anything on
 # the machine still carries it is a gid the next group created may inherit.
-rm -f /etc/sysusers.d/hdw4s-sysusers.conf
+rm -f /etc/sysusers.d/hdw4s-sysusers.conf /etc/sysusers.d/hdw4s-shared-sysusers.conf
 # The stream directories, made per session start. /run clears at a reboot; an
 # uninstall should not wait for one.
 rm -rf --one-file-system /run/hdw4s-stream
+# /shared: the timer that re-binds the table, then the table itself and a tmpfs
+# store, then the directory desktops bound it from and its tmpfiles line.
+#
+# NOT UNMOUNTED HERE BY PATH. hdw4s-shared-expose --withdraw takes away only the
+# mounts it recorded making, each checked to be the one on top at its path, and
+# leaves anything else mounted there where it is: a lazy unmount aimed at the
+# wrong mount on a desktop host can take a homes server's bind with it. What it
+# leaves, a reboot clears; a tmpfs table's contents go with it, as they would
+# then anyway. The /shared mount point on the root filesystem goes only if this
+# package made it (the mark) and it is empty -- rmdir, never rm.
+systemctl stop hdw4s-shared-expose.timer hdw4s-shared-expose.service >/dev/null 2>&1 || :
+if [ -x "${dst}/hdw4s-shared-expose" ]; then
+  "${dst}/hdw4s-shared-expose" --withdraw ||
+    echo 'Note: something is still mounted under /run/hdw4s-shared*; it was not ours to remove.'
+fi
+# The root namespace's /shared FIRST, by the same code the package's prerm
+# runs: it unmounts only the bind it recorded making, keeps /shared while a
+# desktop still runs, and drops the mark only with the directory.
+if [ -x "${dst}/hdw4s-ephemeral-slots" ]; then
+  "${dst}/hdw4s-ephemeral-slots" --shared-view release-for-removal || :
+fi
+# Then the directory that bind is made from -- but not while the mark says the
+# bind may still stand: removing its source succeeds, and leaves /shared
+# showing a deleted directory for ever after.
+[ -e /var/lib/hdw4s/.shared-mountpoint ] || rmdir /run/hdw4s-shared 2>/dev/null || :
+rmdir /run/hdw4s-shared-store 2>/dev/null || :
+rm -f /etc/tmpfiles.d/hdw4s-tmpfiles.conf
 # The slot identities and the per-slot drop-ins the minting writes. They live in
 # /run and a reboot would clear them, but an uninstall that leaves accounts
 # resolving is a surprise nobody needs. /run/userdb is shared with any other
@@ -233,9 +271,12 @@ for sys in /usr/local /usr "${own}"; do
   [ -n "${sys}" ] || continue
   # install.sh links into sbin, so bin alone left the real symlink dangling.
   [ ! -L "${sys}/sbin/hdw4s" ] || rm -f "${sys}/sbin/hdw4s"
+  [ ! -L "${sys}/sbin/hdw4s-shared-sweep" ] || rm -f "${sys}/sbin/hdw4s-shared-sweep"
   [ ! -L "${sys}/bin/hdw4s" ] || rm -f "${sys}/bin/hdw4s"
   [ ! -e "${sys}/share/man/man8/hdw4s.8.gz" ] ||
     rm -f "${sys}/share/man/man8/hdw4s.8.gz"
+  [ ! -e "${sys}/share/man/man8/hdw4s-shared-sweep.8.gz" ] ||
+    rm -f "${sys}/share/man/man8/hdw4s-shared-sweep.8.gz"
 done
 mandb -q 2>/dev/null || :
 

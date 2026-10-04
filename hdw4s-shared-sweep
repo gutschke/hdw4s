@@ -1,0 +1,2992 @@
+#!/usr/bin/python3 -I
+"""Keep a /shared store safe to expose and tidy: guard it, widen what is
+left on it, expire what nobody uses, and optionally relay "this was used"
+from NFS clients to the one machine whose atime counts.
+
+    hdw4s-shared-sweep --dir DIR --idle 30m --max-age 7d
+                                   one sweep pass (what the timer runs)
+    hdw4s-shared-sweep --watch --dir DIR
+                                   widen and drop non-files the moment they appear
+    hdw4s-shared-sweep --guard DIR [--form any|i|ii]
+                                   is DIR safe to walk or expose? exit 0 or 1
+    hdw4s-shared-sweep --harden STORE
+                                   add missing flags to a store in place, then guard
+    hdw4s-shared-sweep --check --dir DIR --idle 30m [--interval 2m]
+                                   the rows "hdw4s check" prints
+    hdw4s-shared-sweep --relay-server --dir DIR --allow ADDR[,ADDR...]
+    hdw4s-shared-sweep --relay-client --store STORE --idle 30m [--to DEST]
+
+The manual is hdw4s-shared-sweep(8). Exit status: 0 done or accepted, 1
+refused by the guard (or a red row), 2 usage or this tool is broken, 3 warnings
+only (--check).
+
+WHY A ROOT TOOL MAY WALK A TREE ANYBODY CAN CHANGE. Not because this file is
+careful, although it is (every operation is relative to a directory fd and
+never follows a link): because of what the GUARD requires before anything is
+touched. The table is on a filesystem dedicated to it (so nothing in it is a
+hard link to anything outside), mounted nosymfollow (so no path through it
+follows a symlink, root's included), nodev, noexec and nosuid. The guard is
+the one implementation of that rule; the expose service and "hdw4s check"
+call it here rather than repeat it, because two parties writing one rule in
+two languages is a defect this project has shipped twice.
+
+NOTHING READ FROM THE TABLE OR THE WIRE IS EVER LOGGED. File names are what a
+visitor chose, and a name in a persistent journal on the storage host cannot
+be taken back. Counts only. The only path this tool logs is the one its
+administrator configured.
+
+"python3 -I" on the first line is load-bearing: isolated mode keeps the
+working directory and PYTHONPATH off the import path, so a visitor's
+table/struct.py can never be imported by a root process that happens to run
+with its working directory in the table. noexec does not stop an import.
+"""
+
+import argparse
+import ctypes
+import errno
+import ipaddress
+import os
+import platform
+import re
+import select
+import signal
+import socket
+import stat
+import struct
+import sys
+import time
+
+sys.dont_write_bytecode = True
+
+VERSION = "2.4.10"
+PROG = "hdw4s-shared-sweep"
+
+# The relay's default group and port, so that an enabled relay needs no
+# configuration on any topology of one segment (owner, PM P19): every client
+# multicasts, every server listens, whichever nodes are up.
+#
+# 239.255.47.48: IPv4 Local Scope (RFC 2365, 239.255.0.0/16). Checked
+# 2026-10-02 against IANA's multicast-addresses registry: nothing in
+# 239.255.0.0/16 is assigned except the scope-relative top 256
+# (239.255.255.0/24: SAP, SLPv2, SSDP 239.255.255.250, DHCP, UPnP ...), which
+# this avoids; its MAC 01:00:5e:7f:2f:30 shares no low 23 bits with 224.0.0.x
+# control traffic. Not a group any common software defaults to, as far as is
+# known here.
+# Port 4748/udp: IANA lists it Unassigned. 4747/udp, the earlier choice, is
+# registered (buschtrommel, peer-to-peer file exchange), so it moved by one.
+RELAY_GROUP = "239.255.47.48"
+RELAY_PORT = 4748
+
+# Flags every view of the table must carry. strictatime is the fifth, and is
+# required unless the filesystem is NFS, where atime is the server's.
+FLAGS = ("nosymfollow", "nodev", "noexec", "nosuid")
+NFS = ("nfs", "nfs4")
+# The only names a store's root may hold besides table. lost+found is made by
+# mkfs; .zfs is ZFS's snapshot directory, normally hidden from readdir.
+STORE_EXTRAS = ("lost+found", ".zfs")
+
+# A timestamp more than this far in the future is ignored when judging use:
+# touch -d can put atime and mtime anywhere, and an item stamped next year
+# would otherwise never expire. ctime cannot be set from user space.
+FUTURE_SLACK = 300
+
+
+def log(msg, level=None):
+    """One line on stderr. Under journald (JOURNAL_STREAM set) a level is
+    carried as a <N> prefix, which journald reads and strips; on a terminal
+    the line is plain."""
+    pre = ""
+    if level is not None and os.environ.get("JOURNAL_STREAM"):
+        pre = "<%d>" % {"warning": 4, "notice": 5, "info": 6}[level]
+    sys.stderr.write("%s%s: %s\n" % (pre, PROG, msg))
+    sys.stderr.flush()
+
+
+class Refused(Exception):
+    """The guard refused. clause is one token from a fixed set (the CLI
+    contract), so that a test or a caller can compare it exactly."""
+
+    def __init__(self, clause, prose):
+        Exception.__init__(self, "%s: %s" % (clause, prose))
+        self.clause = clause
+        self.prose = prose
+
+
+class Usage(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# The duration grammar is hdw4s-duration's, not ours. It is installed beside
+# this file in the same package, and a second copy of the grammar anywhere is
+# the defect that file exists to end (.github/checks.sh refuses one).
+
+def _load_duration():
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "hdw4s-duration")
+    loader = importlib.machinery.SourceFileLoader("hdw4s_duration", path)
+    spec = importlib.util.spec_from_loader("hdw4s_duration", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def duration(text, what):
+    """Whole seconds. 0 is refused: expiry is a promise, and the grammar's
+    "0 means never" is not a value this has."""
+    d = _load_duration()
+    try:
+        secs = d.parse(text)
+    except d.DurationError as e:
+        raise Usage("%s: %s" % (what, e))
+    if secs == 0:
+        raise Usage("%s: 0 would keep everything for ever; give a duration."
+                    % what)
+    return secs
+
+
+# ---------------------------------------------------------------------------
+# libc. Python 3.11 and 3.12 have no statx, no openat2 and no mount; glibc has
+# statx, mount, utimensat, inotify, fanotify, name_to_handle_at and capset.
+
+_libc = ctypes.CDLL(None, use_errno=True)
+
+
+def _err(name):
+    e = ctypes.get_errno()
+    return OSError(e, "%s: %s" % (name, os.strerror(e)))
+
+
+AT_FDCWD = -100
+AT_SYMLINK_NOFOLLOW = 0x100
+AT_REMOVEDIR = 0x200
+AT_EMPTY_PATH = 0x1000
+
+STATX_BASIC_STATS = 0x7FF
+STATX_BTIME = 0x800
+STATX_MNT_ID = 0x1000
+STATX_ATTR_MOUNT_ROOT = 0x2000
+
+O_PATH = getattr(os, "O_PATH", 0o10000000)
+O_NOATIME = getattr(os, "O_NOATIME", 0o1000000)
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC \
+    | os.O_NONBLOCK
+
+_libc.statx.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                        ctypes.c_uint, ctypes.c_char_p]
+
+
+class Stx(object):
+    __slots__ = ("mask", "attributes", "attributes_mask", "uid", "mode",
+                 "ino", "atime", "btime", "ctime", "mtime", "mnt_id",
+                 "dev")
+
+    def has(self, bit):
+        return bool(self.mask & bit)
+
+    @property
+    def is_mount_root(self):
+        return bool(self.attributes & STATX_ATTR_MOUNT_ROOT)
+
+
+def statx(dirfd, name, flags=AT_SYMLINK_NOFOLLOW,
+          mask=STATX_BASIC_STATS | STATX_BTIME | STATX_MNT_ID):
+    buf = ctypes.create_string_buffer(256)
+    if isinstance(name, str):
+        name = os.fsencode(name)
+    if _libc.statx(dirfd, name, flags, mask, buf) != 0:
+        raise _err("statx")
+    raw = buf.raw
+    s = Stx()
+    s.mask, = struct.unpack_from("<I", raw, 0)
+    s.attributes, = struct.unpack_from("<Q", raw, 8)
+    s.uid, = struct.unpack_from("<I", raw, 20)
+    s.mode, = struct.unpack_from("<H", raw, 28)
+    s.ino, = struct.unpack_from("<Q", raw, 32)
+    s.attributes_mask, = struct.unpack_from("<Q", raw, 56)
+
+    def ts(off):
+        sec, nsec = struct.unpack_from("<qI", raw, off)
+        return sec + nsec / 1e9
+    s.atime, s.btime, s.ctime, s.mtime = ts(64), ts(80), ts(96), ts(112)
+    s.dev = struct.unpack_from("<II", raw, 136)
+    s.mnt_id, = struct.unpack_from("<Q", raw, 144)
+    return s
+
+
+def fstatx(fd):
+    return statx(fd, b"", AT_EMPTY_PATH)
+
+
+# ---------------------------------------------------------------------------
+# mountinfo, read for ONE mount id. The 50b2050 tool took the first line whose
+# mount point matched the path, which is the wrong line whenever anything is
+# stacked there; the mount id from statx names exactly the mount the fd is on.
+
+def _unescape(s):
+    # mountinfo escapes space, tab, newline and backslash as \ooo.
+    out, i = [], 0
+    while i < len(s):
+        if s[i] == "\\" and i + 4 <= len(s) and s[i + 1:i + 4].isdigit():
+            out.append(chr(int(s[i + 1:i + 4], 8)))
+            i += 4
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+class Mount(object):
+    __slots__ = ("id", "devno", "root", "point", "opts", "fstype", "source",
+                 "super")
+
+
+def parse_mountinfo(line):
+    """One mountinfo line (text) as a Mount, or None."""
+    fields = line.split()
+    if not fields or "-" not in fields:
+        return None
+    sep = fields.index("-")
+    m = Mount()
+    m.id = int(fields[0])
+    m.devno = fields[2]
+    m.root = _unescape(fields[3])
+    m.point = _unescape(fields[4])
+    m.opts = set(fields[5].split(","))
+    m.fstype = fields[sep + 1]
+    m.source = _unescape(fields[sep + 2]) if len(fields) > sep + 2 else ""
+    m.super = fields[sep + 3].split(",") if len(fields) > sep + 3 else []
+    return m
+
+
+def mounts():
+    """Every line of this namespace's mountinfo, parsed."""
+    out = []
+    with open("/proc/self/mountinfo", "rb") as f:
+        for line in f:
+            m = parse_mountinfo(line.decode("utf-8", "surrogateescape"))
+            if m is not None:
+                out.append(m)
+    return out
+
+
+def mountinfo(mnt_id):
+    for m in mounts():
+        if m.id == mnt_id:
+            return m
+    return None
+
+
+def missing_flags(m):
+    miss = [f for f in FLAGS if f not in m.opts]
+    if m.fstype not in NFS and ("relatime" in m.opts or "noatime" in m.opts):
+        miss.append("strictatime")
+    return miss
+
+
+# ---------------------------------------------------------------------------
+# The guard.
+
+def initial_userns():
+    """True in the initial user namespace (a host, a privileged container),
+    False in any other (an unprivileged container, unshare -U). Unreadable
+    counts as initial: the stricter answer for both callers."""
+    try:
+        with open("/proc/self/uid_map") as f:
+            return f.read().split() == ["0", "0", "4294967295"]
+    except OSError:
+        return True
+
+
+def _root_uids():
+    """uid 0, and -- inside a user namespace that is not the initial one --
+    the kernel's overflow uid. A store root owned by the HOST's root is shown
+    as the overflow uid (nobody) inside an unprivileged container, because that
+    uid is not mapped there; nobody inside can act as it, so it is at least as
+    locked as root. On the initial namespace that uid is a real account
+    (nobody), and is not accepted."""
+    uids = {0}
+    if not initial_userns():
+        try:
+            with open("/proc/sys/kernel/overflowuid") as f:
+                uids.add(int(f.read()))
+        except (OSError, ValueError):
+            pass
+    return uids
+
+
+class Guarded(object):
+    """What the guard hands back: an fd on the accepted directory, and what
+    it was judged as."""
+    __slots__ = ("fd", "form", "mount", "stx")
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def _store_rule(parent_fd, pst, m):
+    """The store rule, on the store ROOT: a whole filesystem, root-owned and
+    not group- or other-writable, holding table and nothing else. The flags
+    are judged separately, so --harden can apply this BEFORE it remounts."""
+    if m.root != "/":
+        raise Refused("fs-root", "the store's mountinfo root is %r, not /: it "
+                      "is a directory of a larger filesystem, not a filesystem "
+                      "of its own" % m.root)
+    if pst.uid not in _root_uids() or pst.mode & 0o022:
+        raise Refused("store-owner", "the store root is owned by uid %d with "
+                      "mode %04o; it must be root's and not group- or "
+                      "other-writable" % (pst.uid, pst.mode & 0o7777))
+    # A root other than 0 is the overflow uid (_root_uids), seen from a user
+    # namespace: the host's root, or, when that uid is also mapped (a typical
+    # unprivileged container maps 0-65535, so its own "nobody" is that uid),
+    # possibly this namespace's nobody -- stat cannot tell which. Either way
+    # the store is still a whole filesystem holding only table, not group- or
+    # other-writable, and the gate acts only inside the table. NOT LOGGED: it
+    # is the steady state of every container, and the guard runs every 30
+    # seconds there; a line per run buried the real reason when a store did
+    # fail (2026-10-03). The manual says it once.
+    extra = [n for n in os.listdir(parent_fd)
+             if n != "table" and n not in STORE_EXTRAS]
+    if extra:
+        # A count, never the names: they are whatever was put there.
+        raise Refused("store-extra", "the store root holds %d entr%s besides "
+                      "table; a store holds table and nothing else"
+                      % (len(extra), "y" if len(extra) == 1 else "ies"))
+
+
+def open_named(path):
+    """Open PATH as a directory, refusing a link as its last component AND
+    any resolution that lands somewhere other than the path given: O_NOFOLLOW
+    covers only the last component, and a symlink earlier in the path would
+    quietly put every later operation somewhere else."""
+    try:
+        fd = os.open(path, DIR_FLAGS)
+    except OSError as e:
+        raise Refused("open", "cannot open as a directory without following "
+                      "a link (%s)" % os.strerror(e.errno))
+    try:
+        got = os.readlink("/proc/self/fd/%d" % fd)
+    except OSError:
+        got = None
+    if got != os.path.normpath(os.path.abspath(path)):
+        os.close(fd)
+        raise Refused("path", "it resolves somewhere other than the path "
+                      "given (through a symbolic link in the path?)")
+    return fd
+
+
+def guard(path, form="any"):
+    """GUARD(D): accept D in form (i) or (ii), or raise Refused naming the
+    first clause that failed. Order: open, mount, form, flags.
+
+    DESTRUCTIVE MODES PASS form="ii" AND NOTHING ELSE (PM ruling P10, A7, on
+    the owner's deletion ruling): in every shape shipped, the sweep, the
+    watcher and the relay server work on the store's own table. Form (i)
+    exists for the non-destructive callers that look at the EXPOSURE (--check,
+    the expose service's re-guard), and even there only with TWO proofs
+    (exposure_proved): its root is the very table (dev, ino) of a sibling
+    mount that passes form (ii), and -- by type -- its mountinfo root is
+    /table (local) or its source is the sibling's source plus /table (NFS,
+    where a bind of a subdirectory records root "/"). A table directory of
+    some other flagged filesystem -- a homes filesystem, say -- proves
+    neither."""
+    fd = open_named(path)
+    ok = False
+    try:
+        st = fstatx(fd)
+        if not st.has(STATX_MNT_ID) or \
+                not st.attributes_mask & STATX_ATTR_MOUNT_ROOT:
+            raise Refused("mount", "the kernel did not report a mount id and "
+                          "mount-root bit (statx); refusing to guess")
+        m = mountinfo(st.mnt_id)
+        if m is None:
+            raise Refused("mount", "no mountinfo line for mount %d"
+                          % st.mnt_id)
+        if form == "any":
+            form = "i" if st.is_mount_root else "ii"
+        if form == "i":
+            if not st.is_mount_root:
+                raise Refused("form-i", "not a mount root, so not the "
+                              "exposure of a store's table")
+            if not exposure_proved(m, st, mounts(), _judge_table):
+                raise Refused("no-sibling", "not proved to be a store's table: "
+                              "no mount of the same filesystem here is a store "
+                              "whose table is this very directory (same device "
+                              "and inode) and also %s" % (
+                                  "has the source <store source>/table"
+                                  if m.fstype in NFS else
+                                  "is mounted from root /table"))
+        else:
+            if st.is_mount_root:
+                raise Refused("stacked", "it is itself a mount root: "
+                              "something is mounted on the store's table")
+            pfd = os.open("..", DIR_FLAGS, dir_fd=fd)
+            try:
+                pst = fstatx(pfd)
+                if pst.mnt_id != st.mnt_id or not pst.is_mount_root:
+                    raise Refused("not-mount-child", "it is not directly "
+                                  "beneath the root of its own mount")
+                try:
+                    named = statx(pfd, b"table")
+                except OSError:
+                    named = None
+                if named is None or (named.ino, named.dev) != (st.ino, st.dev):
+                    raise Refused("not-table", "its name in the store root is "
+                                  "not 'table'")
+                _store_rule(pfd, pst, m)
+            finally:
+                os.close(pfd)
+        miss = missing_flags(m)
+        if miss:
+            raise Refused("flags", "the mount lacks %s" % " ".join(miss))
+        g = Guarded()
+        g.fd, g.form, g.mount, g.stx = fd, form, m, st
+        ok = True
+        return g
+    finally:
+        if not ok:
+            os.close(fd)
+
+
+def norm_source(src):
+    """An NFS source as mountinfo shows it, compared exactly after collapsing
+    repeated slashes and stripping a trailing one. A bracketed IPv6 host
+    holds no slash, so it is left intact."""
+    host, sep, path = src.partition(":/") if "]:" not in src else \
+        (src[:src.index("]:") + 1], ":/", src[src.index("]:") + 3:])
+    path = re.sub("/+", "/", "/" + path).rstrip("/") if sep else src
+    return host + ":" + (path or "/") if sep else src
+
+
+def _judge_table(path):
+    g = guard(path, "ii")
+    try:
+        return g.stx
+    finally:
+        g.close()
+
+
+def exposure_proved(m, st, mount_list, judge):
+    """Form (i)'s two proofs, BOTH required (PM P23):
+      1. IDENTITY, for every filesystem: this mount's root is the very
+         directory (st_dev, st_ino) that is the table of a sibling mount --
+         same device, root / -- which passes form (ii) (judge);
+      2. by type: a local filesystem's bind of table records root "/table";
+         an NFS one records root "/" and the path in its SOURCE, which must
+         be the sibling's source plus "/table".
+    Measured on a cluster: an NFS exposure reads root "/", so root alone
+    refused the real thing."""
+    for o in mount_list:
+        if o.id == m.id or o.devno != m.devno or o.root != "/":
+            continue
+        try:
+            t = judge(os.path.join(o.point, "table"))
+        except (Refused, OSError):
+            continue
+        if (t.dev, t.ino) != (st.dev, st.ino):
+            continue
+        if m.fstype in NFS:
+            if o.fstype in NFS and norm_source(m.source) == \
+                    norm_source(norm_source(o.source) + "/table"):
+                return True
+        elif m.root == "/table":
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Hardening a store in place.
+
+MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC = 1, 2, 4, 8
+MS_REMOUNT, MS_NOSYMFOLLOW, MS_NOATIME, MS_NODIRATIME = 32, 256, 1024, 2048
+MS_BIND, MS_RELATIME, MS_STRICTATIME = 4096, 1 << 21, 1 << 24
+_libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                        ctypes.c_ulong, ctypes.c_char_p]
+_FLAGBITS = {"ro": MS_RDONLY, "nosuid": MS_NOSUID, "nodev": MS_NODEV,
+             "noexec": MS_NOEXEC, "nosymfollow": MS_NOSYMFOLLOW,
+             "nodiratime": MS_NODIRATIME}
+
+
+def harden(store):
+    """The store rule first (WITHOUT flags), so a wrong SOURCE -- "/", a
+    homes filesystem -- is refused before anything is remounted noexec.
+    Then add exactly the missing flags, by one bind remount in place of the
+    very directory that was judged (through its /proc fd link, not the path
+    again). Then the full guard, form (ii), on table."""
+    fd = open_named(store)
+    try:
+        st = fstatx(fd)
+        if not st.has(STATX_MNT_ID) or \
+                not st.attributes_mask & STATX_ATTR_MOUNT_ROOT:
+            raise Refused("mount", "the kernel did not report a mount id and "
+                          "mount-root bit (statx); refusing to guess")
+        m = mountinfo(st.mnt_id)
+        if m is None:
+            raise Refused("mount", "no mountinfo line for mount %d"
+                          % st.mnt_id)
+        if not st.is_mount_root:
+            raise Refused("fs-root", "the store is not a mount root: nothing "
+                          "is mounted there")
+        _store_rule(fd, st, m)
+        try:
+            t = statx(fd, b"table")
+        except OSError:
+            t = None
+        if t is None or not stat.S_ISDIR(t.mode):
+            raise Refused("open", "the store has no table directory")
+        miss = missing_flags(m)
+        if miss:
+            flags = MS_REMOUNT | MS_BIND
+            for o in m.opts:
+                flags |= _FLAGBITS.get(o, 0)
+            for f in miss:
+                flags |= _FLAGBITS.get(f, 0)
+            if "strictatime" in miss:
+                flags |= MS_STRICTATIME
+            elif "noatime" in m.opts:
+                flags |= MS_NOATIME
+            elif "relatime" in m.opts:
+                flags |= MS_RELATIME
+            target = ("/proc/self/fd/%d" % fd).encode()
+            if _libc.mount(None, target, None, flags, None) != 0:
+                e = ctypes.get_errno()
+                raise Refused("remount", "could not add %s in place (%s)%s"
+                              % (" ".join(miss), os.strerror(e),
+                                 "; an atime flag is locked in a user "
+                                 "namespace: put strictatime on the "
+                                 "host-side mount" if e == errno.EPERM
+                                 else ""))
+            log("added %s to %s." % (" ".join(miss), store))
+    finally:
+        os.close(fd)
+    return guard(os.path.join(store, "table"), "ii")
+
+
+# ---------------------------------------------------------------------------
+# The walk. Iterative, so depth is bounded by descriptors and not by Python's
+# recursion limit (a 20,000-deep tree is an afternoon's work for a visitor);
+# fd-relative throughout; never leaves the table's mount; never follows a
+# link; tolerant of anything changing under it, because by design anybody may.
+
+def raise_fd_limit():
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < hard:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+        except (ValueError, OSError):
+            pass
+
+
+class Unsafe(Exception):
+    """A destructive call the gate refused. Counted, never logged by name."""
+
+
+class Gate(object):
+    """EVERY destructive call in this file -- unlink, rmdir, fchmod -- goes
+    through here, and nothing else in the file makes one.
+
+    The owner's worry, verbatim: "file deletion outside of the host's /shared
+    directory". The guard and the store rule are meant to make that
+    impossible before a walk starts, and the unit's ProtectSystem=strict
+    plus ReadOnlyPaths=/run (strict alone leaves /run writable, measured on
+    systemd 255) to make it impossible whatever the code does. This gate is the layer that
+    does not trust either: it is checked immediately before each call,
+    against facts it took itself from the table fd, and it does not share
+    their failure modes --
+
+      * the name is ONE component (no "/", not "." or "..", no NUL), so the
+        kernel's fd-relative call cannot resolve anything but a direct child
+        of the directory fd, and never follows the final link (unlinkat,
+        rmdir never do; fchmod acts on an fd opened O_NOFOLLOW);
+      * the directory fd is on the table's own mount (statx mount id) AND is
+        still beneath the table NOW: its path as the kernel reports it
+        (/proc/self/fd) starts with the table's. A directory held open and
+        then renamed out of the table -- the classic escape of an fd walk,
+        possible on one filesystem whatever the store rule says -- fails
+        here, at the call, not at the next pass;
+      * the entry itself is on the table's mount (a mount stacked on a name
+        mid-walk changes it) and is the inode that was judged (a rename race
+        changes it);
+      * a file is only re-moded when it has ONE link: on a filesystem that
+        was not dedicated after all, a hard link from elsewhere would carry
+        the new mode out of the table.
+    """
+
+    def __init__(self, table_fd, dry_run=False):
+        st = fstatx(table_fd)
+        self.dry_run = dry_run
+        self.fd = table_fd
+        self.mnt = st.mnt_id
+        self.key = (st.dev, st.ino)
+        self.prefix = os.readlink(b"/proc/self/fd/%d" % table_fd)
+        if not self.prefix.startswith(b"/") or self.prefix.endswith(b")"):
+            raise Unsafe("the table's own path is not readable")
+        self.refused = {}
+        self._fresh = {}
+
+    def refuse(self, why):
+        self.refused[why] = self.refused.get(why, 0) + 1
+        raise Unsafe(why)
+
+    @staticmethod
+    def one_component(name):
+        n = name if isinstance(name, bytes) else os.fsencode(name)
+        return bool(n) and b"/" not in n and b"\0" not in n and \
+            n not in (b".", b"..")
+
+    def beneath(self, fd):
+        """Is fd (a directory or a file) inside the table right now?"""
+        if fd == self.fd:
+            return True
+        try:
+            st = fstatx(fd)
+            if st.mnt_id != self.mnt:
+                return False
+            p = os.readlink(b"/proc/self/fd/%d" % fd)
+        except OSError as e:
+            if e.errno == errno.ENAMETOOLONG:
+                return self._walk_up(fd, st)
+            return False
+        return p.startswith(self.prefix + b"/")
+
+    # How long a "still beneath" answer for a directory too deep to print is
+    # reused. ONLY for those: a path /proc can print (under 4 KiB) is checked
+    # exactly, at every call. A climb is O(depth) syscalls, and under a
+    # path-based security module (AppArmor) each syscall on a deep directory
+    # is itself O(depth): measured 200 us per statx at depth 2000, and a full
+    # climb at the deepest the kernel allows takes seconds. Without reuse that
+    # walk ran for over fifteen minutes; with it, one full climb per window.
+    # A successful climb vouches, as of when it STARTED, for every directory
+    # it passed through. No check closes the race between it and the call
+    # anyway; for a directory deeper than 4 KiB of path this widens that
+    # window to at most this long.
+    REUSE = 10.0
+
+    def _walk_up(self, fd, st):
+        """For a path too long for /proc to print: climb ".." until the
+        table's own inode (beneath) or a mount root (not), every step on the
+        table's mount. No path is printed on the way: printing is O(depth) in
+        the kernel, and doing it per step made the climb cubic."""
+        now = time.monotonic()
+        key = (st.dev, st.ino)
+        t = self._fresh.get(key)
+        if t is not None and now - t < self.REUSE:
+            return True
+        seen = [key]
+        cur = os.dup(fd)
+        try:
+            for _ in range(1 << 22):
+                up = os.open("..", O_PATH | os.O_DIRECTORY | os.O_CLOEXEC,
+                             dir_fd=cur)
+                os.close(cur)
+                cur = up
+                ust = fstatx(cur)
+                if ust.mnt_id != self.mnt:
+                    return False
+                k = (ust.dev, ust.ino)
+                # Reaching the table vouches now; reaching an ancestor vouched
+                # less than REUSE ago vouches as of THAT time, never later, so
+                # a chain of short climbs cannot keep an answer alive for ever.
+                at = now if k == self.key else self._fresh.get(k)
+                if at is not None and now - at < self.REUSE:
+                    if len(self._fresh) > 100000:
+                        self._fresh.clear()
+                    for v in seen:
+                        self._fresh[v] = at
+                    return True
+                if ust.is_mount_root:
+                    return False
+                seen.append(k)
+            return False
+        finally:
+            os.close(cur)
+
+    def entry(self, dfd, name, ino):
+        if not self.one_component(name):
+            self.refuse("name")
+        if not self.beneath(dfd):
+            self.refuse("escaped")
+        try:
+            st = statx(dfd, name)
+        except OSError:
+            self.refuse("gone")
+        if st.mnt_id != self.mnt:
+            self.refuse("mount")
+        if ino is not None and st.ino != ino:
+            self.refuse("changed")
+        return st
+
+    def relname(self, dfd, name):
+        """The table-relative name, for a dry run's "would" line only."""
+        n = name if isinstance(name, bytes) else os.fsencode(name)
+        try:
+            p = os.readlink(b"/proc/self/fd/%d" % dfd)
+        except OSError:
+            return n.decode("utf-8", "replace")
+        rel = p[len(self.prefix) + 1:] if p.startswith(self.prefix + b"/") \
+            else b""
+        if not n:
+            whole = rel
+        else:
+            whole = rel + b"/" + n if rel else n
+        return whole.decode("utf-8", "replace") \
+            .encode("unicode_escape").decode("ascii")
+
+    def would(self, what, dfd, name):
+        """DRY RUN (owner: "disable actual deletions and just log what you
+        would do"): every check above has passed, nothing is done, and the
+        one line says what would have been. Names are logged ONLY here, on
+        purpose and on request; a normal run logs counts only (T3)."""
+        log("would %s %s" % (what, self.relname(dfd, name)), "info")
+
+    def unlink(self, dfd, name, ino, why="expire"):
+        st = self.entry(dfd, name, ino)
+        if stat.S_ISDIR(st.mode):
+            self.refuse("changed")
+        if self.dry_run:
+            return self.would(why, dfd, name)
+        os.unlink(name, dir_fd=dfd)
+
+    def rmdir(self, dfd, name, ino):
+        st = self.entry(dfd, name, ino)
+        if not stat.S_ISDIR(st.mode):
+            self.refuse("changed")
+        if self.dry_run:
+            return self.would("rmdir", dfd, name)
+        os.rmdir(name, dir_fd=dfd)
+
+    def fchmod(self, fd, mode):
+        st = fstatx(fd)
+        if st.mnt_id != self.mnt:
+            self.refuse("mount")
+        if not self.beneath(fd):
+            self.refuse("escaped")
+        if not stat.S_ISDIR(st.mode) and os.fstat(fd).st_nlink != 1:
+            self.refuse("linked")
+        if self.dry_run:
+            return self.would("widen", fd, b"")
+        os.fchmod(fd, mode)
+
+
+def open_dir(dfd, name, ino, mnt_id=None):
+    """Open a child directory without following a link and without moving
+    its atime; None if it is gone, changed type, or is a different inode
+    than the one judged a moment ago."""
+    for flags in (DIR_FLAGS | O_NOATIME, DIR_FLAGS):
+        try:
+            fd = os.open(name, flags, dir_fd=dfd)
+            break
+        except OSError as e:
+            if e.errno == errno.EPERM and flags & O_NOATIME:
+                continue  # not the owner and no CAP_FOWNER: tests only
+            # Out of descriptors, or a path the kernel will no longer resolve
+            # (AppArmor's path mediation refuses open at about 8 KiB of path,
+            # and a rename can put a directory deeper than mkdir ever could):
+            # both are "too deep", and COUNTED, so --check says so. Never
+            # silent: what is not reached is never expired.
+            if e.errno in (errno.EMFILE, errno.ENAMETOOLONG):
+                raise
+            return None
+    try:
+        cst = fstatx(fd)
+        if cst.ino != ino or (mnt_id is not None and cst.mnt_id != mnt_id):
+            os.close(fd)
+            return None  # a mount appeared on the name, or it was swapped
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+class Counts(object):
+    def __init__(self):
+        self.widened = self.expired = self.special = self.dirs_gone = 0
+        self.too_deep = self.errors = 0
+        self.no_btime = False
+        self.dry = False
+        self.stale_red = 0
+        self.refused = {}
+
+
+def last_use(st, now, is_dir):
+    """max(atime, mtime, ctime) -- a directory's without atime, because any
+    listing moves it -- ignoring a value more than FUTURE_SLACK in the
+    future, and falling back to ctime, which user space cannot set."""
+    vals = (st.mtime, st.ctime) if is_dir else (st.atime, st.mtime, st.ctime)
+    ok = [v for v in vals if v <= now + FUTURE_SLACK]
+    return max(ok) if ok else st.ctime
+
+
+# How deep the walk goes, and so how many directory descriptors it may hold at
+# once (one per level). An explicit budget, because the only cap measured so
+# far (about 4030 levels) is AppArmor's path mediation, which a stock kernel
+# without AppArmor does not have. Beyond it a directory is skipped and
+# COUNTED, never entered; --check warns while the count is non-zero.
+DEFAULT_MAX_DEPTH = 8192
+
+
+def depth_budget(asked):
+    """The budget asked for, but never more than the descriptors this process
+    may hold, with room to spare for everything else it opens."""
+    import resource
+    soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    room = soft - 256 if soft != resource.RLIM_INFINITY else asked
+    return max(1, min(asked, room))
+
+
+def walk(table_fd, mnt_id, on_file, on_dir_pre, on_dir_post, counts,
+         max_depth=DEFAULT_MAX_DEPTH):
+    """Post-order over the table, ITERATIVE (a list as the stack, never
+    Python recursion). on_file(dfd, name, st) for every non-directory;
+    on_dir_pre(dfd, name, st, fd) when a directory is entered;
+    on_dir_post(dfd, name, st, fd, remaining) when it is left. on_file and
+    on_dir_post return True when they removed the entry. A directory more
+    than max_depth below the table is not entered: counts.too_deep."""
+    # A frame: [fd, names, index, removed, parent fd, name, stx]
+    try:
+        top = os.listdir(table_fd)
+    except OSError:
+        counts.errors += 1
+        return  # nothing this pass; the next one tries again
+    stack = [[table_fd, top, 0, 0, None, None, None]]
+    while stack:
+        fr = stack[-1]
+        fd, names = fr[0], fr[1]
+        if fr[2] < len(names):
+            name = names[fr[2]]
+            fr[2] += 1
+            try:
+                st = statx(fd, name)
+            except OSError as e:
+                if e.errno == errno.ENAMETOOLONG:
+                    counts.too_deep += 1  # there, and out of reach: counted
+                    continue
+                fr[3] += 1  # gone already: count it as not remaining
+                continue
+            if stat.S_ISDIR(st.mode):
+                if st.mnt_id != mnt_id:
+                    continue  # another mount inside the table: not ours
+                if len(stack) > max_depth:
+                    counts.too_deep += 1
+                    continue
+                try:
+                    cfd = open_dir(fd, name, st.ino, mnt_id)
+                except OSError:
+                    counts.too_deep += 1
+                    continue
+                if cfd is None:
+                    continue
+                try:
+                    children = os.listdir(cfd)
+                except OSError:
+                    os.close(cfd)
+                    counts.errors += 1
+                    continue
+                try:
+                    on_dir_pre(fd, name, st, cfd)
+                except OSError:
+                    counts.errors += 1
+                stack.append([cfd, children, 0, 0, fd, name, st])
+            else:
+                try:
+                    if on_file(fd, name, st):
+                        fr[3] += 1
+                except OSError:
+                    counts.errors += 1
+            continue
+        stack.pop()
+        if fr[4] is None:
+            continue  # the table itself
+        remaining = len(names) - fr[3]
+        try:
+            if on_dir_post(fr[4], fr[5], fr[6], fd, remaining):
+                stack[-1][3] += 1
+        except OSError:
+            counts.errors += 1
+        finally:
+            os.close(fd)
+
+
+def widen_file(gate, dfd, name, st, counts):
+    """(mode & 0777) | 0666: readable and writable by everyone, and the
+    set-id and sticky bits gone -- nosuid makes them harmless HERE, but an
+    administrator's cp -a out of the table would carry them somewhere they
+    are not (threat T9)."""
+    want = (st.mode & 0o777) | 0o666
+    if st.mode & 0o7777 == want:
+        return
+    if not gate.one_component(name):
+        return
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                     | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError:
+        return  # gone, or turned into a link: the next pass sees it
+    try:
+        fst = os.fstat(fd)
+        if fst.st_ino == st.ino and stat.S_ISREG(fst.st_mode):
+            try:
+                gate.fchmod(fd, (fst.st_mode & 0o777) | 0o666)
+                counts.widened += 1
+            except Unsafe:
+                pass
+    finally:
+        os.close(fd)
+
+
+def remove_special(gate, dfd, name, st, counts):
+    """Anything that is not a regular file or a directory goes: a symlink,
+    a fifo, a socket, a device node. Never followed, never opened."""
+    try:
+        gate.unlink(dfd, name, st.ino, "remove-non-file")
+        counts.special += 1
+    except Unsafe:
+        return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # Changed under us between the look and the call -- by design anybody
+        # may: a fifo became a directory (EISDIR), a component went (ENOTDIR),
+        # and so on. Counted, never raised: a visitor must not be able to
+        # crash the watcher by racing it, which is what this was (S-fuzz on a
+        # box, 2026-10-02: IsADirectoryError out of the fast path).
+        counts.errors += 1
+        return False
+    return True
+
+
+def sweep(table_fd, mnt_id, idle, max_age, now, counts, expire=True,
+          max_depth=DEFAULT_MAX_DEPTH, dry_run=False):
+    """One pass: drop non-files, widen, and (unless expire is False, which is
+    the watcher's pass) expire."""
+
+    gate = Gate(table_fd, dry_run)
+    counts.dry = dry_run
+
+    def on_file(dfd, name, st):
+        if not stat.S_ISREG(st.mode):
+            return remove_special(gate, dfd, name, st, counts)
+        if expire:
+            old = st.has(STATX_BTIME) and now - st.btime >= max_age
+            if not st.has(STATX_BTIME):
+                counts.no_btime = True
+            if old or now - last_use(st, now, False) >= idle:
+                try:
+                    gate.unlink(dfd, name, st.ino)
+                    counts.expired += 1
+                except Unsafe:
+                    return False
+                except FileNotFoundError:
+                    pass
+                return True
+        widen_file(gate, dfd, name, st, counts)
+        return False
+
+    def on_dir_pre(dfd, name, st, fd):
+        if st.mode & 0o7777 != 0o777:
+            try:
+                gate.fchmod(fd, 0o777)
+                counts.widened += 1
+            except Unsafe:
+                pass
+
+    def on_dir_post(dfd, name, st, fd, remaining):
+        # Judged on the directory's times from BEFORE this pass touched its
+        # children: our own unlinks move its mtime, and judging after them
+        # would let one level of empty directory go per IDLE.
+        if not expire or remaining > 0:
+            return False
+        old = st.has(STATX_BTIME) and now - st.btime >= max_age
+        if not (old or now - last_use(st, now, True) >= idle):
+            return False
+        if os.listdir(fd):
+            return False
+        try:
+            gate.rmdir(dfd, name, st.ino)
+            counts.dirs_gone += 1
+            return True
+        except (Unsafe, OSError):
+            return False
+
+    try:
+        walk(table_fd, mnt_id, on_file, on_dir_pre, on_dir_post, counts,
+             max_depth)
+    finally:
+        counts.refused = dict(gate.refused)
+
+
+def report(counts, what):
+    parts = []
+    for n, label in ((counts.expired, "expired"),
+                     (counts.dirs_gone, "empty director(ies) removed"),
+                     (counts.special, "non-file(s) removed"),
+                     (counts.widened, "widened")):
+        if n:
+            parts.append("%d %s" % (n, label))
+    if counts.dry and parts:
+        parts = ["dry-run: would have " + ", ".join(parts) +
+                 " -- NOTHING was changed"]
+    if counts.too_deep:
+        parts.append("%d director(ies) beyond the depth budget or the "
+                     "kernel's path limit not walked" % counts.too_deep)
+    if counts.errors:
+        parts.append("%d entr(ies) changed under the walk" % counts.errors)
+    for why, n in sorted(counts.refused.items()):
+        parts.append("%d destructive call(s) refused by the gate (%s)"
+                     % (n, why))
+    if parts:
+        log("%s: %s." % (what, ", ".join(parts)))
+
+
+# ---------------------------------------------------------------------------
+# --check: the rows hdw4s check prints. Read-only.
+
+def check(path, idle, interval, verbose, now=None,
+          max_depth=DEFAULT_MAX_DEPTH):
+    rows = []
+    try:
+        g = guard(path, "any")
+    except Refused as r:
+        print("red: %s is not a guarded store: %s: %s"
+              % (path, r.clause, r.prose))
+        return 1
+    try:
+        now = time.time() if now is None else now
+        counts = Counts()
+        limit = idle + 2 * interval
+        stale = [0]
+
+        def on_file(dfd, name, st):
+            if not stat.S_ISREG(st.mode):
+                return False
+            if not st.has(STATX_BTIME):
+                counts.no_btime = True
+            if now - last_use(st, now, False) > limit:
+                stale[0] += 1
+            return False
+
+        def on_dir_post(dfd, name, st, fd, remaining):
+            if remaining == 0 and now - last_use(st, now, True) > limit:
+                stale[0] += 1
+            return False
+        raise_fd_limit()
+        walk(g.fd, g.stx.mnt_id, on_file, lambda *a: None, on_dir_post,
+             counts, max_depth)
+        if counts.too_deep:
+            rows.append(("warn", "%s holds %d director(ies) deeper than the "
+                         "sweep's depth budget (%d) or the kernel's path "
+                         "limit: nothing below them is widened or expired"
+                         % (path, counts.too_deep, max_depth)))
+        if stale[0]:
+            rows.append(("red", "nobody is sweeping %s: %d item(s) unused "
+                         "for longer than the idle window plus two sweep "
+                         "intervals are still there" % (path, stale[0])))
+        try:
+            v = os.fstatvfs(g.fd)
+            used_b = (v.f_blocks - v.f_bavail) / v.f_blocks if v.f_blocks else 0
+            used_i = (v.f_files - v.f_favail) / v.f_files if v.f_files else 0
+            if max(used_b, used_i) > 0.9:
+                rows.append(("warn", "%s is %d%% full" % (
+                    path, int(100 * max(used_b, used_i)))))
+        except OSError:
+            pass
+        if g.mount.fstype in NFS:
+            if "hard" in g.mount.super:
+                rows.append(("warn", "%s is an NFS store mounted hard: a "
+                             "server outage hangs whatever touches it; mount "
+                             "it soft" % path))
+            if verbose:
+                rows.append(("info", "atime of an NFS store is the server's; "
+                             "this cannot verify atime=on relatime=off there"))
+        if counts.no_btime or not g.stx.has(STATX_BTIME):
+            rows.append(("warn", "%s reports no birth time, so the maximum "
+                         "age is not enforced there" % path))
+    finally:
+        g.close()
+    for level, text in rows:
+        print("%s: %s" % (level, text))
+    if any(l == "red" for l, _ in rows):
+        return 1
+    if any(l == "warn" for l, _ in rows):
+        return 3
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# --watch: widen and drop non-files as they appear. fanotify on the whole
+# store filesystem, because inotify needs a watch per directory and races
+# each new one. Refused on NFS and on a host's filesystem from inside a
+# container; then the timer alone widens.
+
+FAN_CLOEXEC, FAN_NONBLOCK = 0x1, 0x2
+FAN_REPORT_FID, FAN_REPORT_DIR_FID, FAN_REPORT_NAME = 0x200, 0x400, 0x800
+FAN_MARK_ADD, FAN_MARK_FILESYSTEM = 0x1, 0x100
+FAN_ATTRIB, FAN_CLOSE_WRITE, FAN_MOVED_TO, FAN_CREATE = 0x4, 0x8, 0x80, 0x100
+FAN_Q_OVERFLOW, FAN_ONDIR = 0x4000, 0x40000000
+FAN_EVENT_INFO_TYPE_DFID_NAME = 2
+CAP_SYS_ADMIN = 21
+_libc.fanotify_mark.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_uint64,
+                                ctypes.c_int, ctypes.c_char_p]
+
+
+def drop_cap(cap):
+    """Remove one capability from the effective, permitted and inheritable
+    sets, so it cannot be raised again by this process."""
+    hdr = struct.pack("<Ii", 0x20080522, 0)
+    data = ctypes.create_string_buffer(24)
+    h = ctypes.create_string_buffer(hdr)
+    if _libc.capget(h, data) != 0:
+        raise _err("capget")
+    words = list(struct.unpack("<6I", data.raw))  # (eff,prm,inh) x 2
+    idx, bit = cap // 32, 1 << (cap % 32)
+    for k in range(3):
+        words[idx * 3 + k] &= ~bit
+    data = ctypes.create_string_buffer(struct.pack("<6I", *words))
+    if _libc.capset(ctypes.create_string_buffer(hdr), data) != 0:
+        raise _err("capset")
+
+
+def capabilities():
+    out = {}
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith(("CapEff:", "CapPrm:")):
+                k, v = line.split(":", 1)
+                out[k] = v.strip()
+    return out
+
+
+def handle_of(fd):
+    """(type, bytes) of fd's file handle, to recognise the table's own
+    directory in an event without resolving anything."""
+    buf = ctypes.create_string_buffer(8 + 128)
+    struct.pack_into("<I", buf, 0, 128)
+    mnt = ctypes.c_int()
+    if _libc.name_to_handle_at(fd, b"", buf, ctypes.byref(mnt),
+                               AT_EMPTY_PATH) != 0:
+        raise _err("name_to_handle_at")
+    n, typ = struct.unpack_from("<Ii", buf.raw, 0)
+    return typ, buf.raw[8:8 + n]
+
+
+def top_level_names(data, table_handle):
+    """From a buffer of fanotify events, the names of entries created or
+    changed directly in the table. Everything else only asks for a pass."""
+    names, off = [], 0
+    while off + 24 <= len(data):
+        ev_len, _vers, _res, meta_len, _mask, fd, _pid = \
+            struct.unpack_from("<IBBHQii", data, off)
+        if ev_len < 24 or off + ev_len > len(data):
+            break
+        if fd >= 0:
+            os.close(fd)
+        p = off + meta_len
+        while p + 4 <= off + ev_len:
+            itype, _pad, ilen = struct.unpack_from("<BBH", data, p)
+            if ilen < 4:
+                break
+            if itype == FAN_EVENT_INFO_TYPE_DFID_NAME and p + 4 + 8 + 8 <= off + ev_len:
+                q = p + 4 + 8  # header, fsid
+                hb, htype = struct.unpack_from("<Ii", data, q)
+                h = data[q + 8:q + 8 + hb]
+                rest = data[q + 8 + hb:p + ilen]
+                name = rest.split(b"\0", 1)[0]
+                if (htype, h) == table_handle and name not in (b"", b"."):
+                    names.append(name)
+            p += ilen
+        off += ev_len
+    return names
+
+
+def fast_path(table_fd, names, c, dry_run=False):
+    """Remove the non-files named by events directly in the table, before
+    any pass and without a walk."""
+    gate = Gate(table_fd, dry_run)
+    c.dry = dry_run
+    for n in names:
+        if not gate.one_component(n):
+            continue
+        try:
+            st = statx(table_fd, n)
+        except OSError:
+            continue
+        if not (stat.S_ISREG(st.mode) or stat.S_ISDIR(st.mode)):
+            remove_special(gate, table_fd, n, st, c)
+    c.refused = dict(gate.refused)
+
+
+def watch(path, max_depth=DEFAULT_MAX_DEPTH, dry_run=False):
+    raise_fd_limit()
+    try:
+        g = guard(path, "ii")
+    except Refused as r:
+        log("refused %s: %s: %s" % (path, r.clause, r.prose))
+        return 1
+    fan = _libc.fanotify_init(FAN_CLOEXEC | FAN_NONBLOCK | FAN_REPORT_FID
+                              | FAN_REPORT_DIR_FID | FAN_REPORT_NAME,
+                              os.O_RDONLY | os.O_CLOEXEC)
+    mask = FAN_CREATE | FAN_ATTRIB | FAN_CLOSE_WRITE | FAN_MOVED_TO | FAN_ONDIR
+    if fan < 0 or _libc.fanotify_mark(fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
+                                      mask, g.fd, None) != 0:
+        log("cannot watch %s (%s); the timed sweep alone will widen items."
+            % (path, os.strerror(ctypes.get_errno())))
+        return 0
+    # The mark needed CAP_SYS_ADMIN; nothing after it does, and this process
+    # reads a tree anybody can shape. Gone from every set, then shown.
+    try:
+        drop_cap(CAP_SYS_ADMIN)
+    except OSError as e:
+        log("could not drop CAP_SYS_ADMIN (%s); refusing to watch." % e)
+        return 1
+    caps = capabilities()
+    log("%s %s watching %s (CapEff %s, CapPrm %s)."
+        % (PROG, VERSION, path, caps.get("CapEff"), caps.get("CapPrm")))
+    table_handle = handle_of(g.fd)
+    marked = g.stx
+    g.close()
+    last_walk, next_ok, pending = 1.0, 0.0, True
+    last_guard = time.monotonic()
+    while True:
+        # The mark is on the superblock that was mounted when it was made. A
+        # store unmounted and mounted again is a new one, and this would wait
+        # for ever on the old: every 30 s the path must still name it.
+        if time.monotonic() - last_guard >= 30:
+            last_guard = time.monotonic()
+            try:
+                same_table(path, "ii", marked)
+            except Refused as rf:
+                log("refused %s: %s: %s; exiting to re-mark." % (
+                    path, rf.clause, rf.prose))
+                return 1
+        timeout = 30.0
+        if pending:
+            timeout = min(timeout, max(0.0, next_ok - time.monotonic()))
+        r, _, _ = select.select([fan], [], [], timeout)
+        if r:
+            try:
+                data = os.read(fan, 65536)
+            except BlockingIOError:
+                data = b""
+            names = top_level_names(data, table_handle)
+            pending = True
+            if names:
+                # The fast path: a link or fifo dropped at the top of the table
+                # is removed now, before any pass, with no walk.
+                try:
+                    gg = guard(path, "ii")
+                except Refused as rf:
+                    log("refused %s: %s: %s" % (path, rf.clause, rf.prose))
+                    return 1
+                try:
+                    c = Counts()
+                    try:
+                        fast_path(gg.fd, names, c, dry_run)
+                    except OSError:
+                        c.errors += 1
+                    report(c, "watch")
+                finally:
+                    gg.close()
+            continue
+        if not pending or time.monotonic() < next_ok:
+            continue
+        # The pass: drop non-files and widen everything, no expiry. Rate
+        # limited to max(1 s, 10 x the last walk), so a burst of events costs
+        # at most a tenth of a CPU however large the table is.
+        try:
+            gg = guard(path, "ii")
+        except Refused as rf:
+            log("refused %s: %s: %s" % (path, rf.clause, rf.prose))
+            return 1
+        t0 = time.monotonic()
+        c = Counts()
+        try:
+            sweep(gg.fd, gg.stx.mnt_id, 0, 0, time.time(), c, expire=False,
+                  max_depth=max_depth, dry_run=dry_run)
+        except OSError:
+            # The last line, not the defence: every per-entry call already
+            # counts its own failure. A pass that fails anyway is a pass that
+            # did less, never a watcher that stopped.
+            c.errors += 1
+        finally:
+            gg.close()
+        last_walk = time.monotonic() - t0
+        next_ok = time.monotonic() + max(1.0, 10 * last_walk)
+        pending = False
+        report(c, "watch")
+
+
+# ---------------------------------------------------------------------------
+# The relay, server side. Its ONLY possible effect is moving the atime (and so
+# the ctime) of an existing regular file inside the table: one openat2 that
+# cannot leave the table or follow a link, one fstat, one utimensat. It never
+# creates, removes, re-modes or writes anything, and never sends a packet.
+
+# The wire format, version 1. A datagram is one version byte, then one or more
+# records, each:  kind u8 | flags u8 (0) | name_len u16 BE | fileid u64 BE |
+# name (name_len bytes, UTF-8). kind 1 = use (name required), kind 2 =
+# heartbeat (name_len 0, fileid 0). Anything else, anywhere, drops the WHOLE
+# datagram before any record is acted on.
+WIRE_VERSION = 1
+KIND_USE, KIND_HEARTBEAT = 1, 2
+REC_HEAD = struct.Struct(">BBHQ")
+MAX_NAME = 4096
+MAX_DATAGRAM = 8192
+CLIENT_DATAGRAM = 1400
+
+# Records per second. A client announces a file at most once per IDLE/4, so
+# an honest client is orders of magnitude below these. Counted per RECORD,
+# not per datagram, because a datagram may carry hundreds (threat T6).
+RATE_SOURCE, BURST_SOURCE = 200.0, 2000.0
+# The CLIENT's own pace: half of what one source is accepted at, so the
+# server never drops a client's announcements for rate, with room left for
+# heartbeats. Measured before this pace existed (in the real units): a burst
+# of 5000 opens sent 5000 records at once; the server accepted 2035 and
+# dropped 2965 for rate -- and those files were already marked announced, so
+# they would have expired early, which is what the relay is for preventing.
+CLIENT_RATE, CLIENT_BURST = RATE_SOURCE / 2, BURST_SOURCE / 2
+# ...and its pace in DATAGRAMS, which is what a receive buffer fills with:
+# the kernel charges a queued datagram its buffer, not its payload. Measured
+# on loopback (Linux 7.0): 960 bytes for a one-record datagram, 2304 for
+# CLIENT_DATAGRAM, 16640 for MAX_DATAGRAM. Measured on an NFS client and its
+# ZFS server (2026-10-03, R7): 50000 opens in 20 s, the client sent the first
+# ~1000 records as they arrived -- ONE RECORD PER DATAGRAM -- and the
+# server's socket, at rmem_default (212992, about 220 such datagrams), dropped
+# 278 of them while the server was busy on ZFS. So the client sends at most
+# once per CLIENT_TICK, packing what is due into full datagrams, and never
+# more than CLIENT_GRAM_BURST datagrams at once or CLIENT_GRAM_RATE a second;
+# the server's receive buffer must hold that burst at the largest charge:
+# SERVER_RCVBUF bytes AS THE KERNEL COUNTS THEM (what SO_RCVBUF reads back,
+# twice what was asked for). Asking takes net.core.rmem_max of at least half
+# of it, which a stock rmem_max (212992) is.
+CLIENT_TICK = 0.2
+CLIENT_GRAM_RATE, CLIENT_GRAM_BURST = 20.0, 16.0
+GRAM_CHARGE = 17408
+SERVER_RCVBUF = int(CLIENT_GRAM_BURST) * GRAM_CHARGE
+RATE_GLOBAL, BURST_GLOBAL = 1000.0, 10000.0
+MAX_SOURCES = 256
+
+# R8 decides this: does the NFS fileid a client sees equal st_ino on the
+# server? If so a stale or renamed name does nothing. If R8 shows they
+# differ, this is the one line to change.
+REQUIRE_FILEID = True
+
+RESOLVE_NO_XDEV, RESOLVE_NO_MAGICLINKS = 0x01, 0x02
+RESOLVE_NO_SYMLINKS, RESOLVE_BENEATH = 0x04, 0x08
+UTIME_NOW, UTIME_OMIT = (1 << 30) - 1, (1 << 30) - 2
+
+# openat2 has no glibc wrapper. Its number is 437 in the generic table every
+# architecture Debian and Ubuntu build for uses (x86_64 and i386 included,
+# which joined the unified numbering at 424). alpha, ia64 and the MIPS ABIs
+# number it differently; there the relay server refuses to start rather than
+# guess.
+_OPENAT2 = {"x86_64": 437, "i386": 437, "i686": 437, "aarch64": 437,
+            "armv7l": 437, "armv8l": 437, "armv6l": 437, "ppc64le": 437,
+            "ppc64": 437, "riscv64": 437, "s390x": 437, "loongarch64": 437}
+
+_libc.syscall.restype = ctypes.c_long
+_libc.utimensat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                            ctypes.c_int]
+
+
+class Malformed(Exception):
+    pass
+
+
+def parse_datagram(data):
+    """[(kind, name_bytes, fileid)] or raise Malformed. Pure: no I/O, no
+    allocation beyond the result, and nothing escapes but Malformed."""
+    n = len(data)
+    if n < 1 + REC_HEAD.size or n > MAX_DATAGRAM:
+        raise Malformed("size")
+    if data[0] != WIRE_VERSION:
+        raise Malformed("version")
+    out, off = [], 1
+    while off < n:
+        if off + REC_HEAD.size > n:
+            raise Malformed("truncated")
+        kind, flags, nlen, fileid = REC_HEAD.unpack_from(data, off)
+        off += REC_HEAD.size
+        if flags != 0:
+            raise Malformed("flags")
+        if off + nlen > n:
+            raise Malformed("length")
+        name = bytes(data[off:off + nlen])
+        off += nlen
+        if kind == KIND_HEARTBEAT:
+            if nlen or fileid:
+                raise Malformed("heartbeat")
+        elif kind == KIND_USE:
+            check_name(name)
+        else:
+            raise Malformed("kind")
+        out.append((kind, name, fileid))
+    return out
+
+
+def check_name(name):
+    if not name or len(name) > MAX_NAME:
+        raise Malformed("name-length")
+    if b"\0" in name:
+        raise Malformed("nul")
+    try:
+        name.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        raise Malformed("utf8")
+    if name.startswith(b"/"):
+        raise Malformed("absolute")
+    for comp in name.split(b"/"):
+        if comp in (b"", b".", b".."):
+            raise Malformed("component")
+
+
+class Resolver(object):
+    """Turns a checked name into exactly one utimensat, or nothing. Usable
+    with the parser bypassed (threat T2: each layer must be seen refusing on
+    its own)."""
+
+    def __init__(self, table_fd):
+        mach = platform.machine()
+        if mach not in _OPENAT2:
+            raise OSError(errno.ENOSYS, "openat2's number on %s is not known "
+                          "here" % mach)
+        self.nr = _OPENAT2[mach]
+        self.table_fd = table_fd
+
+    def openat2(self, name):
+        how = struct.pack("<QQQ", O_PATH | os.O_CLOEXEC, 0,
+                          RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS
+                          | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV)
+        buf = ctypes.create_string_buffer(how)
+        fd = _libc.syscall(ctypes.c_long(self.nr), ctypes.c_int(self.table_fd),
+                           ctypes.c_char_p(name), buf, ctypes.c_size_t(24))
+        if fd < 0:
+            raise _err("openat2")
+        return fd
+
+    def touch(self, name, fileid):
+        """'touched', or the reason nothing was done."""
+        try:
+            fd = self.openat2(name)
+        except OSError as e:
+            return "resolve-%s" % errno.errorcode.get(e.errno, e.errno)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return "not-regular"
+            if REQUIRE_FILEID and st.st_ino != fileid:
+                return "fileid"
+            times = (ctypes.c_long * 4)(0, UTIME_NOW, 0, UTIME_OMIT)
+            if _libc.utimensat(fd, b"", times, AT_EMPTY_PATH) != 0:
+                return "utimensat-%s" % errno.errorcode.get(
+                    ctypes.get_errno(), "?")
+            return "touched"
+        finally:
+            os.close(fd)
+
+
+def parse_allow(text):
+    nets = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            raise Usage("--allow: %r is not an address or a network" % part)
+    if not nets:
+        raise Usage("--allow names nobody; the server would drop everything")
+    return nets
+
+
+def source_address(addr):
+    """The sender as an ip_address, with a v4-mapped v6 address taken as the
+    v4 address it is and a link-local scope stripped, so the code's --allow
+    agrees with IPAddressAllow= on a dual-stack socket (threat T2 (iv))."""
+    host = addr[0].split("%", 1)[0]
+    ip = ipaddress.ip_address(host)
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip
+
+
+class Bucket(object):
+    __slots__ = ("rate", "burst", "tokens", "t")
+
+    def __init__(self, rate, burst):
+        self.rate, self.burst, self.tokens = rate, burst, burst
+        self.t = time.monotonic()
+
+    def room(self, now=None):
+        """Whole tokens available now (refilling first)."""
+        now = time.monotonic() if now is None else now
+        self.tokens = min(self.burst, self.tokens + (now - self.t) * self.rate)
+        self.t = now
+        return int(self.tokens)
+
+    def take(self, n, now=None):
+        self.room(now)
+        if self.tokens >= n:
+            self.tokens -= n
+            return True
+        return False
+
+
+# ---- interfaces, for the multicast relay ---------------------------------
+
+IFF_UP, IFF_LOOPBACK, IFF_MULTICAST = 0x1, 0x8, 0x1000
+RTF_GATEWAY = 0x2
+IP_PKTINFO, IP_MULTICAST_IF, IP_MULTICAST_TTL = 8, 32, 33
+IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP, IP_MULTICAST_ALL = 35, 36, 49
+
+
+class Iface(object):
+    __slots__ = ("index", "name", "flags", "nets")
+
+
+SIOCGIFFLAGS, SIOCGIFINDEX = 0x8913, 0x8933
+
+
+def iface_names():
+    """The interface names of THIS network namespace, from
+    /proc/self/net/dev. Not if_nameindex(): glibc answers that through a
+    NETLINK socket, which the relay units' RestrictAddressFamilies= (AF_INET
+    AF_INET6 AF_UNIX) refuses -- measured in the real server unit: every
+    start died EAFNOSUPPORT. Reading /proc and two ioctls on an AF_INET
+    socket keep the units' address families as narrow as they were."""
+    # Unreadable is an ERROR, never "no interfaces": read as empty, a sandbox
+    # that hides /proc/self/net would leave the server joined to nothing and
+    # saying nothing (systemd seat, A4) -- the shape of three earlier reds.
+    out = []
+    with open("/proc/self/net/dev") as f:
+        rows = f.read().splitlines()[2:]
+    for row in rows:
+        name = row.split(":", 1)[0].strip()
+        if name:
+            out.append(name)
+    return out
+
+
+def iface_index_of(sock, name):
+    import fcntl
+    buf = struct.pack("16si20x", name.encode()[:15], 0)
+    return struct.unpack_from("i", fcntl.ioctl(sock, SIOCGIFINDEX, buf), 16)[0]
+
+
+def iface_flags(sock, name):
+    """struct ifreq: the name, then ifr_flags (a short) at offset 16. Read
+    from THIS process's network namespace -- /sys/class/net may be another
+    one's (it is in a container that did not remount it)."""
+    import fcntl
+    buf = struct.pack("16sH22x", name.encode()[:15], 0)
+    return struct.unpack_from("H", fcntl.ioctl(sock, SIOCGIFFLAGS, buf), 16)[0]
+
+
+def interfaces():
+    """{ifindex: Iface} for every interface, with its connected IPv4 subnets
+    (the routes through it that need no gateway). Names from
+    /proc/self/net/dev, index and flags by ioctl on an AF_INET socket,
+    subnets from /proc/self/net/route: all of this network namespace, no
+    tool, and no address family the relay units do not already allow."""
+    out = {}
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for n in iface_names():
+            try:
+                idx = iface_index_of(s, n)
+                flags = iface_flags(s, n)
+            except OSError:
+                continue
+            i = Iface()
+            i.index, i.name, i.flags, i.nets = idx, n, flags, []
+            out[idx] = i
+    finally:
+        s.close()
+    byname = {i.name: i for i in out.values()}
+    with open("/proc/self/net/route") as f:
+        rows = f.read().splitlines()[1:]
+    for row in rows:
+        f = row.split()
+        if len(f) < 8 or f[0] not in byname:
+            continue
+        flags = int(f[3], 16)
+        if flags & RTF_GATEWAY:
+            continue
+        dest = ipaddress.IPv4Address(struct.pack("<I", int(f[1], 16)))
+        mask = ipaddress.IPv4Address(struct.pack("<I", int(f[7], 16)))
+        try:
+            net = ipaddress.IPv4Network("%s/%s" % (dest, mask))
+        except ValueError:
+            continue
+        if net.prefixlen:
+            byname[f[0]].nets.append(net)
+    return out
+
+
+def join_verdict(i, wanted=None):
+    """Why the server would NOT join on interface i, or None if it would --
+    the one place that decides, for the join and for --relay-interfaces."""
+    if wanted and i.name not in wanted:
+        return "not named in --interface"
+    if i.flags & IFF_LOOPBACK:
+        return "loopback"
+    if not i.flags & IFF_UP:
+        return "down"
+    if not i.flags & IFF_MULTICAST:
+        return "not multicast-capable"
+    if not i.nets:
+        return "no IPv4 subnet on this host"
+    return None
+
+
+def multicast_interfaces(wanted=None):
+    """The interfaces a server joins on: up, multicast-capable, not loopback,
+    with an IPv4 subnet -- all of them, or only those NAMED in wanted."""
+    return {idx: i for idx, i in interfaces().items()
+            if join_verdict(i, wanted) is None}
+
+
+def relay_interfaces(wanted=None):
+    """--relay-interfaces: what the multicast relay server WOULD join on this
+    host, and why, every interface accounted for. Read-only: no socket is
+    joined, nothing is written. Also the client's derived interface: the
+    route to the group."""
+    found = interfaces()
+    joins = 0
+    for idx, i in sorted(found.items()):
+        why = join_verdict(i, wanted)
+        nets = ",".join(str(n) for n in i.nets) or "-"
+        if why is None:
+            joins += 1
+            print("join  %-16s index %-4d subnets %s" % (i.name, idx, nets))
+        else:
+            print("skip  %-16s index %-4d %s (subnets %s)" % (i.name, idx, why,
+                                                              nets))
+    for name in wanted or []:
+        if name not in {i.name for i in found.values()}:
+            print("unknown %s: named in --interface, no such interface here"
+                  % name)
+    print("route to the group %s: %s (the client's default interface when "
+          "its store's server is not on a more specific route)"
+          % (RELAY_GROUP, route_interface(RELAY_GROUP) or "none"))
+    print("%d interface(s) would be joined%s." % (
+        joins, "" if wanted else " by the STOCK default (no --interface)"))
+    return 0 if joins else 1
+
+
+def route_interface(addr):
+    """The interface of the most specific route to addr (IPv4), by name."""
+    ip = ipaddress.ip_address(addr)
+    best = None
+    with open("/proc/self/net/route") as f:   # unreadable raises; see above
+        rows = f.read().splitlines()[1:]
+    for row in rows:
+        f = row.split()
+        if len(f) < 8:
+            continue
+        dest = ipaddress.IPv4Address(struct.pack("<I", int(f[1], 16)))
+        mask = ipaddress.IPv4Address(struct.pack("<I", int(f[7], 16)))
+        try:
+            net = ipaddress.IPv4Network("%s/%s" % (dest, mask))
+        except ValueError:
+            continue
+        if ip in net and (best is None or net.prefixlen > best[0]):
+            best = (net.prefixlen, f[0])
+    return best[1] if best else None
+
+
+def mreqn(group, ifindex):
+    return socket.inet_aton(str(group)) + bytes(4) + struct.pack("@i", ifindex)
+
+
+def parse_names(text):
+    return [x for x in (text or "").replace(",", " ").split() if x]
+
+
+# ---- the server's state, separate from its socket ------------------------
+
+class Server(object):
+    """State and counters of a relay server, separate from its socket so that
+    a test can drive it datagram by datagram, and its log decisions clock by
+    clock (tick).
+
+    MULTICAST (the default) binds the wildcard, because a group arrives
+    addressed to the group and not to this host; three layers then decide,
+    each with its own counter (and its own red arm in the suite):
+      * IP_MULTICAST_ALL=0 on the socket (kernel: no other group joined on
+        this host reaches it) -- set where the socket is made;
+      * the datagram's own destination (IP_PKTINFO) must be the group, and
+        it must have arrived on an interface this server joined on;
+      * its source must be ON-LINK: inside a subnet connected to that very
+        interface. --allow narrows that further; routed sources never pass.
+    UNICAST (--listen given) binds that one address and requires --allow."""
+
+    def __init__(self, table_fd, allow, resolver=None, group=None,
+                 now=None):
+        self.allow = allow or []
+        self.group = ipaddress.ip_address(group) if group else None
+        self.joined = {}        # ifindex -> [connected networks]
+        self.join_failed = set()  # interface names a join was refused on
+        self.resolver = resolver or Resolver(table_fd)
+        self.glob = Bucket(RATE_GLOBAL, BURST_GLOBAL)
+        self.sources = {}      # ip -> {"bucket", counters, "heartbeat"}
+        self.counts = {}       # reason -> n, all sources together
+        self.other = {"received": 0}   # not admitted: ONE bucket
+        self.started = time.monotonic() if now is None else now
+        self.last_rx = None    # last datagram from an admitted source
+        self.state = {"quiet": False, "never": False, "warned": set()}
+
+    def bump(self, key, n=1):
+        self.counts[key] = self.counts.get(key, 0) + n
+
+    def source(self, ip):
+        s = self.sources.get(ip)
+        if s is None:
+            if len(self.sources) >= MAX_SOURCES:
+                ip = "other-allowed"
+                s = self.sources.get(ip)
+            if s is None:
+                s = {"bucket": Bucket(RATE_SOURCE, BURST_SOURCE),
+                     "received": 0, "accepted": 0, "dropped": 0,
+                     "heartbeat": None}
+                self.sources[ip] = s
+        return s
+
+    def admit(self, ip, ifindex=None, dst=None):
+        """None to admit, or the reason not to."""
+        if self.group is not None:
+            if dst is None or ipaddress.ip_address(dst) != self.group:
+                return "not-group"
+            nets = self.joined.get(ifindex)
+            if nets is None:
+                return "not-joined-interface"
+            if not any(ip in n for n in nets):
+                return "not-on-link"
+            if self.allow and not any(ip in n for n in self.allow):
+                return "not-allowed"
+            return None
+        if not any(ip in n for n in self.allow):
+            return "not-allowed"
+        return None
+
+    def handle(self, data, addr, ifindex=None, dst=None, now=None):
+        """One datagram. Never raises: everything is a counter."""
+        try:
+            self.bump("received")
+            try:
+                ip = source_address(addr)
+                why = self.admit(ip, ifindex, dst)
+            except ValueError:
+                why = "not-allowed"
+            if why:
+                self.other["received"] += 1
+                self.bump("drop-%s" % why)
+                return
+            s = self.source(ip)
+            s["received"] += 1
+            self.last_rx = time.monotonic() if now is None else now
+            try:
+                recs = parse_datagram(data)
+            except Malformed as m:
+                s["dropped"] += 1
+                self.bump("drop-malformed-%s" % m.args[0])
+                return
+            n = len(recs)
+            if not s["bucket"].take(n):
+                s["dropped"] += n
+                self.bump("drop-rate-source", n)
+                return
+            if not self.glob.take(n):
+                s["dropped"] += n
+                self.bump("drop-rate-global", n)
+                return
+            for kind, name, fileid in recs:
+                if kind == KIND_HEARTBEAT:
+                    s["heartbeat"] = self.last_rx
+                    self.bump("heartbeat")
+                    continue
+                why = self.resolver.touch(name, fileid)
+                if why == "touched":
+                    s["accepted"] += 1
+                    self.bump("accepted")
+                else:
+                    s["dropped"] += 1
+                    self.bump("drop-%s" % why)
+        except Exception as e:  # the catch-all is the property (b)
+            self.bump("drop-internal-%s" % type(e).__name__)
+
+    def summary(self):
+        """ONE line: the counts, then each source compactly."""
+        parts = ["%s=%d" % kv for kv in sorted(self.counts.items())]
+        srcs = ["%s:r%d/a%d/d%d" % (ip, s["received"], s["accepted"],
+                                    s["dropped"])
+                for ip, s in sorted(self.sources.items(),
+                                    key=lambda kv: str(kv[0]))]
+        return "counts: %s; sources %s; not admitted %d" % (
+            " ".join(parts) or "none", " ".join(srcs) or "none",
+            self.other["received"])
+
+    def silent(self, limit=1800, now=None):
+        """Allowed sources with no heartbeat for limit seconds: every source
+        that has been heard from, and every single-host --allow entry, once
+        the server has been up that long."""
+        now = time.monotonic() if now is None else now
+        out = []
+        for ip, s in self.sources.items():
+            hb = s["heartbeat"]
+            if (hb is None and now - self.started > limit) or \
+                    (hb is not None and now - hb > limit):
+                out.append(str(ip))
+        if now - self.started > limit:
+            for n in self.allow:
+                if n.num_addresses == 1 and n.network_address not in self.sources:
+                    out.append(str(n.network_address))
+        return sorted(set(out))
+
+    def tick(self, now, silence, heartbeat, setup=3600):
+        """The log lines due now: (level, text). The owner's rule -- a failing
+        path is visible within about two heartbeat intervals, no failure
+        makes more than a few lines an hour, recovery is said once:
+          * per source: silent past `silence`, ONE warning per episode, ONE
+            recovery line;
+          * the whole server: nothing from anyone for 2 x `heartbeat` after
+            somebody was heard, ONE warning per episode, ONE recovery line;
+          * first-time setup: nothing EVER received `setup` after start, ONE
+            line, once. No name from the wire is in any of them."""
+        out = []
+        st = self.state
+        # Per-source warnings ONLY for sources an administrator NAMED in
+        # --allow (threat M1): learned sources are whoever sends, and any
+        # on-link host could spoof a thousand of them, send one heartbeat
+        # each and go quiet -- a thousand warnings. Learned sources are
+        # covered by the whole-server line below.
+        named = {str(n.network_address) for n in self.allow
+                 if n.num_addresses == 1}
+        silent = {ip for ip in self.silent(silence, now) if ip in named}
+        for ip in sorted(silent - st["warned"]):
+            out.append(("warning", "no heartbeat from %s for more than %ds; "
+                         "its reads are not keeping anything alive"
+                         % (ip, silence)))
+        for ip in sorted(st["warned"] - silent):
+            out.append(("notice", "heartbeats from %s again" % ip))
+        st["warned"] = silent
+        if self.last_rx is not None:
+            quiet = now - self.last_rx > 2 * heartbeat
+            if quiet and not st["quiet"]:
+                out.append(("warning", "nothing received from any client for "
+                            "more than %ds: the multicast path (or the "
+                            "clients) may be down" % (2 * heartbeat)))
+            elif st["quiet"] and not quiet:
+                out.append(("notice", "receiving from clients again"))
+            st["quiet"] = quiet
+        elif not st["never"] and now - self.started > setup:
+            st["never"] = True
+            out.append(("warning", "nothing received from any client in %ds "
+                        "since start: check the firewall (UDP to the group "
+                        "and port) and IGMP snooping on the path"
+                        % setup))
+        return out
+
+
+def same_table(path, form, held):
+    """Re-run the guard on the PATH and require it to name the very directory
+    held open: a store unmounted lazily (umount -l) and mounted again leaves a
+    long-running process holding the old, detached tree while the path names
+    the new one, and nothing errors -- the watch simply stops seeing anything,
+    while the unit reports active. Raises Refused on a mismatch."""
+    g = guard(path, form)
+    try:
+        if (g.stx.mnt_id, g.stx.ino) != (held.mnt_id, held.ino):
+            raise Refused("moved", "the path no longer names the directory "
+                          "this process holds (unmounted or remounted)")
+    finally:
+        g.close()
+
+
+def listen_address(listen):
+    """UNICAST mode's ONE address. Never a wildcard: on a host with guest
+    bridges a wildcard unicast listener is reachable from more places than
+    --allow intends. (Multicast mode binds the wildcard by necessity, with
+    the layers in Server.) Raises Usage."""
+    try:
+        ip = ipaddress.ip_address(listen.split("%", 1)[0])
+    except ValueError:
+        raise Usage("--listen: %r is not an address" % listen)
+    if ip.is_unspecified:
+        raise Usage("--listen %s is a wildcard: it would answer on every "
+                    "address this host has. Name the one address on the "
+                    "route to the clients, or leave --listen empty for "
+                    "multicast." % listen)
+    return ip
+
+
+SO_MEMINFO, SK_MEMINFO_DROPS = 55, 8
+
+
+def size_receive(sock):
+    """The receive buffer, in bytes as the kernel counts them, grown to at
+    least SERVER_RCVBUF if it is smaller -- never shrunk: a host whose
+    rmem_default is already larger keeps it. The kernel doubles a request
+    and caps it at net.core.rmem_max, without an error, so the result is
+    read back rather than assumed."""
+    have = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+    if have >= SERVER_RCVBUF:
+        return have
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SERVER_RCVBUF)
+    except OSError:
+        pass
+    return sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+
+
+def kernel_drops(sock):
+    """Datagrams the kernel dropped for this socket (a full receive buffer):
+    what ss shows as skmem d, read from the socket itself. None if this
+    kernel cannot say."""
+    try:
+        raw = sock.getsockopt(socket.SOL_SOCKET, SO_MEMINFO, 4 * 9)
+    except OSError:
+        return None
+    if len(raw) < 4 * (SK_MEMINFO_DROPS + 1):
+        return None
+    return struct.unpack_from("=I", raw, 4 * SK_MEMINFO_DROPS)[0]
+
+
+def multicast_socket(port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Layer 1: only the groups THIS socket joined reach it, not every group
+    # anything on the host joined on this port (the kernel's default).
+    sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_ALL, 0)
+    sock.setsockopt(socket.IPPROTO_IP, IP_PKTINFO, 1)
+    sock.bind(("0.0.0.0", port))
+    return sock
+
+
+def rejoin(sock, srv, wanted):
+    """Join (again) on every eligible interface, and leave any that went.
+    Every call drops and re-adds each membership, which sends an unsolicited
+    IGMP report: a snooping switch with no querier then keeps forwarding the
+    group to us. Returns (joined names, newly joined, left)."""
+    try:
+        now = multicast_interfaces(wanted)
+    except OSError as e:
+        if not srv.state.get("enum_failed"):
+            srv.state["enum_failed"] = True
+            log("cannot list this host's interfaces (%s); keeping the joins "
+                "there are" % e, "warning")
+        names = sorted(str(i) for i in srv.joined)
+        return names, set(), set()
+    srv.state["enum_failed"] = False
+    old = set(srv.joined)
+    failed = []
+    for idx in old - set(now):
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, IP_DROP_MEMBERSHIP,
+                            mreqn(srv.group, idx))
+        except OSError:
+            pass
+        srv.joined.pop(idx, None)
+    for idx, i in now.items():
+        if idx in old:
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, IP_DROP_MEMBERSHIP,
+                                mreqn(srv.group, idx))
+            except OSError:
+                pass
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                            mreqn(srv.group, idx))
+            srv.joined[idx] = list(i.nets)
+        except OSError as e:
+            srv.joined.pop(idx, None)
+            failed.append((i.name, errno.errorcode.get(e.errno, e.errno)))
+    # A join refused (ENOBUFS past net.ipv4.igmp_max_memberships, 20 per
+    # socket by default, on a host with many bridges) is said ONCE per
+    # interface, never again at each re-join or rescan (threat M3).
+    fresh = [(n, e) for n, e in failed if n not in srv.join_failed]
+    if fresh:
+        log("could not join %s on %s (%s); those interfaces receive nothing. "
+            "Narrow with --interface, or raise "
+            "net.ipv4.igmp_max_memberships." % (
+                srv.group, ",".join(n for n, _ in fresh),
+                ",".join(sorted({e for _, e in fresh}))), "warning")
+    srv.join_failed |= {n for n, _ in failed}
+    names = sorted(now[i].name for i in srv.joined if i in now)
+    return names, set(srv.joined) - old, old - set(srv.joined)
+
+
+def pktinfo(ancdata):
+    for level, typ, data in ancdata:
+        if level == socket.IPPROTO_IP and typ == IP_PKTINFO and len(data) >= 12:
+            idx, = struct.unpack_from("@i", data, 0)
+            return idx, socket.inet_ntoa(data[8:12])
+    return None, None
+
+
+def relay_server(path, allow, listen, port, silence=1800, reguard=30.0,
+                 group=None, wanted=None, heartbeat=600):
+    try:
+        g = guard(path, "ii")
+    except Refused as r:
+        log("refused %s: %s: %s" % (path, r.clause, r.prose))
+        return 1
+    held = g.stx
+    try:
+        srv = Server(g.fd, allow, group=None if listen else group)
+    except OSError as e:
+        log("cannot run the relay server: %s" % e)
+        return 2
+    if listen:
+        ip = listen_address(listen)
+        fam = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+        sock = socket.socket(fam, socket.SOCK_DGRAM)
+        if fam == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        sock.bind((listen, port))
+        rcvbuf = size_receive(sock)
+        log("%s %s relay server (unicast) on %s port %d for %s, table %s, "
+            "receive buffer %d bytes." % (
+                PROG, VERSION, sock.getsockname()[0], port,
+                ",".join(str(n) for n in allow), path, rcvbuf))
+    else:
+        sock = multicast_socket(port)
+        try:
+            multicast_interfaces(wanted)
+        except OSError as e:
+            log("cannot list this host's interfaces (%s): the server would "
+                "join nothing. In a unit, /proc/self/net must be readable "
+                "(ProcSubset=, ProtectProc=)." % e)
+            return 2
+        names, _, _ = rejoin(sock, srv, wanted)
+        if not names:
+            log("joined NO interface: none is up, multicast-capable, not "
+                "loopback, with an IPv4 subnet%s. Nothing can arrive until "
+                "one does; the server re-checks every minute." % (
+                    "" if not wanted else ", among --interface " +
+                    ",".join(wanted)), "warning")
+        rcvbuf = size_receive(sock)
+        log("%s %s relay server (multicast) joined %s on %s, port %d, "
+            "sources %s, table %s, receive buffer %d bytes." % (
+                PROG, VERSION, srv.group, ",".join(names) or "NO interface",
+                port, ",".join(str(n) for n in allow) if allow else "on-link",
+                path, rcvbuf))
+    # A client's largest permitted burst must fit, or a busy server drops
+    # part of it in the kernel, where none of the counts below can see it.
+    if rcvbuf < SERVER_RCVBUF:
+        log("the receive buffer is %d bytes, less than the %d a client's "
+            "largest burst may need: raise net.core.rmem_max to at least %d "
+            "(the kernel doubles it)"
+            % (rcvbuf, SERVER_RCVBUF, (SERVER_RCVBUF + 1) // 2), "warning")
+    if kernel_drops(sock) is None:
+        log("this kernel does not report the socket's drops (SO_MEMINFO); "
+            "datagrams the kernel drops for it are not counted",
+            "warning")
+    want = {"dump": False}
+    signal.signal(signal.SIGUSR1, lambda *a: want.__setitem__("dump", True))
+    buf = bytearray(MAX_DATAGRAM + 1)
+    last_guard = last_log = last_tick = last_join = time.monotonic()
+    logged_counts = None
+    while True:
+        r, _, _ = select.select([sock], [], [], 5.0)
+        if r:
+            try:
+                n, anc, flags, addr = sock.recvmsg_into(
+                    [buf], socket.CMSG_SPACE(12), socket.MSG_TRUNC)
+            except InterruptedError:
+                n = -1
+            except OSError:
+                srv.bump("drop-recv-error")
+                n = -1
+            if n > MAX_DATAGRAM or (n >= 0 and flags & socket.MSG_TRUNC):
+                srv.bump("received")
+                srv.bump("drop-malformed-size")
+            elif n >= 0:
+                idx, dst = pktinfo(anc) if not listen else (None, None)
+                srv.handle(memoryview(buf)[:n], addr, idx, dst)
+        now = time.monotonic()
+        # The counts: on SIGUSR1, and hourly only if anything changed -- an
+        # hour of failure adds nothing here, so it cannot become a storm.
+        # The kernel's drops for this socket are counted with the rest:
+        # a datagram the receive buffer had no room for never reaches
+        # handle(), so no other counter can see it. DATAGRAMS, not
+        # announcements: one can carry dozens. Mostly a full buffer, but
+        # the kernel's count also takes in its other per-socket drops.
+        kd = kernel_drops(sock)
+        if kd is not None:
+            srv.counts["drop-kernel-datagrams"] = kd
+        if want["dump"] or (now - last_log >= 3600 and
+                            srv.counts != logged_counts):
+            want["dump"] = False
+            last_log = now
+            logged_counts = dict(srv.counts)
+            log(srv.summary())
+        if now - last_tick >= 60:
+            last_tick = now
+            for level, text in srv.tick(now, silence, heartbeat):
+                log(text, level)
+        if not listen and now - last_join >= 60:
+            last_join = now
+            names, new, gone = rejoin(sock, srv, wanted)
+            if new or gone:
+                log("multicast interfaces now %s" % (",".join(names) or
+                                                     "NONE"), "notice")
+        if now - last_guard >= reguard:
+            last_guard = now
+            try:
+                same_table(path, "ii", held)
+            except Refused as rf:
+                log("refused %s: %s: %s; stopping." % (path, rf.clause,
+                                                       rf.prose))
+                return 1
+
+
+# ---------------------------------------------------------------------------
+# The relay, client side. On an NFS client HOST: reads served from the page
+# cache never reach the server, so the server's atime does not move and an
+# item read only here would expire early. inotify sees every open, cached or
+# not, including opens through a bind of the table (a container's view).
+
+IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE = 0x20, 0x40, 0x80, 0x100
+IN_DELETE_SELF, IN_MOVE_SELF, IN_UNMOUNT = 0x400, 0x800, 0x2000
+IN_Q_OVERFLOW, IN_IGNORED, IN_ONLYDIR, IN_ISDIR = 0x4000, 0x8000, 0x1000000, \
+    0x40000000
+IN_CLOEXEC, IN_NONBLOCK = 0o2000000, 0o4000
+_libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p,
+                                    ctypes.c_uint32]
+
+
+class Client(object):
+    def __init__(self, table_fd, idle):
+        self.table_fd = table_fd
+        self.idle = idle
+        self.ino = _libc.inotify_init1(IN_CLOEXEC | IN_NONBLOCK)
+        if self.ino < 0:
+            raise _err("inotify_init1")
+        self.wds = {}           # wd -> relative path (bytes), b"" = table
+        self.root_wd = None
+        self.pending = {}       # relative path -> True, oldest first
+        self.announced = {}     # relative path -> monotonic time sent
+        self.pace = Bucket(CLIENT_RATE, CLIENT_BURST)
+        self.grams = Bucket(CLIENT_GRAM_RATE, CLIENT_GRAM_BURST)
+        self.last_overflow_log = None
+        self.counts = {}
+        self.dead = False
+
+    def bump(self, k, n=1):
+        self.counts[k] = self.counts.get(k, 0) + n
+
+    def add_watch(self, fd, rel):
+        mask = IN_OPEN | IN_CREATE | IN_MOVED_FROM | IN_MOVED_TO | IN_ONLYDIR \
+            | IN_DELETE_SELF | IN_MOVE_SELF
+        # Through the fd's own /proc link, so the watch lands on exactly the
+        # directory that was opened without following a link.
+        wd = _libc.inotify_add_watch(self.ino, ("/proc/self/fd/%d" % fd).encode(),
+                                     mask)
+        if wd < 0:
+            e = ctypes.get_errno()
+            self.bump("watch-%s" % errno.errorcode.get(e, e))
+            return None
+        self.wds[wd] = rel
+        return wd
+
+    def scan(self, start_fd=None, start_rel=b""):
+        """Watch every directory from start (the table by default). Returns
+        the set of wds seen. A 0700 directory not yet widened cannot be
+        entered and is picked up by a later rescan."""
+        seen = set()
+        root = start_fd if start_fd is not None else self.table_fd
+        stack = [(os.dup(root), start_rel)]
+        while stack:
+            fd, rel = stack.pop()
+            try:
+                wd = self.add_watch(fd, rel)
+                if wd is not None:
+                    seen.add(wd)
+                    if rel == b"" and self.root_wd is None:
+                        self.root_wd = wd
+                try:
+                    names = os.listdir(fd)
+                except OSError:
+                    continue
+                for name in names:
+                    bname = os.fsencode(name)
+                    try:
+                        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if not stat.S_ISDIR(st.st_mode):
+                        continue
+                    try:
+                        cfd = os.open(name, DIR_FLAGS, dir_fd=fd)
+                    except OSError:
+                        continue
+                    stack.append((cfd, rel + b"/" + bname if rel else bname))
+            finally:
+                os.close(fd)
+        return seen
+
+    def rebuild(self):
+        seen = self.scan()
+        for wd in list(self.wds):
+            if wd not in seen and wd != self.root_wd:
+                _libc.inotify_rm_watch(self.ino, wd)
+                self.wds.pop(wd, None)
+        self.bump("rescan")
+
+    def events(self, data):
+        off = 0
+        rebuild = False
+        while off + 16 <= len(data):
+            wd, mask, _cookie, nlen = struct.unpack_from("<iIII", data, off)
+            name = data[off + 16:off + 16 + nlen].split(b"\0", 1)[0]
+            off += 16 + nlen
+            if mask & IN_Q_OVERFLOW:
+                # Counted and rescanned, and NOTHING announced for it: an
+                # overflow must never become "everything was used".
+                self.bump("overflow")
+                now = time.monotonic()
+                if self.last_overflow_log is None or \
+                        now - self.last_overflow_log >= 600:
+                    self.last_overflow_log = now
+                    log("the inotify queue overflowed (%d time(s) so far): "
+                        "opens in it were lost and are NOT announced; "
+                        "rescanning" % self.counts["overflow"], "warning")
+                rebuild = True
+                continue
+            if wd == self.root_wd and mask & (IN_IGNORED | IN_UNMOUNT
+                                              | IN_DELETE_SELF | IN_MOVE_SELF):
+                self.dead = True
+                continue
+            if mask & IN_IGNORED:
+                self.wds.pop(wd, None)
+                continue
+            rel = self.wds.get(wd)
+            if rel is None:
+                # A watch already removed (a rescan dropped it) whose events
+                # were still queued. Counted, as every discard here is: a
+                # silent one made R7's loss undiagnosable from this side.
+                if mask & IN_OPEN and not mask & IN_ISDIR:
+                    self.bump("discard-unknown-wd")
+                continue
+            path = rel + b"/" + name if rel else name
+            if mask & IN_ISDIR:
+                if mask & IN_MOVED_FROM:
+                    rebuild = True
+                elif mask & (IN_CREATE | IN_MOVED_TO) and name:
+                    try:
+                        cfd = os.open(path, DIR_FLAGS, dir_fd=self.table_fd)
+                    except OSError:
+                        continue
+                    try:
+                        self.scan(cfd, path)
+                    finally:
+                        os.close(cfd)
+                continue
+            if mask & IN_OPEN and name:
+                self.pending[path] = True
+        return rebuild
+
+    def records(self, now, limit=None, grams=None):
+        """The use records due now: coalesced per file, at most once per
+        IDLE/4, regular files only, with the fileid this mount reports --
+        and at most `limit` of them, filling at most `grams` datagrams as
+        pack() fills them (the client's pace). What does not fit stays
+        PENDING, oldest first, and is NOT marked announced: a file is marked
+        only when its record is actually sent, so a burst is deferred rather
+        than dropped. Every pending open that is NOT sent is counted, by
+        reason."""
+        out = []
+        quarter = self.idle / 4.0
+        used, cur = 0, 0        # datagrams begun, bytes in the current one
+        for path in list(self.pending):
+            if limit is not None and len(out) >= limit:
+                break
+            t = self.announced.get(path)
+            if t is not None and now - t < quarter:
+                del self.pending[path]
+                self.bump("coalesced")
+                continue
+            if len(path) > MAX_NAME:
+                del self.pending[path]
+                self.bump("discard-too-long")
+                continue
+            try:
+                path.decode("utf-8", "strict")
+            except UnicodeDecodeError:
+                del self.pending[path]   # the server would refuse it
+                self.bump("discard-not-utf8")
+                continue
+            size = REC_HEAD.size + len(path)
+            if cur == 0 or (cur > 1 and cur + size > CLIENT_DATAGRAM):
+                if grams is not None and used >= grams:
+                    break
+                used, cur = used + 1, 1
+            try:
+                st = os.stat(path, dir_fd=self.table_fd, follow_symlinks=False)
+            except (OSError, ValueError) as e:
+                del self.pending[path]
+                self.bump("discard-stat-%s" % errno.errorcode.get(
+                    getattr(e, "errno", None), "invalid"))
+                continue
+            del self.pending[path]
+            if not stat.S_ISREG(st.st_mode):
+                self.bump("discard-not-regular")
+                continue
+            cur += size
+            self.announced[path] = now
+            out.append((KIND_USE, path, st.st_ino))
+        for path in [p for p, t in self.announced.items() if now - t >= quarter]:
+            del self.announced[path]
+        return out
+
+
+def pack(records, sizes=None):
+    """Datagrams of at most CLIENT_DATAGRAM bytes (a single long record goes
+    alone, up to MAX_DATAGRAM). `sizes`, if given, receives the number of
+    records in each."""
+    grams, cur, n = [], bytearray([WIRE_VERSION]), 0
+    sizes = [] if sizes is None else sizes
+    for kind, name, fileid in records:
+        try:
+            name.decode("utf-8", "strict")
+        except UnicodeDecodeError:
+            # The server would refuse it; do not send it. Client.records()
+            # has already counted and removed such a name, so this is only
+            # for a caller that skipped it.
+            continue
+        rec = REC_HEAD.pack(kind, 0, len(name), fileid) + name
+        if len(cur) > 1 and len(cur) + len(rec) > CLIENT_DATAGRAM:
+            grams.append(bytes(cur))
+            sizes.append(n)
+            cur, n = bytearray([WIRE_VERSION]), 0
+        cur += rec
+        n += 1
+    if len(cur) > 1:
+        grams.append(bytes(cur))
+        sizes.append(n)
+    return grams
+
+
+def heartbeat():
+    return bytes([WIRE_VERSION]) + REC_HEAD.pack(KIND_HEARTBEAT, 0, 0, 0)
+
+
+def nfs_server_address(m):
+    for o in m.super:
+        if o.startswith("addr="):
+            return o[5:]
+    return None
+
+
+class SendLog(object):
+    """The client's send failures, logged so that a failing path is seen and
+    never storms (owner, PM P19): the FIRST error with its errno, then one
+    count an hour while they go on, then ONE recovery line."""
+
+    def __init__(self):
+        self.failing, self.since_report, self.last_report = False, 0, 0.0
+
+    def result(self, ok, err, now):
+        out = []
+        if ok:
+            if self.failing:
+                out.append(("notice", "sending to the relay works again"))
+            self.failing = False
+            return out
+        if not self.failing:
+            self.failing, self.since_report, self.last_report = True, 0, now
+            out.append(("warning", "cannot send to the relay (%s); its reads "
+                        "are not keeping anything alive until this clears"
+                        % errno.errorcode.get(err, err)))
+            return out
+        self.since_report += 1
+        if now - self.last_report >= 3600:
+            out.append(("warning", "%d more send(s) to the relay failed in the "
+                        "last hour" % self.since_report))
+            self.since_report, self.last_report = 0, now
+        return out
+
+
+def iface_index(name):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        return iface_index_of(s, name)
+    finally:
+        s.close()
+
+
+def relay_client(store, idle, to, port, any_fstype, group=RELAY_GROUP, ttl=1,
+                 iface=None, hb_every=600):
+    raise_fd_limit()
+    table = os.path.join(store, "table")
+    try:
+        g = guard(table, "ii")
+    except Refused as r:
+        log("refused %s: %s: %s" % (table, r.clause, r.prose))
+        return 1
+    if g.mount.fstype not in NFS and not any_fstype:
+        log("refused %s: not an NFS mount (%s); the relay is for a store read "
+            "over NFS, whose server cannot see reads from the cache here"
+            % (store, g.mount.fstype))
+        return 1
+    dest = to or group
+    try:
+        ip = ipaddress.ip_address(dest)
+    except ValueError:
+        log("--to/--group: %r is not an address." % dest)
+        return 2
+    fam = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    sock = socket.socket(fam, socket.SOCK_DGRAM)
+    how = "unicast"
+    if ip.is_multicast:
+        if fam != socket.AF_INET:
+            log("IPv6 multicast is not supported; use an IPv4 group.")
+            return 2
+        sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_TTL, ttl)
+        # The outgoing interface follows the STORE: the route to its NFS
+        # server, so it moves with the store under HA. --interface overrides.
+        try:
+            via = nfs_server_address(g.mount) or "0.0.0.0"
+            name = iface or route_interface(via)
+        except OSError as e:
+            log("cannot read this host's routes (%s); the kernel picks the "
+                "outgoing interface." % e, "warning")
+            name = None
+        if not name:
+            log("no route found to choose the multicast interface by; the "
+                "kernel's default route picks it. Set --interface "
+                "(HDW4S_SHARED_RELAY_INTERFACE=) if that is wrong.", "warning")
+        if name:
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_IF,
+                                mreqn("0.0.0.0", iface_index(name)))
+            except (OSError, ValueError) as e:
+                log("cannot send the group out of %s (%s)." % (name, e))
+                return 2
+        how = "multicast via %s, ttl %d" % (name or "the default route", ttl)
+    target = (str(ip), port)
+    c = Client(g.fd, idle)
+    c.rebuild()
+    log("%s %s relay client on %s, announcing to %s port %d (%s)."
+        % (PROG, VERSION, store, ip, port, how))
+    sends = SendLog()
+
+    def send(gram, nrec=0):
+        try:
+            sock.sendto(gram, target)
+            c.bump("sent")
+            c.bump("records-sent", nrec)
+            lines = sends.result(True, 0, time.monotonic())
+        except OSError as e:
+            c.bump("send-error")
+            # Already marked announced: these opens are lost, so counted.
+            c.bump("discard-send-error", nrec)
+            lines = sends.result(False, e.errno, time.monotonic())
+        for level, text in lines:
+            log(text, level)
+
+    def counts():
+        return "counts: %s; pending %d" % (
+            " ".join("%s=%d" % kv for kv in sorted(c.counts.items()))
+            or "none", len(c.pending))
+    # The counts: on SIGUSR1 (as the server), hourly, and ONCE at exit --
+    # a stop (SIGTERM) included, so the last word of every run is its counts.
+    want = {"dump": False, "stop": False}
+    signal.signal(signal.SIGUSR1, lambda *a: want.__setitem__("dump", True))
+    signal.signal(signal.SIGTERM, lambda *a: want.__setitem__("stop", True))
+    send(heartbeat())
+    last_hb = last_scan = last_log = last_guard = time.monotonic()
+    last_send = last_hb - CLIENT_TICK
+    try:
+        while not c.dead and not want["stop"]:
+            # Short turns while a burst is still being paced out, so it
+            # drains at the pace and not in one-second lumps.
+            r, _, _ = select.select([c.ino], [], [],
+                                    CLIENT_TICK if c.pending else 1.0)
+            rebuild = False
+            if r:
+                try:
+                    rebuild = c.events(os.read(c.ino, 65536))
+                except BlockingIOError:
+                    pass
+            now = time.monotonic()
+            if rebuild or now - last_scan >= idle / 4.0:
+                c.rebuild()
+                last_scan = now
+            # Paced: never more records than one source is accepted at, at
+            # most once a tick, in full datagrams, never more datagrams at
+            # once than the server's receive buffer is sized for. A tick
+            # starts at a SEND: an open read when the last send is a tick or
+            # more ago -- a lone open, or the first of a burst -- goes out at
+            # once, alone; what arrives within a tick of a send waits for
+            # the next one and is packed with the rest.
+            if c.pending and now - last_send >= CLIENT_TICK:
+                last_send = now
+                recs = c.records(now, c.pace.room(now), c.grams.room(now))
+                sizes = []
+                grams = pack(recs, sizes)
+                if recs:
+                    c.pace.take(len(recs), now)
+                    c.grams.take(len(grams), now)
+                for gram, n in zip(grams, sizes):
+                    send(gram, n)
+            if now - last_hb >= hb_every:
+                send(heartbeat())
+                last_hb = now
+            if now - last_guard >= 10:
+                last_guard = now
+                try:
+                    same_table(table, "ii", g.stx)
+                except Refused as rf:
+                    log("refused %s: %s: %s" % (table, rf.clause, rf.prose))
+                    c.dead = True
+            if want["dump"] or now - last_log >= 3600:
+                want["dump"] = False
+                last_log = now
+                log(counts())
+    finally:
+        log(counts() + " (at exit)")
+    if want["stop"]:
+        return 0
+    # Exits non-zero so Restart=on-failure re-attaches to a remounted store
+    # rather than watching a dead inode while reporting active.
+    log("the store's root watch is gone (unmounted or replaced); exiting.")
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# --probe-sandbox: what threat RS+ asks of a REAL unit. Run it by swapping the
+# unit's ExecStart= in a drop-in, so the namespace is the unit's own rather
+# than retyped. Opens and closes; never reads a byte; prints only errnos.
+
+def probe(path, extra, role, to=None, port=RELAY_PORT, iface=None):
+    """Run inside a REAL unit (ExecStart swapped by a drop-in; every other
+    directive, declared or implied, applies). Two halves:
+
+      * escape probes: open (and close) a few files outside the table; any
+        that opens is red. Prints errnos only, never content.
+      * the positive control: the ROLE'S OWN PATH, once, on a canary --
+        not a stand-in call. The first control here called utimensat directly
+        and passed in a relay unit whose resolver could not run at all
+        (openat2 -> ENOSYS, implied by DynamicUser=): a control that skips
+        the path it vouches for proves nothing about it.
+
+    Roles: server (Resolver.touch of <table>/canary, then an fchmod of it,
+    which must be refused), sweep (a real expiring sweep of a scratch
+    directory it makes in the table), watch (the fanotify mark, the
+    capability drop, then a real widen), client (one real announcement to
+    --to/--port, or the store's server)."""
+    targets = [("w", "/proc/sys/kernel/domainname"),
+               ("w", "/sys/kernel/mm/transparent_hugepage/enabled"),
+               ("r", "/etc/shadow")] + extra
+    # What a role is EXPECTED to be able to open, said rather than counted:
+    # the sweep and the watcher run as root with CAP_DAC_OVERRIDE, and
+    # ProtectSystem=strict makes /etc read-only, not hidden, so they read
+    # /etc/shadow (filed, P12). Counting it made every sweep and watch probe
+    # red by construction, which teaches people to read past red.
+    filed = {("r", "/etc/shadow")} if role in ("sweep", "watch") else set()
+    opened = 0
+    for mode, p in targets:
+        if (mode, p) in filed:
+            print("filed %s %s (expected for this role; not counted)"
+                  % (mode, p))
+            continue
+        flags = (os.O_WRONLY if mode == "w" else os.O_RDONLY) | os.O_CLOEXEC \
+            | os.O_NONBLOCK | os.O_NOCTTY
+        try:
+            os.close(os.open(p, flags))
+            print("OPENED %s %s" % (mode, p))
+            opened += 1
+        except OSError as e:
+            print("refused %s %s %s" % (mode, p,
+                                        errno.errorcode.get(e.errno, e.errno)))
+    try:
+        ok = _probe_role(path, role, to, port, iface)
+    except (Refused, OSError) as e:
+        print("control FAILED %s: %s" % (role, getattr(e, "clause", None) or
+                                         errno.errorcode.get(
+                                             getattr(e, "errno", 0), str(e))))
+        ok = False
+    print("uid %d %s" % (os.getuid(), " ".join(
+        "%s=%s" % kv for kv in sorted(capabilities().items()))))
+    if opened:
+        return 1
+    return 0 if ok else 2
+
+
+def _scratch(gate, g):
+    """A scratch directory of the probe's own, directly in the table."""
+    name = ".hdw4s-probe-%d" % os.getpid()
+    os.mkdir(name, 0o700, dir_fd=g.fd)
+    return name, open_dir(g.fd, name, statx(g.fd, name).ino, g.stx.mnt_id)
+
+
+def _probe_role(path, role, to, port, iface=None):
+    if role == "server":
+        g = guard(path, "ii")
+        try:
+            cfd = os.open("canary", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          dir_fd=g.fd)
+            st = os.fstat(cfd)
+            before = st.st_atime_ns
+            why = Resolver(g.fd).touch(b"canary", st.st_ino)
+            moved = os.fstat(cfd).st_atime_ns != before
+            try:
+                os.fchmod(cfd, st.st_mode & 0o7777)
+                fch = "ALLOWED"
+            except OSError as e:
+                fch = errno.errorcode.get(e.errno, e.errno)
+            os.close(cfd)
+        finally:
+            g.close()
+        # The server's real multicast START path: enumerate, open the
+        # wildcard socket, join on the configured interface(s) (--interface,
+        # else every eligible one). The first in-unit control stopped at the
+        # resolver and passed while every real start died EAFNOSUPPORT here.
+        try:
+            srv = Server(-1, [], resolver=object(), group=RELAY_GROUP)
+            sock = multicast_socket(port)
+            names, _, _ = rejoin(sock, srv, [iface] if iface else None)
+            sock.close()
+            join = ",".join(names) or "NONE"
+        except OSError as e:
+            names, join = [], "ERROR-%s" % errno.errorcode.get(e.errno, e.errno)
+        print("control server: resolver=%s atime-moved=%s fchmod=%s joined=%s"
+              % (why, moved, fch, join))
+        return why == "touched" and moved and fch == "EPERM" and bool(names)
+    if role in ("sweep", "watch"):
+        g = guard(path, "ii")
+        try:
+            if role == "watch":
+                # Said BEFORE the call: watch@ has no SystemCallErrorNumber=,
+                # so a filter refusal is SIGSYS and the process dies here
+                # without another word -- the absence of the next line is
+                # that verdict.
+                print("control watch: calling fanotify_init and fanotify_mark "
+                      "(a filter refusal kills the process here)")
+                sys.stdout.flush()
+                fan = _libc.fanotify_init(FAN_CLOEXEC | FAN_NONBLOCK
+                                          | FAN_REPORT_FID | FAN_REPORT_DIR_FID
+                                          | FAN_REPORT_NAME,
+                                          os.O_RDONLY | os.O_CLOEXEC)
+                marked = fan >= 0 and _libc.fanotify_mark(
+                    fan, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, FAN_CREATE,
+                    g.fd, None) == 0
+                err = 0 if marked else ctypes.get_errno()
+                mark = "ok" if marked else errno.errorcode.get(err, "?")
+                # EPERM from the KERNEL: a filesystem mark is refused outside
+                # the initial user namespace on a filesystem the namespace
+                # does not own (an unprivileged container). The filter let
+                # the call through -- it would have killed us -- and the unit
+                # is built for exactly this: the timer widens alone.
+                kernel_refused = not marked and err == errno.EPERM and \
+                    not initial_userns()
+                if kernel_refused:
+                    mark = "EPERM-by-kernel(not-initial-userns)"
+                drop_cap(CAP_SYS_ADMIN)
+                if fan >= 0:
+                    os.close(fan)
+            gate = Gate(g.fd)
+            name, sfd = _scratch(gate, g)
+            try:
+                fd = os.open("canary", os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             0o600, dir_fd=sfd)
+                os.close(fd)
+                c = Counts()
+                if role == "sweep":
+                    sweep(sfd, g.stx.mnt_id, 120, 86400, time.time() + 2 * 86400,
+                          c)
+                    result = "expired=%d left=%d" % (c.expired,
+                                                     len(os.listdir(sfd)))
+                    good = c.expired == 1 and not os.listdir(sfd)
+                else:
+                    st = statx(sfd, "canary")
+                    widen_file(Gate(sfd), sfd, "canary", st, c)
+                    mode = statx(sfd, "canary").mode & 0o7777
+                    gate2 = Gate(sfd)
+                    gate2.unlink(sfd, "canary", None)
+                    result = "mark=%s widened-to=%04o" % (mark, mode)
+                    good = (marked or kernel_refused) and mode == 0o666
+                os.close(sfd)
+                gate.rmdir(g.fd, name, None)
+            except BaseException:
+                os.close(sfd)
+                raise
+        finally:
+            g.close()
+        print("control %s: %s" % (role, result))
+        return good
+    if role == "client":
+        g = guard(os.path.join(path, "table"), "ii")
+        try:
+            dest = to or RELAY_GROUP
+            c = Client(g.fd, 7200)
+            c.rebuild()
+            fd = os.open("canary", os.O_RDONLY | os.O_CLOEXEC, dir_fd=g.fd)
+            os.close(fd)
+            time.sleep(0.2)
+            c.events(os.read(c.ino, 65536))
+            grams = pack(c.records(time.monotonic()))
+            ip = ipaddress.ip_address(dest)
+            sock = socket.socket(socket.AF_INET6 if ip.version == 6
+                                 else socket.AF_INET, socket.SOCK_DGRAM)
+            if ip.is_multicast:
+                name = iface or route_interface(
+                    nfs_server_address(g.mount) or "0.0.0.0")
+                sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_TTL, 1)
+                if name:
+                    sock.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_IF,
+                                    mreqn("0.0.0.0", iface_index(name)))
+            for gram in grams:
+                sock.sendto(gram, (str(ip), port))
+        finally:
+            g.close()
+        print("control client: announced=%d to %s port %d" % (len(grams), dest,
+                                                               port))
+        return len(grams) == 1
+    raise Usage("--probe-role must be server, sweep, watch or client")
+
+
+# ---------------------------------------------------------------------------
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog=PROG, add_help=True)
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--guard", metavar="DIR")
+    mode.add_argument("--harden", metavar="STORE")
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--watch", action="store_true")
+    mode.add_argument("--relay-server", action="store_true")
+    mode.add_argument("--relay-client", action="store_true")
+    mode.add_argument("--probe-sandbox", action="store_true")
+    mode.add_argument("--relay-interfaces", action="store_true")
+    mode.add_argument("--version", action="store_true")
+    p.add_argument("--form", choices=("any", "i", "ii"), default="any")
+    p.add_argument("--dir")
+    p.add_argument("--store")
+    p.add_argument("--idle")
+    p.add_argument("--max-age")
+    p.add_argument("--interval", default="2m")
+    p.add_argument("--allow")
+    p.add_argument("--listen")
+    p.add_argument("--group", default=RELAY_GROUP)
+    p.add_argument("--ttl", type=int, default=1)
+    p.add_argument("--interface")
+    p.add_argument("--heartbeat", default="10m")
+    p.add_argument("--port", type=int, default=RELAY_PORT)
+    p.add_argument("--to")
+    p.add_argument("--silence", default="30m")
+    p.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+    p.add_argument("--any-fstype", action="store_true",
+                   help=argparse.SUPPRESS)
+    p.add_argument("--probe-path", action="append", default=[])
+    p.add_argument("--probe-role", choices=("server", "sweep", "watch",
+                                            "client"), default="server")
+    # TESTS ONLY: judge the table as of this epoch second instead of now.
+    # ctime cannot be set from user space, so an item cannot be made OLD for
+    # a test; time can be moved instead. Refused for real root (the initial
+    # user namespace), so it can never steer a production sweep.
+    p.add_argument("--now", type=float, help=argparse.SUPPRESS)
+    p.add_argument("--verbose", action="store_true")
+    p.add_argument("--dry-run", nargs="?", const="1", default="")
+    p.add_argument("--unsandboxed", action="store_true")
+    return p.parse_args(argv)
+
+
+def unsandboxed(euid, initial, root_ro):
+    """Root, on the host itself, with a writable root filesystem: not inside
+    the units' ProtectSystem=strict. Cheap to see, and the one case in which
+    the gate and the guard are the ONLY layers left -- so the destructive
+    modes refuse it unless told --unsandboxed on purpose. A host whose root
+    filesystem is read-only anyway reads as sandboxed: that is the limit."""
+    return euid == 0 and initial and not root_ro
+
+
+def multicast_group(text):
+    try:
+        ip = ipaddress.ip_address(text)
+    except ValueError:
+        raise Usage("--group: %r is not an address" % text)
+    if ip.version != 4 or not ip.is_multicast:
+        raise Usage("--group %s is not an IPv4 multicast group" % text)
+    return ip
+
+
+def ttl_value(n):
+    if not 1 <= n <= 255:
+        raise Usage("--ttl must be 1..255")
+    return n
+
+
+def dry_flag(text):
+    """--dry-run, or --dry-run=VALUE from a unit's environment: empty, 0, no
+    or false is off; 1, yes or true is on; anything else is refused rather
+    than guessed (a typo must not quietly delete)."""
+    v = (text or "").strip().lower()
+    if v in ("", "0", "no", "false"):
+        return False
+    if v in ("1", "yes", "true"):
+        return True
+    raise Usage("--dry-run=%s: say 1 or 0" % text)
+
+
+def test_now(a):
+    if a.now is None:
+        return None
+    if os.geteuid() == 0 and initial_userns():
+        raise Usage("--now is for tests, and refused to real root")
+    log("WARNING: --now: judging the table as of %d, not the real time. For "
+        "tests only." % a.now, "warning")
+    return a.now
+
+
+def need(a, *names):
+    for n in names:
+        if getattr(a, n.replace("-", "_")) in (None, ""):
+            raise Usage("--%s is required here" % n)
+
+
+def main(argv):
+    a = parse_args(argv[1:])
+    try:
+        if a.version:
+            print("%s %s" % (PROG, VERSION))
+            return 0
+        if a.guard is not None:
+            try:
+                g = guard(a.guard, a.form)
+            except Refused as r:
+                log("refused %s: %s: %s" % (a.guard, r.clause, r.prose))
+                return 1
+            print("accepted %s form=%s fstype=%s mount=%d"
+                  % (a.guard, g.form, g.mount.fstype, g.mount.id))
+            g.close()
+            return 0
+        if a.harden is not None:
+            try:
+                g = harden(a.harden)
+            except Refused as r:
+                log("refused %s: %s: %s" % (a.harden, r.clause, r.prose))
+                return 1
+            print("accepted %s form=%s fstype=%s mount=%d"
+                  % (os.path.join(a.harden, "table"), g.form, g.mount.fstype,
+                     g.mount.id))
+            g.close()
+            return 0
+        now = test_now(a)
+        dry = dry_flag(a.dry_run)
+        if dry:
+            log("DRY RUN: nothing will be removed or re-moded; every change "
+                "that passes the checks is logged as \"would ...\" instead.",
+                "notice")
+        if a.max_depth < 1:
+            raise Usage("--max-depth must be at least 1")
+        # Raised BEFORE the budget is computed from it. The other way round
+        # the budget was the default soft limit less headroom (768), not 8192,
+        # and a 4067-deep tree on a box was left one directory short of
+        # expiring at every pass (S-fuzz on a development box, 2026-10-02).
+        raise_fd_limit()
+        budget = depth_budget(a.max_depth)
+        if a.any_fstype:
+            if os.geteuid() == 0 and initial_userns():
+                raise Usage("--any-fstype is for tests, and refused to real "
+                            "root")
+            log("WARNING: --any-fstype: the relay client accepts a store "
+                "that is not NFS. For tests only; no flag or store rule is "
+                "relaxed.", "warning")
+        if a.check:
+            need(a, "dir", "idle")
+            return check(a.dir, duration(a.idle, "--idle"),
+                         duration(a.interval, "--interval"), a.verbose, now,
+                         budget)
+        if (a.watch or not any((a.check, a.relay_server, a.relay_client,
+                                a.probe_sandbox))) and not a.unsandboxed and \
+                unsandboxed(os.geteuid(), initial_userns(),
+                            bool(os.statvfs("/").f_flag & os.ST_RDONLY)):
+            log("refusing to sweep or watch as root outside the unit's "
+                "sandbox (ProtectSystem=strict); run it from its unit, or "
+                "pass --unsandboxed if you mean it.")
+            return 1
+        if a.watch:
+            need(a, "dir")
+            return watch(a.dir, budget, dry)
+        if a.relay_interfaces:
+            return relay_interfaces(parse_names(a.interface))
+        if a.relay_server:
+            need(a, "dir")
+            if a.listen:   # unicast: one named address, and named clients
+                need(a, "allow")
+                listen_address(a.listen)
+            group = None
+            if not a.listen:
+                group = multicast_group(a.group)
+            return relay_server(a.dir, parse_allow(a.allow) if a.allow else [],
+                                a.listen, a.port,
+                                duration(a.silence, "--silence"),
+                                group=group, wanted=parse_names(a.interface),
+                                heartbeat=duration(a.heartbeat, "--heartbeat"))
+        if a.relay_client:
+            need(a, "store", "idle")
+            return relay_client(a.store, duration(a.idle, "--idle"), a.to,
+                                a.port, a.any_fstype,
+                                group=str(multicast_group(a.group)),
+                                ttl=ttl_value(a.ttl),
+                                iface=(parse_names(a.interface) or [None])[0],
+                                hb_every=duration(a.heartbeat, "--heartbeat"))
+        if a.probe_sandbox:
+            need(a, "dir")
+            extra = []
+            for spec in a.probe_path:
+                m, _, p = spec.partition(":")
+                if m not in ("r", "w") or not p:
+                    raise Usage("--probe-path takes r:PATH or w:PATH")
+                extra.append((m, p))
+            return probe(a.dir, extra, a.probe_role, a.to or None, a.port,
+                         (parse_names(a.interface) or [None])[0])
+        need(a, "dir", "idle", "max-age")
+        if now is None:
+            now = time.time()
+        idle = duration(a.idle, "--idle")
+        max_age = duration(a.max_age, "--max-age")
+        raise_fd_limit()
+        try:
+            g = guard(a.dir, "ii")
+        except Refused as r:
+            log("refused %s: %s: %s" % (a.dir, r.clause, r.prose))
+            return 1
+        c = Counts()
+        try:
+            sweep(g.fd, g.stx.mnt_id, idle, max_age, now, c,
+                  max_depth=budget, dry_run=dry)
+        finally:
+            g.close()
+        if c.no_btime:
+            log("%s reports no birth time: the maximum age is not enforced "
+                "there, only the idle window." % a.dir)
+        report(c, "sweep")
+        return 0
+    except Usage as u:
+        log(str(u))
+        return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BaseException as e:
+        # "This helper is broken" is 2, never 1: a caller must not read a
+        # crash as the guard's refusal, nor as a pass.
+        # The type and errno only: an OSError's text carries the file name,
+        # and a name from the table is never logged.
+        log("internal error: %s (errno %s)"
+            % (type(e).__name__, getattr(e, "errno", None)))
+        sys.exit(2)

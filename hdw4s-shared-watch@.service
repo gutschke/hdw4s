@@ -1,0 +1,74 @@
+[Unit]
+Description=Widen what is left on the /shared table of the store at %f as soon as it appears
+Documentation=man:hdw4s-shared-sweep(8)
+BindsTo=%i.mount
+After=%i.mount hdw4s-shared-harden@%i.service
+
+[Service]
+# HDW4S_SHARED_DRYRUN=1 in a runtime drop-in makes every change that passes
+# the checks a logged "would ..." line instead (owner: for the first switch-on,
+# "disable actual deletions and just log what you would do"). Empty: real.
+Environment=HDW4S_SHARED_DRYRUN=
+ExecStart=/usr/lib/hdw4s/hdw4s-shared-sweep --watch --dir %f/table --dry-run=${HDW4S_SHARED_DRYRUN}
+# Where fanotify is refused (NFS, or a host's filesystem seen from inside a
+# container) this logs one line and exits 0, and the timer widens alone. A
+# guard refusal exits 1 and is retried.
+Restart=on-failure
+RestartSec=10s
+# Renewed daily. ProtectSystem= and ReadOnlyPaths= are fixed when the unit
+# STARTS: a filesystem the host mounts later (a new homes dataset, an NFS
+# remount) arrives in this unit's namespace WRITABLE (measured in a namespace
+# model, deletion review F4). The tool's gate still refuses anything off the
+# table's mount, but the sandbox should not quietly decay into code alone, so
+# a long-running process gets a fresh, fully read-only view once a day: the
+# timeout counts as a failure and Restart= brings it back within RestartSec=.
+# A homes tree mounted at runtime still needs InaccessiblePaths= on its
+# PARENT, which does cover later child mounts.
+RuntimeMaxSec=1d
+# The sweeper's sandbox, plus CAP_SYS_ADMIN for the one fanotify mark. The
+# tool drops it from its effective and permitted sets straight after the
+# mark, before it reads a single event.
+ProtectSystem=strict
+# ProtectSystem=strict does NOT make /run read-only: measured 2026-10-02 on
+# systemd 255 (a container, measured 2026-10-02), /run and /run/lock were writable inside this unit,
+# and writes landed on the host's /run, whatever ReadWritePaths= said. So
+# /run is made read-only here by name. A more specific ReadWritePaths= below
+# it (a store under /run in tmpfs mode) still wins for that path.
+ReadOnlyPaths=/run
+# The STORE ROOT, not %f/table. ReadWritePaths= bind-mounts its path onto
+# itself, and a bind of table would make the table a mount root inside this
+# unit -- which the guard's form (ii), the only form a destructive mode
+# accepts, refuses as "stacked". Bound at the store root, the bind's root is
+# the filesystem's /, and table sits directly beneath it as on the host. The
+# root itself is root's and 0755 and holds only table; the gate confines every
+# write to beneath the table regardless.
+ReadWritePaths=%f
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_FOWNER CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_SYS_ADMIN
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service fanotify_init fanotify_mark
+MemoryMax=1G
+TasksMax=8
+CPUQuota=50%
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=%i.mount

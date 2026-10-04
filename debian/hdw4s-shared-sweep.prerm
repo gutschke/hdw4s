@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+# On REMOVE (not on upgrade, which postinst handles by restarting), stop
+# every instance of this package's templates: their unit files and the tool
+# are about to go, and a watcher or relay left running would run on with
+# nothing on disk to say what it is. Their enable links stay until purge,
+# like any package unit's.
+if [ "$1" = 'remove' ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+  systemctl list-units --plain --no-legend --all \
+      'hdw4s-shared-harden@*' 'hdw4s-shared-sweep@*' 'hdw4s-shared-watch@*' \
+      'hdw4s-shared-relay-server@*' 'hdw4s-shared-relay-client@*' 2>/dev/null |
+    while read -r unit _rest; do
+      systemctl stop "${unit}" >/dev/null 2>&1 || :
+    done
+fi
+
+#DEBHELPER#
+
+exit 0

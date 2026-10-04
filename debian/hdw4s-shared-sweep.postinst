@@ -1,0 +1,43 @@
+#!/bin/sh
+set -e
+
+# Every unit in this package is a template on a store's path, and debhelper
+# acts on unit NAMES: it neither stops nor starts an instance, so an upgrade
+# leaves every enabled instance running -- on the OLD code, which is still in
+# the process's memory, and against the OLD unit file until a reload. Nothing
+# else on a storage host or an NFS client host would bring them onto the new
+# version: hdw4s, whose boot run starts the instances on a desktop machine, is
+# not installed there.
+#
+# So: reload, then RESTART the long-running instances that are active now,
+# and nothing else. try-restart, and only for a unit the list shows active,
+# so an instance that is stopped or merely enabled is never started by an
+# upgrade. Deliberately not:
+#   * the sweep timers and their services: the timer keeps its schedule
+#     across a reload, and each sweep is a new process on the new code;
+#   * harden@: a oneshot that already did its job (the flags are on the
+#     mount); re-running it would remount a live store for no gain, and the
+#     new code runs at the next mount of the store anyway.
+# The relay server's fixed user, before anything may restart it.
+if [ "$1" = 'configure' ] && [ -z "${DPKG_ROOT:-}" ]; then
+  systemd-sysusers hdw4s-shared-sysusers.conf || {
+    echo 'hdw4s-shared-sweep: could not create the relay user; run' >&2
+    echo '       "systemd-sysusers hdw4s-shared-sysusers.conf".' >&2
+  }
+fi
+
+if [ "$1" = 'configure' ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+  systemctl daemon-reload >/dev/null 2>&1 || :
+  systemctl list-units --plain --no-legend --all \
+      'hdw4s-shared-watch@*.service' 'hdw4s-shared-relay-server@*.service' \
+      'hdw4s-shared-relay-client@*.service' 2>/dev/null |
+    while read -r unit _load active _rest; do
+      [ "${active}" = 'active' ] || continue
+      systemctl try-restart "${unit}" ||
+        echo "hdw4s-shared-sweep: could not restart ${unit} onto the new version." >&2
+    done
+fi
+
+#DEBHELPER#
+
+exit 0

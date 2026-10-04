@@ -1,0 +1,25 @@
+[Unit]
+Description=Give the /shared store at %f its flags, and refuse it if it is not a store
+Documentation=man:hdw4s-shared-sweep(8)
+# The instance is the escaped path of the store ROOT ("systemd-escape --path"),
+# so %i.mount is the store's own mount unit and %f its path: nothing that has
+# to agree is written twice. Enabled, this is wanted by that mount, so every
+# mount and every manual remount hardens again.
+BindsTo=%i.mount
+After=%i.mount
+# Nothing may export or bind the store before its flags are set. HA guests
+# start through the LRM, so ordering before the guests alone is not enough.
+# Units that do not exist on this machine are ignored by Before=.
+Before=nfs-server.service pve-guests.service pve-ha-lrm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Checks the store rule BEFORE remounting, so a wrong path is refused rather
+# than remounted noexec; then adds only the flags that are missing, in place;
+# then guards the table. Runs in the host's mount namespace on purpose: the
+# remount is the whole point, and it must apply to the mount everyone sees.
+ExecStart=/usr/lib/hdw4s/hdw4s-shared-sweep --harden %f
+
+[Install]
+WantedBy=%i.mount

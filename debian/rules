@@ -3,6 +3,20 @@
 %:
 	dh $@
 
+# Two binary packages from one flat tree. hdw4s-shared-sweep is the /shared
+# tool and its units, for a storage node that runs no desktops; hdw4s is
+# everything else and depends on it. debian/hdw4s-shared-sweep.install is THE
+# list of what that package carries, and it is also what hdw4s is told to
+# leave out: hdw4s's unit lines are globs (hdw4s*.service), which would match
+# the tool's units too, and one file shipped by two packages is a dpkg
+# conflict at install time. Derived, so the two cannot disagree; checks.sh
+# asserts every unit lands in exactly one package.
+SWEEP_FILES := $(shell sed -e 's/\#.*//' debian/hdw4s-shared-sweep.install | awk 'NF {print $$1}')
+
+override_dh_install:
+	dh_install -phdw4s $(addprefix -X,$(SWEEP_FILES))
+	dh_install -phdw4s-shared-sweep
+
 # The firewall table, the timers and the ephemeral slot minter are the units the
 # package turns on by itself. hdw4s@.service is a template and cannot be enabled
 # without an instance name; which accounts get a desktop is the administrator's
@@ -21,25 +35,25 @@
 # RemainAfterExit=yes and RefuseManualStop=yes, so a restart is refused outright,
 # and postinst re-runs the script itself for the refresh an upgrade needs.
 override_dh_installsystemd:
-	dh_installsystemd --no-stop-on-upgrade hdw4s-firewall.service
-	dh_installsystemd hdw4s-firewall.timer
-	dh_installsystemd --no-enable --no-start hdw4s-firewall-check.service
-	dh_installsystemd hdw4s-updater.timer
-	dh_installsystemd hdw4s-reaper.timer
-	dh_installsystemd hdw4s-check.timer
-	dh_installsystemd --no-enable --no-start hdw4s-check.service
-	dh_installsystemd --no-enable --no-start hdw4s-reaper.service
-	dh_installsystemd --no-enable --no-start hdw4s-updater.service
-	dh_installsystemd --no-enable --no-start hdw4s@.service
-	dh_installsystemd --no-enable --no-start hdw4s-ephemeral@.service
-	dh_installsystemd --no-stop-on-upgrade --no-restart-after-upgrade hdw4s-ephemeral-slots.service
-	dh_installsystemd --no-enable --no-start hdw4s-proxy@.socket
-	dh_installsystemd --no-enable --no-start hdw4s-proxy@.service
+	dh_installsystemd -phdw4s --no-stop-on-upgrade hdw4s-firewall.service
+	dh_installsystemd -phdw4s hdw4s-firewall.timer
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-firewall-check.service
+	dh_installsystemd -phdw4s hdw4s-updater.timer
+	dh_installsystemd -phdw4s hdw4s-reaper.timer
+	dh_installsystemd -phdw4s hdw4s-check.timer
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-check.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-reaper.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-updater.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s@.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-ephemeral@.service
+	dh_installsystemd -phdw4s --no-stop-on-upgrade --no-restart-after-upgrade hdw4s-ephemeral-slots.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-proxy@.socket
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-proxy@.service
 # The front door. The SOCKET is enabled and the service is not: the router is
 # socket-activated, so enabling the service too would start a second copy at
 # boot competing for the same port.
-	dh_installsystemd --no-stop-on-upgrade --no-restart-after-upgrade hdw4s-demux.socket
-	dh_installsystemd --no-enable --no-start hdw4s-demux.service
+	dh_installsystemd -phdw4s --no-stop-on-upgrade --no-restart-after-upgrade hdw4s-demux.socket
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-demux.service
 # Named here although neither can be enabled and neither is ever started by
 # hand: the incarnation publisher is pulled in by Wants= on the session, and the
 # refusal responder by OnFailure= on the relay. The reason to name them is that
@@ -49,24 +63,38 @@ override_dh_installsystemd:
 # in no policy line is a unit nobody decided anything about. Both of these had
 # been absent from this file since they were written; ".github/checks.sh"
 # now fails the build if a unit file exists with no line of its own.
-	dh_installsystemd --no-enable --no-start hdw4s-incarnation@.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-incarnation@.service
 # The stream directory of one session, pulled in by Requires= on the session unit
 # and stopped when that session no longer needs it (StopWhenUnneeded=).
-	dh_installsystemd --no-enable --no-start hdw4s-stream@.service
-	dh_installsystemd --no-enable --no-start hdw4s-refuse@.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-stream@.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-refuse@.service
 # The teardown watcher and the teardown itself. --no-enable --no-start for
 # the same reason as the two above and one of its own: HOW MANY SLOTS THERE
 # ARE IS A SETTING, so the set of instances cannot be known at packaging
 # time. hdw4s-ephemeral-slots starts one .path per slot at boot, from the
 # number actually configured, and /run is a tmpfs so nothing it started
 # outlives a boot into a different configuration.
-	dh_installsystemd --no-enable --no-start hdw4s-teardown@.path
-	dh_installsystemd --no-enable --no-start hdw4s-teardown@.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-teardown@.path
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-teardown@.service
 # The start watcher and the start, for the same reasons: one .path per slot,
 # started by hdw4s-ephemeral-slots from the number actually configured. The
 # router's start request is the only way a pool desktop starts.
-	dh_installsystemd --no-enable --no-start hdw4s-start@.path
-	dh_installsystemd --no-enable --no-start hdw4s-start@.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-start@.path
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-start@.service
 # The scrub of a slot's records, started by the ephemeral desktop's own unit
 # before and after each visit; never enabled, never started at install.
-	dh_installsystemd --no-enable --no-start hdw4s-slot-scrub@.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-slot-scrub@.service
+# /shared's expose step and its 30-second re-judgement. Never enabled: the
+# boot run starts the timer when HDW4S_SHARED is on, so a machine with /shared
+# off runs nothing every 30 seconds.
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-shared-expose.service
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-shared-expose.timer
+# The /shared tool's units, all templates whose instance is a store's path:
+# nothing to enable or start until an administrator (or hdw4s, at boot, for a
+# store it owns) names a store. Named so that the policy is a decision.
+	dh_installsystemd -phdw4s-shared-sweep --no-enable --no-start hdw4s-shared-harden@.service
+	dh_installsystemd -phdw4s-shared-sweep --no-enable --no-start hdw4s-shared-sweep@.service
+	dh_installsystemd -phdw4s-shared-sweep --no-enable --no-start hdw4s-shared-sweep@.timer
+	dh_installsystemd -phdw4s-shared-sweep --no-enable --no-start hdw4s-shared-watch@.service
+	dh_installsystemd -phdw4s-shared-sweep --no-enable --no-start hdw4s-shared-relay-server@.service
+	dh_installsystemd -phdw4s-shared-sweep --no-enable --no-start hdw4s-shared-relay-client@.service

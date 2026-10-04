@@ -1,0 +1,70 @@
+[Unit]
+Description=Tell the server of the NFS-mounted /shared store at %f which files were used here
+Documentation=man:hdw4s-shared-sweep(8)
+# OFF BY DEFAULT. Runs on a HOST whose store is an NFS client mount, not in a
+# container. Held to its mount, and it exits non-zero when its root watch goes
+# (an unmount, a remount), so it re-attaches rather than watching a dead inode
+# while reporting active.
+BindsTo=%i.mount
+After=%i.mount network-online.target
+Wants=network-online.target
+
+[Service]
+# MULTICAST BY DEFAULT (owner): to the group, out of the interface of the
+# route to the store's NFS server (so it follows the store), TTL 1 -- one
+# segment. HDW4S_SHARED_RELAY_TO= sends unicast to one server instead;
+# HDW4S_SHARED_RELAY_INTERFACE= overrides the derived interface.
+Environment=HDW4S_SHARED_IDLE=30m HDW4S_SHARED_RELAY_TO=
+Environment=HDW4S_SHARED_RELAY_GROUP=239.255.47.48 HDW4S_SHARED_RELAY_PORT=4748
+Environment=HDW4S_SHARED_RELAY_TTL=1 HDW4S_SHARED_RELAY_INTERFACE=
+Environment=HDW4S_SHARED_RELAY_HEARTBEAT=10m
+ExecStart=/usr/lib/hdw4s/hdw4s-shared-sweep --relay-client --store %f --idle ${HDW4S_SHARED_IDLE} --to=${HDW4S_SHARED_RELAY_TO} --group ${HDW4S_SHARED_RELAY_GROUP} --port ${HDW4S_SHARED_RELAY_PORT} --ttl ${HDW4S_SHARED_RELAY_TTL} --interface=${HDW4S_SHARED_RELAY_INTERFACE} --heartbeat ${HDW4S_SHARED_RELAY_HEARTBEAT}
+Restart=on-failure
+RestartSec=10s
+RestartSteps=5
+RestartMaxDelaySec=5min
+DynamicUser=yes
+# What DynamicUser= IMPLIES, stated, so the unit file says what is in force
+# (tests.sh refuses a DynamicUser= unit that does not): ProtectSystem=strict,
+# ProtectHome=, PrivateTmp=, NoNewPrivileges= and RestrictSUIDSGID= are below;
+# RemoveIPC= here. RestrictSUIDSGID= costs this role nothing: it never calls
+# openat2 (the relay SERVER does, which is why it is not a DynamicUser).
+RemoveIPC=yes
+CapabilityBoundingSet=
+ReadOnlyPaths=%f
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectSystem=strict
+# ProtectSystem=strict does NOT make /run read-only: measured 2026-10-02 on
+# systemd 255 (a container, measured 2026-10-02), /run and /run/lock were writable inside this unit,
+# and writes landed on the host's /run, whatever ReadWritePaths= said. So
+# /run is made read-only here by name. A more specific ReadWritePaths= below
+# it (a store under /run in tmpfs mode) still wins for that path.
+ReadOnlyPaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+MemoryMax=256M
+TasksMax=4
+CPUQuota=20%
+
+[Install]
+# Wanted by the store's own mount, like the sweep timer and the watcher: an
+# enabled relay starts whenever that store is mounted, a reboot included, and
+# stops with it (BindsTo= above). Without this section the unit was "static":
+# "systemctl enable" refused it, and an enabled relay could not survive a boot.
+WantedBy=%i.mount

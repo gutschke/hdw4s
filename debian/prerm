@@ -12,10 +12,28 @@ set -e
 # knows by name, which are the static ones, so the instances would be left
 # holding the public ports with their unit files gone.
 if [ "$1" = 'remove' ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ]; then
+  # /shared, while hdw4s-shared-expose still exists to do it: the timer that
+  # re-binds the table, then the mounts it recorded making, each checked to
+  # be the one on top at its path. NEVER an unmount by path: a lazy unmount
+  # aimed at the wrong mount on a desktop host can take somebody else's bind
+  # with it. What it leaves, a reboot clears. Same as uninstall.sh.
+  systemctl stop hdw4s-shared-expose.timer hdw4s-shared-expose.service \
+    >/dev/null 2>&1 || :
+  if [ -x /usr/lib/hdw4s/hdw4s-shared-expose ]; then
+    /usr/lib/hdw4s/hdw4s-shared-expose --withdraw ||
+      echo 'hdw4s: something is still mounted under /run/hdw4s-shared*; it was not ours to remove.' >&2
+  fi
   for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 'hdw4s@*' \
              2>/dev/null | awk '{print $1}'); do
     systemctl stop "${u}" >/dev/null 2>&1 || :
   done
+  # The root filesystem's /shared, if this package made it: here and not in
+  # postrm, because by then the code that decides is gone. It is kept, and
+  # said, while any desktop still runs -- removing it would take /shared away
+  # from that desktop -- and its mark goes only with it.
+  if [ -x /usr/lib/hdw4s/hdw4s-ephemeral-slots ]; then
+    /usr/lib/hdw4s/hdw4s-ephemeral-slots --shared-view release-for-removal || :
+  fi
 fi
 
 #DEBHELPER#

@@ -58,7 +58,9 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Report any running session that is not publishing the identity a returning
     browser tab compares itself against, whether the machine can hand anybody a
     desktop at all, and whether the memory limit on the desktop slice is a number
-    this machine can actually reach. Exit non-zero if any of those is wrong.
+    this machine can actually reach -- and, with `/shared` on, whether desktops
+    are being given a table and anybody is sweeping it. Exit non-zero if any of
+    those is wrong.
     Nothing is restarted: the point is that somebody is told which session and
     why. See DIAGNOSTICS.
 
@@ -866,6 +868,267 @@ a running pool changes nothing until then, and the proxy will be refused with
 The pool is served by a unit named `hdw4s-demux`, which is where it appears in
 `systemctl` output and in the journal. Nothing else requires that name.
 
+## THE SHARED DROP AREA
+
+Off unless the administrator turns it on. With it on, every desktop on the
+machine, named and ephemeral, sees `/shared`: a directory each of them may read
+and write, for handing a file from one desktop to another. The machine's
+administrator sees the same table at `/shared` too (see **For the
+administrator** below).
+
+**On one machine, this is the whole of the setup:**
+
+    HDW4S_SHARED=tmpfs
+
+in `/etc/hdw4s/hdw4s.conf`, and a reboot. The table is then memory of its own,
+`HDW4S_SHARED_SIZE` big (10% of this machine's memory unless set), emptied by
+every reboot. Nothing else is needed, and nothing below about stores, sweepers
+or containers applies.
+
+It is a picnic table, not a file server, and turning it on deliberately weakens
+what desktops can do to each other. Anybody may leave, take, replace or alter
+anything there, and nothing about an item is promised, not even that it will
+still be there. Tell users so. A file taken from the table is as untrusted as
+anything else on it -- that holds for the administrator's own copies too.
+
+What is kept is that the table cannot be turned against the rest of the
+machine. It is a filesystem of its own, so no hard link can reach it from a
+home, and it is mounted `nosymfollow`, `noexec`, `nosuid` and `nodev`: the
+kernel follows no link there and nothing there runs by being opened. Only
+regular files and directories are kept; anything else is removed. A program
+that resolves links itself, instead of asking the kernel to, could follow one
+in the moment before the sweep removes it. A program can still be given a file
+from there to read, as a person can be given a document; that is not something
+a mount option stops.
+
+### Settings
+
+All are read at boot, by `hdw4s-ephemeral-slots.service`: reboot after changing
+one.
+
+  * `HDW4S_SHARED`:
+    `off` (the default), `tmpfs` or `source`. Off means nothing is mounted, no
+    desktop sees `/shared`, and no file of the feature exists.
+
+  * `HDW4S_SHARED_SIZE`:
+    `tmpfs` only: an absolute size (`512M`, `2G`) or a percentage of this
+    machine's memory (`10%`, the default). The percentage is worked out from
+    `/proc/meminfo`: handed to the kernel, it would be taken of the host's
+    memory in a container. The number of files is capped in proportion (one per
+    16 KiB), because a size alone does not bound what empty files cost. What is
+    stored counts against the memory of whoever wrote it.
+
+    This setting used to switch the feature on. Set without `HDW4S_SHARED`, it
+    now does nothing, and the boot and `hdw4s check` both say so.
+
+  * `HDW4S_SHARED_SOURCE`:
+    `source` only: the root of a store an administrator provides, already
+    mounted. See **The store** below.
+
+  * `HDW4S_SHARED_SWEEP`:
+    `local` (the default) sweeps the table on this machine. `external` is for a
+    store shared between machines, where exactly one machine -- the one holding
+    the storage -- sweeps it, and every other runs no sweep.
+
+  * `HDW4S_SHARED_IDLE`:
+    An item goes once nobody has read, written or changed it for this long
+    (default `30m`; the syntax of `HDW4S_IDLE_DAYS`, a bare number is days).
+    An empty directory goes once nothing has been added to it or removed from
+    it for this long; merely listing it does not count, or browsing would keep
+    every empty directory for ever. A time in the future, from a clock that is
+    wrong or a file stamped by hand, is not believed.
+
+  * `HDW4S_SHARED_MAX_AGE`:
+    And whatever happens, an item goes once it is this old (default `7d`),
+    counted from when it was created. `0` is refused: what is left there is
+    removed in the end. On a filesystem that does not record when a file was
+    created this is not enforced, and the sweep and `hdw4s check` say so.
+
+`HDW4S_SHARED_EXPIRY`, from earlier versions, is retired; `HDW4S_SHARED_IDLE`
+replaces it, and a leftover line is named by `hdw4s check`.
+
+### What runs
+
+  * **The sweep**, every two minutes (`hdw4s-shared-sweep`; see
+    hdw4s-shared-sweep(8)). It makes every item readable and writable by
+    everyone -- desktops create files private to their owner, and a copy keeps
+    its mode -- and removes what has expired. Where the kernel allows it, a
+    watcher widens new items as they appear, so the two-minute wait is the
+    exception. With `HDW4S_SHARED_SWEEP=local`, the expose service below keeps
+    both running while the table is shown: one stopped by an upgrade or by
+    hand is started again within 30 seconds. `hdw4s check` is red while the
+    sweep is not running -- nothing would ever expire -- and warns while the
+    watcher is not.
+
+  * **`hdw4s-shared-expose.service`**, every 30 seconds. Desktops bind
+    `/run/hdw4s-shared` as `/shared`; this binds the store's `table` onto that
+    directory once the store passes the guard, and takes it away again when the
+    store stops answering, is not mounted, or has lost a mount flag. A desktop
+    that is already running sees the table arrive and leave. It only ever
+    unmounts a mount it made itself and recorded: anything else found mounted
+    at `/run/hdw4s-shared` is left where it is, named in its log, and
+    `hdw4s check` is red until somebody removes it.
+
+**It fails soft.** While there is no acceptable store, desktops start as usual
+and see an empty `/shared` they cannot write to. A desktop started in the few
+seconds after a network store stops answering, before the next run notices, may
+still fail to start; that run then takes the store away.
+
+**That needs a store that fails rather than hangs.** Mount a network store
+`soft`; NFS mounts are `hard` unless told otherwise. A store that stops
+answering without failing -- a `hard` NFS mount, or a FUSE filesystem whose
+daemon has stopped -- also stalls the run that would take it away, so `/shared`
+stays bound to it, and every desktop started until the store answers again
+hangs at start. `hdw4s check` warns about an NFS store mounted `hard`.
+
+`/run/hdw4s-shared` itself is made at every boot, empty and root's, whether the
+feature is on or not. **Do not delete it**: every desktop with `/shared` then
+fails to start (226/NAMESPACE), on purpose -- the alternative systemd offers,
+an optional bind, would leave a `/shared` on the root filesystem writable by
+every desktop. `systemd-tmpfiles --create` makes it again, but root's
+`/shared` keeps showing the deleted one until the next boot, and `hdw4s check`
+is red until then.
+
+**For the administrator:** in the root namespace `/shared` is a read-only
+view that shows the table only while it is guarded: the boot makes it, as a
+read-only bind of `/run/hdw4s-shared` that receives whatever is bound there and
+nothing else, so the table appears and leaves with the expose service's bind.
+While no table is shown it is empty and refuses writes; while one is, it is the
+table, writable as the desktops' is. Copy out with a plain `cp`; there is
+nothing on the table but regular files and directories. Expiry applies to what
+the administrator leaves there, too. **Give the tools the store path, never
+/shared** -- `hdw4s-shared-sweep --dir` takes the store's own mount or
+`/run/hdw4s-shared`.
+
+That view is made only while no table is shown yet: made later, it would keep
+the table after the expose service takes it away. So turning the feature on
+with an upgrade, or reinstalling while a table is shown, leaves it for the next
+boot, and says so. A `/shared` that was there before the feature made one (an
+administrator's own) is left alone; desktops see the table there, root does
+not, and `hdw4s check` says so. Turning the feature off removes the view and
+the directory again, if this feature made them and once no desktop is running:
+removing it under a running desktop would take `/shared` away from that
+desktop. Do not remove `/shared` by hand while desktops run, for the same
+reason.
+
+**Never unmount `/shared` in the root namespace by hand.** Every desktop, and
+every service systemd starts in a namespace of its own, holds a copy of that
+view. Unmounted while a table is shown, the copy of the table on each is left
+behind in those namespaces: it no longer goes away when the table is taken
+away (a lost flag, a dead store, `apt remove`), and it keeps the store busy.
+Nothing on the machine can see it from outside those namespaces. `hdw4s check`
+is red once it notices the view was unmounted. To repair it, restart every
+desktop and namespaced service started since the boot, or reboot. To take the
+view away on purpose, turn the feature off and reboot.
+
+### The store
+
+In `tmpfs` mode the package makes the store itself, at
+`/run/hdw4s-shared-store`, with a root only root can enter: desktops reach the
+table through `/shared` and no other way. In `source` mode,
+`HDW4S_SHARED_SOURCE` names one, and it must be exactly this, or it is refused
+and `/shared` stays empty:
+
+  * **A whole filesystem of its own**, mounted at `HDW4S_SHARED_SOURCE` -- not a
+    directory inside some other filesystem, which would let a hard link reach
+    whatever else is on it.
+
+  * **Its root owned by root**, not writable by group or others, holding
+    `table/` (mode 0777, not sticky: the sticky bit would stop anyone replacing
+    or taking an item) **and nothing else**, apart from a `lost+found` or a
+    `.zfs`. Only `table` is ever shown to desktops or swept. Inside an
+    unprivileged container a root owned by the host's root shows as the
+    overflow uid (usually 65534, `nobody`), and is accepted as root's.
+
+  * **Mounted `nosymfollow,nodev,noexec,nosuid` and `strictatime`.** On NFS,
+    `strictatime` is the server's business rather than the client's: the
+    server's filesystem must record every access (for ZFS, `atime=on
+    relatime=off`), which nothing on the client can verify. Where a flag is
+    missing the package adds it to that mount in place, once, and logs it --
+    never a second mount beside it.
+
+A store not mounted at all leaves the empty directory underneath, which is not
+a filesystem's root and has no `table`, so it is refused rather than used.
+
+### Sharing one table between machines
+
+Mount the store **on the host**, with the flags, and bind it into each
+container, carrying the flags on the bind. If the store is on another machine,
+the host mounts it over NFS. In each container set `HDW4S_SHARED=source`,
+`HDW4S_SHARED_SOURCE` to where the bind lands, and `HDW4S_SHARED_SWEEP=external`;
+install `hdw4s-shared-sweep` on the machine that holds the storage and run its
+sweep there, and nowhere else. The package in a container checks what it is
+given and does nothing else, unless a flag is missing.
+
+  * **LXC, and Proxmox VE** (in `/etc/pve/lxc/<id>.conf`), one line per
+    container, the container path without its leading slash:
+
+        lxc.mount.entry: <host store> <path in container> none bind,create=dir,optional,nosymfollow,nodev,noexec,nosuid,strictatime 0 0
+
+    **The host mount must already carry all of these flags** (`nosymfollow`,
+    `nodev`, `noexec`, `nosuid`, `strictatime`); the entry can only pass them
+    through. If any of them differs -- a host mount that is `relatime` while
+    the entry says `strictatime` is enough -- the container receives the bind
+    with **no flags at all**, `optional` hides that the remount failed, and
+    hdw4s refuses it: `/shared` stays empty. Verify inside the container:
+
+        findmnt -o TARGET,OPTIONS <path in container>
+
+    `optional` lets the container boot when the host path is missing; the
+    guard then refuses the empty directory, which is the fail-soft case. On
+    Proxmox VE a `mpN:` mount point also works, but takes part in snapshots,
+    backups and migration, so the entry above is preferred.
+
+  * **Incus and LXD:** a disk device whose source is the host's flagged mount.
+    Whether it carries the flags through, or behaves like an LXC entry when
+    one differs, has not been measured: verify with `findmnt` inside.
+
+  * **A virtual machine:** an NFS mount carrying the flags, for example
+    `nosymfollow,nodev,noexec,nosuid,soft`.
+
+**For migration or high availability**, the host path in the entry must name
+the same store on every node the container may run on: present the store at
+one path everywhere -- locally where the storage is, over NFS elsewhere.
+
+### Caveats
+
+  * **In a container, `nosymfollow` holds against the container's users, not
+    against its root.** The other three flags arrive locked from the host, but
+    container root can remount without `nosymfollow`. The guard notices at its
+    next run and takes the table away; it catches accident and
+    misconfiguration, not a hostile root, who is trusted with the machine.
+
+  * **Reads served from another machine's NFS cache do not count as use.** The
+    server records the first read and not the ones after it, so an item only
+    ever read from a machine that is not the storage host can expire
+    `HDW4S_SHARED_IDLE` after it was last written or first read.
+    `HDW4S_SHARED_MAX_AGE` is unaffected. The optional usage relay of
+    hdw4s-shared-sweep(8) closes this; without it, nothing else changes.
+
+  * **An NFS store should be mounted `soft`.** A `hard` mount that stops
+    answering blocks everything that touches it until it answers again, and
+    `hdw4s check` warns about one.
+
+### hdw4s check
+
+Red when `/shared` is on and nothing is bound at `/run/hdw4s-shared`, when what
+is bound fails the guard, when `HDW4S_SHARED` or its expiry settings cannot be
+read, and when nobody is sweeping: some item has gone unused for longer than
+`HDW4S_SHARED_IDLE` plus two sweeps -- on a machine with
+`HDW4S_SHARED_SWEEP=external`, the only sign it has that the sweeper elsewhere
+has stopped. A warning, not a failure, for a store more than 90% full, an NFS
+store mounted `hard`, a filesystem that does not record creation times, the
+old `HDW4S_SHARED_SIZE` switch, and for a day after the table was taken away
+for a lost flag and bound again ("drift healed at ..."): a repair is never
+silent. In `tmpfs` mode it also says how big the table is, default or not.
+
+Red, too, when `/shared` in the root namespace is anything but the read-only
+view of `/run/hdw4s-shared` described above -- a view that kept the table after
+it was taken away, one whose source was deleted, one that is writable, or
+anything else mounted there -- and when the feature is on and the boot left no
+view at all. A view left for the next boot is a warning; an administrator's own
+`/shared` is named, not counted.
+
 ## TRANSPORTS
 
 How the reverse proxy reaches a session, in decreasing order of how much the
@@ -1055,6 +1318,11 @@ therefore open every desktop on the machine, so a session refuses to start as on
 
   * `/etc/systemd/system/hdw4s-proxy@<instance>.socket.d/`:
     The address the front door listens on, written by `hdw4s transport`.
+
+  * `/run/hdw4s-shared/`:
+    What every desktop binds as `/shared`: made empty at every boot, with the
+    table bound onto it while `/shared` is on and a store passes. See
+    **THE SHARED DROP AREA**.
 
   * `/run/hdw4s-stream/<instance>/s/`:
     Where the session's streaming server listens. Made by
