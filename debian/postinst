@@ -270,14 +270,22 @@ if [ "$1" = 'configure' ]; then
   #
   # Nothing that reads where the desktops are is restarted from here, ON
   # PURPOSE: a router restarted now would find no desktop in any slot and could
-  # hand a running one to a second visitor. The router is never restarted by
-  # this package's upgrade, and the updater asks hdw4s-old-layout itself and
-  # waits. The reboot is what makes the two layouts agree, so it is asked for.
+  # hand a running one to a second visitor. So the router is not stopped by the
+  # upgrade (--no-stop-on-upgrade in debian/rules: debhelper's own prerm used to
+  # stop it, measured on a dev box 2026-10-04, and the next arrival started a
+  # new one), and it is restarted onto the new code below ONLY when the layout
+  # has not changed. The updater asks hdw4s-old-layout itself and waits. The
+  # reboot is what makes the two layouts agree, so it is asked for.
   if /usr/lib/hdw4s/hdw4s-old-layout; then
     echo 'hdw4s: this version keeps its runtime files in /run/hdw4s, and this' >&2
     echo '       machine is still running the previous layout. Reboot it now:' >&2
     echo '       desktops that are already running still use the old places, and' >&2
     echo '       nothing is moved across, or restarted, while they run.' >&2
+  elif [ -d /run/systemd/system ]; then
+    # Same layout: the router may start over on the new code at once, as the
+    # stop in prerm used to make it. Its routing state is kept across this
+    # (RuntimeDirectoryPreserve=yes), so no visitor loses a desktop.
+    systemctl try-restart hdw4s-demux.service >/dev/null 2>&1 || :
   fi
 
   # Move any ephemeral slot this machine already has off TCP.

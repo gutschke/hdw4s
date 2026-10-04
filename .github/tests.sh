@@ -8809,10 +8809,28 @@ echo '== hdw4s check sees a named desktop that will not start =='
   has 'and how the record is cleared'    "${out}" 'rm -f /run/hdw4s/ledger/alice'
 )
 
+echo '== an upgrade never stops the router, and restarts it only when the layout is unchanged =='
+( set +e
+  # debhelper's prerm stopped hdw4s-demux.service on every upgrade, and the next
+  # arrival started a new one: harmless while the state kept its path, a hazard
+  # when it moved -- the new router saw every slot free (dev box, 2026-10-04).
+  line="$(command grep -E 'dh_installsystemd .*hdw4s-demux\.service' "${ROOT}/debian/rules")"
+  case "${line}" in *--no-stop-on-upgrade*) ok 'the router service is not stopped on upgrade';;
+    *) bad 'the router service is not stopped on upgrade' "${line:-no line}";; esac
+  # The one restart is in the branch where hdw4s-old-layout said NO: read the
+  # postinst block from the window test to the end of its if.
+  blk="$(sed -n '/hdw4s-old-layout; then/,/^  fi$/p' "${ROOT}/debian/postinst")"
+  win="$(sed -n '/hdw4s-old-layout; then/,/^  elif /p' <<<"${blk}")"
+  rest="$(sed -n '/^  elif /,/^  fi$/p' <<<"${blk}")"
+  hasnt 'inside the window nothing restarts the router' "${win}" 'hdw4s-demux'
+  has   'outside it, the router is restarted onto the new code' "${rest}" 'try-restart hdw4s-demux.service'
+  is    'and nowhere else in postinst' "$(command grep -c 'hdw4s-demux.service' "${ROOT}/debian/postinst")" '1'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1682  # update when tests are added; a wrong number is the point
+EXPECTED=1686  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
