@@ -28,6 +28,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-templat
          hdw4s-slot-scrub@.service
          hdw4s-start hdw4s-start@.service hdw4s-start@.path
          hdw4s-incarnation hdw4s-incarnation@.service
+         hdw4s-background hdw4s-stage-wait
          hdw4s-stream-dir hdw4s-stream@.service hdw4s-sysusers.conf
          hdw4s-selkies-webrtc
          hdw4s-proxy@.socket hdw4s-proxy@.service

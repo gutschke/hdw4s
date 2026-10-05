@@ -8685,10 +8685,23 @@ echo '== an upgrade never stops the router, and restarts it onto the new code ==
   has   'removal stops the router service itself' "${rm_blk}" 'systemctl stop hdw4s-demux.service'
 )
 
+echo '== install.sh ships every library file the package does =='
+( set +e
+  # Two lists of the same files, and they had drifted: the package shipped
+  # hdw4s-background and hdw4s-stage-wait, install.sh did not, so on an
+  # install.sh install a visitor desktop came up on the flat fallback colour
+  # and never armed the startup hold (read from hdw4s-run-session, not
+  # measured: neither is fatal there). Nothing compared the lists.
+  src="${ROOT}"; eval "$(sed -n '/^SOURCES=(/,/LICENSE)$/p' "${ROOT}/install.sh")"
+  missing="$(awk '$1 !~ /^#/ && NF == 2 && $2 == "usr/lib/hdw4s" { print $1 }' "${ROOT}/debian/install" |
+             while read -r f; do printf '%s\n' "${SOURCES[@]}" | command grep -qx -- "${f}" || echo "${f}"; done)"
+  is 'install.sh ships every library file the package does' "${missing}" ''
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1653  # update when tests are added; a wrong number is the point
+EXPECTED=1654  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
