@@ -1,0 +1,802 @@
+#!/usr/bin/python3
+"""Run a command inside a running hdw4s desktop, as its user. Root only.
+
+    hdw4s-enter <unit> [--incarnation <instance>=<value>] -- <command> [args...]
+
+The back end of "hdw4s exec", which decides WHICH desktop; this decides nothing
+about that and only enters the one it is named, honestly. hdw4s(8), "exec".
+Exit status: the command's, or 125 when this refuses (and says why).
+
+WHAT "INSIDE" MEANS HERE, and each part is paid for:
+
+  * The desktop's mount namespace. An ephemeral desktop's home and /tmp are
+    tmpfs mounts that exist only there; a command beside the desktop reads the
+    EMPTY directories at the same paths, succeeds, and reports on nothing.
+  * Its UTS namespace (ProtectHostname= gives it one), and any other namespace
+    of its main process that differs from ours.
+  * Its control group, so whatever the unit enforces by cgroup -- the
+    firewall's cross-session rules, SocketBind*=, the memory limit -- applies
+    to the command too. A command left in the caller's ssh scope is outside all
+    of it and its network answers would be about somebody else. The cost is the
+    meaning: it dies with the desktop and counts against its memory.
+  * Its user: uid, gid AND supplementary groups. Dropping the groups would turn
+    a named user's /dev/dri into "permission denied" that the desktop never sees.
+  * Its umask (the units set UMask=0077: a file the command makes is as private
+    as one the desktop makes) and its resource limits.
+  * Its environment, by an ALLOW-LIST (hdw4s-session-environment), never all of
+    it: the session's environment carries its proxy credential.
+
+WHAT IT CANNOT COPY, AND SAYS SO EVERY TIME: the seccomp filter, and any LSM
+label. Every property is reported same or DIFFERENT, measured from /proc after
+entry rather than asserted.
+
+THE PROCESS IS SYSTEMD'S, AND CHECKED TO BE. An earlier private tool picked the
+first process carrying the session's variables. Every process the occupant
+starts carries them, and an occupant can make a user and mount namespace of
+their own with any /usr/bin they like; entering THAT as root runs their binary
+as root. Measured 2026-10-05: "FORGED-SETPRIV-RAN uid=0". So:
+
+  * the namespaces entered are the unit's main process's. The units have
+    NotifyAccess=all, and a MAINPID= message from inside the cgroup can MOVE
+    systemd's MainPID to a process the occupant chose -- so MainPID must equal
+    ExecMainPID (what systemd itself forked), must have started when systemd
+    says that started, must be in the unit's own cgroup and in OUR user
+    namespace;
+  * the environment and credentials come from a DIRECT CHILD of that process
+    sharing all of those, never uid or gid 0;
+  * both are held by pidfd while every fact is read ONCE, and must still be
+    alive afterwards, so a recycled pid cannot answer for either;
+  * nothing found inside the desktop runs until uid, gid and groups are the
+    desktop's: this process is resolved outside, setns() and the drop happen
+    here, and only the final exec looks up the command inside.
+
+ROOT'S TERMINAL NEVER REACHES THE DESKTOP. The command can be code the occupant
+influences (a ~/.bashrc, a PATH entry), and a process that inherits root's
+terminal can outlive the command, take the terminal's foreground and read what
+root types next -- the classic "su" terminal attack. So the command runs in a
+child in a session of its own, and this process, which stays outside, relays
+its streams: through a fresh pseudo-terminal when root's input and output are
+both terminals (as ssh -t), through pipes otherwise -- with /dev/null for input
+when root's input is a terminal nobody would be answering. The command never
+holds a descriptor of root's.
+
+NEVER THE SCREEN BY DEFAULT. The variables marked "display" in the list are
+withheld. That is a courtesy, not a wall -- a process running as the desktop's
+user can find the display itself -- and the report says exactly that.
+"""
+
+import ctypes
+import errno
+import fcntl
+import os
+import pwd
+import resource
+import select
+import signal
+import subprocess
+import sys
+import struct
+import termios
+import time
+import tty
+
+LIBDIR = os.environ.get("HDW4S_LIBDIR", "/usr/lib/hdw4s")
+ENV_LIST = os.path.join(LIBDIR, "hdw4s-session-environment")
+INCARNATION_AUTHORITY = os.path.join(
+    os.environ.get("HDW4S_RUNDIR", "/run/hdw4s"), "incarnation")
+CGROUP_ROOT = "/sys/fs/cgroup"
+REFUSED = 125
+
+# setns() order: everything but the mount namespace first.
+NAMESPACES = ("uts", "ipc", "net", "cgroup", "mnt")
+REPORTED = ("mnt", "uts", "ipc", "net", "pid", "user", "cgroup")
+CREDS = ("Uid", "Gid", "Groups", "NoNewPrivs", "CapBnd", "Umask")
+# How far /proc's start time may sit from systemd's record of the fork. Both
+# count from boot; they part only across a suspend, which a server does not do.
+START_SLACK = 5.0
+LIMIT_NAMES = {
+    "Max cpu time": "RLIMIT_CPU", "Max file size": "RLIMIT_FSIZE",
+    "Max data size": "RLIMIT_DATA", "Max stack size": "RLIMIT_STACK",
+    "Max core file size": "RLIMIT_CORE", "Max resident set": "RLIMIT_RSS",
+    "Max processes": "RLIMIT_NPROC", "Max open files": "RLIMIT_NOFILE",
+    "Max locked memory": "RLIMIT_MEMLOCK", "Max address space": "RLIMIT_AS",
+    "Max file locks": "RLIMIT_LOCKS", "Max pending signals": "RLIMIT_SIGPENDING",
+    "Max msgqueue size": "RLIMIT_MSGQUEUE", "Max nice priority": "RLIMIT_NICE",
+    "Max realtime priority": "RLIMIT_RTPRIO",
+    "Max realtime timeout": "RLIMIT_RTTIME"}
+
+PR_CAPBSET_DROP = 24
+PR_SET_NO_NEW_PRIVS = 38
+CAP_LAST_CAP_FILE = "/proc/sys/kernel/cap_last_cap"
+
+
+class Refusal(Exception):
+    pass
+
+
+def say(msg):
+    sys.stderr.write("hdw4s exec: %s\n" % msg)
+    sys.stderr.flush()
+
+
+def unit_facts(unit, run=subprocess.run):
+    out = run(["systemctl", "show", "-p", "ActiveState", "-p", "MainPID",
+               "-p", "ExecMainPID", "-p", "ControlGroup",
+               "-p", "ExecMainStartTimestampMonotonic", "--", unit],
+              capture_output=True, text=True, check=False).stdout
+    f = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+    return {"state": f.get("ActiveState", ""),
+            "main": int(f.get("MainPID") or 0),
+            "execmain": int(f.get("ExecMainPID") or 0),
+            "cgroup": f.get("ControlGroup", ""),
+            "started": int(f.get("ExecMainStartTimestampMonotonic") or 0) / 1e6}
+
+
+def ns_of(pid, kind, proc="/proc"):
+    try:
+        return os.readlink("%s/%s/ns/%s" % (proc, pid, kind))
+    except OSError:
+        return None
+
+
+def cgroup_of(pid, proc="/proc"):
+    """The cgroup v2 path of PID ("0::<path>"), or None."""
+    try:
+        with open("%s/%s/cgroup" % (proc, pid)) as f:
+            for line in f:
+                if line.startswith("0::"):
+                    return line[3:].strip()
+    except OSError:
+        pass
+    return None
+
+
+def status_of(pid, proc="/proc"):
+    out = {}
+    with open("%s/%s/status" % (proc, pid)) as f:
+        for line in f:
+            k, _, v = line.partition(":")
+            out[k] = v.strip()
+    return out
+
+
+def environ_of(pid, proc="/proc"):
+    with open("%s/%s/environ" % (proc, pid), "rb") as f:
+        raw = f.read()
+    env = {}
+    for item in raw.split(b"\0"):
+        k, sep, v = item.partition(b"=")
+        if sep:
+            env[k.decode("utf-8", "replace")] = v.decode("utf-8", "replace")
+    return env
+
+
+def limits_of(pid, proc="/proc"):
+    """{"RLIMIT_x": (soft, hard)} as /proc/<pid>/limits states them."""
+    def conv(v):
+        return resource.RLIM_INFINITY if v == "unlimited" else int(v)
+    out = {}
+    with open("%s/%s/limits" % (proc, pid)) as f:
+        for line in f:
+            for label, name in LIMIT_NAMES.items():
+                if line.startswith(label):
+                    soft, hard = line[len(label):].split()[:2]
+                    out[name] = (conv(soft), conv(hard))
+    return out
+
+
+def children_of(pid, proc="/proc"):
+    try:
+        with open("%s/%s/task/%s/children" % (proc, pid, pid)) as f:
+            return [int(x) for x in f.read().split()]
+    except OSError:
+        return []
+
+
+def since_boot(pid, proc="/proc"):
+    """When PID started, in seconds since boot."""
+    with open("%s/%s/stat" % (proc, pid)) as f:
+        fields = f.read().rsplit(")", 1)[1].split()
+    return int(fields[19]) / os.sysconf("SC_CLK_TCK")  # field 22 overall
+
+
+def wall_start(pid, proc="/proc"):
+    """When PID started, in seconds since the epoch."""
+    with open("%s/stat" % proc) as f:
+        btime = next(int(l.split()[1]) for l in f if l.startswith("btime "))
+    return btime + since_boot(pid, proc)
+
+
+def read_env_list(path=ENV_LIST):
+    """[(name, flags)] from hdw4s-session-environment."""
+    out = []
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if not parts or parts[0].startswith("#"):
+                continue
+            out.append((parts[0], set(parts[1:])))
+    return out
+
+
+def filtered_env(source, names, display=False):
+    """The command's environment: listed names only, and their values from the
+    desktop. Returns (env, withheld) -- what was held back for the screen."""
+    env, withheld = {}, []
+    for name, flags in names:
+        if name not in source:
+            continue
+        if "display" in flags and not display:
+            withheld.append(name)
+            continue
+        env[name] = source[name]
+    return env, withheld
+
+
+def choose(unit, proc="/proc", facts=unit_facts, pidfd_open=os.pidfd_open):
+    """(main pid, env source pid, their pidfds) for UNIT, or Refusal.
+
+    Each pidfd is opened BEFORE its process is checked, so every check is of
+    the process the pidfd holds: a number that died and was reused before the
+    pidfd existed fails the checks (start time, ExecMainPID) rather than
+    passing them on the strength of its predecessor. gather() then requires
+    both to be alive after its own reads. See the header."""
+    u = facts(unit)
+    if u["state"] != "active":
+        raise Refusal("%s is %s, not running -- nothing to enter, and this "
+                      "never starts a desktop" % (unit, u["state"] or "unknown"))
+    main, cgroup = u["main"], u["cgroup"]
+    if main <= 0 or not cgroup or not u["started"]:
+        raise Refusal("systemd names no main process for %s" % unit)
+    if main != u["execmain"]:
+        raise Refusal("%s's main process %d is not the one systemd started "
+                      "(%d): something inside the desktop moved it"
+                      % (unit, main, u["execmain"]))
+    pf_main = pidfd_open(main)
+    try:
+        if abs(since_boot(main, proc) - u["started"]) > START_SLACK:
+            raise Refusal("%s's main process %d did not start when systemd "
+                          "started it -- the number has been reused" % (unit, main))
+        if cgroup_of(main, proc) != cgroup:
+            raise Refusal("%s's main process %d is not in the unit's own "
+                          "control group" % (unit, main))
+        mine = ns_of("self", "user", proc)
+        if mine is None or ns_of(main, "user", proc) != mine:
+            raise Refusal("%s's main process %d is not in this system's user "
+                          "namespace" % (unit, main))
+        mnt = ns_of(main, "mnt", proc)
+        uid = status_of(main, proc)["Uid"].split()[0]
+        for child in children_of(main, proc):
+            try:
+                pf_child = pidfd_open(child)
+            except OSError:
+                continue
+            try:
+                if (status_of(child, proc).get("PPid", str(main)) == str(main) and
+                        ns_of(child, "mnt", proc) == mnt and
+                        ns_of(child, "user", proc) == mine and
+                        status_of(child, proc)["Uid"].split()[0] == uid and
+                        cgroup_of(child, proc) == cgroup and
+                        "DBUS_SESSION_BUS_ADDRESS" in environ_of(child, proc)):
+                    return main, child, pf_main, pf_child
+            except (OSError, KeyError):
+                pass
+            os.close(pf_child)
+    except BaseException:
+        os.close(pf_main)
+        raise
+    os.close(pf_main)
+    raise Refusal("%s has no session bus yet (no child of its main process %d "
+                  "carries one); try again once the desktop has started"
+                  % (unit, main))
+
+
+def alive(pidfd):
+    try:
+        signal.pidfd_send_signal(pidfd, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def label_of(pid, proc="/proc"):
+    try:
+        with open("%s/%s/attr/current" % (proc, pid)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def snapshot(main, src, proc="/proc"):
+    """What the report compares. NAMESPACES are the main process's -- what this
+    enters -- and CREDENTIALS the child's, whose user it becomes. Of the
+    desktop: taken while still root and outside. Of this process: after entry,
+    with main and src both "self"."""
+    st = status_of(src, proc)
+    return {"ns": {k: ns_of(main, k, proc) for k in REPORTED},
+            "status": {k: st.get(k, "").split() for k in CREDS},
+            "filters": st.get("Seccomp_filters"),
+            "limits": limits_of(src, proc),
+            "cgroup": cgroup_of(src, proc), "label": label_of(src, proc)}
+
+
+def gather(main, src, pf_main, pf_src, display=False, proc="/proc"):
+    """Every fact the entry needs, read ONCE while choose()'s pidfds hold both
+    processes -- and refused unless both are still alive afterwards: while a
+    process lives its number cannot be reused, so the reads were of it."""
+    st = status_of(src, proc)
+    uid, gid = int(st["Uid"].split()[0]), int(st["Gid"].split()[0])
+    if uid == 0 or gid == 0:
+        raise Refusal("the desktop runs as uid %d gid %d; this never runs "
+                      "a command as root" % (uid, gid))
+    f = {"uid": uid, "gid": gid,
+         "groups": [int(g) for g in st.get("Groups", "").split()],
+         "capbnd": int(st["CapBnd"], 16),
+         "nnp": st.get("NoNewPrivs") == "1",
+         "umask": int(st["Umask"], 8),
+         "limits": limits_of(src, proc),
+         "cgroup": cgroup_of(src, proc),
+         "snapshot": snapshot(main, src, proc)}
+    f["env"], f["withheld"] = filtered_env(environ_of(src, proc),
+                                           read_env_list(), display)
+    f["nsfds"] = {}
+    for kind in NAMESPACES:
+        if ns_of(main, kind, proc) != ns_of("self", kind, proc):
+            f["nsfds"][kind] = os.open("%s/%d/ns/%s" % (proc, main, kind),
+                                       os.O_RDONLY | os.O_CLOEXEC)
+    if not (alive(pf_main) and alive(pf_src)):
+        raise Refusal("the desktop's processes ended while being read")
+    f["pf_main"] = pf_main
+    return f
+
+
+def check_incarnation(inst, value, main, authority=INCARNATION_AUTHORITY,
+                      proc="/proc"):
+    """The desktop entered is the one the visitor's letting had. hdw4s exec
+    resolved the address to INST while VALUE was its identity; between that
+    and now the seat can have been let again. Root's record must still say
+    VALUE, and the process must have started after that record was written
+    (hdw4s-incarnation runs before the desktop, by After=)."""
+    path = os.path.join(authority, inst)
+    try:
+        with open(path) as f:
+            now = f.read().strip()
+        written = os.stat(path).st_mtime
+    except OSError:
+        now, written = None, None
+    if now is None or now != value:
+        raise Refusal("%s is no longer running the desktop that address had" % inst)
+    if wall_start(main, proc) + 1 < written:
+        raise Refusal("%s's running desktop started before its own identity "
+                      "was written -- refusing rather than guessing" % inst)
+
+
+def libc():
+    return ctypes.CDLL(None, use_errno=True)
+
+
+def copy_bounding_set(mask):
+    """Drop every capability from our bounding set that the desktop lacks.
+    Done while still root (it needs CAP_SETPCAP), before the uid change."""
+    with open(CAP_LAST_CAP_FILE) as f:
+        last = int(f.read())
+    c = libc()
+    for cap in range(last + 1):
+        if not (mask >> cap) & 1:
+            if c.prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) != 0:
+                raise OSError(ctypes.get_errno(), "PR_CAPBSET_DROP %d" % cap)
+
+
+def enter(f):
+    """Become the desktop's process in every respect we can, in THIS process
+    (the child). Nothing inside the desktop has run yet when it returns."""
+    # The cgroup first: it is written through the HOST's /sys/fs/cgroup, which
+    # the desktop's mount namespace need not show.
+    with open(os.path.join(CGROUP_ROOT + f["cgroup"], "cgroup.procs"), "w") as c:
+        c.write("0\n")
+    for kind in NAMESPACES:
+        if kind in f["nsfds"]:
+            os.setns(f["nsfds"][kind], 0)
+            os.close(f["nsfds"][kind])
+    # As root still: a hard limit can only be RAISED with privilege.
+    # Only what this Python can name (it has no RLIMIT_LOCKS, measured on
+    # noble's 3.12); one it cannot set shows as DIFFERENT in the report.
+    for name, lim in f["limits"].items():
+        if hasattr(resource, name):
+            resource.setrlimit(getattr(resource, name), lim)
+    copy_bounding_set(f["capbnd"])
+    if f["nnp"] and libc().prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS")
+    os.umask(f["umask"])
+    os.setgroups(f["groups"])
+    os.setresgid(f["gid"], f["gid"], f["gid"])
+    os.setresuid(f["uid"], f["uid"], f["uid"])
+    if os.getresuid() != (f["uid"],) * 3 or os.getresgid() != (f["gid"],) * 3:
+        raise Refusal("could not become uid %d gid %d" % (f["uid"], f["gid"]))
+    try:
+        os.chdir(f["env"].get("HOME") or pwd.getpwuid(f["uid"]).pw_dir)
+    except (OSError, KeyError):
+        os.chdir("/")
+
+
+def report(main, src, them, env, withheld, out=sys.stderr):
+    """Same/DIFFERENT for each property, measured now from /proc."""
+    me = snapshot("self", "self")
+    rows = [("%s ns" % k, me["ns"][k] == them["ns"][k]) for k in REPORTED]
+    rows += [(k, me["status"][k] == them["status"][k]) for k in CREDS]
+    rows += [("limits", me["limits"] == them["limits"]),
+             ("control group", me["cgroup"] == them["cgroup"]),
+             ("LSM label", me["label"] == them["label"])]
+    same = [name for name, ok in rows if ok]
+    differ = [name for name, ok in rows if not ok]
+    out.write("hdw4s exec: entered the desktop of pid %d (systemd's main "
+              "process); user and environment of pid %d\n" % (main, src))
+    out.write("hdw4s exec: same as the desktop: %s\n" % (", ".join(same) or "nothing"))
+    if differ:
+        out.write("hdw4s exec: DIFFERENT from the desktop: %s\n" % ", ".join(differ))
+    # SECCOMP BY FILTER COUNT, NEVER BY MODE. Inside a container every process
+    # is in mode 2 already -- the container installs a filter of its own -- so
+    # comparing the mode said "same" for a command carrying 1 filter beside a
+    # desktop carrying 29 (measured 2026-10-05). Even equal counts would not
+    # prove equal filters, which is why this line never says "same".
+    out.write("hdw4s exec: seccomp filters: %s here, %s in the desktop -- they "
+              "cannot be copied, so system calls the desktop is refused may "
+              "succeed here\n" % (me["filters"] or "0", them["filters"] or "0"))
+    out.write("hdw4s exec: %d variable(s) from the allow-list; %s\n" % (
+        len(env), ("withheld for the screen: %s -- a process running as this "
+                   "user can still find the display itself"
+                   % " ".join(withheld)) if withheld else "nothing withheld"))
+    out.flush()
+
+
+def run_child(main, src, f, cmd, fds):
+    """In the child: take FDS as 0, 1, 2 (and the terminal, if one is among
+    them, as the controlling terminal of a session of its own), enter, report,
+    exec. Never returns."""
+    try:
+        os.setsid()
+        for n, fd in enumerate(fds):
+            os.dup2(fd, n)
+        tty_fd = next((n for n in (0, 1, 2) if os.isatty(n)), None)
+        if tty_fd is not None:
+            fcntl.ioctl(tty_fd, termios.TIOCSCTTY, 0)
+        enter(f)
+        # The desktop entered is still the one read: its main process lives,
+        # so its number -- and the cgroup path just joined -- are still its.
+        if not alive(f["pf_main"]):
+            raise Refusal("the desktop stopped while being entered")
+        report(main, src, f["snapshot"], f["env"], f["withheld"])
+        # Nothing of ours, and nothing our caller left open, reaches the
+        # command: only 0, 1 and 2, which are pipes or a terminal of its own.
+        # To the top of the range, not the open-files limit: enter() has just
+        # set the desktop's, and a descriptor above it would survive.
+        os.closerange(3, 2**31 - 1)
+        # This process ignores SIGPIPE (Python's default, and the relay's
+        # need); the command must not inherit that.
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except Refusal as e:
+        say("REFUSING: %s" % e)
+        os._exit(REFUSED)
+    except Exception as e:  # pylint: disable=broad-except
+        # ANY failure here is a refusal, never a traceback: this is the child,
+        # half-entered, and nothing it was about to run may run.
+        say("REFUSING: could not enter the desktop: %r" % e)
+        os._exit(REFUSED)
+    try:
+        os.execvpe(cmd[0], cmd, f["env"])
+    except OSError as e:
+        say("%s: %s" % (cmd[0], e.strerror))
+        os._exit(127)
+
+
+def exit_code(st):
+    if os.WIFSIGNALED(st):
+        return 128 + os.WTERMSIG(st)
+    return os.waitstatus_to_exitcode(st)
+
+
+class Wire:
+    """One stream between root and the command: bytes read from SRC, held, and
+    written to DST as fast as DST will take them, never faster."""
+    CAP = 65536
+
+    def __init__(self, src, dst, to_command):
+        self.src, self.dst, self.to_command = src, dst, to_command
+        self.buf = bytearray()
+        self.reading = True     # SRC may still give more
+        self.open = True        # DST still wants more
+        self.eofs = 0
+        self.owed = None        # after the command exits: bytes still to come
+
+
+def nonblocking(fd):
+    fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
+
+
+def spawn(main, src, f, cmd):
+    """Run the command in a child and RELAY its standard streams; return its
+    wait status. Root's own descriptors never reach the child, so nothing it
+    leaves running can hold them, read from them, or keep this waiting.
+
+    When root's input AND output are terminals, the command gets a fresh
+    pseudo-terminal, given root's terminal's settings, and root's keyboard --
+    root's terminal goes raw while it does, and comes back after. A stream that is a pipe or a file goes through a
+    PIPE, byte for byte: through a terminal, input was cut at 4095 bytes a
+    line and output gained carriage returns (found in review; both exited 0).
+
+    NOTHING HERE BLOCKS ON ONE STREAM. Each has its own buffer and is written
+    only when select() says its destination will take bytes: a blocking write
+    deadlocked against a command that filled its output before reading its
+    input, and no signal could break it (found in review)."""
+    # INTERACTIVE ONLY WHEN BOTH ENDS ARE A TERMINAL, as ssh decides -t: then
+    # the command gets a terminal and the keyboard. Otherwise nothing here
+    # reads root's keyboard: "hdw4s exec ... | less" took every key meant for
+    # the pager, and restored the pager's terminal mode over root's (review).
+    # A keyboard with no terminal to answer it gives the command /dev/null.
+    interactive = os.isatty(0) and os.isatty(1)
+    ttys = [interactive, interactive, interactive and os.isatty(2)]
+    stdin_dead = os.isatty(0) and not interactive
+    master = slave = None
+    if interactive:
+        master, slave = os.openpty()
+        # Root's terminal's own settings -- its interrupt key, its end-of-file
+        # key -- as ssh and su give theirs. A fresh one's are not a working
+        # terminal's: its end-of-file character read back as NUL (measured).
+        try:
+            termios.tcsetattr(slave, termios.TCSANOW,
+                              termios.tcgetattr(ttys.index(True)))
+            if ttys[0]:
+                fcntl.ioctl(master, termios.TIOCSWINSZ,
+                            fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+        except (termios.error, OSError):
+            pass
+    child_fds, wires = [], []
+    for n in (0, 1, 2):
+        if ttys[n]:
+            child_fds.append(slave)
+        elif n == 0 and stdin_dead:
+            child_fds.append(os.open("/dev/null", os.O_RDONLY | os.O_CLOEXEC))
+        elif n == 0:
+            r, w = os.pipe()
+            child_fds.append(r)
+            wires.append(Wire(0, w, True))
+        else:
+            r, w = os.pipe()
+            child_fds.append(w)
+            wires.append(Wire(r, n, False))
+    if master is not None:
+        if ttys[0]:
+            wires.append(Wire(0, master, True))
+        wires.append(Wire(master, 1 if ttys[1] else 2, False))
+
+    pid = os.fork()
+    if pid == 0:
+        run_child(main, src, f, cmd, child_fds)
+    for fd in set(child_fds):
+        os.close(fd)
+    ours = {fd for w in wires for fd in (w.src, w.dst) if fd > 2}
+    for fd in ours:
+        nonblocking(fd)
+
+    def forward(sig, _):
+        # The command's whole process group: it leads a session of its own.
+        try:
+            os.killpg(pid, sig)
+        except OSError:
+            pass
+    stops = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+    for sig in stops:
+        signal.signal(sig, forward)
+    if ttys[0]:
+        def winch(*_):
+            try:
+                fcntl.ioctl(master, termios.TIOCSWINSZ,
+                            fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+            except OSError:
+                pass
+        signal.signal(signal.SIGWINCH, winch)
+
+    saved = termios.tcgetattr(0) if ttys[0] else None
+    status = None
+    try:
+        if ttys[0]:
+            # TCSANOW, not setraw()'s default TCSAFLUSH: that DISCARDS what was
+            # typed before the relay began -- the first line typed after
+            # pressing Enter on "hdw4s exec ... -- bash -i" (measured).
+            tty.setraw(0, termios.TCSANOW)
+        while True:
+            if status is None:
+                done, st = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    status = st
+                    # Root's terminal and Ctrl-C are root's again for the
+                    # drain: a stalled reader must be interruptible (review).
+                    if saved is not None:
+                        restore(saved)
+                        saved = None
+                    for sig in stops:
+                        signal.signal(sig, signal.SIG_DFL)
+                    if master is not None:
+                        # Output the command wrote just before exiting may
+                        # still be on its way through the terminal layer.
+                        time.sleep(0.05)
+                    # EVERYTHING the command wrote before it exited, at the
+                    # reader's own pace, with no deadline -- and nothing after:
+                    # the wires close under anything it left behind. A 2 s cap
+                    # here dropped the tail of the output whenever root's reader
+                    # was slower (a pager, a stalled link), exit 0 (review).
+                    for w in wires:
+                        if w.to_command:
+                            w.reading = w.open = False
+                        elif w.reading:
+                            w.owed = waiting(w.src)
+                            w.reading = w.owed > 0
+            if status is not None and \
+                    not any(w.buf or w.reading for w in wires if w.open):
+                break
+            rd = [w.src for w in wires
+                  if w.reading and w.open and len(w.buf) < Wire.CAP]
+            wr = [w.dst for w in wires if w.open and w.buf]
+            try:
+                r, wable, _ = select.select(rd, wr, [], 0.2)
+            except InterruptedError:
+                continue
+            for w in wires:
+                if w.src in r and w.reading and w.open:
+                    pull(w, master)
+                if w.dst in wable and w.open and w.buf:
+                    push(w, pid)
+                if w.to_command and not w.reading and not w.buf and w.open \
+                        and w.dst != master:
+                    # Root's input ended: the command's input ends too.
+                    os.close(w.dst)
+                    ours.discard(w.dst)
+                    w.open = False
+    finally:
+        if saved is not None:
+            restore(saved)
+        for fd in ours:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    if status is None:
+        status = os.waitpid(pid, 0)[1]
+    return status
+
+
+def restore(saved):
+    try:
+        termios.tcsetattr(0, termios.TCSADRAIN, saved)
+    except termios.error:
+        pass  # root's terminal hung up: nothing to restore
+
+
+def eof_char(fd):
+    """The end-of-file character of the terminal FD, or Ctrl-D."""
+    try:
+        c = termios.tcgetattr(fd)[6][termios.VEOF]
+        if c and c != b"\0":
+            return c
+    except termios.error:
+        pass
+    return b"\x04"
+
+
+def waiting(fd):
+    """How many bytes FD holds unread, as the kernel counts them."""
+    try:
+        return struct.unpack("i", fcntl.ioctl(fd, termios.FIONREAD, b"\0" * 4))[0]
+    except OSError:
+        return 0
+
+
+def pull(w, master):
+    """One read from W's source into its buffer."""
+    want = Wire.CAP - len(w.buf)
+    if w.owed is not None:
+        want = min(want, w.owed)
+    try:
+        data = os.read(w.src, want)
+    except BlockingIOError:
+        return
+    except OSError as e:
+        if e.errno != errno.EIO:  # EIO: a terminal whose other side has gone
+            raise
+        data = b""
+    if data:
+        w.buf += data
+        if w.src == 0:
+            w.eofs = 0
+        if w.owed is not None:
+            w.owed -= len(data)
+            w.reading = w.owed > 0
+        return
+    if w.src == 0 and w.dst == master:
+        # Root's TERMINAL said end-of-file: a Ctrl-D typed before it went raw.
+        # Say it to the command's terminal too, and keep listening: dropping
+        # the keyboard left an interactive command waiting for input that
+        # could never come (measured). A terminal that keeps saying it -- hung
+        # up -- is let go.
+        w.eofs += 1
+        w.buf += eof_char(master)
+        if w.eofs >= 3:
+            w.reading = False
+        return
+    w.reading = False
+
+
+def push(w, pid):
+    """As much of W's buffer as its destination takes now. A destination that
+    is gone ends the wire: the command's input, closed by the command; or root's
+    output, closed by root's reader -- then the command's output pipe is closed
+    too, so it meets EPIPE as it would in a shell pipeline."""
+    chunk = w.buf[:4096] if w.dst <= 2 else w.buf
+    try:
+        n = os.write(w.dst, chunk)
+    except BlockingIOError:
+        return
+    except BrokenPipeError:
+        w.buf.clear()
+        w.open = False
+        # Its own pipe is closed, so the command meets EPIPE as in a shell
+        # pipeline -- but never the terminal's master: the keyboard's wire
+        # writes to it too, and closing it hung the command up (review).
+        if not w.to_command and w.src > 2 and not os.isatty(w.src):
+            try:
+                os.close(w.src)
+            except OSError:
+                pass
+        w.reading = False
+        return
+    del w.buf[:n]
+
+
+def main(argv):
+    # A caller that closed one of 0, 1, 2 would have os.pipe() hand that
+    # number back, and root's stream and the command's would be confused.
+    for n in (0, 1, 2):
+        try:
+            os.fstat(n)
+        except OSError:
+            os.dup2(os.open("/dev/null", os.O_RDWR), n)
+    if os.geteuid() != 0:
+        say("only root may run a command in somebody's desktop")
+        return 1
+    usage = ("usage: hdw4s-enter <unit> [--incarnation <instance>=<value>] "
+             "-- <command> [args...]")
+    args = list(argv)
+    inc = None
+    if not args:
+        say(usage)
+        return 2
+    unit = args.pop(0)
+    if args[:1] == ["--incarnation"]:
+        if len(args) < 2 or "=" not in args[1]:
+            say(usage)
+            return 2
+        inst, _, value = args[1].partition("=")
+        inc = (inst, value)
+        args = args[2:]
+    if args[:1] != ["--"] or len(args) < 2:
+        say(usage)
+        return 2
+    cmd = args[1:]
+    try:
+        main_pid, src, pf_main, pf_src = choose(unit)
+        if inc:
+            check_incarnation(inc[0], inc[1], main_pid)
+        f = gather(main_pid, src, pf_main, pf_src)
+    except Refusal as e:
+        say("REFUSING: %s" % e)
+        return REFUSED
+    except (OSError, KeyError, ValueError, IndexError) as e:
+        say("REFUSING: could not read the desktop's processes: %s" % e)
+        return REFUSED
+    if "TERM" in os.environ:
+        f["env"]["TERM"] = os.environ["TERM"]
+    return exit_code(spawn(main_pid, src, f, cmd))
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

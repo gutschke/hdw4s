@@ -91,6 +91,7 @@ import hashlib
 import socket
 import stat
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -1104,7 +1105,8 @@ class Ownership:
     start-up self-check builds.
     """
 
-    def __init__(self, path=None):
+    def __init__(self, path=None, quiet=False):
+        self._quiet = quiet
         self._lock = threading.Lock()
         # HELD ACROSS "WHICH SLOT IS FREE" AND "IT IS NOW LET", by let_slot()
         # and by reclaim_slot(), and by nothing else. Not self._lock, which
@@ -1166,6 +1168,8 @@ class Ownership:
             self._by_identity.clear()
             log("WARNING: the ownership table at %s could not be taken back "
                 "(%r); starting without it." % (self._path, e))
+            return
+        if self._quiet and not dropped:
             return
         log("took back %d letting(s) from %s%s"
             % (len(self._by_sid), self._path,
@@ -1382,6 +1386,11 @@ class Ownership:
     def owned_by(self, identity):
         with self._lock:
             return list(self._by_identity.get(identity, ()))
+
+    def sids(self):
+        """Every sid on record, ended or not. For the administrator's lookup."""
+        with self._lock:
+            return list(self._by_sid)
 
     def instances_in_use(self):
         """The slots this router has a LIVE letting for. Never the ones it had.
@@ -4042,6 +4051,199 @@ def still_this_letting(own, sid, grace=True):
         return "no desktop ever came up on %s for this letting" \
             % rec["instance"]
     return None
+
+
+# --------------------------------------------------------------------------
+# The administrator's lookup: which seat is the desktop behind this address?
+# --------------------------------------------------------------------------
+#
+# "hdw4s exec" and "hdw4s list --seats" ask it, as root, through
+# "hdw4s-demux --resolve" and "--lettings". An administrator holds what the
+# visitor holds -- the address /s/<sid>/ -- and the seat is what a command runs
+# in. The seat is the thing that is RECYCLED: an address whose letting has
+# ended names a seat that may now hold a stranger's desktop, and running a
+# command there as root is the exec-shaped version of the defect this file's
+# header opens with. So the answer comes from the LETTING, by the router's own
+# rules, and never from the seat the record happens to name.
+
+INCARNATION_AUTHORITY = os.path.join(RUN_DIR, "incarnation")
+
+# The shortest prefix of a sid an administrator may type. A sid is 128 bits;
+# eight hex digits is what "list --seats" prints, and enough that two live
+# lettings sharing it is a curiosity rather than a hazard -- an ambiguous
+# prefix is refused, never guessed.
+SID_PREFIX_MIN = 8
+
+
+def authoritative_incarnation(instance, root=None):
+    """This start's identity from root's OWN record, or None.
+
+    Not slot_incarnation(): that reads the copy published to the web root,
+    which can outlive the boot it describes and is all this service can read.
+    Root can read the record in /run, which a boot clears, so this one cannot
+    describe a start from before it.
+    """
+    base = INCARNATION_AUTHORITY if root is None else root
+    try:
+        with open(os.path.join(base, instance), "r") as f:
+            v = f.read().strip()
+    except OSError:
+        return None
+    return v or None
+
+
+def admin_letting(own, sid, authority=None, rundir=None):
+    """(instance, None) when SID's letting holds its seat's CURRENT desktop,
+    else (None, why). The router's own rules, then one more.
+
+    Every reason still_this_letting() gives is a refusal here too. Then two it
+    does not need, because a visitor's request already brings them: the letting
+    must have had a desktop answer it (one that never did names a seat some
+    other letting may be starting), and the identity recorded when it did must
+    EQUAL root's record of the start running now. ABSENT IS NOT EQUAL, on
+    either side: a record nothing published, or a seat with no record, refuses.
+    """
+    rec = own.lookup(sid)
+    if rec is None:
+        return None, "there is no letting on record for it"
+    why = still_this_letting(own, sid, grace=False)
+    if why:
+        return None, why
+    inst = rec["instance"]
+    if not rec.get("live"):
+        return None, "no desktop has come up on %s for this letting yet" % inst
+    # Nothing ended the letting, but nothing is running in the seat either:
+    # seen on a test box, a stopped seat still listed its last visitor.
+    if not slot_occupied(inst, rundir):
+        return None, "the desktop behind %s has stopped" % inst
+    was = rec.get("incarnation")
+    now_inc = authoritative_incarnation(inst, authority)
+    if was is None or now_inc is None:
+        return None, ("%s has no record of which desktop this letting had, so "
+                      "it cannot be told apart from a later one" % inst)
+    if was != now_inc:
+        return None, "%s is running a different desktop than this letting's" % inst
+    return inst, None
+
+
+def admin_resolve(own, held, authority=None, rundir=None):
+    """What an administrator HOLDS -> (sid, instance, None) or (None, None, why).
+
+    HELD may be a sid, a prefix of one (SID_PREFIX_MIN or longer), or the
+    address the visitor sees, from which /s/<sid>/ is taken. Anything else is
+    refused without looking anything up.
+    """
+    m = re.search(r"/s/([0-9a-f]+)(?:/|$)", held)
+    want = m.group(1) if m else held
+    if not re.fullmatch(r"[0-9a-f]{%d,32}" % SID_PREFIX_MIN, want):
+        return None, None, ("not a visitor's address: expected /s/<token>/ or at "
+                            "least %d hex digits of the token" % SID_PREFIX_MIN)
+    hits = [s for s in own.sids() if s.startswith(want)]
+    if not hits:
+        return None, None, "no visitor's desktop has had that address since the last boot"
+    if len(hits) > 1:
+        return None, None, "%d addresses start with %s; give more of it" \
+            % (len(hits), want)
+    sid = hits[0]
+    inst, why = admin_letting(own, sid, authority, rundir)
+    return (sid, inst, None) if inst else (sid, None, why)
+
+
+def admin_lettings(own, authority=None, rundir=None):
+    """[(instance, sid, minted)] for every letting admin_letting() would admit."""
+    out = []
+    for sid in own.sids():
+        inst, _ = admin_letting(own, sid, authority, rundir)
+        if inst:
+            out.append((inst, sid, own.lookup(sid)["minted"]))
+    return sorted(out)
+
+
+def assert_admin_lookup_refuses(factory=Ownership, letting=None):
+    """Prove the administrator's lookup, both directions, before it answers.
+
+    A FACTORY and the function under test are parameters for the reason
+    assert_ownership_keying() gives: a self-check that builds what it trusts
+    cannot fail. Each refusal below is a way a seat comes to hold somebody
+    else's desktop; the permit arm stops a lookup that refuses everything from
+    passing as careful.
+    """
+    letting = admin_letting if letting is None else letting
+    with tempfile.TemporaryDirectory() as auth, \
+            tempfile.TemporaryDirectory() as rundir:
+        def publish(inst, value):
+            with open(os.path.join(auth, inst), "w") as f:
+                f.write(value + "\n")
+        def ask(sid):
+            return letting(own, sid, auth, rundir)[0]
+        os.mkdir(os.path.join(rundir, "_hdw4s_0"))
+        own = factory()
+        a = own.mint_session(own.mint_identity(), "_hdw4s_0")
+        # Not yet answered: no desktop of this letting's to name.
+        assert ask(a) is None, \
+            "a letting no desktop ever answered was resolved to its seat"
+        own.attach(a, "1111")
+        # Answered, and the record agrees with root's: PERMIT.
+        publish("_hdw4s_0", "1111")
+        assert ask(a) == "_hdw4s_0", \
+            "the current letting of a running desktop was refused"
+        # The seat restarted under it: a different desktop now.
+        publish("_hdw4s_0", "2222")
+        assert ask(a) is None, \
+            "a letting was resolved to a seat running a different desktop"
+        # Root has no record at all (after a boot): absent is not equal.
+        os.unlink(os.path.join(auth, "_hdw4s_0"))
+        assert ask(a) is None, \
+            "a letting was resolved to a seat with no record of its desktop"
+        publish("_hdw4s_0", "1111")
+        # The seat let again: the earlier letting is never the current one,
+        # even while the identities still agree.
+        b = own.mint_session(own.mint_identity(), "_hdw4s_0")
+        assert ask(a) is None, \
+            "a superseded letting was resolved to its seat"
+        own.attach(b, "1111")
+        assert ask(b) == "_hdw4s_0", \
+            "the later letting was refused its own desktop"
+        # Nothing running in the seat, though nothing ended the letting.
+        os.rmdir(os.path.join(rundir, "_hdw4s_0"))
+        assert ask(b) is None, \
+            "a letting was resolved to a seat with no desktop running"
+        os.mkdir(os.path.join(rundir, "_hdw4s_0"))
+        # Ended by us: never resolved, whatever the seat shows.
+        own.end_session(b, "discarded by its owner")
+        assert ask(b) is None, \
+            "an ended letting was resolved to its seat"
+
+
+def admin_main(argv):
+    """hdw4s-demux --resolve <held> | --lettings. Root only; reads, never writes.
+
+    Prints the seat and its desktop's identity (for --lettings: seat, sid and
+    mint time) and nothing else
+    from the table: a row also holds the visitor's identity cookie, which is a
+    credential, and no field of it is ever selected here.
+    """
+    if os.geteuid() != 0:
+        sys.stderr.write("hdw4s-demux: %s is for root\n" % argv[0])
+        return 1
+    assert_admin_lookup_refuses(Ownership, admin_letting)
+    own = Ownership(OWNERSHIP_FILE, quiet=True)
+    if argv[0] == "--lettings" and len(argv) == 1:
+        for inst, sid, minted in admin_lettings(own):
+            print("%s %s %d" % (inst, sid, int(minted)))
+        return 0
+    if argv[0] == "--resolve" and len(argv) == 2:
+        sid, inst, why = admin_resolve(own, argv[1])
+        if inst is None:
+            sys.stderr.write("hdw4s: %s\n" % why)
+            return 3
+        # The seat, and the identity of the desktop this letting had: hdw4s
+        # exec checks it again at the moment it enters, because the seat can
+        # be let again between this answer and that.
+        print("%s %s" % (inst, own.lookup(sid)["incarnation"]))
+        return 0
+    sys.stderr.write("usage: hdw4s-demux --resolve <address or token> | --lettings\n")
+    return 2
 
 
 def start_for_first_request(own, sid):
@@ -7172,4 +7374,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # The administrator's lookup is a separate, read-only face of this file:
+    # it shares the rules, never the running router's state or its socket.
+    if len(sys.argv) > 1 and sys.argv[1] in ("--resolve", "--lettings"):
+        sys.exit(admin_main(sys.argv[1:]))
     main()

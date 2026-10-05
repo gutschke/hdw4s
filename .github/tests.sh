@@ -928,7 +928,10 @@ echo '== list sums the pool up in one line, and lists seats only when asked =='
   out="$(cmd_list --seats 2>/dev/null)"
   has   'list --seats shows each seat'          "${out}" '_hdw4s_0'
   has   'and the authoring slot'                "${out}" 'tmpl               template'
-  has   'and a seat'"'"'s display and why it is held' "${out}" ':12      a desktop is running in it'
+  # The LETTING column sits between them: "(root)" unprivileged, and as root
+  # whatever the machine's router says -- so it is skipped, not asserted, here.
+  row="$(awk '$5 != "" { $5 = "X" } { print }' <<<"$(command grep ':12 ' <<<"${out}")")"
+  has   'and a seat'"'"'s display and why it is held' "${row}" ':12 X a desktop is running in it'
   hasnt 'and not the person'"'"'s desktop'      "${out}" "${me} "
   HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" list --bogus >/dev/null 2>&1
   is    'list takes only --seats' "$?" '2'
@@ -8698,10 +8701,357 @@ echo '== install.sh ships every library file the package does =='
   is 'install.sh ships every library file the package does' "${missing}" ''
 )
 
+echo '== exec: a visitor address resolves only to its own letting and desktop =='
+( set +e
+  # hdw4s exec names a pool desktop by the address its visitor holds. Seats are
+  # let again, so every way a seat comes to hold somebody else's desktop must
+  # refuse -- proved by the router's own self-check, and that self-check proved
+  # by doctored lookups it must catch (each one dropped one condition).
+  out="$(python3 - "${ROOT}/hdw4s-demux" <<'PY'
+import importlib.machinery, importlib.util, json, os, sys, tempfile
+l = importlib.machinery.SourceFileLoader("demux", sys.argv[1])
+d = importlib.util.module_from_spec(importlib.util.spec_from_loader("demux", l)); l.exec_module(d)
+def arm(name, f):
+    try:
+        d.assert_admin_lookup_refuses(d.Ownership, f); print(name, "GREEN")
+    except AssertionError:
+        print(name, "red")
+arm("real", d.admin_letting)
+def no_inc(own, sid, auth=None, now=None):
+    rec = own.lookup(sid); why = d.still_this_letting(own, sid, grace=False)
+    return (None, why) if why or not rec.get("live") else (rec["instance"], None)
+def no_live(own, sid, auth=None, now=None):
+    rec = own.lookup(sid); why = d.still_this_letting(own, sid, grace=False)
+    if why: return None, why
+    was, now_ = rec.get("incarnation"), d.authoritative_incarnation(rec["instance"], auth)
+    return (rec["instance"], None) if was == now_ else (None, "x")
+# Without the router's letting rules (ended, re-let): a seat let again while
+# its desktop identity still agrees must be refused by them alone. (Minting a
+# new letting marks the earlier one ended, so "re-let" is not a case apart.)
+def no_rules(own, sid, auth=None, now=None):
+    rec = own.lookup(sid)
+    if not rec.get("live"): return None, "x"
+    return (rec["instance"], None) if rec["incarnation"] == d.authoritative_incarnation(rec["instance"], auth) else (None, "x")
+def absent_equal(own, sid, auth=None, now=None):
+    rec = own.lookup(sid); why = d.still_this_letting(own, sid, grace=False)
+    if why or not rec.get("live"): return None, "x"
+    now_ = d.authoritative_incarnation(rec["instance"], auth)
+    return (rec["instance"], None) if now_ in (None, rec["incarnation"]) else (None, "x")
+def no_occupancy(own, sid, auth=None, rundir=None):
+    rec = own.lookup(sid); why = d.still_this_letting(own, sid, grace=False)
+    if why or not rec.get("live"): return None, "x"
+    now_ = d.authoritative_incarnation(rec["instance"], auth)
+    return (rec["instance"], None) if now_ is not None and now_ == rec["incarnation"] else (None, "x")
+arm("no-incarnation", no_inc); arm("no-live", no_live); arm("no-occupancy", no_occupancy)
+arm("no-rules", no_rules); arm("absent-equal", absent_equal)
+arm("refuse-all", lambda own, sid, auth=None, now=None: (None, "no"))
+# What an administrator types.
+own = d.Ownership(); a = own.mint_session(own.mint_identity(), "_hdw4s_1")
+print("short", d.admin_resolve(own, "abc")[2] is not None and d.admin_resolve(own, "abc")[1] is None)
+print("url", "no desktop has come up" in d.admin_resolve(own, "https://h.example/s/%s/" % a)[2])
+print("prefix", "no desktop has come up" in d.admin_resolve(own, a[:8])[2])
+print("unknown", "no visitor" in d.admin_resolve(own, "0" * 32 if not a.startswith("0") else "f" * 32)[2])
+# The table as the router writes it, read the way --lettings and --resolve read
+# it: the identity cookie is in every row and must never be printed.
+with tempfile.TemporaryDirectory() as t:
+    auth = os.path.join(t, "inc"); os.mkdir(auth)
+    with open(os.path.join(auth, "_hdw4s_1"), "w") as f: f.write("abcd\n")
+    rows = {"%032x" % 7: {"identity": "SECRETIDENTITY", "instance": "_hdw4s_1",
+                          "minted": 1000.0, "live": True, "incarnation": "abcd",
+                          "ended": None, "ended_at": None}}
+    path = os.path.join(t, "ownership.json")
+    with open(path, "w") as f: json.dump({"version": 1, "sessions": rows}, f)
+    run = os.path.join(t, "session"); os.makedirs(os.path.join(run, "_hdw4s_1"))
+    d.OWNERSHIP_FILE, d.INCARNATION_AUTHORITY, d.SESSION_RUNDIR = path, auth, run
+    real = d.os.geteuid; d.os.geteuid = lambda: 0
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        r1 = d.admin_main(["--lettings"]); r2 = d.admin_main(["--resolve", "%08x" % 0])
+    d.os.geteuid = lambda: 1000
+    with contextlib.redirect_stderr(io.StringIO()):
+        r3 = d.admin_main(["--lettings"])
+    d.os.geteuid = real
+    o = buf.getvalue()
+    print("lettings", r1 == 0 and "_hdw4s_1 %032x 1000" % 7 in o)
+    print("resolve", r2 == 0 and "_hdw4s_1 abcd" in o)
+    print("noidentity", "SECRETIDENTITY" not in o)
+    print("nonroot", r3 == 1)
+PY
+)"
+  has 'the router self-check passes the real lookup'            "${out}" 'real GREEN'
+  has 'RED: a lookup ignoring the desktop identity is caught'    "${out}" 'no-incarnation red'
+  has 'RED: a lookup admitting a never-answered letting is caught' "${out}" 'no-live red'
+  has 'RED: a lookup ignoring ended and re-let lettings is caught' "${out}" 'no-rules red'
+  has 'RED: a lookup reading absent as equal is caught'           "${out}" 'absent-equal red'
+  has 'RED: a lookup naming a seat with nothing running is caught' "${out}" 'no-occupancy red'
+  has 'RED: a lookup refusing everything is caught'               "${out}" 'refuse-all red'
+  has 'a too-short token is refused before any lookup'           "${out}" 'short True'
+  has 'the visitor URL is accepted as written'                    "${out}" 'url True'
+  has 'and so is an 8-character prefix'                           "${out}" 'prefix True'
+  has 'an address nobody had is refused as such'                  "${out}" 'unknown True'
+  has '--lettings prints seat, sid and mint time'                 "${out}" 'lettings True'
+  has '--resolve prints the seat and its desktop identity'        "${out}" 'resolve True'
+  has 'and neither ever prints the identity cookie'               "${out}" 'noidentity True'
+  has 'the lookup is for root only'                               "${out}" 'nonroot True'
+)
+
+echo '== exec: the desktop entered is the one systemd started, never the occupant'"'"'s =='
+( set +e
+  # Entering a process's mount namespace as root runs the next binary from the
+  # view THAT process chose. Measured 2026-10-05: an occupant's own unshare'd
+  # namespace with a fake /usr/bin ran "setpriv" as uid 0. So the namespaces
+  # come from systemd's main process, the environment from its direct child,
+  # and each is checked. A fake /proc stands in; every arm names its case.
+  out="$(python3 - "${ROOT}/hdw4s-enter" "${ROOT}/hdw4s-session-environment" <<'PY'
+import importlib.machinery, importlib.util, os, sys, tempfile
+l = importlib.machinery.SourceFileLoader("enter", sys.argv[1])
+e = importlib.util.module_from_spec(importlib.util.spec_from_loader("enter", l)); l.exec_module(e)
+CG = "/hdw4s.slice/hdw4s-ephemeral@_hdw4s_0.service"
+def proc(t, pids, children):
+    os.makedirs(os.path.join(t, "self", "ns"))
+    os.symlink("user:[1]", os.path.join(t, "self", "ns", "user"))
+    for pid, (mnt, user, uid, cg, env) in pids.items():
+        b = os.path.join(t, str(pid)); os.makedirs(os.path.join(b, "ns"))
+        os.makedirs(os.path.join(b, "task", str(pid)))
+        os.symlink("mnt:[%s]" % mnt, os.path.join(b, "ns", "mnt"))
+        os.symlink("user:[%s]" % user, os.path.join(b, "ns", "user"))
+        open(os.path.join(b, "status"), "w").write(
+            "Uid:\t%d\t%d\t%d\t%d\nGid:\t%d\t%d\t%d\t%d\nCapBnd:\t0\nUmask:\t0077\n" % ((uid,) * 8))
+        # Started 100 s after boot: field 22 of stat, in clock ticks.
+        open(os.path.join(b, "stat"), "w").write(
+            "%d (x) S" % pid + " 0" * 18 + " %d 0\n" % (100 * os.sysconf("SC_CLK_TCK")))
+        open(os.path.join(b, "limits"), "w").write("Max open files 1024 4096 files\n")
+        open(os.path.join(b, "cgroup"), "w").write("0::%s\n" % cg)
+        open(os.path.join(b, "environ"), "wb").write(b"\0".join(k.encode() + b"=x" for k in env) + b"\0")
+        open(os.path.join(b, "task", str(pid), "children"), "w").write(" ".join(map(str, children.get(pid, []))))
+def run(name, pids, children, state="active", main=10, execmain=10, started=100.0):
+    with tempfile.TemporaryDirectory() as t:
+        proc(t, pids, children)
+        try:
+            m, src, pa, pb = e.choose("u", proc=t, facts=lambda u: {
+                "state": state, "main": main, "execmain": execmain,
+                "cgroup": CG, "started": started},
+                pidfd_open=lambda p: os.pidfd_open(os.getpid()))
+            os.close(pa); os.close(pb)
+            print(name, "chose", m, src)
+        except e.Refusal:
+            print(name, "refused")
+BUS = ["DBUS_SESSION_BUS_ADDRESS", "DCONF_PROFILE"]
+MAIN = (5, 1, 900, CG, ["DCONF_PROFILE"])
+run("permit", {10: MAIN, 11: (5, 1, 900, CG, BUS)}, {10: [11]})
+# The occupant's own namespace, as the only child carrying the bus: refused.
+run("forged", {10: MAIN, 11: (6, 2, 900, CG, BUS)}, {10: [11]})
+# Same namespaces, but a grandchild: the occupant's process, never chosen.
+run("grandchild", {10: MAIN, 11: (5, 1, 900, CG, []), 12: (5, 1, 900, CG, BUS)}, {10: [11], 11: [12]})
+run("othercg", {10: (5, 1, 900, "/elsewhere", ["DCONF_PROFILE"]), 11: (5, 1, 900, CG, BUS)}, {10: [11]})
+run("userns", {10: (5, 2, 900, CG, ["DCONF_PROFILE"]), 11: (5, 2, 900, CG, BUS)}, {10: [11]})
+run("inactive", {10: MAIN, 11: (5, 1, 900, CG, BUS)}, {10: [11]}, state="inactive")
+# systemd's MainPID moved by a MAINPID= message from inside (NotifyAccess=all).
+run("moved", {10: MAIN, 11: (5, 1, 900, CG, BUS)}, {10: [11]}, execmain=9)
+# The number reused: the process at it started long after systemd's fork.
+run("reused", {10: MAIN, 11: (5, 1, 900, CG, BUS)}, {10: [11]}, started=30.0)
+run("nostart", {10: MAIN, 11: (5, 1, 900, CG, BUS)}, {10: [11]}, started=0)
+# A desktop whose user is root: never entered.
+with tempfile.TemporaryDirectory() as t:
+    proc(t, {10: (5, 1, 0, CG, ["DCONF_PROFILE"]), 11: (5, 1, 0, CG, BUS)}, {10: [11]})
+    try:
+        pf = os.pidfd_open(os.getpid())
+        e.gather(10, 11, pf, pf, proc=t)
+        print("root", "entered")
+    except e.Refusal:
+        print("root", "refused")
+# The environment: by the list, display withheld, the credential never.
+names = e.read_env_list(sys.argv[2])
+src = {"DCONF_PROFILE": "p", "DISPLAY": ":5", "XAUTHORITY": "/x",
+       "SELKIES_BASIC_AUTH_PASSWORD": "S3CRET", "HOME": "/home/user",
+       "DBUS_SESSION_BUS_ADDRESS": "unix:path=/b"}
+env, held = e.filtered_env(src, names)
+print("env", sorted(env), sorted(held))
+print("secret", "S3CRET" not in env.values())
+env2, _ = e.filtered_env(src, names, display=True)
+print("display-optin", "DISPLAY" in env2)
+# The seat let again between the lookup and the entry.
+with tempfile.TemporaryDirectory() as t:
+    open(os.path.join(t, "_hdw4s_0"), "w").write("new\n")
+    try:
+        e.check_incarnation("_hdw4s_0", "old", 1, authority=t); print("relet", "admitted")
+    except e.Refusal:
+        print("relet", "refused")
+PY
+)"
+  has 'the main process and its bus-carrying child are entered' "${out}" 'permit chose 10 11'
+  has 'RED: a child in a namespace of its own is refused'        "${out}" 'forged refused'
+  has 'RED: an occupant-started grandchild is never chosen'      "${out}" 'grandchild refused'
+  has 'RED: a main process outside the unit cgroup is refused'   "${out}" 'othercg refused'
+  has 'RED: a main process in another user namespace is refused' "${out}" 'userns refused'
+  has 'a desktop that is not running is refused, never started'  "${out}" 'inactive refused'
+  has 'RED: a main process moved away from the one systemd forked' "${out}" 'moved refused'
+  has 'RED: a main process number that has been reused is refused' "${out}" 'reused refused'
+  has 'RED: a desktop running as root is never entered'           "${out}" 'root refused'
+  has 'a unit with no recorded start is refused'                  "${out}" 'nostart refused'
+
+  has 'the environment is the allow-list, display withheld'      "${out}" "env ['DBUS_SESSION_BUS_ADDRESS', 'DCONF_PROFILE', 'HOME'] ['DISPLAY', 'XAUTHORITY']"
+  has 'the session credential is never handed over'              "${out}" 'secret True'
+  has 'the display variables are flagged, not missing'           "${out}" 'display-optin True'
+  has 'a seat let again since the lookup is refused'             "${out}" 'relet refused'
+  # One list, two readers: the session uploads to its bus what exec hands over.
+  has 'hdw4s-run-session reads the same list' "$(cat "${ROOT}/hdw4s-run-session")" 'hdw4s-session-environment"'
+  has 'and the package installs it'           "$(cat "${ROOT}/debian/install")" 'hdw4s-session-environment'
+  # The bus address goes to the command and never to the bus itself: the
+  # session start skips what is marked "exec". Read the way it reads the list.
+  up="$(while read -r name flag; do case "${name}" in ''|\#*) continue;; esac
+        [ "${flag}" = exec ] && continue; echo "${name}"; done < "${ROOT}/hdw4s-session-environment")"
+  hasnt 'the session start does not upload the bus address' "${up}" 'DBUS_SESSION_BUS_ADDRESS'
+  has   'but still uploads what programs need'               "${up}" 'DCONF_PROFILE'
+  # The session start's own loop, run: it skips "exec" as a WORD among the
+  # flags, and a missing list costs a warning, never the session ("bash -e").
+  loop="$(sed -n '/^activation=()$/,/could not read the list/p' "${ROOT}/hdw4s-run-session")"
+  d="$(mktemp -d)"; printf 'A\nB display exec\nC exec display\nD display\n' > "${d}/hdw4s-session-environment"
+  got="$(HDW4S_LIBDIR="${d}" bash -e -c "${loop}"$'\n''echo "${activation[*]}"' 2>&1)"
+  is 'the session start uploads exactly the names not marked exec' "${got}" 'A D'
+  got="$(HDW4S_LIBDIR="${d}/none" bash -e -c "${loop}"$'\n''echo "survived ${#activation[@]}"' 2>&1)"
+  has 'a missing list is a warning, and the session goes on' "${got}" 'survived 0'
+  rm -rf "${d}"
+)
+
+echo '== exec: a command gets its streams byte for byte, and lets go of them =='
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  # The real relay and the real child set-up, with only the ENTRY stood in for
+  # (it needs root and a desktop). Through a terminal, input was cut at 4095
+  # bytes a line and output gained carriage returns and the report, exit 0
+  # (found in review); a leftover holding root's own pipes kept exec waiting.
+  cat > "${T}/drive.py" <<'PY'
+import importlib.machinery, importlib.util, os, sys
+l = importlib.machinery.SourceFileLoader("enter", sys.argv[1])
+e = importlib.util.module_from_spec(importlib.util.spec_from_loader("enter", l)); l.exec_module(e)
+e.enter = lambda f: None
+e.report = lambda *a, **k: sys.stderr.write("REPORT\n")
+fd = os.open("/dev/null", os.O_RDONLY); os.dup2(fd, 7)   # inheritable, like a caller's
+sys.exit(e.exit_code(e.spawn(1, 1, {"env": dict(os.environ), "snapshot": None, "withheld": [], "pf_main": os.pidfd_open(os.getpid())}, sys.argv[2:])))
+PY
+  d() { python3 "${T}/drive.py" "${ROOT}/hdw4s-enter" "$@"; }
+  head -c 10000 /dev/zero | tr '\0' x > "${T}/line"; echo >> "${T}/line"
+  is 'a long line through a pipe arrives whole' "$(d wc -c < "${T}/line" 2>/dev/null | tr -d ' ')" '10001'
+  d sh -c 'printf "a\001b\n"' > "${T}/out" 2>/dev/null
+  is 'output to a file is byte for byte, report kept apart' "$(od -An -c "${T}/out" | tr -s ' ')" ' a 001 b \n'
+  d sh -c 'exit 7' </dev/null >/dev/null 2>&1
+  is 'the command'"'"'s exit status comes back' "$?" '7'
+  is 'a descriptor the caller left open does not reach the command' \
+     "$(d sh -c 'test -e /proc/self/fd/7 && echo LEAKED || echo closed' </dev/null 2>/dev/null)" 'closed'
+  s="$(date +%s)"; d sh -c 'sleep 20 & echo started' </dev/null > "${T}/bg" 2>&1
+  is 'a leftover in the background does not hold exec' "$(( $(date +%s) - s < 5 ))" '1'
+  has 'and what the command printed before it exited arrives' "$(cat "${T}/bg")" 'started'
+  # Found in review, each measured on the relay before it was rebuilt: a
+  # command that fills its output before reading its input deadlocked it past
+  # any signal; a reader that leaves early killed it by SIGPIPE, losing output.
+  out="$(head -c 1000000 /dev/zero | timeout 30 python3 "${T}/drive.py" "${ROOT}/hdw4s-enter" \
+           sh -c 'head -c 1000000 /dev/zero; cat >/dev/null' 2>/dev/null | wc -c; echo "rc=${PIPESTATUS[1]}")"
+  is 'output before input does not deadlock the relay' "${out//$'\n'/ }" '1000000 rc=0'
+  out="$(yes 2>/dev/null | timeout 30 python3 "${T}/drive.py" "${ROOT}/hdw4s-enter" head -1 2>/dev/null; echo "rc=${PIPESTATUS[1]}")"
+  is 'a command that stops reading early still has its output delivered' "${out//$'\n'/ }" 'y rc=0'
+  is 'a caller that closed stdin is no obstacle' "$(d sh -c 'echo ok' <&- 2>/dev/null)" 'ok'
+  # A reader slower than the command: everything it wrote before exiting
+  # arrives. A 2 s drain cap delivered 65536 of 150000 bytes, exit 0 (review).
+  out="$(d sh -c 'head -c 150000 /dev/zero' 2>/dev/null | (sleep 3; wc -c); echo "rc=${PIPESTATUS[0]}")"
+  is 'a slow reader still gets all the command wrote' "${out//$'\n'/ }" '150000 rc=0'
+  if command -v script >/dev/null; then
+    # A reader of root's output that leaves early: root's terminal comes back.
+    out="$(timeout 30 script -qec "stty -g; python3 '${T}/drive.py' '${ROOT}/hdw4s-enter' seq 1 300000 2>/dev/null | head -1 >/dev/null; stty -g" /dev/null < /dev/null 2>&1 | tr -d '\r')"
+    is "root's terminal is restored when its reader leaves early" "$(sort -u <<<"${out}" | wc -l)" '1'
+    # Keyboard a terminal, output a pipe that closes early: the terminal is
+    # not hung up under the command (it was: SIGHUP, 129 -- review).
+    out="$( (sleep 1; printf 'abc'; sleep 1; printf 'def'; sleep 3) | timeout 30 script -qec "python3 '${T}/drive.py' '${ROOT}/hdw4s-enter' sh -c 'sleep 3; exit 0' 2>&1 | head -c 1 >/dev/null; echo rc=\${PIPESTATUS[0]}" /dev/null 2>&1 | tr -d '\r')"
+    has 'a closed output pipe does not hang up the command'"'"'s terminal' "${out}" 'rc=0'
+    # Root's OUTPUT a terminal, its input a pipe: the input still goes as a pipe.
+    out="$(script -qec "python3 '${T}/drive.py' '${ROOT}/hdw4s-enter' sh -c 'wc -c; tty <&2' < '${T}/line'" /dev/null < /dev/null 2>&1 | tr -d '\r')"
+    has 'with a terminal for output, piped input still arrives whole' "${out}" '10001'
+    has 'and, not being interactive, the command gets no terminal'     "${out}" 'not a tty'
+    # Keyboard a terminal, output a pipe ("exec ... | less"): the relay leaves
+    # the keyboard alone -- every key went to the command (review) -- and the
+    # command reads end-of-file at once.
+    out="$( (sleep 1; printf 'abc'; sleep 4) | timeout 30 script -qec "python3 '${T}/drive.py' '${ROOT}/hdw4s-enter' sh -c 'cat; echo EOF-\$?; sleep 2' 2>/dev/null | cat; read -t 5 -n 3 x; echo GOT=\$x" /dev/null 2>&1 | tr -d '\r')"
+    has 'with output piped, the command reads end-of-file, not the keyboard' "${out}" 'EOF-0'
+    has 'and keys typed meanwhile are left for the next reader'               "${out}" 'GOT=abc'
+    # Root's INPUT a terminal: what is typed before the relay starts is kept.
+    # Typed ahead, then Ctrl-D while the command runs. (Not both at once: with a
+    # PIPE for its own input, script(1) gives its terminal all-zero settings,
+    # so a Ctrl-D typed that early is not an end-of-file on any real terminal.)
+    out="$( (printf 'typed-ahead\n'; sleep 2; printf '\004'; sleep 2) |
+            timeout 20 script -qec "python3 '${T}/drive.py' '${ROOT}/hdw4s-enter' sh -c 'cat; echo CAT-ENDED'" /dev/null 2>&1 | tr -d '\r')"
+    # Echoed by the terminal and printed back by cat: the line at least twice.
+    is  'input typed before the relay starts is not thrown away' "$(( $(command grep -c 'typed-ahead' <<<"${out}") >= 2 ))" '1'
+    has 'and Ctrl-D ends the command'                           "${out}" 'CAT-ENDED'
+  else
+    skip 'with a terminal for output, piped input still arrives whole' 'no script(1)'
+    skip 'and, not being interactive, the command gets no terminal' 'no script(1)'
+    skip 'with output piped, the command reads end-of-file, not the keyboard' 'no script(1)'
+    skip 'and keys typed meanwhile are left for the next reader' 'no script(1)'
+    skip 'input typed before the relay starts is not thrown away' 'no script(1)'
+    skip 'and Ctrl-D ends the command' 'no script(1)'
+    skip "root's terminal is restored when its reader leaves early" 'no script(1)'
+    skip 'a closed output pipe does not hang up the command'"'"'s terminal' 'no script(1)'
+  fi
+)
+
+echo '== exec: what an administrator types reaches the right unit, or nothing =='
+( set +e; sandbox; . "${SB}/setup.sh"
+  mkdir -p "${SB}/lib"
+  printf '#!/bin/sh\necho "enter $*" > "%s/called"\n' "${SB}" > "${SB}/lib/hdw4s-enter"
+  cat > "${SB}/lib/hdw4s-demux" <<STUB
+#!/bin/sh
+echo "demux \$*" >> "${SB}/demux-called"
+case "\$2" in */s/0123456789abcdef*|01234567*) echo '_hdw4s_2 cafe'; exit 0;; esac
+echo 'hdw4s: no visitor desktop has had that address since the last boot' >&2; exit 3
+STUB
+  chmod +x "${SB}/lib/hdw4s-enter" "${SB}/lib/hdw4s-demux"
+  printf '0 alice desktop\n1 _hdw4s_2 ephemeral\n' > "${SLOTS}"
+  id() { [ "${1:-}" = -u ] && echo "${FAKE_UID:-0}" || command id "$@"; }
+  ex() { rm -f "${SB}/called"; ( HDW4S_LIBDIR="${SB}/lib" cmd_exec "$@" ) 2>&1; echo "rc=$?"; }
+  r="$(ex alice -- gsettings get a b)"
+  is 'a named desktop enters its own unit, with no letting check' "$(cat "${SB}/called" 2>/dev/null)" 'enter hdw4s@alice.service -- gsettings get a b'
+  r="$(ex _hdw4s_2 true)"
+  is 'a pool seat by name enters the pool unit' "$(cat "${SB}/called" 2>/dev/null)" 'enter hdw4s-ephemeral@_hdw4s_2.service -- true'
+  r="$(ex 'https://pool.example/s/0123456789abcdef0123456789abcdef/' -- id)"
+  is 'a visitor address enters its seat and re-checks the desktop' "$(cat "${SB}/called" 2>/dev/null)" 'enter hdw4s-ephemeral@_hdw4s_2.service --incarnation _hdw4s_2=cafe -- id'
+  r="$(ex deadbeef99 -- id)"
+  has 'an address the router refuses stops with its reason' "${r}" 'no visitor desktop has had that address'
+  has 'and exit status 125'                                  "${r}" 'rc=125'
+  [ -e "${SB}/called" ] && bad 'and nothing is entered' 'hdw4s-enter ran' || ok 'and nothing is entered'
+  # Through the real script and its real exit trap, which the sandbox drops:
+  # a refusal that explained itself must not also say "failed unexpectedly".
+  r="$(HDW4S_ETCDIR="${SB}/etc" HDW4S_LIBDIR="${SB}/lib" PATH="${SB}/bin:${PATH}" \
+        bash -c 'id() { [ "${1:-}" = -u ] && echo 0 || command id "$@"; }; export -f id
+                 exec "$0" exec deadbeef99 -- true' "${ROOT}/hdw4s" 2>&1; echo "rc=$?")"
+  has   'through the real script the refusal is still exit 125' "${r}" 'rc=125'
+  hasnt 'and is not reported as an unexpected failure'        "${r}" 'failed unexpectedly'
+  rm -f "${SB}/demux-called"
+  r="$(ex bob -- id)"
+  has 'a name that is no desktop says where names come from' "${r}" "hdw4s list --seats"
+  [ -e "${SB}/demux-called" ] && bad 'and asks the router nothing' 'demux was asked' || ok 'and asks the router nothing'
+  r="$(FAKE_UID=1000 ex alice -- id)"
+  has 'exec is refused to anybody but root' "${r}" 'only root'
+  [ -e "${SB}/called" ] && bad 'and enters nothing' 'hdw4s-enter ran' || ok 'and enters nothing'
+
+  # list --seats: the LETTING column is how an address leads to a seat.
+  printf '0 alice desktop\n1 _hdw4s_2 ephemeral\n2 _hdw4s_3 ephemeral\n' > "${SLOTS}"
+  printf '#!/bin/sh\necho "_hdw4s_2 0123456789abcdef0123456789abcdef 1000"\n' > "${SB}/lib/hdw4s-demux"
+  out="$(HDW4S_LIBDIR="${SB}/lib" list_seats 2>&1)"
+  has 'list --seats has a LETTING column'                   "${out}" 'LETTING'
+  has 'a let seat shows its token prefix' "$(command grep '^_hdw4s_2 ' <<<"${out}")" ' 01234567 '
+  hasnt 'and never the whole token'                          "${out}" '0123456789abcdef0123'
+  has 'an unlet seat shows -' "$(command grep '^_hdw4s_3 ' <<<"${out}")" ' -  '
+  printf '#!/bin/sh\nexit 1\n' > "${SB}/lib/hdw4s-demux"
+  out="$(HDW4S_LIBDIR="${SB}/lib" list_seats 2>&1)"
+  has 'a failed lookup shows ?, never -' "$(command grep '^_hdw4s_3 ' <<<"${out}")" ' ?  '
+  out="$(FAKE_UID=1000 HDW4S_LIBDIR="${SB}/lib" list_seats 2>&1)"
+  has 'and without root it says so' "$(command grep '^_hdw4s_3 ' <<<"${out}")" '(root)'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1654  # update when tests are added; a wrong number is the point
+EXPECTED=1725  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

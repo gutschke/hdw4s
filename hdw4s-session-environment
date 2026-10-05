@@ -1,0 +1,37 @@
+# The variables a program in an hdw4s desktop is handed, by name, one per line.
+#
+# ONE LIST, TWO READERS. hdw4s-run-session uploads exactly these to the session
+# bus, so that a program D-Bus starts gets what it needs; "hdw4s exec" hands a
+# command exactly these, taken from the running desktop. A list rather than
+# "everything": the session's environment also holds its proxy credential, and
+# whatever is uploaded to the bus or given to a command can be read by it.
+#
+# A line may carry a flag after the name. "display" marks the variables that
+# reach the screen and its input; "hdw4s exec" withholds those by default.
+# "exec" marks the ones only "hdw4s exec" hands over: the bus knows its own
+# address, but a command without it cannot reach the bus -- and "gsettings set"
+# then prints an error and EXITS 0, a write that vanished looking like one that
+# landed.
+DBUS_SESSION_BUS_ADDRESS exec
+USER exec
+LOGNAME exec
+DISPLAY display
+XAUTHORITY display
+ICEAUTHORITY display
+XDG_RUNTIME_DIR
+XDG_SESSION_TYPE
+XDG_SESSION_CLASS
+XDG_CURRENT_DESKTOP
+XDG_CONFIG_HOME
+XDG_DATA_HOME
+XDG_STATE_HOME
+XDG_CACHE_HOME
+GNOME_SHELL_SESSION_MODE
+PATH
+HOME
+LANG
+PULSE_SERVER
+PULSE_RUNTIME_PATH
+PIPEWIRE_RUNTIME_DIR
+GVFS_DISABLE_FUSE
+DCONF_PROFILE

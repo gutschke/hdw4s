@@ -6,6 +6,7 @@ hdw4s(8) -- headless GNOME desktop streamed to a web browser
 `hdw4s` `list` [`--seats`]<br>
 `hdw4s` `check`<br>
 `hdw4s` `show` <instance><br>
+`hdw4s` `exec` <desktop> [`--`] <command> [<argument>...]<br>
 `hdw4s` `enable` <instance><br>
 `hdw4s` `disable` <instance><br>
 `hdw4s` `release` [`--internal`] <instance><br>
@@ -53,6 +54,10 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     With `--seats`, list the pool's seats and the template-authoring slot
     instead: each one's unit state, its display, and what is holding it --
     for finding out what is wrong with the pool, not for configuring it.
+    LETTING is the first 8 characters of the token in the address of the
+    visitor whose desktop the seat is running now, `/s/<token>/`: what a
+    visitor can read out of their browser, and what `exec` accepts. `-` is no
+    visitor's desktop; `?` is a lookup that failed; it takes root to see.
 
   * `check`:
     Report any running session that is not publishing the identity a returning
@@ -66,6 +71,42 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
   * `show` <instance>:
     Print one session's settings and, for each of them, which file it came from.
+
+  * `exec` <desktop> [`--`] <command> [<argument>...]:
+    Run one command inside a running desktop, as that desktop's user, with its
+    files, its session bus and its settings -- for asking a desktop what it
+    sees, which a command run beside it cannot do: a visitor's home and `/tmp`
+    exist only inside their desktop, and the same paths outside are empty.
+    Root only. <desktop> is a person's instance name as in `list`, a pool seat
+    as in `list --seats`, or a visitor's desktop by the address in their
+    browser, `/s/<token>/`, or the token's first 8 characters or more.
+
+    An address is accepted only while the visit it belongs to holds the seat's
+    current desktop. Seats are given to the next visitor once one leaves, so
+    the address of a visit that has ended is refused with the reason, rather
+    than run in whoever has the seat now.
+
+    The command joins the desktop's namespaces, control group and user (uid,
+    group and supplementary groups), takes its umask and resource limits, and
+    is given the desktop's environment
+    only for the variables in `/usr/lib/hdw4s/hdw4s-session-environment`,
+    which never includes the session's credential. It dies with the desktop
+    and counts against its memory limit. Before it runs, `exec` reports on
+    standard error what is the same as the desktop and what is not. The
+    desktop's seccomp filter cannot be copied, so a system call the desktop is
+    refused may succeed here, and it says so every time.
+
+    It never starts a desktop, never connects to its stream, and does not hand
+    the command `DISPLAY`, `XAUTHORITY` or `ICEAUTHORITY`. That last is a
+    courtesy, not a boundary: anything running as the desktop's user can find
+    its screen, and so can read its clipboard or type into it. Do not run
+    commands in a desktop somebody is using without telling them. The command
+    runs in a session of its own and never holds your terminal: when your input
+    and output are both a terminal it gets a fresh one and your keyboard, as
+    with `ssh -t`; otherwise its output comes through pipes, and its input is
+    yours only if that is not a terminal (else it reads end-of-file), so a
+    pager after a `|` keeps your keys. The exit
+    status is the command's; 125 means `exec` refused, and says why.
 
   * `enable` <instance>:
     Allocate a slot for a session and open its front door. The desktop is not

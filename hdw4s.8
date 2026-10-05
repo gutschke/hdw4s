@@ -10,6 +10,8 @@
 .br
 \fBhdw4s\fR \fBshow\fR \fIinstance\fR
 .br
+\fBhdw4s\fR \fBexec\fR \fIdesktop\fR [\fB\-\-\fR] \fIcommand\fR [\fIargument\fR\|\.\|\.\|\.]
+.br
 \fBhdw4s\fR \fBenable\fR \fIinstance\fR
 .br
 \fBhdw4s\fR \fBdisable\fR \fIinstance\fR
@@ -52,13 +54,22 @@ Sessions are expected to sit behind a reverse proxy that terminates TLS and iden
 \fBlist\fR [\fB\-\-seats\fR]
 Print every person's desktop with its user, port, whether it has a credential of its own, whether it keeps its settings apart from the home directory, its transport, its unit state and its current display\. The ephemeral pool is one line under the table: how many seats it has and how many are in use, with a warning once 80% of them are, while there is still time to add seats before a visitor is turned away\.
 .IP
-With \fB\-\-seats\fR, list the pool's seats and the template\-authoring slot instead: each one's unit state, its display, and what is holding it \-\- for finding out what is wrong with the pool, not for configuring it\.
+With \fB\-\-seats\fR, list the pool's seats and the template\-authoring slot instead: each one's unit state, its display, and what is holding it \-\- for finding out what is wrong with the pool, not for configuring it\. LETTING is the first 8 characters of the token in the address of the visitor whose desktop the seat is running now, \fB/s/<token>/\fR: what a visitor can read out of their browser, and what \fBexec\fR accepts\. \fB\-\fR is no visitor's desktop; \fB?\fR is a lookup that failed; it takes root to see\.
 .TP
 \fBcheck\fR
 Report any running session that is not publishing the identity a returning browser tab compares itself against, whether the machine can hand anybody a desktop at all, and whether the memory limit on the desktop slice is a number this machine can actually reach \-\- and, with \fB/shared\fR on, whether desktops are being given a table and anybody is sweeping it\. Exit non\-zero if any of those is wrong\. Nothing is restarted: the point is that somebody is told which session and why\. See DIAGNOSTICS\.
 .TP
 \fBshow\fR \fIinstance\fR
 Print one session's settings and, for each of them, which file it came from\.
+.TP
+\fBexec\fR \fIdesktop\fR [\fB\-\-\fR] \fIcommand\fR [\fIargument\fR\|\.\|\.\|\.]
+Run one command inside a running desktop, as that desktop's user, with its files, its session bus and its settings \-\- for asking a desktop what it sees, which a command run beside it cannot do: a visitor's home and \fB/tmp\fR exist only inside their desktop, and the same paths outside are empty\. Root only\. \fIdesktop\fR is a person's instance name as in \fBlist\fR, a pool seat as in \fBlist \-\-seats\fR, or a visitor's desktop by the address in their browser, \fB/s/<token>/\fR, or the token's first 8 characters or more\.
+.IP
+An address is accepted only while the visit it belongs to holds the seat's current desktop\. Seats are given to the next visitor once one leaves, so the address of a visit that has ended is refused with the reason, rather than run in whoever has the seat now\.
+.IP
+The command joins the desktop's namespaces, control group and user (uid, group and supplementary groups), takes its umask and resource limits, and is given the desktop's environment only for the variables in \fB/usr/lib/hdw4s/hdw4s\-session\-environment\fR, which never includes the session's credential\. It dies with the desktop and counts against its memory limit\. Before it runs, \fBexec\fR reports on standard error what is the same as the desktop and what is not\. The desktop's seccomp filter cannot be copied, so a system call the desktop is refused may succeed here, and it says so every time\.
+.IP
+It never starts a desktop, never connects to its stream, and does not hand the command \fBDISPLAY\fR, \fBXAUTHORITY\fR or \fBICEAUTHORITY\fR\. That last is a courtesy, not a boundary: anything running as the desktop's user can find its screen, and so can read its clipboard or type into it\. Do not run commands in a desktop somebody is using without telling them\. The command runs in a session of its own and never holds your terminal: when your input and output are both a terminal it gets a fresh one and your keyboard, as with \fBssh \-t\fR; otherwise its output comes through pipes, and its input is yours only if that is not a terminal (else it reads end\-of\-file), so a pager after a \fB|\fR keeps your keys\. The exit status is the command's; 125 means \fBexec\fR refused, and says why\.
 .TP
 \fBenable\fR \fIinstance\fR
 Allocate a slot for a session and open its front door\. The desktop is not started here and is not started at boot: the socket listens, and the first connection to arrive starts the session behind it\. Safe to re\-run\. Refused for a seat of the ephemeral pool and for the template\-authoring slot: neither is a person's desktop, and the refusal says what to run instead\.

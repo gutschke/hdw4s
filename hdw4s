@@ -191,6 +191,10 @@ Usage: hdw4s <command> [arguments]
                           publishing the identity a returning tab compares
                           against
   show <instance>         show one session's settings and where each came from
+  exec <desktop> [--] <command> [args...]
+                          run a command inside a running desktop, as its user;
+                          <desktop> is an instance, a pool seat, or a visitor's
+                          address /s/<token>/ (or the token's first 8 characters)
   enable <instance>       allocate a slot for a session and arm its front door
   disable <instance>      stop a session and keep its slot reserved
   release <instance>      stop a session and give up its slot
@@ -823,19 +827,38 @@ list_preload() {
 # finding out what is wrong with the pool, which display a seat has, and what is
 # holding one. Not mixed into the people table: a visitor's desktop is nobody's
 # by name, and in that table it read as a person called "ephemeral3".
+#
+# LETTING is how an administrator gets from what a visitor can tell them -- the
+# address in their browser, /s/<token>/ -- to a seat: the token's first 8
+# characters, for the letting that holds the seat's CURRENT desktop by the
+# router's own rules (hdw4s-demux --lettings), and "-" for none. Reading the
+# router's table takes root; without it the column says so rather than "-".
 list_seats() {
-  local idx inst t why
-  printf '%-18s %-9s %-9s %-8s %s\n' SEAT KIND STATE DISPLAY 'IN USE'
+  local idx inst t why sid letting lettings unknown='(root)'
+  local -A token_of=()
+  if [ "$(id -u)" -eq 0 ]; then
+    # A lookup that failed is "?", never "-": "-" says nobody holds the seat.
+    if lettings="$("${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-demux" --lettings 2>/dev/null)"; then
+      unknown=''
+      while read -r inst sid _; do
+        [ -n "${sid}" ] && token_of[${inst}]="${sid:0:8}"
+      done <<<"${lettings}"
+    else
+      unknown='?'
+    fi
+  fi
+  printf '%-18s %-9s %-9s %-8s %-9s %s\n' SEAT KIND STATE DISPLAY LETTING 'IN USE'
   [ -r "${SLOTS}" ] || return 0
   while read -r idx inst t _; do
     case "${idx}" in ''|\#*) continue;; esac
     case "${t}" in ephemeral) ;; template) ;; *) continue;; esac
     why="$(seat_busy "${inst}")"
-    printf '%-18s %-9s %-9s %-8s %s\n' "${inst}" \
+    letting="${unknown:-${token_of[${inst}]:--}}"
+    printf '%-18s %-9s %-9s %-8s %-9s %s\n' "${inst}" \
       "$( [ "${t}" = ephemeral ] && echo seat || echo template)" \
       "${_LIST_STATE[hdw4s-ephemeral@${inst}.service]:-unknown}" \
       "$(cat "${RUNDIR}/session/${inst}/display" 2>/dev/null || echo '-')" \
-      "${why:--}"
+      "${letting}" "${why:--}"
   done < <(sort -n "${SLOTS}")
 }
 
@@ -858,7 +881,8 @@ list_pool_line() {
     echo "  Nearly full: the next visitor after ${n} is turned away. To add seats:"
     echo '    hdw4s pool size <N>'
   fi
-  echo "  Each seat, its display and what holds it: hdw4s list --seats"
+  echo "  Each seat, its display, its visitor's address and what holds it:" \
+       "hdw4s list --seats"
 }
 
 cmd_list() {
@@ -4473,6 +4497,63 @@ fi
 # "pool set" check against, so a completion can never offer what they refuse or
 # miss what they accept. Undocumented on purpose; reads only.
 #   __complete keys machine|instance|pool      __complete values <KEY>
+# "exec": run one command inside a running desktop, as its user. Root only.
+#
+# The target is named by what an administrator HOLDS: a person's desktop by its
+# instance name, a pool seat by its seat name ("list --seats"), and a visitor's
+# desktop by the address in the visitor's browser, /s/<token>/, or enough of the
+# token. The token is resolved by the router's own rules for a letting, never by
+# the seat its record names: seats are let again, and an address whose letting
+# has ended names a seat that may hold a stranger's desktop now.
+#
+# Entering is hdw4s-enter's job, and its header says what "inside" covers and
+# what it cannot (the seccomp filter). It never starts a desktop, never touches
+# the stream, and withholds the display variables.
+cmd_exec() {
+  local held="$1"
+  local out='' inst='' whose=''
+  local -a inc=()
+  shift
+  [ "${1:-}" = '--' ] && shift
+  [ $# -ge 1 ] || usage_error
+  [ "$(id -u)" -eq 0 ] || die 'hdw4s exec: only root may run a command in somebody'"'"'s desktop'
+  if [ -r "${SLOTS}" ] &&
+     awk -v i="${held}" '$1 !~ /^#/ && $2 == i { f = 1 } END { exit !f }' "${SLOTS}"; then
+    inst="${held}"
+  else
+    case "${held}" in
+      */s/*|[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+      *) die "hdw4s exec: there is no desktop called '${held}'.
+  A person's desktop is named as in 'hdw4s list', a pool seat as in
+  'hdw4s list --seats', and a visitor's by the address in their browser
+  (/s/<token>/) or at least the first 8 characters of the token." ;;
+    esac
+    # The router has said why; stand the trap down, as fail() does, or a
+    # refusal reads as "failed unexpectedly". 125, as hdw4s-enter's refusals.
+    out="$("${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-demux" --resolve "${held}")" ||
+      { trap '' INT TERM QUIT HUP EXIT ERR; exit 125; }
+    inst="${out%% *}"
+    inc=(--incarnation "${inst}=${out#* }")
+  fi
+  # A pool seat named by its SEAT may have passed to another visitor since
+  # "list --seats" was read: say whose desktop this is now. The address is the
+  # name that cannot drift.
+  if [ "$(type_of "${inst}")" = ephemeral ] && [ "${held}" = "${inst}" ]; then
+    # A failed lookup says so: "nobody's" and "could not ask" are different
+    # answers, as LETTING's "-" and "?" are.
+    if out="$("${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-demux" --lettings 2>/dev/null)"; then
+      out="$(awk -v i="${inst}" '$1 == i { print substr($2, 1, 8) }' <<<"${out}")"
+      whose="no visitor's desktop by the router's record"
+      [ -z "${out}" ] || whose="the desktop of visitor ${out}"
+      echo "hdw4s exec: ${inst} is ${whose}" >&2
+    else
+      echo "hdw4s exec: ${inst}: could not ask the router whose desktop it is" >&2
+    fi
+  fi
+  exec "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-enter" "$(unit_of "${inst}")" \
+    "${inc[@]}" -- "$@"
+}
+
 cmd_complete() {
   local key
   case "$1:$#" in
@@ -4497,6 +4578,7 @@ case "${1:-}" in
             case "$*" in ''|--seats) ;; *) usage_error;; esac
             cmd_list "$@";;
   check)    shift; [ $# -eq 0 ] || usage_error; cmd_check "$@";;
+  exec)     shift; [ $# -ge 2 ] || usage_error; cmd_exec "$@";;
   show)     shift; [ $# -eq 1 ] || usage_error; cmd_show "$@";;
   enable)   shift; [ $# -eq 1 ] || usage_error; cmd_enable "$@";;
   disable)  shift; [ $# -eq 1 ] || usage_error; cmd_disable "$@";;

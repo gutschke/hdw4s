@@ -69,8 +69,7 @@ trap 'stopping=1
 #       echo "hdw4s: could not set ..." >&2
 #
 #  1. `gsettings set` EXITS 0 ON A LOST BUS, with the value unchanged. Measured,
-#     and written up in private/in-session.sh's own header after four straight
-#     measurements were void because of it: "a guessed or globbed
+#     after four straight measurements were void because of it: "a guessed or globbed
 #     DBUS_SESSION_BUS_ADDRESS makes `gsettings set` print 'failed to commit
 #     changes to dconf' AND EXIT 0". So the "|| echo" diagnostic was unreachable
 #     for exactly the failure the `timeout 10` in front of it exists to
@@ -318,7 +317,8 @@ fi
 #
 # The variables are listed rather than passed with --all, because this
 # environment also holds the session's proxy credential, and everything on the
-# bus can read what is uploaded here.
+# bus can read what is uploaded here. The list is hdw4s-session-environment,
+# which "hdw4s exec" reads too: one list, so the two cannot drift apart.
 # Keep the readiness notification to ourselves.
 #
 # NotifyAccess=all is required because the process that reports ready is a
@@ -333,14 +333,21 @@ fi
 HDW4S_NOTIFY_SOCKET="${NOTIFY_SOCKET:-}"
 unset NOTIFY_SOCKET
 
-dbus-update-activation-environment \
-  DISPLAY XAUTHORITY ICEAUTHORITY \
-  XDG_RUNTIME_DIR XDG_SESSION_TYPE XDG_SESSION_CLASS XDG_CURRENT_DESKTOP \
-  XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME \
-  GNOME_SHELL_SESSION_MODE PATH HOME LANG \
-  PULSE_SERVER PULSE_RUNTIME_PATH PIPEWIRE_RUNTIME_DIR \
-  GVFS_DISABLE_FUSE \
-  DCONF_PROFILE \
+#
+# NEVER FATAL, as the literal list it replaced could not be: this script runs
+# under "bash -e", and a missing list file killed the session before it was
+# ready (found in review: install.sh did not ship the file).
+activation=()
+while read -r name flags; do
+  case "${name}" in ''|\#*) continue;; esac
+  # "exec" as a WORD among the flags: a line "X display exec" must not be
+  # uploaded because its flags were read as one string.
+  case " ${flags} " in *' exec '*) continue;; esac
+  activation+=("${name}")
+done < "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-session-environment" ||
+  echo 'hdw4s: could not read the list of variables to publish' >&2
+[ "${#activation[@]}" -gt 0 ] &&
+dbus-update-activation-environment "${activation[@]}" \
   2>/dev/null || echo 'hdw4s: could not publish the activation environment' >&2
 
 # The desktop's file indexer, off by default. On a home shared between machines
