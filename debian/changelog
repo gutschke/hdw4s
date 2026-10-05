@@ -1,3 +1,18 @@
+hdw4s (2.4.13) unstable; urgency=medium
+
+  * New: "hdw4s exec <desktop> -- <command>" runs a command inside a
+    running desktop, as its user, with its files, settings and session
+    bus -- for asking a desktop what it sees. A visitor's desktop is named
+    by the address in their browser; "hdw4s list --seats" shows which
+    seat that is. Root only; it reports what it could not make the same
+    as the desktop. See "exec" in hdw4s(8).
+  * The package now depends on dconf-cli: without it the policy that
+    locks a visitor desktop down was never compiled.
+  * install.sh installs hdw4s-background and hdw4s-stage-wait too, so a
+    visitor desktop there gets its own background and startup hold.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sun, 04 Oct 2026 23:29:21 -0700
+
 hdw4s (2.4.12) unstable; urgency=medium
 
   * Named desktops now print to the browser by default, as ephemeral ones
