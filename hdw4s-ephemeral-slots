@@ -1333,7 +1333,7 @@ if [ -z "${ONE_SHOT}" ] && [ -d "${DBDIR}" ]; then
     "picture-uri-dark='${uri}'")"
   if [ "$(cat "${DBDIR}/20-background" 2>/dev/null || :)" != "${want}" ]; then
     printf '%s\n' "${want}" > "${DBDIR}/20-background"
-    if command -v dconf >/dev/null 2>&1; then dconf update 2>/dev/null || :; fi
+    dconf update 2>/dev/null || :
   fi
 fi
 

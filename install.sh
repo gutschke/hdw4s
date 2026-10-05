@@ -96,6 +96,10 @@ done
 command -v xdotool >/dev/null || missing="${missing} xdotool"
 command -v xrandr  >/dev/null || missing="${missing} x11-xserver-utils"
 command -v xset    >/dev/null || missing="${missing} x11-xserver-utils"
+# And the one that compiles the visitor desktops' settings policy: without it
+# the pool's desktops start from stock GNOME defaults instead of the lockdown,
+# and nothing fails to say so.
+command -v dconf   >/dev/null || missing="${missing} dconf-cli"
 
 # Not fatal, so not in the list above: Selkies drives the sound server through
 # its own bundled bindings and only falls back to forking pactl when those
@@ -224,14 +228,9 @@ install -d -m0755 /etc/opt/chrome/policies/managed
 # Compiles the text above into the binary database dconf memory-maps. A missing
 # database is not an error -- dconf warns on stderr, returns 0, and silently
 # falls back to schema defaults -- so a failure here has to be said out loud.
-if command -v dconf >/dev/null; then
-  dconf update 2>/dev/null ||
-    echo 'Warning: "dconf update" failed; ephemeral sessions will start from
+dconf update 2>/dev/null ||
+  echo 'Warning: "dconf update" failed; ephemeral sessions will start from
       stock GNOME defaults rather than the policy above.'
-else
-  echo 'Note: dconf is not installed, so the ephemeral policy database was not
-      compiled. Install dconf-cli and run "dconf update".'
-fi
 
 # The configuration file is the administrator's once it exists; never overwrite
 # an edited one on reinstall.

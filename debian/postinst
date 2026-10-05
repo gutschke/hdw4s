@@ -62,15 +62,10 @@ if [ "$1" = 'configure' ]; then
   # Compiles the text into the database dconf memory-maps. A missing database is
   # not an error: dconf warns on stderr, exits 0, and falls back to schema
   # defaults -- so this failing has to be said out loud rather than swallowed.
-  if command -v dconf >/dev/null 2>&1; then
-    dconf update 2>/dev/null || {
-      echo 'hdw4s: "dconf update" failed; ephemeral sessions will start from' >&2
-      echo '  stock GNOME defaults rather than the shipped policy.' >&2
-    }
-  else
-    echo 'hdw4s: dconf is not installed, so the ephemeral policy database was' >&2
-    echo '  not compiled. Install dconf-cli and run "dconf update".' >&2
-  fi
+  dconf update 2>/dev/null || {
+    echo 'hdw4s: "dconf update" failed; ephemeral sessions will start from' >&2
+    echo '  stock GNOME defaults rather than the shipped policy.' >&2
+  }
 
   # On an upgrade the firewall unit is already active, and it is Type=oneshot
   # with RemainAfterExit=yes, so debhelper's "start" below is a no-op --
