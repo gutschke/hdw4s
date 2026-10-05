@@ -372,8 +372,7 @@ SESSION_TYPES='desktop ephemeral template'
 # What kind of session an instance is. Recorded in the table rather than guessed
 # from the name, because six readers need the answer long after "hdw4s enable"
 # has exited, and a name pattern would make the spelling of a name load-bearing
-# in all of them. A row written by an older version has two fields and means
-# "desktop", which is what every session was when it was written.
+# in all of them.
 type_of() {
   local t=''
   # Answered from the table "list" read once, when it did; see list_preload.
@@ -4276,15 +4275,14 @@ pool_resize() {
   #
   # ROOT'S ALONE, 0600. flock(2) needs only a descriptor and a descriptor only
   # read permission, so a lock file anybody can read is one any account here can
-  # hold, and every resize after it is refused. Made under umask 077, and
-  # chmod'ed in case an older version left it readable. The directory is made if
-  # missing and never given a mode: it is not this command's to decide.
+  # hold, and every resize after it is refused. Made under umask 077. The
+  # directory is made if missing and never given a mode: it is not this
+  # command's to decide.
   mkdir -p "${RUNDIR}"
   local was
   was="$(umask)"; umask 077
   exec {lock}>"${RUNDIR}/pool.lock"
   umask "${was}"
-  chmod 0600 "${RUNDIR}/pool.lock"
   flock -n "${lock}" ||
     die 'hdw4s: another "hdw4s pool size" is running; wait for it and run this again.'
 

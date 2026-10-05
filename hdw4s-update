@@ -225,7 +225,6 @@ mkdir -p "${LOCKFILE%/*}"
 was="$(umask)"; umask 077
 exec 9>"${LOCKFILE}"
 umask "${was}"
-chmod 0600 "${LOCKFILE}"
 flock -n 9 || {
   echo 'hdw4s: another hdw4s-update is already running; leaving it to finish.'
   exit 0

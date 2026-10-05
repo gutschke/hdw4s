@@ -25,9 +25,9 @@ LOCK="${HDW4S_RUNDIR:-/run/hdw4s}/firewall.lock"
 # descriptor, and a descriptor needs no more than read permission -- so a lock
 # file anybody can read is one any account on the machine, a desktop's occupant
 # included, can hold for ever, and the 15-minute self-heal below then waits on it
-# instead of putting the firewall back. Created under umask 077, and chmod'ed in
-# case an older version left it readable. The directory is made if it is
-# missing and never given a mode: it is not this script's to decide.
+# instead of putting the firewall back. Created under umask 077. The directory
+# is made if it is missing and never given a mode: it is not this script's to
+# decide.
 take_lock() {
   local was
   mkdir -p "$(dirname "${LOCK}")"
@@ -35,7 +35,6 @@ take_lock() {
   umask 077
   exec 9>"${LOCK}"
   umask "${was}"
-  chmod 0600 "${LOCK}"
   flock 9
 }
 

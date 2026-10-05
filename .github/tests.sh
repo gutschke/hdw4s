@@ -1083,10 +1083,6 @@ MINT
   # THE LOCK IS ROOT'S ALONE. flock needs only a read descriptor, so a lock file
   # anybody can read is one anybody can hold, and every resize is then refused.
   is  'the pool lock is 0600' "$(stat -c %a "${RUNDIR}/pool.lock")" '600'
-  chmod 0644 "${RUNDIR}/pool.lock"
-  (pool_resize 1) >/dev/null 2>&1
-  is  'and one an older version left readable is made 0600' \
-      "$(stat -c %a "${RUNDIR}/pool.lock")" '600'
 
   # ONE AT A TIME: a second run is refused while the first holds the lock, and
   # changes nothing.
@@ -5028,10 +5024,8 @@ echo '== an install rewrites every file that names the payload path =='
 
 echo '== a slot records what kind of session it is =='
 ( set +e; sandbox; . "${SB}/setup.sh"
-  printf '%s\n' '# comment' '0 alice' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
-  # A row written before the type existed has two fields, and every session was
-  # a desktop when it was written -- so that is what it must still mean.
-  is 'a two-field row means desktop'   "$(type_of alice)"  'desktop'
+  printf '%s\n' '# comment' '0 alice desktop' '1 _hdw4s_0 ephemeral' > "${SLOTS}"
+  is 'a desktop row is read'           "$(type_of alice)"  'desktop'
   is 'a three-field row is read'       "$(type_of _hdw4s_0)"   'ephemeral'
   is 'an unknown instance defaults'    "$(type_of nobody)" 'desktop'
   is 'the desktop unit'   "$(unit_of alice)" 'hdw4s@alice.service'
@@ -5275,36 +5269,19 @@ echo '== an ephemeral slot cannot be put on the network =='
   has 'and speaks of the pool, not our internals' "${out}" 'the pool chooses'
 )
 
-echo '== a slot table written by an older version still works =='
+echo '== the slot table readers take the type as a third field =='
 ( set +e; sandbox; . "${SB}/setup.sh"
-  # The deployed machines have a two-field table written by 2.2.0, and the
-  # install puts readers in front of it that were written for three. If a
-  # two-field row mishandles, "list", "reap" and the firewall break for real
-  # users -- on upgrade, which is the worst moment. This is that table.
-  printf '%s\n' \
-    '# Session slots. One line per session: <index> <instance>.' \
-    '0 alice' '1 bob' '2 carol' > "${SLOTS}"
-
-  is 'every old row reads as a desktop' \
-     "$(for i in alice bob carol; do type_of "${i}"; done | sort -u | tr '\n' ' ')" \
-     'desktop '
-  is 'and resolves to the desktop unit' "$(unit_of bob)" 'hdw4s@bob.service'
-  is 'slot_of still finds a two-field row' "$(slot_of carol)" '2'
-  is 'and alloc_slot is idempotent against one' "$(alloc_slot bob)" '1'
-  is 'which did not rewrite the row' \
-     "$(awk '$2=="bob"{print NF}' "${SLOTS}" | head -1)" '2'
-
+  printf '%s\n' '0 alice desktop' '3 _hdw4s_0 ephemeral' > "${SLOTS}"
   # The readers walk the table with "read -r idx inst _". Prove that shape is
-  # required, by showing what the old two-variable form does to a three-field
-  # row: it does not drop the type, it appends it to the name, so the slot is
-  # indexed under a session that does not exist.
-  printf '%s\n' '3 _hdw4s_0 ephemeral' >> "${SLOTS}"
+  # required, by showing what a two-variable form does to a three-field row: it
+  # does not drop the type, it appends it to the name, so the slot is indexed
+  # under a session that does not exist.
   old_form="$(while read -r idx inst; do [ "${idx}" = '3' ] && echo "${inst}"; done < "${SLOTS}")"
   new_form="$(while read -r idx inst _; do [ "${idx}" = '3' ] && echo "${inst}"; done < "${SLOTS}")"
-  is 'the old reader shape corrupts the name' "${old_form}" '_hdw4s_0 ephemeral'
+  is 'a two-variable reader corrupts the name' "${old_form}" '_hdw4s_0 ephemeral'
   is 'and the shape the readers use does not' "${new_form}" '_hdw4s_0'
-  is 'a mixed table still answers for the old rows' "$(unit_of alice)" 'hdw4s@alice.service'
-  is 'and for the new one'                          "$(unit_of _hdw4s_0)" 'hdw4s-ephemeral@_hdw4s_0.service'
+  is 'the desktop row resolves to its unit'   "$(unit_of alice)" 'hdw4s@alice.service'
+  is 'and the ephemeral one to its own'       "$(unit_of _hdw4s_0)" 'hdw4s-ephemeral@_hdw4s_0.service'
 )
 
 echo '== the relay names no session unit, and enable supplies one =='
@@ -7015,10 +6992,6 @@ echo '== the installed app is never named upstream, on either kind of desktop ==
   # THE BUILD LOCK IS ROOT'S ALONE: it sits where every account can read, and
   # flock needs only a descriptor, so a readable one stalls every later build.
   is 'the web root build lock is 0600' "$(stat -c %a "${d}/web/.hdw4s-webroot.lock")" '600'
-  chmod 0644 "${d}/web/.hdw4s-webroot.lock"
-  run provision named1 || :
-  is 'and one an older version left readable is made 0600' \
-     "$(stat -c %a "${d}/web/.hdw4s-webroot.lock")" '600'
   is 'a named desktop'"'"'s app is named after it' \
     "$(field "${d}/web/named1/manifest.json" name)" 'Desktop|Desktop'
 
@@ -8357,17 +8330,14 @@ echo "== root's lock files can be opened by root alone =="
       LOCK="${d}/run/firewall.lock"; take_lock; stat -c %a "${LOCK}" )
   }
   is 'the firewall lock is 0600' "$(fw_lock "${d}/fw.sh")" '600'
-  chmod 0644 "${d}/run/firewall.lock"
-  is 'and one an older version left readable is made 0600' "$(fw_lock "${d}/fw.sh")" '600'
   rm -rf "${d}/run"
-  # RED ARM: without the umask and the chmod the lock comes out as the umask
-  # leaves it, which is what shipped.
-  # shellcheck disable=SC2016  # the script's own text, not an expansion here
-  sed -e '/^  umask 077$/d' -e '/^  chmod 0600 "${LOCK}"$/d' "${d}/fw.sh" > "${d}/fw-red.sh"
+  # RED ARM: without the umask the lock comes out as the umask leaves it,
+  # which is what shipped.
+  sed -e '/^  umask 077$/d' "${d}/fw.sh" > "${d}/fw-red.sh"
   if cmp -s "${d}/fw.sh" "${d}/fw-red.sh"; then
     bad 'the firewall red arm mutates take_lock' 'the sed matched nothing'
   else
-    (umask 022; is 'RED ARM: a lock taken without them is caught' \
+    (umask 022; is 'RED ARM: a lock taken without it is caught' \
        "$(fw_lock "${d}/fw-red.sh")" '644')
   fi
   # The template tool's lock, through its own take_lock().
@@ -8506,8 +8476,8 @@ echo '== every runtime file is under /run/hdw4s, and nothing names the old place
   # THE UPDATER'S LOCK, out of the world-writable /run/lock and root's alone:
   # the lines that take it, run against a scratch path.
   # shellcheck disable=SC2016  # the script's own text, matched literally
-  lk="$(sed -n '/^mkdir -p "\${LOCKFILE%\/\*}"$/,/^chmod 0600 "\${LOCKFILE}"$/p' "${ROOT}/hdw4s-update")"
-  is 'the updater lock is taken in five lines' "$(printf '%s\n' "${lk}" | grep -c .)" '5'
+  lk="$(sed -n '/^mkdir -p "\${LOCKFILE%\/\*}"$/,/^umask "\${was}"$/p' "${ROOT}/hdw4s-update")"
+  is 'the updater lock is taken in four lines' "$(printf '%s\n' "${lk}" | grep -c .)" '4'
   is 'and defaults to /run/hdw4s/update.lock' \
      "$(unset HDW4S_RUNDIR; eval "$(grep '^LOCKFILE=' "${ROOT}/hdw4s-update")"; echo "${LOCKFILE}")" '/run/hdw4s/update.lock'
   is 'and is made 0600' "$( (LOCKFILE="${d}/u/update.lock"; umask 022; eval "${lk}"; stat -c %a "${LOCKFILE}") )" '600'
@@ -8858,7 +8828,7 @@ echo '== an upgrade never stops the router, and restarts it onto the new code ==
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1691  # update when tests are added; a wrong number is the point
+EXPECTED=1683  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

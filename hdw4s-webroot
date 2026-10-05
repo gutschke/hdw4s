@@ -100,15 +100,13 @@ cmd_build() {
   # ROOT'S ALONE, 0600. The lock sits in a directory every account can read, and
   # flock(2) needs nothing more than a descriptor: readable by all, it is a lock
   # a desktop's occupant can open and hold for ever, and every later build -- each
-  # named desktop's start, each mint -- then waits on it. Made under umask 077,
-  # and chmod'ed in case an older version left it readable.
+  # named desktop's start, each mint -- then waits on it. Made under umask 077.
   mkdir -p "$(dirname "${root}")"
   local lock was
   lock="$(dirname "${root}")/.hdw4s-webroot.lock"
   was="$(umask)"; umask 077
   exec 9>"${lock}" || die 'could not open the build lock'
   umask "${was}"
-  chmod 0600 "${lock}" || die 'could not make the build lock private'
   flock 9 || die 'could not take the build lock'
 
   local stage="${root}.new.$$"
