@@ -1213,22 +1213,18 @@ def front_door():
 
 def cmd_edit(yes):
     inst = pick_instance()
-    # THE MINTER'S OWN EVIDENCE, NOT "the name resolves". A row an earlier
-    # version's "enable --template <name>" left on a PERSON'S account resolves
-    # perfectly well -- to that person -- and the authoring desktop would then
-    # have been started as them. Only a slot hdw4s-ephemeral-slots made has its
-    # passwd view; hdw4s-is-slot asks polkit's question the same way. Asked
+    # THE MINTER'S OWN EVIDENCE, NOT "the name resolves". A template row on a
+    # PERSON'S account resolves perfectly well -- to that person -- and the
+    # authoring desktop would then be started as them. Only a slot
+    # hdw4s-ephemeral-slots made has its passwd view; hdw4s-is-slot asks
+    # polkit's question the same way. Asked
     # before anything is stopped or wiped: nothing of an edit can be running in a
     # slot that has no identity, and a refusal should leave everything as it was.
     if not os.path.isfile(os.path.join(NS_DIR, inst, "passwd")):
         die("the authoring slot %s has no identity this boot, so its desktop "
             "cannot start.\n"
             "  'journalctl -b -u hdw4s-ephemeral-slots' says why it was not "
-            "made.\n"
-            "  If %s is a person's account, an earlier version left this row "
-            "on it:\n"
-            "    hdw4s release --internal %s\n"
-            "  and run 'hdw4s template edit' again." % (inst, inst, inst))
+            "made." % inst)
     lockfd = take_lock()
     # WE HOLD THE LOCK, so no other "template" command is running: anything of
     # an edit still here was left by one that was killed outright (SIGKILL, a

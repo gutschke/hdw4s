@@ -545,8 +545,7 @@ esac
 # hdw4s.slice. The authoring slot, _hdw4s_author, has run under the same shape
 # end to end: unit, journal namespace, userdb record, slice and socket.
 #
-# NOT A SETTING. The seats were "ephemeral<i>" under HDW4S_EPHEMERAL_PREFIX,
-# which is retired: a configurable spelling of a name nobody types is an
+# NOT A SETTING: a configurable spelling of a name nobody types would be an
 # internal detail the administrator was made to own. Spelled again in "hdw4s",
 # which has no other way to know it; .github/tests.sh holds the copies together.
 SEAT_PREFIX='_hdw4s_'
@@ -750,14 +749,13 @@ elif [ "$#" -gt 0 ]; then
   die "unknown argument '$1'; this takes no arguments, --template NAME or --seat NAME."
 else
   SLOT_SPECS=''
-  # ROWS UNDER RETIRED NAMES: the table offers visitors a row typed
-  # "ephemeral" whose name is not a seat -- after an upgrade, the
-  # "ephemeral0", "ephemeral1", ... of earlier versions. Nothing below mints
-  # an identity for such a row, so the router would go on sending visitors to
-  # a desktop that dies 217/USER, while the new seats, which have no rows,
-  # would be minted for nobody. That is the half-working shape, and it is
-  # REFUSED rather than translated: renaming rows at boot would be an upgrade
-  # path that rewrites an administrator's table behind their back.
+  # ROWS THAT ARE NOT SEATS: the table offers visitors a row typed
+  # "ephemeral" whose name is not a seat. Nothing below mints an identity for
+  # such a row, so the router would go on sending visitors to a desktop that
+  # dies 217/USER, while the seats, which have no rows, would be minted for
+  # nobody. That is the half-working shape, and it is REFUSED rather than
+  # repaired: rewriting the table at boot would change it behind the
+  # administrator's back.
   #
   # NOT REFUSED HERE AND NOW, though. A "die" at this point would skip
   # everything else this run does for the WHOLE machine -- the run
@@ -1164,19 +1162,6 @@ esac
 # OFF MEANS NONE OF THESE FILES EXIST. A stale drop-in is a /shared that nobody
 # turned on.
 shared_mode="${HDW4S_SHARED-}"
-# THE OLD SWITCH. HDW4S_SHARED_SIZE alone used to turn this on; now it is only
-# a size. Nothing turns off silently: a machine upgraded with only the old line
-# boots with /shared OFF and says so here, and "hdw4s check" says it again.
-if [ -z "${shared_mode}" ] && [ -n "${HDW4S_SHARED_SIZE:-}" ]; then
-  echo "hdw4s: WARNING: HDW4S_SHARED_SIZE is set and HDW4S_SHARED is not, so /shared
-  is OFF. HDW4S_SHARED_SIZE used to switch it on; it is now only the size of a
-  tmpfs table. To keep it, add HDW4S_SHARED=tmpfs to ${ETCDIR}/hdw4s.conf and
-  reboot." >&2
-fi
-[ -z "${HDW4S_SHARED_EXPIRY+set}" ] ||
-  echo "hdw4s: WARNING: HDW4S_SHARED_EXPIRY is retired and nothing reads it; items
-  on /shared now go after HDW4S_SHARED_IDLE (default 30m) unused. Delete the
-  line from ${ETCDIR}/hdw4s.conf." >&2
 case "${shared_mode:=off}" in
   off|tmpfs|source) ;;
   *)
@@ -1414,12 +1399,11 @@ elif [ -n "${ONE_SHOT}" ]; then
   # two are worth reading together the first time a template row is minted.
   echo "hdw4s: minted the authoring slot ${TEMPLATE_NAME} (uid ${TEMPLATE_UID})."
 elif [ -n "${RETIRED}" ]; then
-  die "the slot table offers visitors seats this version never mints:${RETIRED}
-  The pool's seats are named ${SEAT_PREFIX}0, ${SEAT_PREFIX}1, ...; the ephemeral0,
-  ephemeral1, ... of earlier versions are retired, and nothing makes an account
-  for them. NO SEAT OF THE POOL WAS MINTED, so no visitor can be served. Named
-  desktops are unaffected; the template-authoring slot needs this unit, and
-  waits with the pool. Replace the rows with seats under the new names, then
+  die "the slot table offers visitors rows the minter never mints:${RETIRED}
+  The pool's seats are named ${SEAT_PREFIX}0, ${SEAT_PREFIX}1, ...; nothing makes
+  an account for any other name. NO SEAT OF THE POOL WAS MINTED, so no visitor
+  can be served. Named desktops are unaffected; the template-authoring slot
+  needs this unit, and waits with the pool. Replace the rows with seats, then
   run this again:
     hdw4s pool size ${HDW4S_EPHEMERAL_SLOTS}
     systemctl start hdw4s-ephemeral-slots.service"

@@ -103,7 +103,7 @@ if [ -n "${SELFTEST}" ]; then
   # A: the two deletions a "clean up properly" pass is most tempted to write.
   #    One eats every profile directory, and with it the two accounts whose
   #    home is under /var/lib/hdw4s; the other eats a dot-directory in a home.
-  awk '{ if ($0 ~ /^  rm -rf \/opt\/gst-web /) {
+  awk '{ if ($0 ~ /^  rm -rf \/var\/lib\/hdw4s\/selkies$/) {
            print "  rm -rf /var/lib/hdw4s"; print "  rm -rf /home/alice/.config" }
          print }' "${ctl}/A/DEBIAN/postrm" > "${ctl}/postrm.a"
   mv "${ctl}/postrm.a" "${ctl}/A/DEBIAN/postrm"; chmod 0755 "${ctl}/A/DEBIAN/postrm"
@@ -377,7 +377,7 @@ done
 
 echo '--- what purge left behind'
 for p in /etc/hdw4s /var/lib/hdw4s /usr/lib/hdw4s /usr/share/hdw4s \
-         /etc/opt/chrome/policies/managed /opt/gst-web \
+         /etc/opt/chrome/policies/managed \
          /etc/dconf/db/hdw4s-ephemeral /etc/dconf/profile/hdw4s-ephemeral \
          /etc/sysctl.d/60-hdw4s.conf; do
   if [ -d "${R}${p}" ]; then

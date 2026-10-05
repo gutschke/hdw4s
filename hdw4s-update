@@ -47,25 +47,13 @@ PATCH_MANIFEST=''
 
 # Two updaters, or an updater and a hand-run apt, must not interleave. dpkg has
 # its own lock and will refuse the second caller, but by then this script has
-# already downloaded, decided and possibly removed the pre-2.0 tree; the useful
-# place to stop is before any of that.
+# already downloaded and decided; the useful place to stop is before that.
 #
 # Under /run/hdw4s, root's, not in /run/lock: that directory is 1777, so any
 # account can create the file before the updater ever runs, and root's open of
 # somebody else's file there is then refused (protected_regular). 0600 for the
 # reason every lock of ours is: flock needs only a descriptor.
 LOCKFILE="${HDW4S_RUNDIR:-/run/hdw4s}/update.lock"
-
-# Where a 1.6-era installation is moved before dpkg is allowed near the prefix.
-# Installing the .deb straight over the old virtualenv is not a clean upgrade
-# and not a clean failure either: it deletes nothing, so the venv's own files
-# stay behind unowned, but it overwrites pyvenv.cfg and flips
-# include-system-site-packages to false, which breaks the old installation
-# without removing a file. Removing the package afterwards then deletes the
-# interpreter symlinks dpkg has since taken ownership of, so what is left is
-# neither version. Moving it aside first is the only order in which both
-# outcomes are recoverable.
-LEGACY="${PREFIX}.pre-2.0"
 
 # The last release whose packaging this script understands, as upstream's own
 # version string -- what "selkies --version" prints. Raise it only together
@@ -822,7 +810,7 @@ unmet_depends() {
 }
 
 # --- ROLLING BACK -----------------------------------------------------------
-# Three cases, and the third is the one that is easy to get wrong.
+# Two cases.
 #
 #   * There was a package here before: install its .deb back over the new one.
 #     dpkg downgrades without complaint; apt would refuse without
@@ -830,8 +818,6 @@ unmet_depends() {
 #   * There was nothing here before: remove the package. Leaving a broken
 #     install in place because "there is nothing to go back to" leaves the
 #     machine one state worse than it started.
-#   * There was a 1.6-era virtualenv here, moved aside rather than deleted for
-#     exactly this moment. Put it back.
 rollback() {
   local to_deb="$1"
   if [ -n "${to_deb}" ]; then
@@ -850,10 +836,6 @@ rollback() {
     echo "  Removing ${PKG} failed as well." >&2
     return 1
   }
-  if [ -d "${LEGACY}" ]; then
-    mv "${LEGACY}" "${PREFIX}"
-    echo "  Put the pre-2.0 installation back at ${PREFIX}." >&2
-  fi
   return 0
 }
 
@@ -1130,23 +1112,6 @@ missing="$(unmet_depends "${workdir}/${asset}" | tr '\n' ' ')"
   die
 }
 
-# --- THE 1.6 PREFIX ---------------------------------------------------------
-# A virtualenv this script built, before upstream shipped a package. dpkg knows
-# nothing about it, so nothing under it is anybody's property and moving it is
-# safe -- which is not true in the other direction, and is why this is asked
-# with dpkg-query rather than by looking for a file.
-if [ -d "${PREFIX}" ] && ! dpkg-query -S "${PREFIX}/bin/python" >/dev/null 2>&1; then
-  echo '  A pre-2.0 Selkies is in the way. It was installed by an older hdw4s'
-  echo '  as a virtualenv, not as a package, and dpkg cannot unpack over it'
-  echo "  cleanly, so it is moved to ${LEGACY} first."
-  rm -rf "${LEGACY}"
-  mv "${PREFIX}" "${LEGACY}"
-  # The 1.6 browser client. Selkies 2.0 serves its own from inside the package
-  # and hdw4s no longer passes --web-root, so nothing reads this again.
-  rm -rf /opt/gst-web /opt/gst-web.bak "${PREFIX}.bak"
-  legacy_moved='yes'
-fi
-
 echo -n '  Installing...'
 if ! install_deb "${workdir}/${asset}"; then
   echo 'CRITICAL: dpkg could not install the new package.' >&2
@@ -1176,10 +1141,6 @@ fi
 # keeping: caching a .deb that has never worked would give the next failure a
 # rollback target that is itself broken.
 cache_deb "${wanted}" "${workdir}/${asset}" "${sum}" "${current}"
-[ -z "${legacy_moved:-}" ] || {
-  echo "  The pre-2.0 installation is still at ${LEGACY}. Nothing reads it;"
-  echo '  remove it once this release has been in use for a while.'
-}
 
 # --- RESTART WHAT IS SAFE TO RESTART ----------------------------------------
 # No --all. Instances stay loaded but inactive because the proxy unit requires

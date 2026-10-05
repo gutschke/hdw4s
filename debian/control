@@ -96,14 +96,10 @@ Description: headless GNOME desktop streamed to a web browser
 # desktops and must not need hdw4s's dependencies to sweep it. hdw4s depends on
 # it at the same version, so a desktop machine always has the tool its
 # expose service and "hdw4s check" call. It carries hdw4s-duration because the
-# tool parses durations and that grammar must stay one file; Replaces lets it
-# take that file over from an hdw4s built before the split, and Breaks makes
-# that older hdw4s go first rather than leave a mixture installed.
+# tool parses durations and that grammar must stay one file.
 Package: hdw4s-shared-sweep
 Architecture: all
 Depends: ${misc:Depends}, python3
-Replaces: hdw4s (<< 2.4.11~)
-Breaks: hdw4s (<< 2.4.11~)
 Description: guard, sweeper and usage relay for the hdw4s /shared drop area
  A /shared drop area is a filesystem every desktop can read and write, kept
  safe by its mount flags and kept tidy by this tool. It refuses to touch a

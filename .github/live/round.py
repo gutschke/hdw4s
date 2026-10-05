@@ -416,20 +416,17 @@ class _Shape(html.parser.HTMLParser):
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.ids, self.actions, self.hrefs = set(), set(), set()
+        self.ids, self.actions = set(), set()
         self.card = False
 
     def handle_starttag(self, tag, attrs):
         a = dict((k, v or "") for k, v in attrs)
         if a.get("id"):
             self.ids.add(a["id"])
-        if tag == "div" and ("card" in a.get("class", "").split()
-                             or "max-width:32rem" in a.get("style", "")):
+        if tag == "div" and "card" in a.get("class", "").split():
             self.card = True
         if tag == "form":
             self.actions.add(a.get("action", ""))
-        if tag == "a":
-            self.hrefs.add(a.get("href", ""))
 
     handle_startendtag = handle_starttag
 
@@ -444,9 +441,8 @@ def classify(title, body_html):
       gate     demux ended_page(): a card WITH a button (POST /sessions/new)
       refused  demux page(): the same card WITHOUT the link (the 503)
 
-    ended_page() and page() differ by a <form action="/sessions/new"> (it was
-    an <a href="/"> until the ended page's button stopped resuming another
-    desktop; both are still read, so an older build classifies too). Neither carries an id, a class or a data- attribute saying which it
+    ended_page() and page() differ by a <form action="/sessions/new">. Neither
+    carries an id, a class or a data- attribute saying which it
     is, so this function is reading a styling decision and calling it a
     protocol. It is good enough to run the round and it is not good enough to
     keep: the repair
@@ -466,11 +462,9 @@ def classify(title, body_html):
     # The gated client's own elements, by id: the gate card and its button.
     if "hdw4s-gate" in shape.ids or "hdw4s-go" in shape.ids:
         return "desktop"
-    # The card was an inline max-width:32rem; it is now class="card" on the
-    # shared page stylesheet. Both are read, so an older build classifies too.
     if not shape.card:
         return "unknown"
-    if "/sessions/new" in shape.actions or "/" in shape.hrefs:
+    if "/sessions/new" in shape.actions:
         return "gate"
     # A LINKLESS CARD IS NOT ONE THING, and this cost the exhaustion arm its
     # meaning before it ever ran. page() builds BOTH the 503 "every desktop is

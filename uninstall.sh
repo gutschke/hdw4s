@@ -141,13 +141,9 @@ for u in /etc/systemd/system/*.target.wants/hdw4s*; do
   target="$(readlink -- "${u}")"
   [ "${target}" = "${target%"/hdw4s/${name}"}" ] || rm -f -- "${u}"
 done
-# Per-instance state. The glob below never matched anything -- hdw4s@.service
-# has no [Install] section, so nothing is ever linked into multi-user.target --
-# while the drop-ins and the socket links that "hdw4s enable" really does write
-# were left behind. Reinstalling then came back up with stale User= and port
+# Per-instance state: the drop-ins and the socket links that "hdw4s enable"
+# writes. Left behind, a reinstall came back up with stale User= and port
 # assignments for slots that had since been handed to somebody else.
-rm -f /etc/systemd/system/multi-user.target.wants/hdw4s@*.service \
-      /etc/systemd/system/multi-user.target.wants/hdw4s-ephemeral@*.service
 rm -f /etc/systemd/system/sockets.target.wants/hdw4s-proxy@*.socket
 rm -rf /etc/systemd/system/hdw4s@*.service.d \
        /etc/systemd/system/hdw4s-ephemeral@*.service.d \
@@ -315,10 +311,8 @@ if command -v dpkg-query >/dev/null 2>&1 &&
 else
   echo '  The selkies package is not installed.'
 fi
-# Ours, with no other owner: the pre-2.0 browser client, the virtualenv the
-# updater moved aside during the migration, and the cached .deb it kept so an
-# upgrade had something to roll back to.
-rm -rf /opt/gst-web /opt/gst-web.bak /opt/selkies.bak /opt/selkies.pre-2.0
+# Ours, with no other owner: the .deb the updater keeps so an upgrade has
+# something to roll back to.
 rm -rf /var/lib/hdw4s/selkies
 echo ' done.'
 

@@ -6304,49 +6304,10 @@ def test_lettings_that_ended_unseen_do_not_disarm_the_reclaim(rig):
         % (name, rig.teardown_requests()))
 
 
-def test_a_table_with_lettings_that_ended_unseen_is_settled_at_start(rig=None):
-    """An upgrade inherits such lettings; the router settles them as it starts.
-
-    The shape of the two rows found on production: live, not ended, and a later
-    letting of the same slot made after each of them."""
-    m = load_demux()
-    m.log = lambda msg: None
-    tmp = tempfile.mkdtemp(prefix="demux-table-")
-    path = os.path.join(tmp, "ownership.json")
-    now = time.time()
-
-    def row(ident, inst, minted, ended=None):
-        return {"identity": ident, "instance": inst, "minted": minted,
-                "live": True, "incarnation": "i%d" % int(minted),
-                "ended": ended, "ended_at": None}
-    rows = {"a" * 32: row("x" * 32, "_hdw4s_0", now - 900),
-            "b" * 32: row("y" * 32, "_hdw4s_0", now - 600),
-            "c" * 32: row("z" * 32, "_hdw4s_0", now - 300),
-            "d" * 32: row("w" * 32, "_hdw4s_1", now - 800)}
-    with open(path, "w") as f:
-        json.dump({"version": 1, "sessions": rows}, f)
-    try:
-        own = m.Ownership(path)
-        ended = {s: bool((own.lookup(s) or {}).get("ended")) for s in rows}
-        assert ended == {"a" * 32: True, "b" * 32: True,
-                         "c" * 32: False, "d" * 32: False}, (
-            "the lettings a later letting of their slot superseded were not "
-            "settled at start (True = ended): %r" % ended)
-        assert own.holders_of("_hdw4s_0", besides="c" * 32) == [], \
-            "a settled letting still counts as holding its slot"
-        with open(path) as f:
-            written = json.load(f)["sessions"]
-        assert written["a" * 32]["ended"] and written["b" * 32]["ended"], \
-            "the settlement was not written down, so the next start redoes it"
-    finally:
-        import shutil
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
 EARLIER_LETTINGS_HOLD_AGAIN = """
 
-# Appended by the red arm: the rule as it was. Nothing is settled at a mint or
-# at start, and every un-ended letting of the slot holds it.
+# Appended by the red arm: the rule as it was. Nothing is settled at a mint,
+# and every un-ended letting of the slot holds it.
 Ownership._supersede_locked = lambda self, instance, sid, minted: 0
 _shipped_holders_of = Ownership.holders_of
 
@@ -6744,7 +6705,6 @@ def main():
                test_a_slot_that_is_never_reaped_is_reported_at_start,
                test_a_duration_already_in_seconds_is_refused,
                test_the_records_the_refusal_log_is_read_from_survive_a_restart,
-               test_a_table_with_lettings_that_ended_unseen_is_settled_at_start,
                test_a_first_request_at_the_edge_of_grace_keeps_its_slot_held,
                # In-process, with the window between the pick and the record
                # held open; see concurrent_lettings().

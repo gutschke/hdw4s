@@ -103,11 +103,8 @@ if [ "$1" = 'purge' ]; then
     echo '       still installed. Remove it with "apt-get purge selkies".'
   fi
 
-  # These are ours. /opt/gst-web is the browser client an hdw4s before 2.0
-  # unpacked, /opt/selkies.pre-2.0 is a virtualenv the updater moved aside
-  # during the migration, and /var/lib/hdw4s/selkies is the .deb it keeps so an
-  # upgrade has something to roll back to. None of them has another owner.
-  rm -rf /opt/gst-web /opt/gst-web.bak /opt/selkies.bak /opt/selkies.pre-2.0
+  # Ours, with no other owner: the .deb the updater keeps so an upgrade has
+  # something to roll back to.
   rm -rf /var/lib/hdw4s/selkies
   echo 'hdw4s: /var/lib/hdw4s still holds each session profile; remove it by'
   echo '       hand if those desktops are not wanted again.'

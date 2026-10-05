@@ -600,11 +600,10 @@ def slot_table(path=None):
     directory listing instead -- and the whole of the defect below was that the
     typed authority was consulted only where being wrong was harmless.
 
-    A row is "<index> <instance> [<type>]". The type defaults to "desktop" when
-    the column is absent, which is the CLI's own reading of the same file; a
-    table written before the column existed describes named desktops, and
-    guessing "ephemeral" for them would put a person's long-lived session into
-    the pool a stranger is minted onto.
+    A row is "<index> <instance> <type>". A row missing its type is read as
+    "desktop", the CLI's own reading of the same file, because that is the
+    direction that fails safe: guessing "ephemeral" would put what may be a
+    person's long-lived session into the pool a stranger is minted onto.
 
     None, NOT an empty list, when the file cannot be read. The two mean opposite
     things to a caller deciding whether to hand a slot out -- "this box has no
@@ -695,9 +694,8 @@ def assert_pool_is_typed(read_table=slot_table, pool=ephemeral_slots):
 
       named0     typed "desktop"  -- a person's long-lived session, in the same
                                      socket directory, offered to a stranger
-      legacy     no type column   -- a table written before the column existed;
-                                     defaulting it to "ephemeral" would do the
-                                     same damage to every row of an old file
+      untyped    no type column   -- a malformed row; defaulting it to
+                                     "ephemeral" would do the same damage
       zz-probe   only a filename  -- the "touch zz-probe.sock" case; it is in no
                                      table at all
       unreadable table            -- must be None and not [], because [] says
@@ -720,7 +718,7 @@ def assert_pool_is_typed(read_table=slot_table, pool=ephemeral_slots):
             f.write("0 eph0 ephemeral\n")
             f.write("1 named0 desktop\n")
             f.write("2 eph1 ephemeral\n")
-            f.write("3 legacy\n")
+            f.write("3 untyped\n")
             f.write("4 tmpl template\n")
         table = read_table(path)
         assert table is not None, \
@@ -736,9 +734,9 @@ def assert_pool_is_typed(read_table=slot_table, pool=ephemeral_slots):
         assert "named0" not in got, \
             "a row typed 'desktop' was offered as ephemeral capacity: a named" \
             " desktop can be handed to a stranger"
-        assert "legacy" not in got, \
-            "a row with no type column was treated as ephemeral; every row of" \
-            " a table written before that column existed is a named desktop"
+        assert "untyped" not in got, \
+            "a row with no type column was treated as ephemeral, so a malformed" \
+            " row could hand a stranger what may be a person's desktop"
         assert "zz-probe" not in got, \
             "a name that is in no table at all reached the pool, so the pool" \
             " is still being computed from something other than the table"
@@ -1172,25 +1170,6 @@ class Ownership:
         log("took back %d letting(s) from %s%s"
             % (len(self._by_sid), self._path,
                "" if not dropped else "; %d malformed row(s) dropped" % dropped))
-        # A TABLE WRITTEN BY A ROUTER THAT DID NOT DO THIS AT MINT carries
-        # lettings whose desktops ended with no tab coming back to say so, and
-        # each of them disarmed every later reclaim of its slot. Settled here,
-        # once, by the same rule mint_session() now applies as it goes -- so an
-        # upgrade cleans the table it inherits and nobody has to wipe it.
-        settled = 0
-        with self._lock:
-            newest = {}
-            for sid, r in self._by_sid.items():
-                if r["minted"] > newest.get(r["instance"], (None, -1.0))[1]:
-                    newest[r["instance"]] = (sid, r["minted"])
-            for inst, (sid, minted) in newest.items():
-                settled += self._supersede_locked(inst, sid, minted)
-            if settled:
-                self._save()
-        if settled:
-            log("marked %d letting(s) ended: a later letting of the same slot "
-                "was made after each, so its desktop had already gone"
-                % settled)
 
     def _save(self):
         """Write the table down. Called with self._lock HELD, after a change.

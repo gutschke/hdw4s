@@ -956,7 +956,7 @@ if [ "${HDW4S_STARTUP_HOLD}" = 'on' ]; then
   hold_gate="${HDW4S_ANNOUNCED_GATE_WAIT:-60}"
   hold_t0="${HDW4S_T0:-}"
   if ! is_seconds "${hold_t0}"; then
-    # Unset when an older hdw4s-session started this script, across an upgrade.
+    # Not a number of seconds: the hold is skipped, never the start failed.
     hold_skip="the session's start time ($(quoted "${hold_t0:-unset}"))"
   elif ! is_seconds "${hold_gate}"; then
     hold_skip="HDW4S_ANNOUNCED_GATE_WAIT ($(quoted "${hold_gate}"))"
@@ -1055,10 +1055,8 @@ session_pid="$!"
 if [ "${HDW4S_AUTH:-none}" = 'basic' ] &&
    [ -n "${CREDENTIALS_DIRECTORY:-}" ] &&
    [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-auth" ]; then
-  # An instance is the account name; the strip keeps the user name right for an
-  # instance named "<user>:<session>" by a version that still created them,
-  # which can still be running.
-  SELKIES_BASIC_AUTH_USER="${instance%%:*}"
+  # An instance is the account name.
+  SELKIES_BASIC_AUTH_USER="${instance}"
   SELKIES_BASIC_AUTH_PASSWORD="$(cat "${CREDENTIALS_DIRECTORY}/hdw4s-auth")"
   export SELKIES_BASIC_AUTH_USER SELKIES_BASIC_AUTH_PASSWORD
   auth='--enable_basic_auth=true'

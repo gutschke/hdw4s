@@ -3,8 +3,7 @@
 # silenced wholesale:
 #   SC2034  variables assigned here are read by the code sourced from hdw4s,
 #           which the linter cannot see across the source boundary.
-#   SC2154  "user" and "session" are outputs of split_name and
-#           split_legacy_name, set as globals.
+#   SC2154  "user" is an output of split_name, set as a global.
 #   SC2030/SC2031  each group runs in its own subshell on purpose, so that one
 #           failure cannot derail the rest; the linter reads the isolation as
 #           an accident.
@@ -122,22 +121,11 @@ echo '== instance names =='
   # Not "split_name … && is …": if the call fails the assertion never runs and
   # nothing is recorded, so making split_name reject every name looked like a
   # pass.
-  user=''; session=''
-  split_name 'alice'   2>/dev/null || :; is 'plain name accepted'     "${user}:${session}" 'alice:1'
-  # An account has one desktop. The second-session form is refused everywhere
-  # except "release", which has to be able to retire one that already exists.
+  user=''
+  split_name 'alice'   2>/dev/null || :; is 'plain name accepted' "${user}" 'alice'
   split_name 'alice:2' 2>/dev/null && bad 'colon rejected' || ok 'colon rejected'
-  user=''; session=''
-  split_legacy_name 'alice:2' 2>/dev/null || :
-  is 'colon accepted for release' "${user}:${session}" 'alice:2'
-  # The escape hatch is not a hole: it gives up the session number, and nothing
-  # else. Everything that keeps a name out of a file path still applies to it.
-  split_legacy_name '../../root/x' 2>/dev/null && bad 'legacy path traversal rejected' || ok 'legacy path traversal rejected'
-  split_legacy_name 'alice:0'      2>/dev/null && bad 'legacy session 0 rejected'      || ok 'legacy session 0 rejected'
-  split_legacy_name ''             2>/dev/null && bad 'legacy empty name rejected'     || ok 'legacy empty name rejected'
   # A name reaches file paths, so it is checked even where the account need not exist.
   split_name '../../root/x' 2>/dev/null && bad 'path traversal rejected' || ok 'path traversal rejected'
-  split_name 'alice:0'      2>/dev/null && bad 'session 0 rejected'       || ok 'session 0 rejected'
   split_name ''             2>/dev/null && bad 'empty name rejected'      || ok 'empty name rejected'
 )
 
@@ -693,6 +681,15 @@ echo '== a named desktop'"'"'s web root is built when it is enabled, before its 
   : > "${CALLS}"; rm -f "${SLOTS}"
   ( enable_slot ephemeral _hdw4s_0 ) >/dev/null 2>&1
   hasnt 'a pool seat is not provisioned here' "$(cat "${CALLS}")" 'webroot provision'
+  # THE RELAY'S HOLD ON ITS SESSION. A named desktop's is BindsTo=: reached at
+  # its own hostname, coming back on connect is its design, and Requires= would
+  # not end a relay whose session exits on its own. A pool seat's is Requisite=,
+  # which starts nothing, so a connection can never start a desktop for nobody.
+  dep() { command grep -E '^(Requires|BindsTo|Requisite)=' \
+            "${DROPIN}/hdw4s-proxy@$1.service.d/30-session.conf" 2>/dev/null; }
+  is 'a named desktop'"'"'s relay binds to its session' "$(dep alice)" 'BindsTo=hdw4s@alice.service'
+  is 'a pool seat'"'"'s relay requires a running one and starts none' \
+     "$(dep _hdw4s_0)" 'Requisite=hdw4s-ephemeral@_hdw4s_0.service'
 )
 
 echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
@@ -730,10 +727,11 @@ echo '== a pool seat or the authoring slot is not a person'"'"'s desktop =='
   out="$( (cmd_enable "${TEMPLATE_SLOT}") 2>&1 )"; rc=$?
   [ "${rc}" -ne 0 ] && ok 'and the reserved name before anything provisions it' \
     || bad 'and the reserved name before anything provisions it' "rc ${rc}"
-  # The row an earlier "enable --template root" could leave on a real account.
+  # A template row is refused by its type, whatever account the name resolves to.
   out="$( (cmd_enable root) 2>&1 )"; rc=$?
-  has   'a template row on a real account names the way out' \
-        "${out}" 'hdw4s release --internal root'
+  [ "${rc}" -ne 0 ] && ok 'a template row on a real account is refused too' \
+    || bad 'a template row on a real account is refused too' "rc ${rc}"
+  has   'and for being the authoring slot'  "${out}" 'hdw4s template edit'
   # Seats are added by "pool size" alone; the per-seat spelling is a usage error
   # from the real dispatcher, before anything is looked up or written.
   HDW4S_ETCDIR="${SB}/etc" bash "${ROOT}/hdw4s" enable --ephemeral _hdw4s_3 >/dev/null 2>&1
@@ -820,16 +818,8 @@ echo '== the pool'"'"'s settings are one thing, not one per seat =='
   rm -f "${ETCDIR}/dora.conf"
   r="$(setting_with_source dora HDW4S_FRAMERATE x)"
   is 'a named desktop does not' "${r}" "30	${CONF}"
-  # A seat configured one by one before this keeps its own value, and both
-  # commands say so rather than leaving the admin to wonder why one seat differs.
-  printf 'HDW4S_TRANSPORT=unix\nHDW4S_FRAMERATE=60\n' > "${ETCDIR}/_hdw4s_0.conf"
-  r="$(setting_with_source _hdw4s_0 HDW4S_FRAMERATE x)"
-  is 'a seat'"'"'s own file still wins' "${r}" "60	${ETCDIR}/_hdw4s_0.conf"
-  out="$( (pool_set 'HDW4S_FRAMERATE=25') 2>&1 )"
-  has 'and pool set names the seat it does not reach' "${out}" 'Overridden on seat(s) _hdw4s_0'
+  ( pool_set 'HDW4S_FRAMERATE=25' ) >/dev/null 2>&1
   out="$(pool_show_all 2>&1)"
-  has 'pool show lists the seat'"'"'s own setting' "${out}" '_hdw4s_0: HDW4S_FRAMERATE'
-  hasnt 'but not what hdw4s wrote there itself' "${out}" '_hdw4s_0: HDW4S_TRANSPORT'
   has 'and shows the pool'"'"'s value and where it came from' "${out}" "HDW4S_FRAMERATE              25                     $(pool_conf)"
   has 'and the built-in default where nothing says' "${out}" 'built-in default'
 
@@ -1127,15 +1117,15 @@ MINT
   is  'and a person'"'"'s desktop alone' "$(slot_of alice)" '0'
   is  'and the identity above the size is gone' "$([ -e "${NSDIR}/_hdw4s_5" ] && echo left || echo gone)" 'gone'
 
-  # AN UPGRADED TABLE, still offering the retired names. Not translated by
-  # anything automatic; "pool size" with the same number replaces them, because
+  # A TABLE OFFERING ROWS THAT ARE NOT SEATS. "pool size" with the same
+  # number replaces them, because
   # a row that is not a seat is the first thing it takes away -- and that is
   # the repair the boot's refusal and "hdw4s check" both name.
   printf '%s\n' '0 alice' '1 ephemeral0 ephemeral' '2 ephemeral1 ephemeral' > "${SLOTS}"
   printf 'HDW4S_EPHEMERAL_SLOTS=2\n' > "${CONF}"; HDW4S_EPHEMERAL_SLOTS=2
   rm -rf "${NSDIR:?}"/*; : > "${CALLS}"
   out="$(pool_show)"
-  has 'pool size names the retired rows' "${out}" 'not minted at the next boot: ephemeral0 ephemeral1'
+  has 'pool size names the rows that are not seats' "${out}" 'not minted at the next boot: ephemeral0 ephemeral1'
   has 'and says what seats are called now' "${out}" 'Seats are named _hdw4s_0, _hdw4s_1, ...'
   (pool_resize 2) >/dev/null 2>&1
   is  'and the same size replaces them with seats' "$(rows)" '_hdw4s_0 _hdw4s_1 '
@@ -1181,11 +1171,11 @@ echo '== the minter mints one seat only inside the configured pool =='
   has 'zero is a size, and has no seats' "${out}" 'beyond HDW4S_EPHEMERAL_SLOTS=0'
 )
 
-echo '== the boot run refuses a table that still offers the retired seat names =='
-# THE OWNER'S RULING, 2026-09-30: the seats are _hdw4s_0 .. _hdw4s_N-1 and there is
-# no automatic upgrade path, so an install whose table still says "ephemeral0" must
-# fail LOUDLY rather than half-work -- the router offering rows nothing mints, while
-# the new seats are minted for nobody. The whole boot run is executed here, in a
+echo '== the boot run refuses a table that offers rows that are not seats =='
+# THE OWNER'S RULING, 2026-09-30: the seats are _hdw4s_0 .. _hdw4s_N-1, so a table
+# offering any other name ("ephemeral0" here) must fail LOUDLY rather than
+# half-work -- the router offering rows nothing mints, while the seats are minted
+# for nobody. The whole boot run is executed here, in a
 # sandbox: every path it writes is a variable pointed below ${SB}, and the three
 # commands that would reach the machine are functions exported over the real ones
 # (bash prefers a function to anything on the PATH the script pins). A pool of ZERO
@@ -1221,8 +1211,8 @@ echo '== the boot run refuses a table that still offers the retired seat names =
     '3 _hdw4s_01 ephemeral' > "${SB}/etc/instances"
   rm -f "${SB}/calls"
   out="$(boot)"; rc=$?
-  [ "${rc}" -ne 0 ] && ok 'a table with the retired names fails the boot run' \
-    || bad 'a table with the retired names fails the boot run' "rc ${rc}: ${out}"
+  [ "${rc}" -ne 0 ] && ok 'a table with rows that are not seats fails the boot run' \
+    || bad 'a table with rows that are not seats fails the boot run' "rc ${rc}: ${out}"
   has 'and names every row that is not a seat' "${out}" 'never mints: ephemeral0 ephemeral1 _hdw4s_01'
   has 'and what the seats are called now' "${out}" 'named _hdw4s_0, _hdw4s_1, ...'
   has 'and the command that replaces them' "${out}" 'hdw4s pool size 0'
@@ -1359,15 +1349,10 @@ echo '== /shared: the boot run binds it only when asked, never optionally, and t
   hasnt 'a duration with a stray character is not written' "$(cat "${tmpfs_knobs}" 2>/dev/null)" 'IDLE'
   has 'and is refused out loud' "${out}" 'is not a duration'
 
-  # THE OLD SWITCH. Nothing turns off silently.
+  # A size is not a switch: only HDW4S_SHARED turns the feature on.
   conf HDW4S_SHARED_SIZE=1G; out="$(boot)"; rc=$?
-  is  'HDW4S_SHARED_SIZE alone no longer turns it on' "$(any "${d1}" "${d2}")" 'absent'
-  has 'and the boot says so, with the line to add' "${out}" 'add HDW4S_SHARED=tmpfs'
-  is  'and still succeeds' "${rc}" '0'
-  conf HDW4S_SHARED=off HDW4S_SHARED_SIZE=1G; out="$(boot)"
-  hasnt 'but not when it was turned off on purpose' "${out}" 'HDW4S_SHARED_SIZE is set'
-  conf HDW4S_SHARED_EXPIRY=30m; out="$(boot)"
-  has 'the retired expiry is named as read by nothing' "${out}" 'HDW4S_SHARED_EXPIRY is retired'
+  is  'HDW4S_SHARED_SIZE alone does not turn it on' "$(any "${d1}" "${d2}")" 'absent'
+  is  'and the boot succeeds' "${rc}" '0'
 
   # A typo in an optional feature must not take the pool down with it.
   conf HDW4S_SHARED=yes; out="$(boot)"; rc=$?
@@ -3353,10 +3338,6 @@ STUB
   is  'off: check is not affected' "${rc}" '0'
   hasnt 'and says nothing about /shared' "${out}" '/shared'
 
-  HDW4S_SHARED_SIZE=1G; out="$(chk)"; rc=$?
-  is  'the old switch alone is said, and not counted' "${rc}" '0'
-  has 'with the line to add' "${out}" 'add HDW4S_SHARED=tmpfs'
-  unset HDW4S_SHARED_SIZE
 
   HDW4S_SHARED=sometimes; out="$(chk)"; rc=$?
   is  'a mode that is not one is red' "${rc}" '1'
@@ -3434,9 +3415,6 @@ STUB
   HDW4S_SHARED_MAX_AGE=0; out="$(chk)"; rc=$?
   is  'a MAX_AGE of 0 is red: expiry is a promise' "${rc}" '1'
   unset HDW4S_SHARED_MAX_AGE
-  HDW4S_SHARED_EXPIRY=30m; out="$(chk)"; rc=$?
-  is  'the retired expiry is said, and not counted' "${rc}" '0'
-  has 'and named' "${out}" 'HDW4S_SHARED_EXPIRY is set, and nothing reads it'
 )
 
 echo '== /shared: the settings are machine-wide and read at boot =='
@@ -3453,8 +3431,6 @@ echo '== /shared: the settings are machine-wide and read at boot =='
     || bad 'and 7d is accepted'
   ( check_value HDW4S_SHARED tmpfs ) 2>/dev/null && ok 'tmpfs is a mode' || bad 'tmpfs is a mode'
   ( check_value HDW4S_SHARED on ) 2>/dev/null && bad '"on" is not a mode' || ok '"on" is not a mode'
-  [ -z "${SETTABLE[HDW4S_SHARED_EXPIRY]:-}" ] && ok 'the retired expiry cannot be set' \
-    || bad 'the retired expiry cannot be set'
 )
 }
 group_shared_wiring
@@ -3859,6 +3835,10 @@ echo '== /shared in the root namespace: the shape check, on the mount table a co
   is  'a deleted source is red, by name' \
     "$(chk "${RUN}" "${GOOD/\/hdw4s\/shared \/shared/\/hdw4s\/shared\/\/deleted \/shared}")" '1:deleted'
   is  'the good bind alone, unexposed: good' "$(chk "${RUN}" "${GOOD}")" '0:'
+  # A view from a LOOKALIKE path is not this one: /run/hdw4s-shared shares a
+  # prefix with the exposure and nothing else, and must read as foreign.
+  is  'a view of a lookalike path is foreign, not good' \
+    "$(chk "${RUN}" "${GOOD/\/hdw4s\/shared \/shared/\/hdw4s-shared \/shared}")" '1:foreign'
   # Unmounted by hand (shape pass F1): the record says bound, nothing is there.
   # It strands table copies in every slave namespace, which no read here can
   # see; the record is the only witness, so it is red, with the remedy.
@@ -3959,7 +3939,6 @@ PY
 )"
   hasnt 'it does not go on to start the desktop' "${out}" 'STARTED'
   has   'it says why'                            "${out}" 'no identity this boot'
-  has   'and names the way out'                  "${out}" 'hdw4s release --internal root'
   printf '%s\n' '# nothing' > "${SB}/etc/instances"
   out="$(HDW4S_ETCDIR="${SB}/etc" HDW4S_NS_DIR="${SB}/ns" python3 - "${ROOT}/hdw4s-template" 2>&1 <<'PY'
 import importlib.machinery, importlib.util, sys
@@ -5253,8 +5232,8 @@ echo '== an ephemeral slot cannot be put on the network =='
   # kind there was, and it went on passing after the pool shipped, pinning the
   # defect in place exactly as the auth group's assertion pinned the dead end.
   #
-  # The stale conf is still put in front of it: an ephemeral slot's file may be
-  # absent, or may say "tcp" because an older version wrote it.
+  # A conf that says "tcp" is put in front of it: the refusal follows the row's
+  # type, whatever the slot's own file says.
   printf '%s\n' "0 ${me} ephemeral" > "${SLOTS}"
   printf 'HDW4S_TRANSPORT=tcp\n' > "${ETCDIR}/${me}.conf"
   out="$( ( cmd_proxy "${me}" ) 2>&1 )"; rc=$?
@@ -5285,8 +5264,7 @@ echo '== the slot table readers take the type as a third field =='
 )
 
 echo '== the relay names no session unit, and enable supplies one =='
-( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
-
+( set +e
   # The template must not name a session unit. It used to, and a drop-in cannot
   # take that back: an empty "Requires=" does not reset the list, so an instance
   # served by a different unit would have carried both.
@@ -5303,127 +5281,6 @@ echo '== the relay names no session unit, and enable supplies one =='
     *30-session.conf*) ok 'enable writes the session drop-in';;
     *) bad 'enable writes the session drop-in' 'not written';;
   esac
-
-  # The two installers carry the same backfill. Duplicated on purpose --
-  # packaging is not a dependency of install.sh -- so the only thing keeping
-  # them honest is this comparison.
-  # Leading whitespace is normalised away: the block sits inside an "if" in one
-  # file and at top level in the other, and the thing that must not drift is what
-  # it does, not how far it is indented.
-  pick() { sed -n '/# BEGIN session-dropin-backfill/,/# END session-dropin-backfill/p' "$1" \
-             | sed 's/^[[:space:]]*//'; }
-  is 'the backfill block exists in postinst' "$(pick "${ROOT}/debian/postinst" | wc -l | tr -d ' ')" \
-     "$(pick "${ROOT}/install.sh" | wc -l | tr -d ' ')"
-  if [ -n "$(pick "${ROOT}/debian/postinst")" ] &&
-     [ "$(pick "${ROOT}/debian/postinst")" = "$(pick "${ROOT}/install.sh")" ]; then
-    ok 'both installers carry the identical block'
-  else
-    bad 'both installers carry the identical block' 'they differ or are missing'
-  fi
-
-  # Run the shipped block against a fixture, rather than a copy of it.
-  mkdir -p "${SB}/etc/hdw4s" "${SB}/units/hdw4s-proxy@alice.service.d" \
-           "${SB}/units/hdw4s-proxy@bob.service.d" \
-           "${SB}/units/hdw4s-proxy@dave.service.d" \
-           "${SB}/units/hdw4s-proxy@eve.service.d" \
-           "${SB}/units/hdw4s-proxy@tmpl.service.d" \
-           "${SB}/units/hdw4s-proxy@fred.service.d" \
-           "${SB}/units/hdw4s-proxy@gwen.service.d"
-  printf '%s\n' '# comment' '0 alice' '1 bob' '2 carol' '3 dave ephemeral' '4 eve' \
-                 '5 tmpl template' '6 fred ephemeral' '7 gwen' \
-    > "${SB}/etc/hdw4s/instances"
-  # A POOL SLOT'S DROP-IN FROM BEFORE ONLY THE MINT STARTED A DESKTOP: BindsTo=,
-  # which starts the session on every connection. The upgrade must turn it into
-  # Requisite=, or an upgraded box keeps starting desktops for nobody. And a
-  # named desktop's BindsTo= is its design and must be left exactly as it is.
-  printf '%s\n' '[Unit]' 'BindsTo=hdw4s-ephemeral@fred.service' \
-                 'After=hdw4s-ephemeral@fred.service' \
-    > "${SB}/units/hdw4s-proxy@fred.service.d/30-session.conf"
-  printf '%s\n' '[Unit]' 'BindsTo=hdw4s@gwen.service' 'After=hdw4s@gwen.service' \
-    > "${SB}/units/hdw4s-proxy@gwen.service.d/30-session.conf"
-  printf 'keep me\n' > "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf"
-  # A drop-in from before the BindsTo fix. An upgrade has to correct it, because
-  # nothing else rewrites the file -- "hdw4s enable" is not re-run on a machine
-  # that is already enabled, so skipping it would leave every existing
-  # installation with a relay that outlives its session.
-  printf '%s\n' '[Unit]' 'Requires=hdw4s@eve.service' 'After=hdw4s@eve.service' \
-    > "${SB}/units/hdw4s-proxy@eve.service.d/30-session.conf"
-  # THE PORT DROP-IN AN EARLIER "hdw4s enable" WROTE. It replaces the relay's
-  # ExecStart= with a loopback port, so an upgrade that left it would put the
-  # relay back on the squattable shape with nothing to show it. One that is NOT
-  # ours -- an upstream that is not a loopback port -- is somebody's decision and
-  # stays. The instance file's HDW4S_PORT goes; its other lines do not.
-  printf '%s\n' '# Written by "hdw4s enable".' '[Service]' 'ExecStart=' \
-                 'ExecStart=/usr/lib/systemd/systemd-socket-proxyd 127.0.0.1:7364' \
-    > "${SB}/units/hdw4s-proxy@alice.service.d/50-port.conf"
-  printf '%s\n' '[Service]' 'ExecStart=' \
-                 'ExecStart=/usr/lib/systemd/systemd-socket-proxyd /srv/elsewhere.sock' \
-    > "${SB}/units/hdw4s-proxy@gwen.service.d/50-port.conf"
-  printf '%s\n' 'HDW4S_IDLE_DAYS=3' 'HDW4S_PORT=7364' > "${SB}/etc/hdw4s/alice.conf"
-  blk="$(pick "${ROOT}/debian/postinst")"
-  # Stubbed because the shipped block calls it; reached only through the eval.
-  # shellcheck disable=SC2317
-  systemctl() { :; }
-  ( ETCDIR="${SB}/etc/hdw4s" UNITDIR="${SB}/units"; eval "${blk}" )
-  if [ ! -e "${SB}/units/hdw4s-proxy@alice.service.d/50-port.conf" ]; then
-    ok 'a relay drop-in naming a loopback port is removed'
-  else
-    bad 'a relay drop-in naming a loopback port is removed' 'still there'
-  fi
-  if [ -e "${SB}/units/hdw4s-proxy@gwen.service.d/50-port.conf" ]; then
-    ok 'one naming anything else is left alone'
-  else
-    bad 'one naming anything else is left alone' 'removed'
-  fi
-  is 'the instance file loses HDW4S_PORT' \
-     "$(grep -c '^HDW4S_PORT=' "${SB}/etc/hdw4s/alice.conf")" '0'
-  is 'and keeps its other settings' \
-     "$(grep -c '^HDW4S_IDLE_DAYS=3$' "${SB}/etc/hdw4s/alice.conf")" '1'
-  case "$(cat "${SB}/units/hdw4s-proxy@alice.service.d/30-session.conf" 2>/dev/null)" in
-    *'BindsTo=hdw4s@alice.service'*) ok 'an instance with no drop-in gets one';;
-    *) bad 'an instance with no drop-in gets one' 'missing or wrong';;
-  esac
-  # BindsTo=, not Requires=: Requires= does not end a relay whose session exits on
-  # its own, which is what a GNOME logout does, and the relay then forwards to a
-  # dead port for every later visitor. Measured HTTP 000 against HTTP 200.
-  case "$(cat "${SB}/units/hdw4s-proxy@alice.service.d/30-session.conf" 2>/dev/null)" in
-    *'Requires='*) bad 'the drop-in binds rather than requires' 'still Requires=';;
-    *) ok 'the drop-in binds rather than requires';;
-  esac
-  # The third field of the instances file is the type. Ignoring it named the
-  # desktop unit for an ephemeral slot, and the relay then failed every start
-  # with result 'dependency' while the front door went on listening.
-  case "$(cat "${SB}/units/hdw4s-proxy@dave.service.d/30-session.conf" 2>/dev/null)" in
-    *'Requisite=hdw4s-ephemeral@dave.service'*) ok 'an ephemeral slot names the ephemeral unit';;
-    *) bad 'an ephemeral slot names the ephemeral unit' 'missing or wrong';;
-  esac
-  # The fourth type, in the same run. The installers cannot call the CLI's
-  # ephemeral_shaped() -- they may be repairing a tree whose hdw4s does not run
-  # yet -- so they carry their own copy of the list, and this is what keeps the
-  # copy honest. A template row on the default arm got BindsTo=hdw4s@tmpl,
-  # which never starts an authoring session: the relay listens and every start
-  # fails on the dependency, with the front door still accepting.
-  case "$(cat "${SB}/units/hdw4s-proxy@tmpl.service.d/30-session.conf" 2>/dev/null)" in
-    *'Requisite=hdw4s-ephemeral@tmpl.service'*) ok 'and so does the template slot';;
-    *) bad 'and so does the template slot' 'missing or wrong';;
-  esac
-  case "$(cat "${SB}/units/hdw4s-proxy@eve.service.d/30-session.conf" 2>/dev/null)" in
-    *'BindsTo=hdw4s@eve.service'*) ok 'an old Requires= drop-in is migrated';;
-    *) bad 'an old Requires= drop-in is migrated' 'not migrated';;
-  esac
-  case "$(cat "${SB}/units/hdw4s-proxy@fred.service.d/30-session.conf" 2>/dev/null)" in
-    *'BindsTo='*) bad 'a pool slot bound to its session is migrated to Requisite=' \
-                  'still BindsTo=: every connection can start a desktop';;
-    *'Requisite=hdw4s-ephemeral@fred.service'*)
-                  ok 'a pool slot bound to its session is migrated to Requisite=';;
-    *) bad 'a pool slot bound to its session is migrated to Requisite=' 'missing or wrong';;
-  esac
-  is 'a named desktop keeps its BindsTo=' \
-     "$(grep -c '^BindsTo=hdw4s@gwen.service' "${SB}/units/hdw4s-proxy@gwen.service.d/30-session.conf")" '1'
-  is 'an existing drop-in is left alone' \
-     "$(cat "${SB}/units/hdw4s-proxy@bob.service.d/30-session.conf")" 'keep me'
-  is 'an instance with no relay directory is skipped' \
-     "$(set -- "${SB}/units"/*carol*; [ -e "$1" ] && echo present || echo absent)" 'absent'
 )
 
 echo '== what the reaper tells someone whose session it just stopped =='
@@ -7670,25 +7527,19 @@ echo '== a pool that cannot hand out a desktop is not a healthy pool =='
   has 'and say what breaks'           "${out}" '217/USER'
   STUB_SLOTS='active'
 
-  # A TABLE STILL OFFERING THE RETIRED NAMES, as an upgraded install has it.
-  # Everything else about the pool is sound here -- doors listening, the
-  # minter active -- so the only thing this arm can be red about is the names.
+  # A TABLE OFFERING A ROW THAT IS NOT A SEAT. Everything else about the pool
+  # is sound here -- doors listening, the minter active -- so the only thing
+  # this arm can be red about is the name.
   printf '%s\n' '0 ephemeral0 ephemeral' '1 _hdw4s_1 ephemeral' > "${SLOTS}"
   STUB_DOORS="${RUNDIR}/proxy/ephemeral0.sock ${RUNDIR}/proxy/_hdw4s_1.sock"
   HDW4S_EPHEMERAL_SLOTS=2
   out="$( ( cmd_check ) 2>&1 )"; rc=$?
-  is  'a row under a retired name fails the check' "${rc}" '1'
-  has 'and names it' "${out}" 'seats this version never mints: ephemeral0'
+  is  'a row that is not a seat fails the check' "${rc}" '1'
+  has 'and names it' "${out}" 'rows the minter never mints: ephemeral0'
   hasnt 'and not the seat beside it' "$(printf '%s\n' "${out}" | grep 'never mints')" '_hdw4s_1'
   has 'and the repair, at the configured size' "${out}" 'hdw4s pool size 2'
   printf '%s\n' '0 _hdw4s_0 ephemeral' '1 _hdw4s_1 ephemeral' > "${SLOTS}"
   STUB_DOORS="${RUNDIR}/proxy/_hdw4s_0.sock ${RUNDIR}/proxy/_hdw4s_1.sock"
-  # The retired setting is said, and is not a failure: it changes nothing.
-  HDW4S_EPHEMERAL_PREFIX=ephemeral
-  out="$( ( cmd_check ) 2>&1 )"; rc=$?
-  unset HDW4S_EPHEMERAL_PREFIX
-  is  'a leftover HDW4S_EPHEMERAL_PREFIX does not fail the check' "${rc}" '0'
-  has 'but is named as read by nothing' "${out}" 'HDW4S_EPHEMERAL_PREFIX is set, and nothing reads it'
 
   # A table that EXISTS and cannot be read is not "no sessions to check": the
   # router answers every arrival 503 in exactly that state.
@@ -8065,8 +7916,7 @@ echo '== the startup hold fails open, and its deadline matches the gate =='
 #
 # Under -e and nounset, arithmetic on a value that is not a number ENDS the
 # script, and a named session then restarts in a loop -- over a timing aid. The
-# values come from the environment (an older hdw4s-session, across an upgrade,
-# exports none) and from /proc. "09" is the quiet one: it passes a digits-only
+# values come from the environment and from /proc. "09" is the quiet one: it passes a digits-only
 # check and is then an invalid OCTAL number to bash's arithmetic.
 ( set +e
   # A sed expression that matches a literal "${...}", not an expansion.
@@ -8819,6 +8669,16 @@ echo '== an upgrade never stops the router, and restarts it onto the new code ==
     *) bad 'the router service is not stopped on upgrade' "${line:-no line}";; esac
   has   'postinst restarts the router onto the new code' "$(cat "${ROOT}/debian/postinst")" 'try-restart hdw4s-demux.service'
   is    'and nowhere else in postinst' "$(command grep -c 'hdw4s-demux.service' "${ROOT}/debian/postinst")" '1'
+  # AFTER systemd has read the new unit files: debhelper's own reload comes at
+  # the end of postinst, so a restart before a reload of postinst's own would
+  # run the router under its old definition until the next reboot.
+  rl="$(command grep -n 'systemctl daemon-reload' "${ROOT}/debian/postinst" | head -1 | cut -d: -f1)"
+  rs="$(command grep -n 'try-restart hdw4s-demux.service' "${ROOT}/debian/postinst" | head -1 | cut -d: -f1)"
+  if [ -n "${rl}" ] && [ -n "${rs}" ] && [ "${rl}" -lt "${rs}" ]; then
+    ok 'and only after postinst has reloaded systemd'
+  else
+    bad 'and only after postinst has reloaded systemd' "reload at line ${rl:-none}, restart at ${rs:-none}"
+  fi
   # Removal stops the router itself, not only its socket: the service holds the
   # socket's descriptor and kept answering after the package was gone.
   rm_blk="$(sed -n "/^if \[ \"\$1\" = 'remove' \]/,/^fi$/p" "${ROOT}/debian/prerm")"
@@ -8828,7 +8688,7 @@ echo '== an upgrade never stops the router, and restarts it onto the new code ==
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1683  # update when tests are added; a wrong number is the point
+EXPECTED=1653  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

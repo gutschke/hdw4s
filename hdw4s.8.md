@@ -141,10 +141,7 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
   * `pool show`:
     What `pool size` prints, then every setting an ephemeral desktop starts
-    with, its value, and the file it came from. Also lists any seat that still
-    has a setting of its own -- left by configuring seats one by one before
-    `pool set` existed -- since that seat's visitors get something the others
-    do not.
+    with, its value, and the file it came from.
 
   * `pool set` <KEY>=<VALUE>...:
     Change a setting for every ephemeral desktop, and for the
@@ -325,23 +322,6 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 An instance is a user name. An account has one desktop:
 
     hdw4s enable alice
-
-Versions up to 1.1 also accepted `alice:2`, a second concurrent desktop for the
-same account on the same machine. That form is no longer created.
-
-It was withdrawn because it was not worth what it cost to reason about, not
-because it stopped working. A second desktop doubled the states every part of
-the package had to account for -- two instances against one home directory, one
-keyring, one set of application single-instance locks -- to deliver something
-that can be had instead by giving the account a desktop on a second machine,
-which is a case this package already supports properly.
-
-**An instance created by an earlier version keeps working**, and keeps its slot
-and its port. `hdw4s list` reports it with the state `legacy`. No command will
-accept the name except `hdw4s release`, which stops the session first, so
-retiring one takes a single command:
-
-    hdw4s release alice:2
 
 An account wanting desktops on *several machines* at once is a different thing
 and is supported; see `HDW4S_ISOLATION`.
@@ -837,8 +817,7 @@ single hostname for the whole pool and are given a session from it.
 
   * **Seats have no port.** They are reached over filesystem sockets, so they
     take nothing from the `HDW4S_BLOCK_SIZE` port block, which is for named
-    desktops; their rows in the slot table are numbered from 1000. Seats
-    created by an earlier version keep the number they have.
+    desktops; their rows in the slot table are numbered from 1000.
 
   * **How many slots.** A fresh install mints **one** and offers none until
     the pool is given a size; one is the number that is safe on a machine the
@@ -877,20 +856,15 @@ single hostname for the whole pool and are given a session from it.
 
   * **Seats are named `_hdw4s_0`, `_hdw4s_1`, ...** -- fixed, and a name no
     person's account can have. Nobody types one: `pool size` chooses the
-    seats and `list --seats` shows them. Earlier versions called them
-    `ephemeral0`, `ephemeral1`, ... under `HDW4S_EPHEMERAL_PREFIX`, which is
-    retired and read by nothing. A slot table that still offers the old names
-    is refused rather than translated: at boot no seat is minted and
+    seats and `list --seats` shows them. A slot table that offers a row typed
+    `ephemeral` under any other name is refused: at boot no seat is minted and
     `hdw4s-ephemeral-slots.service` fails naming the rows, and `hdw4s check`
     fails the same way. `hdw4s pool size N`, with the size the machine already
     has, replaces them; then `systemctl start hdw4s-ephemeral-slots.service`.
 
   * **Settings belong to the pool, not to a seat.** `hdw4s pool set` writes
     the one file every ephemeral desktop reads; `set` with a seat's name is
-    refused. A seat may still carry a setting of its own from an install
-    configured seat by seat, and it still wins for that seat: `pool show` lists
-    each one, and removing the line from `/etc/hdw4s/<seat>.conf` hands the
-    seat back to the pool.
+    refused.
 
   * **The credential belongs to the pool, not to a slot.** A reverse proxy
     presents one credential to reach the pool; individual slots have none and
@@ -975,9 +949,6 @@ one.
     16 KiB), because a size alone does not bound what empty files cost. What is
     stored counts against the memory of whoever wrote it.
 
-    This setting used to switch the feature on. Set without `HDW4S_SHARED`, it
-    now does nothing, and the boot and `hdw4s check` both say so.
-
   * `HDW4S_SHARED_SOURCE`:
     `source` only: the root of a store an administrator provides, already
     mounted. See **The store** below.
@@ -1000,9 +971,6 @@ one.
     counted from when it was created. `0` is refused: what is left there is
     removed in the end. On a filesystem that does not record when a file was
     created this is not enforced, and the sweep and `hdw4s check` say so.
-
-`HDW4S_SHARED_EXPIRY`, from earlier versions, is retired; `HDW4S_SHARED_IDLE`
-replaces it, and a leftover line is named by `hdw4s check`.
 
 ### What runs
 
@@ -1177,8 +1145,8 @@ read, and when nobody is sweeping: some item has gone unused for longer than
 `HDW4S_SHARED_IDLE` plus two sweeps -- on a machine with
 `HDW4S_SHARED_SWEEP=external`, the only sign it has that the sweeper elsewhere
 has stopped. A warning, not a failure, for a store more than 90% full, an NFS
-store mounted `hard`, a filesystem that does not record creation times, the
-old `HDW4S_SHARED_SIZE` switch, and for a day after the table was taken away
+store mounted `hard`, a filesystem that does not record creation times, and
+for a day after the table was taken away
 for a lost flag and bound again ("drift healed at ..."): a repair is never
 silent. In `tmpfs` mode it also says how big the table is, default or not.
 

@@ -252,64 +252,15 @@ EOF
 
 # An instance is an account name, and nothing else: one desktop per account.
 #
-# Versions up to 1.1 also accepted "<user>:<session>" for a second concurrent
-# desktop belonging to the same account. That form is no longer created.
-#
-# It was withdrawn for what it cost to reason about rather than because it broke:
-# two instances against one home directory, one keyring and one set of
-# application single-instance locks, to deliver something that is better had by
-# giving the account a desktop on a second machine -- a case this package
-# supports properly, and the reason HDW4S_ISOLATION=profile exists.
-#
-# Instances created by an earlier version keep working and can still be shut
-# down and released; see split_legacy_name below. Nothing creates a new one.
-#
-# Why a colon was the separator, kept because it still governs those instances
-# and any future change here: systemd leaves ":" untouched when it escapes an
-# instance name, so "%i" and "%I" are identical and no path built from either
-# can acquire a surprise separator. A "-" would be unescaped by "%I" into "/",
-# which would silently turn user "jean-luc" into "jean/luc". A ":" also cannot
-# appear in a user name, because it separates the fields of /etc/passwd, so
-# splitting on it can never cut a name in half.
-#
 # The name only. Split out from the account lookup below because "release" has
 # to work for a session whose account has since been deleted, and must not buy
 # that by giving up the check that keeps an instance name out of a file path.
 split_name() {
   local inst="$1"
-  case "${inst}" in
-    *:*)
-      echo "hdw4s: '${inst}' names a second session for one account." >&2
-      echo '  An account has one desktop. Instances of the form' >&2
-      echo '  "<user>:<session>" are no longer created; an existing one can' >&2
-      echo "  still be shut down with 'hdw4s release ${inst}'." >&2
-      return 1;;
-  esac
-  split_legacy_name "${inst}"
-}
-
-# The same checks, with the retired "<user>:<session>" form still accepted.
-#
-# Only "release" uses this, and it has to: an instance enabled by an earlier
-# version owns a slot, a port the firewall opens, drop-ins and credentials, and
-# a name the strict grammar rejects. Refusing it would leave editing the slot
-# table by hand -- which its own header tells the administrator never to do --
-# as the only way to clean the instance up. "release" stops the units itself, so
-# this one exception is enough to retire such an instance completely; no other
-# command needs to understand the old form.
-split_legacy_name() {
-  local inst="$1"
-  user="${inst%%:*}"
-  session="${inst#*:}"
-  [ "${session}" != "${inst}" ] || session='1'
-
+  user="${inst}"
   case "${user}" in
     ''|*[!A-Za-z0-9._-]*)
       echo "hdw4s: '${inst}' does not name a user" >&2; return 1;;
-  esac
-  case "${session}" in
-    ''|*[!0-9]*|0*)
-      echo "hdw4s: '${inst}' has a bad session number" >&2; return 1;;
   esac
 }
 
@@ -451,22 +402,21 @@ TEMPLATE_SLOT='_hdw4s_author'
 
 # WHAT EVERY SEAT OF THE EPHEMERAL POOL IS CALLED: this, and its number --
 # _hdw4s_0, _hdw4s_1, ... -- for the reason the authoring slot is called what it
-# is. The seats used to be "ephemeral0", "ephemeral1", ..., under a prefix the
-# administrator could change, and a name like that is one a person can have:
-# it read as somebody's account in "hdw4s list", in a process listing and in
-# the journal, and a real "ephemeral3" could not be told from seat 3 by name.
+# is: a name with a leading underscore is one no person can have, so a seat can
+# never be read as somebody's account in "hdw4s list", a process listing or the
+# journal.
 #
-# FIXED, AND NOT A SETTING. HDW4S_EPHEMERAL_PREFIX is retired: a configurable
-# spelling of a name nobody ever types is an internal detail the administrator
-# was made to own, and every reader that had to agree on it was a reader that
-# could disagree. Spelled again, literally, in hdw4s-ephemeral-slots, which
-# mints the seats; .github/tests.sh holds the two copies together.
+# FIXED, AND NOT A SETTING: a configurable spelling of a name nobody ever types
+# would be an internal detail the administrator was made to own, and every
+# reader that had to agree on it a reader that could disagree. Spelled again,
+# literally, in hdw4s-ephemeral-slots, which mints the seats; .github/tests.sh
+# holds the two copies together.
 #
-# A TABLE STILL CARRYING THE OLD NAMES IS REFUSED, NOT TRANSLATED. Nothing mints
-# an identity for them any more, so each is a door onto a desktop that cannot
-# start. The boot run of the minter refuses to mint the pool while one is there
-# and "hdw4s check" fails on it; "hdw4s pool size" replaces them, because a row
-# that is not a seat is the first thing it takes away.
+# A ROW TYPED "ephemeral" UNDER ANY OTHER NAME IS REFUSED: nothing mints an
+# identity for it, so it is a door onto a desktop that cannot start. The boot
+# run of the minter refuses to mint the pool while one is there and "hdw4s
+# check" fails on it; "hdw4s pool size" replaces it, because a row that is not
+# a seat is the first thing it takes away.
 SEAT_PREFIX='_hdw4s_'
 
 # Where hdw4s-ephemeral-slots writes each minted slot's own passwd view. The
@@ -601,22 +551,6 @@ refuse_internal_slot() {
                              '  prints, at the pool'"'"'s hostname. The configuration for that:' \
                              '    hdw4s pool proxy' >&2 ;;
     esac
-    # THE ROW AN EARLIER VERSION COULD LEAVE ON A PERSON'S NAME. "enable
-    # --template <name>" wrote its row before minting, so a name that was
-    # already an account -- the administrator's own, the obvious guess -- died on
-    # the collision and left the row behind, typed "template". The person's
-    # desktop is what this refusal is then standing in front of, so the way out
-    # is named. "An account the minter did not make" is the test: a slot the
-    # minter made has its passwd view, and a person's account does not.
-    if [ "${inst}" != "${TEMPLATE_SLOT}" ] && [ ! -f "${NSDIR}/${inst}/passwd" ] &&
-       getent passwd -- "${inst}" >/dev/null 2>&1; then
-      printf '%s\n' \
-        "  ${inst} is also an account on this machine. If the row was left by" \
-        "  'hdw4s enable --template ${inst}' in an earlier version, remove it and" \
-        '  enable the desktop:' \
-        "    hdw4s release --internal ${inst}" \
-        "    hdw4s enable ${inst}" >&2
-    fi
   fi
   return 1
 }
@@ -701,9 +635,6 @@ alloc_slot() {
   # INTERNAL_INDEX up, outside any block a firewall opens; the index still keys
   # the row, so every reader of the table reads it unchanged, and port_of() is
   # never asked about one (see "list" and "show").
-  #
-  # A row written before this keeps the index it has: nothing reads it, and
-  # renumbering a live table to tidy it is a change with no reader to benefit.
   used="$(awk '$1 !~ /^#/ { print $1 }' "${SLOTS}" | sort -n)"
   if [ "${type}" != 'desktop' ]; then
     for ((idx = INTERNAL_INDEX; ; idx++)); do
@@ -931,7 +862,7 @@ list_pool_line() {
 }
 
 cmd_list() {
-  local idx inst t port state prof auth trans unprotected=0 orphaned=0 legacy=0
+  local idx inst t port state prof auth trans unprotected=0 orphaned=0
   list_preload
   if [ "${1:-}" = '--seats' ]; then
     list_seats
@@ -958,18 +889,6 @@ cmd_list() {
     # opens. This is the command an administrator uses to find out what is
     # reachable, so it has to account for every slot, including the ones it
     # cannot say much about.
-    # A second session for one account, from a version that still created
-    # them. It is not orphaned -- the account exists and the desktop may well
-    # be running -- so saying so would send an administrator looking for a
-    # deleted user. It is reported as what it is, and the footer says what to
-    # do about it.
-    case "${inst}" in
-      *:*)
-        printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
-          "${inst}" "${inst%%:*}" "${port}" '-' '-' '-' 'legacy' '-'
-        legacy=$(( legacy + 1 ))
-        continue;;
-    esac
     if ! split_instance "${inst}" 2>/dev/null; then
       printf '%-18s %-10s %-6s %-5s %-8s %-10s %-9s %s\n' \
         "${inst}" '(none)' "${port}" '-' '-' '-' 'orphaned' '-'
@@ -1001,14 +920,6 @@ cmd_list() {
     echo '  exists, or a system account. Nothing can start them, but the slot'
     echo '  is still allocated and the firewall still opens its port.'
     echo "  Free them with 'hdw4s release <instance>'."
-  }
-  [ "${legacy}" -eq 0 ] || {
-    echo
-    echo "${legacy} slot(s) marked legacy are a second desktop for an account"
-    echo '  that already has one, created by a version that still offered'
-    echo '  that. An account now has one desktop. These keep running and keep'
-    echo '  their port, and no other command will accept the name -- retire'
-    echo "  one with 'hdw4s release <user>:<session>', which stops it first."
   }
 
   [ "${unprotected}" -eq 0 ] || {
@@ -1065,18 +976,6 @@ check_shared() {
   local idle="${HDW4S_SHARED_IDLE:-30m}" out rc bytes drift now store inst
   local state="${HDW4S_SHARED_STATE:-${RUNDIR}/shared-expose}"
   SHARED_BAD=0
-  # The old switch, said here as well as at boot: a machine upgraded with only
-  # HDW4S_SHARED_SIZE set has /shared OFF, and nothing else would say so.
-  if [ -z "${mode}" ] && [ -n "${HDW4S_SHARED_SIZE:-}" ]; then
-    printf '%s\n' \
-      'hdw4s: HDW4S_SHARED_SIZE is set and HDW4S_SHARED is not, so /shared is OFF.' \
-      '  HDW4S_SHARED_SIZE used to switch it on; it is now only the size of a tmpfs' \
-      "  table. To keep /shared, add HDW4S_SHARED=tmpfs to ${CONF} and reboot." >&2
-  fi
-  [ -z "${HDW4S_SHARED_EXPIRY+set}" ] || printf '%s\n' \
-    'hdw4s: HDW4S_SHARED_EXPIRY is set, and nothing reads it any more.' \
-    '  Items on /shared go after HDW4S_SHARED_IDLE (default 30m) unused;' \
-    "  delete the line from ${CONF}." >&2
   # THE ROOT NAMESPACE'S /shared, judged by the code that makes it, and on or
   # off: a bind left from when it was on is said, and a pinned or foreign one
   # is red either way -- the guard below accepts a pinned view, so nothing
@@ -1350,7 +1249,6 @@ cmd_check() {
   local slot_total=0 doors=0 shut='' listen port retired=''
   while read -r idx inst _; do
     case "${idx}" in ''|\#*) continue;; esac
-    case "${inst}" in *:*) continue;; esac
     [ "$(type_of "${inst}")" = 'ephemeral' ] || continue
     slot_total=$(( slot_total + 1 ))
     [ -n "$(seat_index "${inst}")" ] || retired="${retired} ${inst}"
@@ -1361,31 +1259,19 @@ cmd_check() {
     fi
   done < <(sort -n "${SLOTS}")
 
-  # THE RETIRED SETTING, said and not counted: nothing reads it any more, so a
-  # line still carrying it changes nothing -- which is exactly why it is worth
-  # a sentence. An administrator who set it expects it to mean something.
-  if [ -n "${HDW4S_EPHEMERAL_PREFIX+set}" ]; then
-    printf '%s\n' \
-      'hdw4s: HDW4S_EPHEMERAL_PREFIX is set, and nothing reads it any more.' \
-      "  The pool's seats are always named ${SEAT_PREFIX}0, ${SEAT_PREFIX}1, ...;" \
-      "  delete the line from ${CONF}." >&2
-  fi
-
   if [ "${slot_total}" -gt 0 ]; then
-    # ROWS UNDER NAMES THAT ARE NOT SEATS -- after an upgrade, the retired
-    # "ephemeral0", "ephemeral1", ... (see SEAT_PREFIX). FIRST, because it is
+    # ROWS UNDER NAMES THAT ARE NOT SEATS (see SEAT_PREFIX). FIRST, because it is
     # the cause of most of what the arms below would then report: the boot
     # minter refuses to mint the pool while one is there, so the unit is
     # failed and every door below leads nowhere. Said once, here, with the
     # repair, rather than left to be inferred from four symptoms.
     if [ -n "${retired}" ]; then
       printf '%s\n' \
-        "hdw4s: the slot table offers visitors seats this version never mints:${retired}" \
-        "  Seats of the ephemeral pool are named ${SEAT_PREFIX}0, ${SEAT_PREFIX}1, ...; the" \
-        '  ephemeral0, ephemeral1, ... of earlier versions are retired, and nothing' \
-        '  makes an account for them, so a visitor sent to one gets a desktop that' \
-        '  cannot start. The boot refuses to mint the pool until they are gone.' \
-        '  Replace them with seats under the new names, then start the pool:' \
+        "hdw4s: the slot table offers visitors rows the minter never mints:${retired}" \
+        "  Seats of the ephemeral pool are named ${SEAT_PREFIX}0, ${SEAT_PREFIX}1, ...;" \
+        '  nothing makes an account for any other name, so a visitor sent to one' \
+        '  gets a desktop that cannot start. The boot refuses to mint the pool' \
+        '  until they are gone. Replace them with seats, then start the pool:' \
         "    hdw4s pool size ${HDW4S_EPHEMERAL_SLOTS:-1}" \
         '    systemctl start hdw4s-ephemeral-slots.service' >&2
       pool_bad=$(( pool_bad + 1 ))
@@ -1484,7 +1370,6 @@ cmd_check() {
   units="${failed_named}"
   while read -r idx inst _; do
     case "${idx}" in ''|\#*) continue;; esac
-    case "${inst}" in *:*) continue;; esac
     ! ephemeral_shaped "$(type_of "${inst}")" || continue
     units="${units}"$'\n'"hdw4s@${inst}.service"
   done < <(sort -n "${SLOTS}")
@@ -1520,10 +1405,8 @@ cmd_check() {
 
   while read -r idx inst _; do
     case "${idx}" in ''|\#*) continue;; esac
-    # A legacy second session and an orphaned slot are "list"'s business: the
-    # first cannot be looked up by the readers below and the second has no
-    # account to run. This command is about sessions that are running now.
-    case "${inst}" in *:*) continue;; esac
+    # An orphaned slot is "list"'s business: it has no account to run. This
+    # command is about sessions that are running now.
     # A NAMED DESKTOP WITHOUT A WEB ROOT cannot start: it publishes its identity
     # into that root before its own start rebuilds it, and the gate refuses. Asked
     # of every named desktop, running or not, because the one that is NOT running
@@ -2012,13 +1895,6 @@ enable_slot() {
     "${sdep}=$(unit_of "${inst}")" \
     "After=$(unit_of "${inst}")" \
     > "${DROPIN}/hdw4s-proxy@${inst}.service.d/30-session.conf"
-  # NO PORT. The relay's upstream is a path the template names for every
-  # instance (hdw4s-proxy@.service), because a loopback port is a name any
-  # desktop on the machine may take first; see hdw4s-stream-dir. An earlier
-  # version wrote the port here, as a drop-in that REPLACES ExecStart=, so one
-  # left behind would silently put this relay back on TCP -- removed on sight,
-  # as the installer does for every existing instance.
-  rm -f -- "${DROPIN}/hdw4s-proxy@${inst}.service.d/50-port.conf"
 
   # THE AUTHORING SLOT IS NOT REAPED BY DEFAULT, and this is a correction to an
   # inherited default rather than a new policy. cmd_reap walks EVERY row of the
@@ -2123,22 +1999,6 @@ enable_slot() {
     # does not come back up refusing to start for want of a file it already
     # has the secret for.
     link_credential "${inst}" 'auth' 70
-    # Kept, and said out loud, because keeping it is the right call and having
-    # it is not. "enable" is documented as safe to re-run: a session that came
-    # in with a credential its reverse proxy already presents must go out with
-    # the same one, or re-running this takes somebody's desktop away. So the
-    # existing combination is reported rather than repaired, and the repair is
-    # named for whoever decides to make it.
-    if auth_is_meaningless "${inst}"; then
-      echo
-      echo "Session ${inst} carries a credential, and nothing routes one to it: the"
-      echo '  front door in front of the ephemeral slots holds only its own and has no'
-      echo '  way to be given this one. Every visitor sent here gets a 401 while the'
-      echo '  other slots answer.'
-      echo '  It is kept rather than removed, because re-enabling a session must not'
-      echo '  change what it requires underneath whoever is using it. Nothing is'
-      echo "  waiting on a proxy; remove it when you are ready to: hdw4s noauth ${inst}"
-    fi
   elif auth_is_meaningless "${inst}"; then
     # The producer this guard exists to close. Both branches below generate a
     # credential, and for an ephemeral slot "want" is forced to unix a few lines
@@ -2984,25 +2844,15 @@ cmd_transport() {
       # on a port and is not here, and nothing else will ever mention it again.
       # Said after the success line rather than instead of it: the move happened.
       #
-      # Split by session type, because one message was being given to two
-      # situations that want opposite advice. A named session on a socket with a
-      # credential is a SUPPORTED configuration -- the owner has ruled that the
-      # admin may choose it -- so telling its operator to remove the credential
-      # was advice against something deliberate. Only an ephemeral slot has
-      # nobody who can present one.
+      # A named session on a socket with a credential is a SUPPORTED
+      # configuration -- the owner has ruled that the admin may choose it -- so
+      # the credential is kept and the proxy is what has to change.
       if has_auth "${inst}"; then
         echo
-        if auth_is_meaningless "${inst}"; then
-          echo "Session ${inst} still has a credential, and nothing can present it:"
-          echo '  the front door in front of the ephemeral slots holds only its own.'
-          echo '  Every visitor routed here gets a 401 while the other slots answer.'
-          echo "  Remove it: hdw4s noauth ${inst}"
-        else
-          echo "Session ${inst} keeps its credential, which is allowed on this"
-          echo '  transport and is not removed. Whatever connects to the socket must'
-          echo '  still present it, so configure the proxy for this path as well --'
-          echo '  otherwise this session answers 401 while its neighbours answer.'
-        fi
+        echo "Session ${inst} keeps its credential, which is allowed on this"
+        echo '  transport and is not removed. Whatever connects to the socket must'
+        echo '  still present it, so configure the proxy for this path as well --'
+        echo '  otherwise this session answers 401 while its neighbours answer.'
       fi
       ;;
     *)
@@ -4001,18 +3851,10 @@ cmd_release() {
   # gone leaves editing the table by hand as the only way out -- which its own
   # header tells the administrator never to do. The name is still checked: it
   # is interpolated into the paths this function removes.
-  #
-  # The legacy spelling for the same reason: an instance named "<user>:<session>"
-  # by a version that still created them is exactly the instance an administrator
-  # now needs to be able to retire, so this is the one command that accepts the
-  # name the rest of the tool refuses.
-  split_legacy_name "${inst}" || fail
+  split_name "${inst}" || fail
   # THE AUTHORING SLOT ONLY WHEN SAID SO. See refuse_internal_slot: it is not
   # a person's desktop, and "--internal" is the administrator saying they know
-  # what the name is. It is also the only way to retire a template row an
-  # earlier version left on a person's name, which the enable refusal and the
-  # template editor both name. A pool seat is refused even with the flag; see
-  # below.
+  # what the name is. A pool seat is refused even with the flag; see below.
   #
   # AND ONLY THEN: the flag on a person's desktop is refused, so that it cannot
   # become the habitual way to type "release" and stop meaning anything.
@@ -4043,20 +3885,9 @@ cmd_release() {
   echo "its profile under"
   echo "$(profile_dir_of "${inst}")/${inst}, and its settings in"
   echo "${ETCDIR}/${inst}.conf."
-  case "${inst}" in
-    # Nothing can enable this name again, so saying the leftovers are there to
-    # be restored would be an offer that cannot be taken up. Say what they
-    # actually are: rubbish, and safe to delete once anything wanted out of the
-    # profile has been taken.
-    *:*)
-      echo 'Nothing can enable that name again -- an account has one desktop --'
-      echo 'so both are now only a copy to salvage settings from, and can be'
-      echo 'deleted once you are done with them.';;
-    *)
-      echo 'Re-enabling the session restores them. The slot, and with it the'
-      echo 'port, is not reserved and may go to someone else; enabling again'
-      echo 'rewrites the port that conf file records.';;
-  esac
+  echo 'Re-enabling the session restores them. The slot, and with it the'
+  echo 'port, is not reserved and may go to someone else; enabling again'
+  echo 'rewrites the port that conf file records.'
 }
 
 # GIVE "hdw4s template edit" AN AUTHORING SLOT IF THE MACHINE HAS NONE.
@@ -4223,12 +4054,10 @@ pool_show() {
     echo "HDW4S_EPHEMERAL_SLOTS is ${conf}, and the seats visitors are offered do not match it:"
     [ -z "${missing}" ] || echo "  not offered:${missing}"
     [ -z "${strays}" ] || echo "  offered, and not minted at the next boot:${strays}"
-    # The one way an upgraded install gets here without anybody sizing it by
-    # hand, so it is named: the seats were renamed, and a row under an old name
-    # is not a seat any more. "pool size" takes such a row away first.
+    # A row under a name that is not a seat is never minted; "pool size" takes
+    # such a row away first.
     [ -z "${strays}" ] || printf '%s\n' \
-      "  Seats are named ${prefix}0, ${prefix}1, ...; a row under any other name --" \
-      '  such as the ephemeral0, ephemeral1, ... of earlier versions -- is never minted.'
+      "  Seats are named ${prefix}0, ${prefix}1, ...; a row under any other name is never minted."
     echo '  To make them agree, say which size you want:'
     echo "    hdw4s pool size ${conf}"
   fi
@@ -4475,26 +4304,9 @@ declare -A POOL_FIXED=(
   [HDW4S_PROXY_GROUP]='nothing but the pool'"'"'s own front door connects to a pool desktop'
 )
 
-# Keys a seat's own file carries because hdw4s wrote them there, and which are
-# therefore not a setting somebody made on one seat.
-POOL_SEAT_OWN='HDW4S_TRANSPORT HDW4S_AUTH'
-
-# Seats whose own file sets KEY, which wins over the pool's file for that seat.
-# What an install configured seat by seat, before "pool set", is left with.
-seat_overrides() {
-  local key="$1" inst t f out=''
-  [ -r "${SLOTS}" ] || return 0
-  while read -r _ inst t _; do
-    case "${t}" in ephemeral) ;; *) continue ;; esac
-    f="${ETCDIR}/${inst}.conf"
-    command grep -qs "^[[:space:]]*${key}=" "${f}" && out="${out} ${inst}"
-  done < <(awk '$1 !~ /^#/' "${SLOTS}")
-  printf '%s' "${out# }"
-}
-
 # "hdw4s pool set K=V ...".
 pool_set() {
-  local pair key value file before
+  local pair key value file
   [ "$#" -gt 0 ] || die 'hdw4s: nothing to set'
   for pair in "$@"; do
     case "${pair}" in
@@ -4531,11 +4343,6 @@ pool_set() {
     fi
     config_write "${file}" "${key}" "$(quote_value "${value}")"
     echo "${file}: ${key}=${value}"
-    before="$(seat_overrides "${key}")"
-    [ -z "${before}" ] || {
-      echo "  Overridden on seat(s) ${before}, whose own file also sets it -- left from"
-      echo '  configuring seats one by one. Remove the line there to use this one.'
-    }
   done
   pool_hint "$@"
 }
@@ -4595,7 +4402,7 @@ pool_setting_with_source() {
 # "hdw4s pool show": the size and seats, then every setting a pool desktop
 # starts with and where it came from.
 pool_show_all() {
-  local sk skey sdef r v src k t inst f extra=''
+  local sk skey sdef r v src
   pool_show
   echo
   echo 'Settings for every ephemeral desktop: effective value, and where it came from'
@@ -4609,25 +4416,6 @@ pool_show_all() {
     v="${r%%$'\t'*}"; src="${r#*$'\t'}"
     printf '  %-28s %-22s %s\n' "${skey}" "${v:--}" "${src:-built-in default}"
   done
-  # A seat whose own file sets something the pool's file does not decide for it.
-  [ -r "${SLOTS}" ] || return 0
-  while read -r _ inst t _; do
-    [ "${t}" = 'ephemeral' ] || continue
-    f="${ETCDIR}/${inst}.conf"
-    [ -r "${f}" ] || continue
-    while read -r k; do
-      case " ${POOL_SEAT_OWN} " in *" ${k} "*) continue ;; esac
-      extra="${extra}    ${inst}: ${k}"$'\n'
-    done < <(sed -n 's/^[[:space:]]*\([A-Z0-9_]*\)=.*/\1/p' "${f}" | sort -u)
-  done < <(awk '$1 !~ /^#/' "${SLOTS}")
-  [ -z "${extra}" ] || {
-    echo
-    echo 'These seats have a setting of their own, which wins over the pool'"'"'s, so a'
-    echo 'visitor gets something different depending on the seat they are handed:'
-    printf '%s' "${extra}"
-    echo "  Move each into the pool with 'hdw4s pool set', then remove the line from"
-    echo "  ${ETCDIR}/<seat>.conf."
-  }
 }
 
 cmd_pool() {

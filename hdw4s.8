@@ -94,7 +94,7 @@ With no number, print how many seats the ephemeral pool has, which of them are i
 A seat a visitor is using is never taken away, whether or not anybody is looking at it at the moment\. The pool then stops one above it, the command says which seat held it there and how to end that desktop, and it exits non\-zero\. Running it again later with the same number finishes the job, and so does running it again after it was interrupted\.
 .TP
 \fBpool show\fR
-What \fBpool size\fR prints, then every setting an ephemeral desktop starts with, its value, and the file it came from\. Also lists any seat that still has a setting of its own \-\- left by configuring seats one by one before \fBpool set\fR existed \-\- since that seat's visitors get something the others do not\.
+What \fBpool size\fR prints, then every setting an ephemeral desktop starts with, its value, and the file it came from\.
 .TP
 \fBpool set\fR \fIKEY\fR=\fIVALUE\fR\|\.\|\.\|\.
 Change a setting for every ephemeral desktop, and for the template\-authoring desktop, so that a template is made on the desktop visitors get\. Written to \fB/etc/hdw4s/_hdw4s_pool\.conf\fR, which those desktops read after \fBhdw4s\.conf\fR and which wins over it; named desktops do not read it\. It applies to each desktop that starts afterwards: one a visitor has open keeps what it started with until it ends, and nothing tells you to restart it\.
@@ -181,17 +181,6 @@ An instance is a user name\. An account has one desktop:
 .IP "" 4
 .nf
 hdw4s enable alice
-.fi
-.IP "" 0
-.P
-Versions up to 1\.1 also accepted \fBalice:2\fR, a second concurrent desktop for the same account on the same machine\. That form is no longer created\.
-.P
-It was withdrawn because it was not worth what it cost to reason about, not because it stopped working\. A second desktop doubled the states every part of the package had to account for \-\- two instances against one home directory, one keyring, one set of application single\-instance locks \-\- to deliver something that can be had instead by giving the account a desktop on a second machine, which is a case this package already supports properly\.
-.P
-\fBAn instance created by an earlier version keeps working\fR, and keeps its slot and its port\. \fBhdw4s list\fR reports it with the state \fBlegacy\fR\. No command will accept the name except \fBhdw4s release\fR, which stops the session first, so retiring one takes a single command:
-.IP "" 4
-.nf
-hdw4s release alice:2
 .fi
 .IP "" 0
 .P
@@ -397,7 +386,7 @@ The pool is configured as \fBone thing\fR, not slot by slot\. Visitors arrive at
 .IP "\[ci]" 4
 \fBA slot must not be reached directly\.\fR Not by a reverse proxy, not by anything else\. The sockets under \fB/run/hdw4s/proxy/\fR belong to the pool\.
 .IP "\[ci]" 4
-\fBSeats have no port\.\fR They are reached over filesystem sockets, so they take nothing from the \fBHDW4S_BLOCK_SIZE\fR port block, which is for named desktops; their rows in the slot table are numbered from 1000\. Seats created by an earlier version keep the number they have\.
+\fBSeats have no port\.\fR They are reached over filesystem sockets, so they take nothing from the \fBHDW4S_BLOCK_SIZE\fR port block, which is for named desktops; their rows in the slot table are numbered from 1000\.
 .IP "\[ci]" 4
 \fBHow many slots\.\fR A fresh install mints \fBone\fR and offers none until the pool is given a size; one is the number that is safe on a machine the package knows nothing about\. The ceiling is \fB99\fR, and it is the user\-id window rather than a policy: slots take consecutive ids from \fBHDW4S_EPHEMERAL_UID_BASE\fR inside 60900\-60999, and the top of that window is kept for the template\-authoring slot\. \fBpool size\fR refuses a number beyond it before changing anything\.
 .IP
@@ -407,9 +396,9 @@ An idle slot costs an entry under \fB/run\fR and nothing else\. An occupied one 
 .IP "\[ci]" 4
 \fBChanging the size\.\fR \fBhdw4s pool size N\fR, and nothing else\. Three things describe the pool \-\- \fBHDW4S_EPHEMERAL_SLOTS\fR, which the next boot mints identities from; the identities themselves, under \fB/run\fR; and one row per seat in the slot table, which is what visitors are offered \-\- and the command changes all three, in an order that an interruption cannot turn into a seat that is offered and cannot start\. Seats go from the top because the setting describes seats \fB0\fR to \fBN\-1\fR\. A seat a visitor is using holds the pool at one above it until that desktop ends; \fBhdw4s pool size\fR with no number shows which\.
 .IP "\[ci]" 4
-\fBSeats are named \fB_hdw4s_0\fR, \fB_hdw4s_1\fR, \|\.\|\.\|\.\fR \-\- fixed, and a name no person's account can have\. Nobody types one: \fBpool size\fR chooses the seats and \fBlist \-\-seats\fR shows them\. Earlier versions called them \fBephemeral0\fR, \fBephemeral1\fR, \|\.\|\.\|\. under \fBHDW4S_EPHEMERAL_PREFIX\fR, which is retired and read by nothing\. A slot table that still offers the old names is refused rather than translated: at boot no seat is minted and \fBhdw4s\-ephemeral\-slots\.service\fR fails naming the rows, and \fBhdw4s check\fR fails the same way\. \fBhdw4s pool size N\fR, with the size the machine already has, replaces them; then \fBsystemctl start hdw4s\-ephemeral\-slots\.service\fR\.
+\fBSeats are named \fB_hdw4s_0\fR, \fB_hdw4s_1\fR, \|\.\|\.\|\.\fR \-\- fixed, and a name no person's account can have\. Nobody types one: \fBpool size\fR chooses the seats and \fBlist \-\-seats\fR shows them\. A slot table that offers a row typed \fBephemeral\fR under any other name is refused: at boot no seat is minted and \fBhdw4s\-ephemeral\-slots\.service\fR fails naming the rows, and \fBhdw4s check\fR fails the same way\. \fBhdw4s pool size N\fR, with the size the machine already has, replaces them; then \fBsystemctl start hdw4s\-ephemeral\-slots\.service\fR\.
 .IP "\[ci]" 4
-\fBSettings belong to the pool, not to a seat\.\fR \fBhdw4s pool set\fR writes the one file every ephemeral desktop reads; \fBset\fR with a seat's name is refused\. A seat may still carry a setting of its own from an install configured seat by seat, and it still wins for that seat: \fBpool show\fR lists each one, and removing the line from \fB/etc/hdw4s/<seat>\.conf\fR hands the seat back to the pool\.
+\fBSettings belong to the pool, not to a seat\.\fR \fBhdw4s pool set\fR writes the one file every ephemeral desktop reads; \fBset\fR with a seat's name is refused\.
 .IP "\[ci]" 4
 \fBThe credential belongs to the pool, not to a slot\.\fR A reverse proxy presents one credential to reach the pool; individual slots have none and cannot be given one, which is why \fBauth\fR refuses for a slot\.
 .IP "" 0
@@ -455,8 +444,6 @@ All are read at boot, by \fBhdw4s\-ephemeral\-slots\.service\fR: reboot after ch
 .TP
 \fBHDW4S_SHARED_SIZE\fR
 \fBtmpfs\fR only: an absolute size (\fB512M\fR, \fB2G\fR) or a percentage of this machine's memory (\fB10%\fR, the default)\. The percentage is worked out from \fB/proc/meminfo\fR: handed to the kernel, it would be taken of the host's memory in a container\. The number of files is capped in proportion (one per 16 KiB), because a size alone does not bound what empty files cost\. What is stored counts against the memory of whoever wrote it\.
-.IP
-This setting used to switch the feature on\. Set without \fBHDW4S_SHARED\fR, it now does nothing, and the boot and \fBhdw4s check\fR both say so\.
 .TP
 \fBHDW4S_SHARED_SOURCE\fR
 \fBsource\fR only: the root of a store an administrator provides, already mounted\. See \fBThe store\fR below\.
@@ -469,8 +456,6 @@ An item goes once nobody has read, written or changed it for this long (default 
 .TP
 \fBHDW4S_SHARED_MAX_AGE\fR
 And whatever happens, an item goes once it is this old (default \fB7d\fR), counted from when it was created\. \fB0\fR is refused: what is left there is removed in the end\. On a filesystem that does not record when a file was created this is not enforced, and the sweep and \fBhdw4s check\fR say so\.
-.P
-\fBHDW4S_SHARED_EXPIRY\fR, from earlier versions, is retired; \fBHDW4S_SHARED_IDLE\fR replaces it, and a leftover line is named by \fBhdw4s check\fR\.
 .SS "What runs"
 .IP "\[ci]" 4
 \fBThe sweep\fR, every two minutes (\fBhdw4s\-shared\-sweep\fR; see hdw4s\-shared\-sweep(8))\. It makes every item readable and writable by everyone \-\- desktops create files private to their owner, and a copy keeps its mode \-\- and removes what has expired\. Where the kernel allows it, a watcher widens new items as they appear, so the two\-minute wait is the exception\. With \fBHDW4S_SHARED_SWEEP=local\fR, the expose service below keeps both running while the table is shown: one stopped by an upgrade or by hand is started again within 30 seconds\. \fBhdw4s check\fR is red while the sweep is not running \-\- nothing would ever expire \-\- and warns while the watcher is not\.
@@ -534,7 +519,7 @@ findmnt \-o TARGET,OPTIONS <path in container>
 \fBAn NFS store should be mounted \fBsoft\fR\.\fR A \fBhard\fR mount that stops answering blocks everything that touches it until it answers again, and \fBhdw4s check\fR warns about one\.
 .IP "" 0
 .SS "hdw4s check"
-Red when \fB/shared\fR is on and nothing is bound at \fB/run/hdw4s/shared\fR, when what is bound fails the guard, when \fBHDW4S_SHARED\fR or its expiry settings cannot be read, and when nobody is sweeping: some item has gone unused for longer than \fBHDW4S_SHARED_IDLE\fR plus two sweeps \-\- on a machine with \fBHDW4S_SHARED_SWEEP=external\fR, the only sign it has that the sweeper elsewhere has stopped\. A warning, not a failure, for a store more than 90% full, an NFS store mounted \fBhard\fR, a filesystem that does not record creation times, the old \fBHDW4S_SHARED_SIZE\fR switch, and for a day after the table was taken away for a lost flag and bound again ("drift healed at \|\.\|\.\|\."): a repair is never silent\. In \fBtmpfs\fR mode it also says how big the table is, default or not\.
+Red when \fB/shared\fR is on and nothing is bound at \fB/run/hdw4s/shared\fR, when what is bound fails the guard, when \fBHDW4S_SHARED\fR or its expiry settings cannot be read, and when nobody is sweeping: some item has gone unused for longer than \fBHDW4S_SHARED_IDLE\fR plus two sweeps \-\- on a machine with \fBHDW4S_SHARED_SWEEP=external\fR, the only sign it has that the sweeper elsewhere has stopped\. A warning, not a failure, for a store more than 90% full, an NFS store mounted \fBhard\fR, a filesystem that does not record creation times, and for a day after the table was taken away for a lost flag and bound again ("drift healed at \|\.\|\.\|\."): a repair is never silent\. In \fBtmpfs\fR mode it also says how big the table is, default or not\.
 .P
 Red, too, when \fB/shared\fR in the root namespace is anything but the read\-only view of \fB/run/hdw4s/shared\fR described above \-\- a view that kept the table after it was taken away, one whose source was deleted, one that is writable, or anything else mounted there \-\- and when the feature is on and the boot left no view at all\. A view left for the next boot is a warning; an administrator's own \fB/shared\fR is named, not counted\.
 .SH "TRANSPORTS"
