@@ -1382,9 +1382,7 @@ therefore open every desktop on the machine, so a session refuses to start as on
   * `/run/hdw4s/`:
     Everything hdw4s keeps while the machine is up: each desktop's runtime
     directory under `session/`, and beside it the sockets, stream directories,
-    requests and records listed here. A reboot empties it. After installing a
-    version that changed where these live, reboot: a desktop still running
-    keeps using the old places until it is restarted.
+    requests and records listed here. A reboot empties it.
 
   * `/run/hdw4s/shared/`:
     What every desktop binds as `/shared`: made empty at every boot, with the

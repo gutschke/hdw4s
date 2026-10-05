@@ -3863,11 +3863,6 @@ echo '== /shared in the root namespace: the shape check, on the mount table a co
   is  'a deleted source is red, by name' \
     "$(chk "${RUN}" "${GOOD/\/hdw4s\/shared \/shared/\/hdw4s\/shared\/\/deleted \/shared}")" '1:deleted'
   is  'the good bind alone, unexposed: good' "$(chk "${RUN}" "${GOOD}")" '0:'
-  # A view of the exposure where an older version kept it, /run/hdw4s-shared,
-  # is not this one, and nothing falls back to it: left over from before a
-  # reboot, it is somebody else's mount at /shared, and named as such.
-  is  'a view of the old flat exposure is foreign, not good' \
-    "$(chk "${RUN}" "${GOOD/\/hdw4s\/shared \/shared/\/hdw4s-shared \/shared}")" '1:foreign'
   # Unmounted by hand (shape pass F1): the record says bound, nothing is there.
   # It strands table copies in every slave namespace, which no read here can
   # see; the record is the only witness, so it is red, with the remedy.
@@ -8516,42 +8511,6 @@ echo '== every runtime file is under /run/hdw4s, and nothing names the old place
   is 'and defaults to /run/hdw4s/update.lock' \
      "$(unset HDW4S_RUNDIR; eval "$(grep '^LOCKFILE=' "${ROOT}/hdw4s-update")"; echo "${LOCKFILE}")" '/run/hdw4s/update.lock'
   is 'and is made 0600' "$( (LOCKFILE="${d}/u/update.lock"; umask 022; eval "${lk}"; stat -c %a "${LOCKFILE}") )" '600'
-
-  # THE INSTALL-TO-REBOOT WINDOW IS READ FROM THE BOX: an old /run/hdw4s-* entry
-  # means the previous layout is still live, whatever version is being upgraded
-  # from. ONE predicate, hdw4s-old-layout, run here against a stand-in /run.
-  win() { HDW4S_RUN_PARENT="$1" "${ROOT}/hdw4s-old-layout" && echo yes || echo no; }
-  mkdir -p "${d}/r1" "${d}/r2/hdw4s/session" "${d}/r3/hdw4s" "${d}/r4"
-  is 'an empty /run is no window' "$(win "${d}/r1")" 'no'
-  is 'the new layout alone is no window' "$(win "${d}/r2")" 'no'
-  mkdir "${d}/r3/hdw4s-proxy"
-  is 'RED: an old entry beside the new is the window' "$(win "${d}/r3")" 'yes'
-  ln -s private/hdw4s-demux "${d}/r4/hdw4s-demux"
-  is 'RED: and so is a dangling old symlink (the router'"'"'s records)' "$(win "${d}/r4")" 'yes'
-  # Its two askers, and nobody else asks: postinst for the reboot notice, the
-  # updater for itself. A second copy of the test is how two answers start.
-  is 'postinst asks it for the reboot notice' \
-     "$(grep -c '^  if /usr/lib/hdw4s/hdw4s-old-layout; then$' "${ROOT}/debian/postinst")" '1'
-  hasnt 'and keeps no copy of its own' "$(cat "${ROOT}/debian/postinst")" 'hdw4s-*'
-  hasnt 'and nothing in postinst keys it to a version' "$(cat "${ROOT}/debian/postinst")" 'compare-versions'
-  # THE UPDATER, IN THE WINDOW, DOES NOTHING AND SAYS SO -- before it even asks
-  # whether it is root, so this runs as anybody and can never reach a download.
-  upd() { HDW4S_RUN_PARENT="$2" HDW4S_ETCDIR="${d}/etc" bash "$1" 2>&1; echo "rc=$?"; }
-  out="$(upd "${ROOT}/hdw4s-update" "${d}/r3")"
-  has 'in the window the updater waits for the reboot' "${out}" 'waiting for the reboot that finishes the upgrade'
-  has 'and that is not a failure' "${out}" 'rc=0'
-  # RED ARM: the check taken out, and an exit put where it was, so that the copy
-  # can never get as far as updating anything; it must not say it is waiting.
-  cp "${ROOT}/hdw4s-old-layout" "${d}/hdw4s-old-layout"
-  # shellcheck disable=SC2016  # the script's own text, matched literally
-  sed '/^if "$(dirname "$0")\/hdw4s-old-layout"; then$/,/^fi$/c\exit 7' "${ROOT}/hdw4s-update" > "${d}/hdw4s-update"
-  if cmp -s "${ROOT}/hdw4s-update" "${d}/hdw4s-update"; then
-    bad 'the updater red arm mutates it' 'the sed matched nothing'
-  else
-    out="$(upd "${d}/hdw4s-update" "${d}/r3")"
-    hasnt 'RED ARM: without the check, nothing says it is waiting' "${out}" 'waiting for the reboot'
-    has 'RED ARM: and it went on (to the exit planted in its place)' "${out}" 'rc=7'
-  fi
 )
 
 echo '== the router, against stand-in slots =='
@@ -8881,21 +8840,14 @@ echo '== hdw4s check sees a named desktop that will not start =='
   has 'and how the record is cleared'    "${out}" 'rm -f /run/hdw4s/ledger/alice'
 )
 
-echo '== an upgrade never stops the router, and restarts it only when the layout is unchanged =='
+echo '== an upgrade never stops the router, and restarts it onto the new code =='
 ( set +e
-  # debhelper's prerm stopped hdw4s-demux.service on every upgrade, and the next
-  # arrival started a new one: harmless while the state kept its path, a hazard
-  # when it moved -- the new router saw every slot free (dev box, 2026-10-04).
+  # debhelper's prerm would stop hdw4s-demux.service on every upgrade, leaving
+  # the front door to the next arrival's socket activation.
   line="$(command grep -E 'dh_installsystemd .*hdw4s-demux\.service' "${ROOT}/debian/rules")"
   case "${line}" in *--no-stop-on-upgrade*) ok 'the router service is not stopped on upgrade';;
     *) bad 'the router service is not stopped on upgrade' "${line:-no line}";; esac
-  # The one restart is in the branch where hdw4s-old-layout said NO: read the
-  # postinst block from the window test to the end of its if.
-  blk="$(sed -n '/hdw4s-old-layout; then/,/^  fi$/p' "${ROOT}/debian/postinst")"
-  win="$(sed -n '/hdw4s-old-layout; then/,/^  elif /p' <<<"${blk}")"
-  rest="$(sed -n '/^  elif /,/^  fi$/p' <<<"${blk}")"
-  hasnt 'inside the window nothing restarts the router' "${win}" 'hdw4s-demux'
-  has   'outside it, the router is restarted onto the new code' "${rest}" 'try-restart hdw4s-demux.service'
+  has   'postinst restarts the router onto the new code' "$(cat "${ROOT}/debian/postinst")" 'try-restart hdw4s-demux.service'
   is    'and nowhere else in postinst' "$(command grep -c 'hdw4s-demux.service' "${ROOT}/debian/postinst")" '1'
   # Removal stops the router itself, not only its socket: the service holds the
   # socket's descriptor and kept answering after the package was gone.
@@ -8906,7 +8858,7 @@ echo '== an upgrade never stops the router, and restarts it only when the layout
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1704  # update when tests are added; a wrong number is the point
+EXPECTED=1691  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

@@ -214,17 +214,6 @@ case "${1:-}" in
     ;;
 esac
 
-# NOT WHILE THE PREVIOUS RUNTIME LAYOUT IS LIVE: this machine was upgraded and
-# not yet rebooted. Which desktops are idle is judged below from where they are,
-# and in that window every running desktop is somewhere else and would be taken
-# for an idle one and restarted. The one predicate is hdw4s-old-layout's; asked
-# here, at the top, it covers the timer, a Persistent= catch-up and the
-# installer's start alike. Not a failure: the reboot finishes the upgrade.
-if "$(dirname "$0")/hdw4s-old-layout"; then
-  echo 'hdw4s-update: waiting for the reboot that finishes the upgrade; nothing done.'
-  exit 0
-fi
-
 [ "$(id -u)" -eq 0 ] || {
   echo 'This script must be run as "root"' >&2
   die

@@ -27,7 +27,6 @@ hdw4s-stage-wait         usr/lib/hdw4s
 # (debian/hdw4s-shared-sweep.install says why); this package depends on it.
 hdw4s-template           usr/lib/hdw4s
 hdw4s-is-slot            usr/lib/hdw4s
-hdw4s-old-layout         usr/lib/hdw4s
 hdw4s-slot-scrub         usr/lib/hdw4s
 # /shared's expose step: binds the guarded table where desktops see it, or
 # takes it away. Asks hdw4s-shared-sweep --guard; holds no rule of its own.
