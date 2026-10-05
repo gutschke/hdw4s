@@ -1,7 +1,8 @@
 #!/usr/bin/python3
 """Run a command inside a running hdw4s desktop, as its user. Root only.
 
-    hdw4s-enter <unit> [--incarnation <instance>=<value>] -- <command> [args...]
+    hdw4s-enter <unit> [--display] [--incarnation <instance>=<value>]
+                -- <command> [args...]
 
 The back end of "hdw4s exec", which decides WHICH desktop; this decides nothing
 about that and only enters the one it is named, honestly. hdw4s(8), "exec".
@@ -63,6 +64,9 @@ holds a descriptor of root's.
 NEVER THE SCREEN BY DEFAULT. The variables marked "display" in the list are
 withheld. That is a courtesy, not a wall -- a process running as the desktop's
 user can find the display itself -- and the report says exactly that.
+--display ("hdw4s exec -X") hands them over, for a window put into the desktop
+on purpose: a tool to repair a damaged desktop instead of discarding it. Its
+windows are the occupant's to see, and to type into.
 """
 
 import ctypes
@@ -347,6 +351,7 @@ def gather(main, src, pf_main, pf_src, display=False, proc="/proc"):
     if not (alive(pf_main) and alive(pf_src)):
         raise Refusal("the desktop's processes ended while being read")
     f["pf_main"] = pf_main
+    f["display"] = display
     return f
 
 
@@ -419,7 +424,7 @@ def enter(f):
         os.chdir("/")
 
 
-def report(main, src, them, env, withheld, out=sys.stderr):
+def report(main, src, them, env, withheld, out=sys.stderr, display=False):
     """Same/DIFFERENT for each property, measured now from /proc."""
     me = snapshot("self", "self")
     rows = [("%s ns" % k, me["ns"][k] == them["ns"][k]) for k in REPORTED]
@@ -442,10 +447,18 @@ def report(main, src, them, env, withheld, out=sys.stderr):
     out.write("hdw4s exec: seccomp filters: %s here, %s in the desktop -- they "
               "cannot be copied, so system calls the desktop is refused may "
               "succeed here\n" % (me["filters"] or "0", them["filters"] or "0"))
-    out.write("hdw4s exec: %d variable(s) from the allow-list; %s\n" % (
-        len(env), ("withheld for the screen: %s -- a process running as this "
-                   "user can still find the display itself"
-                   % " ".join(withheld)) if withheld else "nothing withheld"))
+    if withheld:
+        screen = ("withheld for the screen: %s -- a process running as this "
+                  "user can still find the display itself" % " ".join(withheld))
+    elif env.get("DISPLAY"):
+        screen = ("the desktop's screen is handed over (DISPLAY=%s): its "
+                  "windows appear to whoever is using it" % env["DISPLAY"])
+    elif display:
+        screen = "-X: this desktop has no DISPLAY, so there is no screen to hand over"
+    else:
+        screen = "nothing withheld"
+    out.write("hdw4s exec: %d variable(s) from the allow-list; %s\n"
+              % (len(env), screen))
     out.flush()
 
 
@@ -465,7 +478,8 @@ def run_child(main, src, f, cmd, fds):
         # so its number -- and the cgroup path just joined -- are still its.
         if not alive(f["pf_main"]):
             raise Refusal("the desktop stopped while being entered")
-        report(main, src, f["snapshot"], f["env"], f["withheld"])
+        report(main, src, f["snapshot"], f["env"], f["withheld"],
+               display=f.get("display", False))
         # Nothing of ours, and nothing our caller left open, reaches the
         # command: only 0, 1 and 2, which are pipes or a terminal of its own.
         # To the top of the range, not the open-files limit: enter() has just
@@ -763,14 +777,17 @@ def main(argv):
     if os.geteuid() != 0:
         say("only root may run a command in somebody's desktop")
         return 1
-    usage = ("usage: hdw4s-enter <unit> [--incarnation <instance>=<value>] "
-             "-- <command> [args...]")
+    usage = ("usage: hdw4s-enter <unit> [--display] "
+             "[--incarnation <instance>=<value>] -- <command> [args...]")
     args = list(argv)
     inc = None
     if not args:
         say(usage)
         return 2
     unit = args.pop(0)
+    display = args[:1] == ["--display"]
+    if display:
+        args.pop(0)
     if args[:1] == ["--incarnation"]:
         if len(args) < 2 or "=" not in args[1]:
             say(usage)
@@ -786,7 +803,7 @@ def main(argv):
         main_pid, src, pf_main, pf_src = choose(unit)
         if inc:
             check_incarnation(inc[0], inc[1], main_pid)
-        f = gather(main_pid, src, pf_main, pf_src)
+        f = gather(main_pid, src, pf_main, pf_src, display)
     except Refusal as e:
         say("REFUSING: %s" % e)
         return REFUSED

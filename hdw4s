@@ -191,10 +191,11 @@ Usage: hdw4s <command> [arguments]
                           publishing the identity a returning tab compares
                           against
   show <instance>         show one session's settings and where each came from
-  exec <desktop> [--] <command> [args...]
+  exec [-X] <desktop> [--] <command> [args...]
                           run a command inside a running desktop, as its user;
                           <desktop> is an instance, a pool seat, or a visitor's
-                          address /s/<token>/ (or the token's first 8 characters)
+                          address /s/<token>/ (or the token's first 8 characters);
+                          -X puts its windows on that desktop's screen
   enable <instance>       allocate a slot for a session and arm its front door
   disable <instance>      stop a session and keep its slot reserved
   release <instance>      stop a session and give up its slot
@@ -4508,8 +4509,13 @@ fi
 #
 # Entering is hdw4s-enter's job, and its header says what "inside" covers and
 # what it cannot (the seccomp filter). It never starts a desktop, never touches
-# the stream, and withholds the display variables.
+# the stream, and withholds the display variables unless -X asks for them.
 cmd_exec() {
+  local -a screen=()
+  # -X: the desktop's own screen, for a window put there on purpose (a repair
+  # tool in a damaged desktop). Its sound needs no option: it is never withheld.
+  [ "${1:-}" = '-X' ] && { screen=(--display); shift; }
+  [ $# -ge 2 ] || usage_error
   local held="$1"
   local out='' inst='' whose=''
   local -a inc=()
@@ -4551,7 +4557,7 @@ cmd_exec() {
     fi
   fi
   exec "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-enter" "$(unit_of "${inst}")" \
-    "${inc[@]}" -- "$@"
+    "${screen[@]}" "${inc[@]}" -- "$@"
 }
 
 cmd_complete() {

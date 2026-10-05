@@ -52,7 +52,11 @@ _hdw4s() {
       [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}")) ;;
     exec)    # a desktop by name; a visitor's is named by its address, which
              # nobody can complete, and after it comes an arbitrary command
-      [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}")) ;;
+      if [ "${n}" -eq 1 ]; then
+        COMPREPLY=($(compgen -W "-X $(_hdw4s_instances)" -- "${cur}"))
+      elif [ "${n}" -eq 2 ] && [ "${words[2]}" = -X ]; then
+        COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}"))
+      fi ;;
     enable)  # an instance is an account; enabling makes its slot
       [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -u -- "${cur}")) ;;
     transport)

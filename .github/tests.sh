@@ -8994,6 +8994,53 @@ PY
   fi
 )
 
+echo '== exec: -X reaches the entry, and the report says what it did =='
+( set +e
+  # The CLI tests stand in for hdw4s-enter, so they cannot see it IGNORE the
+  # flag: a mutation dropping it in main() passed all of them (review). These
+  # drive the real main() with only the machine-touching steps stood in for.
+  out="$(python3 - "${ROOT}/hdw4s-enter" <<'PY'
+import importlib.machinery, importlib.util, io, os, sys
+l = importlib.machinery.SourceFileLoader("enter", sys.argv[1])
+e = importlib.util.module_from_spec(importlib.util.spec_from_loader("enter", l)); l.exec_module(e)
+seen = {}
+e.os.geteuid = lambda: 0
+e.choose = lambda unit: (1, 2, 3, 4)
+e.check_incarnation = lambda *a, **k: seen.setdefault("inc", a[:2])
+def gather(main, src, pm, ps, display=False):
+    seen["display"] = display
+    return {"env": {}}
+e.gather = gather
+e.spawn = lambda *a: 0
+e.exit_code = lambda st: st
+for name, argv in (("plain", ["u", "--", "true"]),
+                   ("x", ["u", "--display", "--", "true"]),
+                   ("xinc", ["u", "--display", "--incarnation", "s=v", "--", "true"])):
+    seen.clear()
+    rc = e.main(argv)
+    print(name, rc, seen.get("display"), seen.get("inc"))
+seen.clear()
+sys.stderr = io.StringIO()
+print("wrongorder", e.main(["u", "--incarnation", "s=v", "--display", "--", "true"]), seen.get("display"))
+sys.stderr = sys.__stderr__
+me = e.snapshot("self", "self")
+for name, env, held, disp in (("handed", {"DISPLAY": ":5"}, [], True),
+                              ("noscreen", {}, [], True),
+                              ("withheld", {}, ["DISPLAY", "XAUTHORITY"], False)):
+    buf = io.StringIO()
+    e.report(1, 2, me, env, held, out=buf, display=disp)
+    print(name, buf.getvalue().strip().splitlines()[-1])
+PY
+)"
+  has 'without -X the entry withholds the screen'  "${out}" 'plain 0 False None'
+  has '-X reaches the entry as display=True'        "${out}" 'x 0 True None'
+  has 'and still beside a visitor'"'"'s pin'        "${out}" "xinc 0 True ('s', 'v')"
+  has 'the flags in the other order are refused'    "${out}" 'wrongorder 2 None'
+  has 'the report says the screen was handed over'  "${out}" 'handed over (DISPLAY=:5)'
+  has 'and says when there was no screen to hand'   "${out}" 'noscreen hdw4s exec: 0 variable(s) from the allow-list; -X: this desktop has no DISPLAY'
+  has 'and without -X, what it withheld'            "${out}" 'withheld for the screen: DISPLAY XAUTHORITY'
+)
+
 echo '== exec: what an administrator types reaches the right unit, or nothing =='
 ( set +e; sandbox; . "${SB}/setup.sh"
   mkdir -p "${SB}/lib"
@@ -9014,6 +9061,12 @@ STUB
   is 'a pool seat by name enters the pool unit' "$(cat "${SB}/called" 2>/dev/null)" 'enter hdw4s-ephemeral@_hdw4s_2.service -- true'
   r="$(ex 'https://pool.example/s/0123456789abcdef0123456789abcdef/' -- id)"
   is 'a visitor address enters its seat and re-checks the desktop' "$(cat "${SB}/called" 2>/dev/null)" 'enter hdw4s-ephemeral@_hdw4s_2.service --incarnation _hdw4s_2=cafe -- id'
+  r="$(ex -X alice -- xterm)"
+  is '-X hands the helper the screen'           "$(cat "${SB}/called" 2>/dev/null)" 'enter hdw4s@alice.service --display -- xterm'
+  r="$(ex -X 'https://pool.example/s/0123456789abcdef0123456789abcdef/' -- xterm)"
+  is 'and does so beside a visitor'"'"'s pin'   "$(cat "${SB}/called" 2>/dev/null)" 'enter hdw4s-ephemeral@_hdw4s_2.service --display --incarnation _hdw4s_2=cafe -- xterm'
+  r="$(ex -X alice)"
+  has '-X with no command is a usage error'     "${r}" 'Usage: hdw4s'
   r="$(ex deadbeef99 -- id)"
   has 'an address the router refuses stops with its reason' "${r}" 'no visitor desktop has had that address'
   has 'and exit status 125'                                  "${r}" 'rc=125'
@@ -9051,7 +9104,7 @@ STUB
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1725  # update when tests are added; a wrong number is the point
+EXPECTED=1735  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
