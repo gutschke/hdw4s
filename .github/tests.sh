@@ -8388,6 +8388,7 @@ echo '== bash completion offers what the commands accept, and nothing they refus
       _init_completion() { cur="${COMP_WORDS[COMP_CWORD]}"; prev="${COMP_WORDS[COMP_CWORD-1]}"
                            words=("${COMP_WORDS[@]}"); cword=${COMP_CWORD}; }
       _filedir() { :; }; _known_hosts_real() { :; }; compopt() { :; }
+      _command_offset() { COMPREPLY=("command-from-word-$1"); }
       COMP_WORDBREAKS="${HDW4S_WB- =:}"  # "=" breaks words, as in bash'"'"'s default
       complete() { :; }
       . "$1"; shift
@@ -8406,6 +8407,12 @@ echo '== bash completion offers what the commands accept, and nothing they refus
   is  'the pool is not offered a setting it fixes' "$(c 'hdw4s pool set HDW4S_ISO')" ''
   is  'nor one that applies only to the whole machine' "$(c 'hdw4s pool set HDW4S_PROX')" ''
   is  'but is offered one it reads from the machine file' "$(c 'hdw4s pool set HDW4S_EPHEMERAL_U')" 'HDW4S_EPHEMERAL_URL= '
+  # exec: the desktop, then the command, completed as a command from the word
+  # where it starts -- after -X, the desktop and a "--" when they are there.
+  is  'exec offers -X where the desktop goes'         "$(c 'hdw4s exec -')" '-X '
+  is  'after the desktop, the command'                "$(c 'hdw4s exec alice l')" 'command-from-word-3 '
+  is  'after -X and the desktop, the command'         "$(c 'hdw4s exec -X alice l')" 'command-from-word-4 '
+  is  'and after a "--" as well'                      "$(c 'hdw4s exec -X alice -- l')" 'command-from-word-5 '
   # Every name offered is one "set" itself accepts: one table, two readers.
   n=0
   for k in $(PATH="${SB}/bin:${PATH}" HDW4S_ETCDIR="${SB}/etc" hdw4s __complete keys machine); do
@@ -9086,6 +9093,19 @@ STUB
   has 'exec is refused to anybody but root' "${r}" 'only root'
   [ -e "${SB}/called" ] && bad 'and enters nothing' 'hdw4s-enter ran' || ok 'and enters nothing'
 
+  # Tab completion for exec: RUNNING desktops by name, and -- to root only --
+  # each running visitor desktop by its token's first 8 characters.
+  printf '0 alice desktop\n1 bob desktop\n2 _hdw4s_2 ephemeral\n3 _hdw4s_3 ephemeral\n' > "${SLOTS}"
+  systemctl() { case "$1" in show) local u; for u in "$@"; do case "${u}" in *.service)
+      printf 'Id=%s\nActiveState=%s\n\n' "${u}" \
+        "$(case "${u}" in *@alice.*|*@_hdw4s_2.*) echo active;; *) echo inactive;; esac)";; esac; done;; esac; }
+  printf '#!/bin/sh\necho "_hdw4s_2 0123456789abcdef0123456789abcdef 1000"\n' > "${SB}/lib/hdw4s-demux"
+  out="$( _LIST_PRELOADED=''; HDW4S_LIBDIR="${SB}/lib" cmd_complete exec 2>&1)"
+  is 'exec completes running desktops and, to root, token prefixes' "$(sort <<<"${out}" | tr '\n' ' ')" '01234567 _hdw4s_2 alice '
+  out="$( _LIST_PRELOADED=''; FAKE_UID=1000 HDW4S_LIBDIR="${SB}/lib" cmd_complete exec 2>&1)"
+  is 'and to anybody else, the running names only' "$(sort <<<"${out}" | tr '\n' ' ')" '_hdw4s_2 alice '
+  unset -f systemctl
+
   # list --seats: the LETTING column is how an address leads to a seat.
   printf '0 alice desktop\n1 _hdw4s_2 ephemeral\n2 _hdw4s_3 ephemeral\n' > "${SLOTS}"
   printf '#!/bin/sh\necho "_hdw4s_2 0123456789abcdef0123456789abcdef 1000"\n' > "${SB}/lib/hdw4s-demux"
@@ -9104,7 +9124,7 @@ STUB
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1735  # update when tests are added; a wrong number is the point
+EXPECTED=1741  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

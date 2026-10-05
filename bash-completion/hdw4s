@@ -50,12 +50,19 @@ _hdw4s() {
       [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -W '--seats' -- "${cur}")) ;;
     show|disable|release|auth|noauth|proxy|keyring)
       [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}")) ;;
-    exec)    # a desktop by name; a visitor's is named by its address, which
-             # nobody can complete, and after it comes an arbitrary command
+    exec)    # a running desktop: by name, or (to root) by its visitor's token
+             # prefix -- from "hdw4s __complete exec", which reads the router's
+             # table (it never contacts the router, so a broken one cannot hang
+             # this shell).
+             # After it comes an arbitrary command, completed as one.
       if [ "${n}" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "-X $(_hdw4s_instances)" -- "${cur}"))
+        COMPREPLY=($(compgen -W "-X $(hdw4s __complete exec 2>/dev/null)" -- "${cur}"))
       elif [ "${n}" -eq 2 ] && [ "${words[2]}" = -X ]; then
-        COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}"))
+        COMPREPLY=($(compgen -W "$(hdw4s __complete exec 2>/dev/null)" -- "${cur}"))
+      else
+        local first=2; [ "${words[2]}" = -X ] && first=3
+        [ "${words[first+1]:-}" = -- ] && first=$((first + 1))
+        [ "${cword}" -gt "${first}" ] && _command_offset $((first + 1))
       fi ;;
     enable)  # an instance is an account; enabling makes its slot
       [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -u -- "${cur}")) ;;

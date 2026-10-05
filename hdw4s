@@ -4575,6 +4575,22 @@ cmd_complete() {
       done | sort;;
     values:2)
       case "${SETTABLE[$2]:-}" in *'|'*) tr '|' '\n' <<<"${SETTABLE[$2]}";; esac;;
+    exec:1)
+      # What "exec" can enter: the RUNNING desktops by name, and -- to root,
+      # who alone can ask the router -- each running visitor desktop by the
+      # first 8 characters of its token, which "exec" accepts. An address is
+      # not a credential (hdw4s-demux's header), and "list --seats" already
+      # shows these prefixes to root; completing them adds no reach.
+      local idx inst _t
+      list_preload
+      while read -r idx inst _t _; do
+        case "${idx}" in ''|\#*) continue;; esac
+        [ "${_LIST_STATE[$(unit_of "${inst}")]:-}" = active ] && echo "${inst}"
+      done < <([ -r "${SLOTS}" ] && cat "${SLOTS}")
+      if [ "$(id -u)" -eq 0 ]; then
+        "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-demux" --lettings 2>/dev/null |
+          awk '{ print substr($2, 1, 8) }'
+      fi;;
   esac
 }
 
