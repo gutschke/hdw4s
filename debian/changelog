@@ -1,3 +1,17 @@
+hdw4s (2.4.14) unstable; urgency=medium
+
+  * A visitor who switches to another tab or window is no longer
+    disconnected after half a minute. The desktop still stops sending
+    video while nobody looks, and resumes on the same connection when the
+    tab is shown again.
+  * "hdw4s exec -X" opens the command's windows on that desktop's own
+    screen, to repair a damaged desktop from the inside instead of
+    discarding it. Whoever is using the desktop sees them.
+  * Tab completion for "hdw4s exec" offers the running desktops, and to
+    root each visitor's desktop by the start of the token in its address.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Mon, 05 Oct 2026 07:50:54 -0700
+
 hdw4s (2.4.13) unstable; urgency=medium
 
   * New: "hdw4s exec <desktop> -- <command>" runs a command inside a
