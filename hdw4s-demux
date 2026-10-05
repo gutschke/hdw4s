@@ -181,7 +181,40 @@ REALM = "hdw4s"
 GATE_DEFAULT = os.environ.get("HDW4S_GATE_MODE", "takeover")
 GATE_ARMS = ("mint", "takeover", "off")
 
-IDLE_TIMEOUT = 120.0
+# How long a connection may sit idle BETWEEN REQUESTS (downstream), and how
+# long a desktop may take to answer ONE request (upstream). Neither applies to
+# an established WebSocket: see the 101 branch of forward_request(). Settable
+# for the test rig only, so that a stream outliving both can be shown in
+# seconds instead of minutes.
+def _seconds(name, default):
+    """A positive number of seconds from the environment, else DEFAULT. A
+    value that is not one must not stop the router starting: it would take
+    every ephemeral desktop down with it."""
+    try:
+        v = float(os.environ.get(name, default))
+    except ValueError:
+        return float(default)
+    return v if v > 0 else float(default)
+
+
+IDLE_TIMEOUT = _seconds("HDW4S_DEMUX_IDLE_TIMEOUT", 120)
+UPSTREAM_TIMEOUT = _seconds("HDW4S_DEMUX_UPSTREAM_TIMEOUT", 30)
+# AN ESTABLISHED STREAM ends when NEITHER direction has carried a byte for this
+# long, or when one write cannot complete in STREAM_WRITE_TIMEOUT. Not a
+# request timeout: a hidden tab stops its video and its stream goes quiet ON
+# PURPOSE, and Selkies' own pings -- websockets: heartbeat=30, WebRTC
+# signalling: keepalive_timeout=30, both read in the installed 2.0.0 -- keep a
+# byte crossing each way about every 30 s while the browser lives.
+#
+# NOT WHAT ENDS A VANISHED BROWSER'S STREAM, and saying so matters: the
+# desktop goes on pinging into the void, so the stream is never silent both
+# ways. Selkies ends it (websockets: no pong within about 45 s), or, where it
+# only pings (WebRTC signalling), the reverse proxy -- our actual peer, which
+# answers for the browser -- gives up retransmitting to it (about 15 minutes at
+# Linux's defaults). Two-way silence is the backstop for a desktop that sends
+# nothing at all, which would otherwise hold its seat for the proxy's day.
+STREAM_IDLE = _seconds("HDW4S_DEMUX_STREAM_IDLE", 300)
+STREAM_WRITE_TIMEOUT = _seconds("HDW4S_DEMUX_STREAM_WRITE_TIMEOUT", 60)
 
 # HOW LONG A VISITOR LOOKS AT THE BROWSER'S LOADING TAB BEFORE WE SAY ANYTHING.
 # The session page is not served until the desktop has started (the startup
@@ -5922,20 +5955,67 @@ def buffered_now(f, sock):
         sock.settimeout(prev)
 
 
-def splice(a, b):
-    """Copy A to B until either end goes. Then close both."""
+def keepalive(sock):
+    """TCP keepalive on SOCK, if it is TCP: how an idle stream with no read
+    timeout still notices a browser that is gone without saying so."""
+    try:
+        if sock.family not in (socket.AF_INET, socket.AF_INET6):
+            return
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 10)
+    except (OSError, AttributeError):
+        pass
+
+
+class Quiet:
+    """When a stream last carried a byte in either direction."""
+
+    def __init__(self):
+        self.last = time.monotonic()
+
+    def touch(self):
+        self.last = time.monotonic()
+
+    def for_(self):
+        return time.monotonic() - self.last
+
+
+def stream_timeout(idle=None, write_timeout=None):
+    """The one socket timeout of an established stream: how often a read wakes
+    to ask whether the stream is silent both ways, and how long one write may
+    take. ONE value, set once on both sockets before either half starts: a
+    socket's timeout is shared by every thread using it, so a value set by one
+    half would silently change the other's."""
+    idle = STREAM_IDLE if idle is None else idle
+    write_timeout = STREAM_WRITE_TIMEOUT if write_timeout is None else write_timeout
+    return max(min(write_timeout, idle / 4.0), 0.05)
+
+
+def stream_splice(a, b, quiet, idle=None):
+    """Copy A to B for an established stream until either end goes, the stream
+    has been silent BOTH ways for IDLE, or a write to B times out. Then shut
+    both down, which ends the other half too."""
+    idle = STREAM_IDLE if idle is None else idle
     try:
         while True:
             try:
                 chunk = a.recv(65536)
+            except socket.timeout:
+                if quiet.for_() >= idle:
+                    break
+                continue
             except OSError:
                 break
             if not chunk:
                 break
+            quiet.touch()
             try:
                 b.sendall(chunk)
-            except OSError:
+            except OSError:  # a write that timed out is one
                 break
+            quiet.touch()
     finally:
         for s in (a, b):
             try:
@@ -6347,7 +6427,7 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
     answering, and the caller must not treat it as one."""
     path = socket_path(instance)
     up = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    up.settimeout(30)
+    up.settimeout(UPSTREAM_TIMEOUT)
     try:
         up.connect(path)
     except OSError as e:
@@ -6556,9 +6636,23 @@ def forward_request(instance, method, rest, query, headers, rf, wf, sock,
         if pending:
             wf.write(upf.read(len(pending)))
             wf.flush()
-        t = threading.Thread(target=splice, args=(sock, up), daemon=True)
+        # NOT THE REQUEST TIMEOUTS. Those -- the desktop's 30 s to answer one
+        # request, the browser's 120 s between requests -- stayed on the
+        # stream, and the first one to expire ended it: a hidden tab asks the
+        # desktop to stop its video, silent audio sends nothing, and 30 s later
+        # the visitor was cut off (measured on a test box 2026-10-05, STOP_VIDEO
+        # at :48.4 and the disconnect at :18.45, twice). A stream ends instead
+        # when it is silent BOTH ways for STREAM_IDLE, or a write stalls; see
+        # there for what does end a vanished browser's stream. keepalive() only
+        # finds a proxy HOST that has gone: a local proxy answers for any browser.
+        keepalive(sock)
+        up.settimeout(stream_timeout())
+        sock.settimeout(stream_timeout())
+        quiet = Quiet()
+        t = threading.Thread(target=stream_splice, args=(sock, up, quiet),
+                             daemon=True)
         t.start()
-        splice(up, sock)
+        stream_splice(up, sock, quiet)
         t.join(5)
         return False
 

@@ -709,7 +709,7 @@ class Client:
 
 class Rig:
     def __init__(self, nslots=3, gate="mint", windows=None, strays=(),
-                 demux=None):
+                 demux=None, extra_env=None):
         # gate=None means DO NOT SET HDW4S_GATE_MODE, so the module's own default
         # applies. Without this every arm test pinned the mode explicitly and the
         # shipped default was never exercised -- which is exactly how the router
@@ -842,6 +842,7 @@ class Rig:
                    HDW4S_DEMUX_BIND="127.0.0.1",
                    HDW4S_DEMUX_PORT=str(self.port),
                    **({"HDW4S_GATE_MODE": gate} if gate is not None else {}))
+        self.env.update(extra_env or {})
         for k in ("LISTEN_FDS", "LISTEN_PID"):
             self.env.pop(k, None)
         self.statedir = os.path.join(self.tmp, "state")
@@ -4275,6 +4276,98 @@ def open_stream(rig, client, sid):
     return s
 
 
+def test_a_silent_stream_outlives_the_request_timeouts(rig):
+    """A tab that is hidden stops the desktop's video, silent audio sends
+    nothing, and the stream goes quiet in BOTH directions. The router's request
+    timeouts -- the desktop's 30 s to answer, the browser's 120 s between
+    requests -- were left on the stream, and the first one to expire ended it:
+    a visitor cut off 30 s after looking away (measured on a test box,
+    2026-10-05, twice to the tenth of a second). Here both are shortened (this
+    rig: 1 s and 2 s) and the stream is left silent for 4 s, then must still
+    carry a message each way."""
+    a = rig.client()
+    sid, _ = arrive_on_slot(rig, a)
+    ws = open_stream(rig, a, sid)
+    try:
+        time.sleep(4)
+        ws.sendall(b"still-here")
+        got = b""
+        deadline = time.time() + 5
+        while b"still-here" not in got and time.time() < deadline:
+            chunk = ws.recv(4096)
+            assert chunk, ("the router closed a stream that had been silent "
+                           "for 4 s -- longer than its request timeouts")
+            got += chunk
+        assert b"still-here" in got, "the silent stream carried nothing back"
+    finally:
+        ws.close()
+
+
+def test_a_stream_silent_both_ways_is_ended(rig):
+    """The other half of keeping a hidden tab's stream: one whose browser is
+    GONE must still end. Our TCP peer is the reverse proxy, which keeps
+    answering for a browser that vanished, so the router ends a stream that
+    has carried nothing in EITHER direction for STREAM_IDLE (this rig: 2 s;
+    shipped: 300 s, beside Selkies' 30 s heartbeat). Left silent for longer,
+    the stream must be closed by the router."""
+    a = rig.client()
+    sid, _ = arrive_on_slot(rig, a)
+    ws = open_stream(rig, a, sid)
+    try:
+        ws.settimeout(8)
+        started = time.time()
+        try:
+            got = ws.recv(4096)
+        except socket.timeout:
+            got = None
+        assert got == b"", ("a stream silent both ways for %.0f s was not "
+                            "ended (got %r)" % (time.time() - started, got))
+        assert time.time() - started >= 1.5, \
+            "the stream was ended before its idle window"
+    finally:
+        ws.close()
+
+
+def test_a_busy_stream_outlives_the_idle_window(rig):
+    """The control for the test above: traffic -- a heartbeat -- keeps a
+    stream open past STREAM_IDLE (this rig: 2 s), so what ended it there was
+    the silence and not the clock."""
+    a = rig.client()
+    sid, _ = arrive_on_slot(rig, a)
+    ws = open_stream(rig, a, sid)
+    try:
+        ws.settimeout(5)
+        for i in range(10):
+            ws.sendall(b"beat")
+            got = b""
+            while b"beat" not in got:
+                chunk = ws.recv(4096)
+                assert chunk, ("a stream with a heartbeat every 0.5 s was ended "
+                               "after %.1f s" % (i * 0.5))
+                got += chunk
+            time.sleep(0.5)
+    finally:
+        ws.close()
+
+
+def test_a_bad_timeout_setting_does_not_stop_the_router(rig):
+    """The timeouts are read from the environment for the test rig. A value
+    that is not a positive number must fall back to the default rather than
+    raise at import: a router that cannot start takes every ephemeral desktop
+    down, and root's own "hdw4s-demux --lettings" with it."""
+    for raw, want in (("abc", "30.0"), ("0", "30.0"), ("-5", "30.0"), ("7", "7.0")):
+        env = dict(os.environ, HDW4S_DEMUX_UPSTREAM_TIMEOUT=raw)
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import importlib.machinery as M, importlib.util as U, sys; "
+             "l = M.SourceFileLoader('d', sys.argv[1]); m = U.module_from_spec("
+             "U.spec_from_loader('d', l)); l.exec_module(m); print(m.UPSTREAM_TIMEOUT)",
+             DEMUX], env=env, capture_output=True, text=True, timeout=30)
+        assert out.stdout.strip() == want, (
+            "HDW4S_DEMUX_UPSTREAM_TIMEOUT=%r gave %r (rc %d): %s"
+            % (raw, out.stdout.strip(), out.returncode, out.stderr[-200:]))
+
+
 def test_only_an_opened_stream_records_an_attach(rig):
     """The reaper discards a pool desktop nobody opened within five minutes,
     and its witness is last-attach/<slot>. A page request must NOT write it:
@@ -6561,6 +6654,7 @@ def main():
              test_refusal_is_logged_with_what_it_takes_to_judge_it,
              test_last_request_record_is_written_where_the_connection_is_accepted,
              test_only_an_opened_stream_records_an_attach,
+             test_a_bad_timeout_setting_does_not_stop_the_router,
              test_a_refused_session_is_logged_once,
              test_a_session_cannot_set_our_cookie,
              test_cookie_lifetime_guard, test_refresh_rate_limit,
@@ -6590,6 +6684,13 @@ def main():
     # be given windows to derive from -- and a test that the floor is not the
     # answer has to be given a window long enough to beat it.
     configured = [
+        (test_a_silent_stream_outlives_the_request_timeouts,
+         dict(extra_env={"HDW4S_DEMUX_UPSTREAM_TIMEOUT": "1",
+                         "HDW4S_DEMUX_IDLE_TIMEOUT": "2"})),
+        (test_a_stream_silent_both_ways_is_ended,
+         dict(extra_env={"HDW4S_DEMUX_STREAM_IDLE": "2"})),
+        (test_a_busy_stream_outlives_the_idle_window,
+         dict(extra_env={"HDW4S_DEMUX_STREAM_IDLE": "2"})),
         (test_cookie_max_age_is_the_derived_lifetime,
          dict(nslots=1, windows=[("_hdw4s_0", 40)])),
         (test_derivation_complains_when_a_window_outgrows_the_pinned_lifetime,
