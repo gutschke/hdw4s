@@ -1,3 +1,28 @@
+hdw4s (2.5.0) unstable; urgency=medium
+
+  * A named desktop with HDW4S_ISOLATION=profile now keeps its data in the
+    home's own ~/.local/share, shared with the account's other machines.
+    Programs installed into the account and the user's own data follow the
+    user again instead of staying on one machine; a program installed or
+    updated from inside the desktop no longer leaves other machines with a
+    launcher that points nowhere. Settings, state and cache stay separate.
+    The keyring and the Firefox and Thunderbird profiles stay on the machine,
+    in the profile's data directory, where existing ones already are.
+    Anything else an existing desktop kept in that directory is not moved
+    into the home automatically.
+  * Firefox and Thunderbird in an isolated desktop now start: their profile
+    directory is created when missing. They refuse to start, with a message,
+    when the browser is a snap package or the launching program did not pass
+    on the desktop's profile location.
+  * The desktop's own D-Bus service files are kept in its runtime directory
+    and never in the home, so they no longer change what other machines
+    sharing the home start.
+  * The Trash of a named desktop is the home's real Trash again, and the
+    Files trash view shows it.
+  * "hdw4s seed" copies ~/.config and ~/.local/state only.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Wed, 14 Oct 2026 21:55:46 -0700
+
 hdw4s (2.4.14) unstable; urgency=medium
 
   * A visitor who switches to another tab or window is no longer
