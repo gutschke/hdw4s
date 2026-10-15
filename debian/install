@@ -9,6 +9,7 @@ hdw4s-teardown           usr/lib/hdw4s
 hdw4s-start              usr/lib/hdw4s
 hdw4s-incarnation        usr/lib/hdw4s
 hdw4s-session-environment usr/lib/hdw4s
+shared-stores             usr/share/hdw4s
 hdw4s-enter              usr/lib/hdw4s
 hdw4s-stream-dir         usr/lib/hdw4s
 # Loaded by /opt/selkies/bin/python (not executed), so 0644 and no shebang run.

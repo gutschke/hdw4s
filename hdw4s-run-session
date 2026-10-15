@@ -276,9 +276,19 @@ fi
 # The password arrives from systemd in a read-only, non-swappable file that
 # exists only for the lifetime of the unit, so it is never written to disk here
 # and never appears in the process table.
+#
+# EVERY BRANCH STARTS IT WITH THE PER-MACHINE DATA DIRECTORY. XDG_DATA_HOME is
+# the home's own, shared with the person's other machines; the keyring is not:
+# two daemons holding one keyring file in memory lose each other's writes, and
+# this desktop's keyring has its own password. HDW4S_LOCAL_DATA is where
+# hdw4s-session keeps it (unset without isolation, when the two are the same).
+# The daemon's other starters -- D-Bus activation, gnome-session's autostart --
+# are shadowed there with the same directory.
+keyring_data="${HDW4S_LOCAL_DATA:-${XDG_DATA_HOME:-${HOME}/.local/share}}"
 if [ -n "${CREDENTIALS_DIRECTORY:-}" ] &&
    [ -r "${CREDENTIALS_DIRECTORY}/hdw4s-keyring" ] &&
    command -v gnome-keyring-daemon >/dev/null; then
+  XDG_DATA_HOME="${keyring_data}" \
   gnome-keyring-daemon --start --components=secrets,pkcs11,ssh --unlock \
     < "${CREDENTIALS_DIRECTORY}/hdw4s-keyring" >/dev/null 2>&1 || {
     echo 'hdw4s: could not unlock the session keyring' >&2
@@ -301,10 +311,18 @@ elif [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ] &&
   # Secret Service to create a collection returns a prompt object instead. The
   # daemon has to be started with --daemonize and given the password on stdin;
   # then login.keyring and user.keystore appear and the default alias resolves.
-  printf '\n' | gnome-keyring-daemon --daemonize --unlock \
-    --components=secrets,pkcs11,ssh >/dev/null 2>&1 || {
+  printf '\n' | XDG_DATA_HOME="${keyring_data}" gnome-keyring-daemon --daemonize \
+    --unlock --components=secrets,pkcs11,ssh >/dev/null 2>&1 || {
     echo 'hdw4s: could not create the session keyring; programs that store a' >&2
     echo '  secret will ask for a keyring password' >&2
+  }
+elif [ "${HDW4S_ISOLATION:-none}" = 'profile' ] &&
+     command -v gnome-keyring-daemon >/dev/null; then
+  # A named desktop with no "hdw4s keyring": started here anyway, locked, so
+  # that the first starter is this one and not gnome-session's autostart.
+  XDG_DATA_HOME="${keyring_data}" gnome-keyring-daemon --start \
+    --components=secrets,pkcs11,ssh >/dev/null 2>&1 || {
+    echo 'hdw4s: could not start the session keyring' >&2
   }
 fi
 

@@ -1,0 +1,36 @@
+# Where an isolated named desktop keeps each store that matters, one per line.
+#
+#   <verdict> <path relative to the home>
+#
+# local   kept per-machine, in the desktop's own directory (HDW4S_LOCAL_DATA)
+#         instead of at this path in the shared home. Each has its own mechanism;
+#         this list names them, it does not move anything.
+# shared  stays in the shared home, on purpose: it is the person's data and must
+#         follow them. Two machines running the same program at once share it the
+#         way any two machines sharing a home do.
+# noted   stays in the shared home, but is known to misbehave there when used
+#         from two machines; reported, never moved.
+#
+# Installed to /usr/share/hdw4s/shared-stores. Lines in /etc/hdw4s/shared-stores
+# are added to these and cannot remove one. A store on neither list is reported
+# when it is found being written (it is not prevented).
+local  .local/share/keyrings
+local  .local/share/firefox
+local  .local/share/thunderbird
+shared .local/share/evolution
+shared .local/share/shotwell
+shared .local/share/gnome-shell
+shared .local/share/recently-used.xbel
+shared .local/share/gvfs-metadata
+shared .local/share/applications
+shared .local/share/icons
+shared .local/share/fonts
+shared .local/share/sounds
+shared .local/share/backgrounds
+shared .local/share/mime
+shared .local/share/nautilus
+shared .local/share/Trash
+noted  .local/share/containers
+noted  .local/share/docker
+noted  .local/share/libvirt
+noted  .local/share/gnome-boxes

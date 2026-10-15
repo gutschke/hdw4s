@@ -236,7 +236,8 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
 
   * `seed` <instance> [`--only` <path>]...:
     Copy an account's existing desktop settings from its home directory into an
-    isolated session's profile, once. Only ever in that direction, only when
+    isolated session's profile, once: `~/.config` and `~/.local/state`. Not
+    `~/.local/share`, which an isolated session reads in the home itself. Only ever in that direction, only when
     asked, and only into a profile that is still empty -- a profile with
     anything in it is one somebody has used, and there is no way to tell which
     of two copies of a setting is the newer. Re-running is refused rather than
@@ -710,27 +711,62 @@ of those are safe to share, and the settings database and the metadata stores
 use memory-mapped and journalled files that are documented not to work over NFS
 at all.
 
-Setting `HDW4S_ISOLATION=profile` keeps the shared home for the user's files but
-moves most of the session's settings, state and cache to a private directory on
-local disk -- most, because the streaming server writes three paths it builds
-from the home directory itself, which no XDG variable reaches. Concretely, the session gets its own `XDG_DATA_HOME`, `XDG_STATE_HOME`,
-`XDG_CACHE_HOME` and dconf profile, its own X authority cookie, its own audio
-server socket, and wrappers that give Firefox and Thunderbird their own
-profiles.
+Setting `HDW4S_ISOLATION=profile` keeps the shared home for the user's files
+and data but moves the session's settings, state and cache to a private
+directory on local disk -- all of them but three paths the streaming server
+builds from the home directory itself, which no XDG variable reaches.
+Concretely, the session gets its own `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+`XDG_CACHE_HOME` and dconf profile, its own X authority cookie and its own audio
+server socket. `XDG_DATA_HOME` stays the home's own `~/.local/share`.
 
-All four XDG base directories move together: config, data, state and cache.
-Leaving the config home shared and redirecting dconf on its own was tried and
-abandoned, because it needs a service that has to answer before any setting can
-be read, and it leaves a lock beside its database that a killed session does not
-clean up. What this does not cover is a path a program builds from
-the home directory rather than from these variables. Some input-method
-configuration hardcodes `~/.config` that way, and so does the streaming
-server.
+Config, state and cache move together. Leaving the config home shared and
+redirecting dconf on its own was tried and abandoned, because it needs a service
+that has to answer before any setting can be read, and it leaves a lock beside
+its database that a killed session does not clean up. What this does not cover
+is a path a program builds from the home directory rather than from these
+variables. Some input-method configuration hardcodes `~/.config` that way, and
+so does the streaming server.
+
+The data directory stays in the home because it holds what has to follow the
+user from machine to machine: programs installed into the account, whose
+launchers in `~/.local/bin` name it, and the user's own data. Moved to one
+machine's disk, a program installed or updated from the desktop left every other
+machine mounting the home with a launcher that pointed nowhere. Three things in
+it are kept on this machine instead, each by its own mechanism, in the profile's
+`data` directory:
+
+    the keyring           two desktops sharing one keyring file lose each
+                          other's writes, and this one has its own password
+                          (see the keyring command); every way the daemon can
+                          be started is pointed at the profile
+    Firefox, Thunderbird  their profiles, through the wrappers, which refuse
+                          to start rather than fall back to the shared one,
+                          and refuse a snap package, which cannot keep its
+                          profile anywhere but the home
+
+The service files that change what the desktop starts -- the indexer switched
+off, the keyring pointed at the profile -- are written into the session's
+runtime directory, ahead of the system's in `XDG_DATA_DIRS`, and never into the
+home, where they would change what every other machine starts.
+`/usr/share/hdw4s/shared-stores` lists what is kept on the machine, what is
+shared on purpose and what is known to misbehave when shared; lines in
+`/etc/hdw4s/shared-stores` add to it.
 
 What stays shared:
 
     Documents, Desktop, Downloads, Pictures, Music, Videos
+    ~/.local/share: programs installed into the account, desktop entries,
+        icons, shell extensions' files, the Trash, recently used files,
+        mail, contacts and calendars kept by Evolution, photo libraries
     everything else in the home directory, including ~/.ssh
+
+A program that keeps a database in the home and is run on two machines at once
+shares it the way it would on any two machines sharing a home; this does not
+change that. Container and virtual-machine storage under `~/.local/share`
+(Podman, Docker, libvirt, Boxes) is known not to work on NFS and is left where
+it is. Two more places were never moved and still are not: `~/.pki` (the
+certificate database Chrome uses) and `~/.var/app` (each Flatpak application's
+own files).
 
 Which of those folders a home has, and where they are, belongs to the home:
 `~/.config/user-dirs.dirs` and `~/.config/user-dirs.locale` say it. A named
@@ -812,10 +848,9 @@ by itself.
 
 What becomes per-session:
 
-    desktop appearance, extensions, keyboard shortcuts
-    saved passwords and online accounts (a separate keyring; see `keyring`)
+    desktop appearance, which extensions are on, keyboard shortcuts
+    saved passwords and online accounts (a separate keyring; see the keyring command)
     browser profile, history and open tabs
-    recently-used files
 
 One consequence is worth planning for: browsers download some data per
 profile, and an isolated session is a new profile. A current Chrome fetches an

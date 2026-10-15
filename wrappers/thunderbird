@@ -1,7 +1,23 @@
 #!/bin/sh
-# Same engine as Firefox, same shared-profile and window-handoff problem.
-if [ -n "${XDG_DATA_HOME}" ] && [ "${HDW4S_ISOLATION}" = 'profile' ]; then
-  exec /usr/bin/thunderbird --profile "${XDG_DATA_HOME}/thunderbird" \
+# Same engine as Firefox, same shared-profile and window-handoff problem, and
+# the same rules: this machine's profile, fail closed, no snap. See firefox.
+if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
+  if [ -z "${HDW4S_LOCAL_DATA}" ]; then
+    msg='Thunderbird was not started: this desktop keeps its own mail profile, and the program that launched Thunderbird did not say where. Start it from the desktop instead.'
+    echo "hdw4s: ${msg}" >&2
+    command -v notify-send >/dev/null && notify-send 'Thunderbird' "${msg}"
+    exit 1
+  fi
+  case "$(readlink -f /usr/bin/thunderbird)" in /snap/*) snap=1;; *) snap=;; esac
+  if [ -n "${snap}" ] || grep -qs /snap/bin/thunderbird /usr/bin/thunderbird; then
+    msg='Thunderbird was not started: this machine has the snap package, which cannot keep a separate profile for this desktop. The administrator can install a Thunderbird .deb instead.'
+    echo "hdw4s: ${msg}" >&2
+    command -v notify-send >/dev/null && notify-send 'Thunderbird' "${msg}"
+    exit 1
+  fi
+  [ -d "${HDW4S_LOCAL_DATA}/thunderbird" ] ||
+    { mkdir -p "${HDW4S_LOCAL_DATA}/thunderbird" && chmod 0700 "${HDW4S_LOCAL_DATA}/thunderbird"; }   # see firefox
+  exec /usr/bin/thunderbird --profile "${HDW4S_LOCAL_DATA}/thunderbird" \
        --new-instance "$@"
 fi
 exec /usr/bin/thunderbird "$@"

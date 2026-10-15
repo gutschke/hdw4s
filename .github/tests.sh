@@ -4237,6 +4237,156 @@ echo '== only a named desktop with its own profile keeps the two copies in step 
       '[ -z "${user_dirs_kept}" ] || user_dirs_sync loop || :'
 )
 
+echo '== an isolated desktop keeps its data in the home and only the short list on this machine =='
+# The data directory used to move to local disk with the rest, and stranded
+# installers and user data on one machine: an installer's update in a desktop
+# re-pointed a launcher in the shared ~/.local/bin at /var/lib/hdw4s
+# (owner, 2026-10-14). Now
+# XDG_DATA_HOME is the home's own; HDW4S_LOCAL_DATA holds what must stay here
+# (keyring, browser profiles), and per-machine service files live in the
+# desktop's runtime directory, prepended to XDG_DATA_DIRS.
+# shellcheck disable=SC2016  # matched as literal text
+( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
+  blk="$(awk '/^if \[ "\$\{HDW4S_ISOLATION\}" = .profile. \]; then$/{f=1} f{print} f && /^fi$/{exit}' "${ROOT}/hdw4s-session")"
+  has 'the isolation block is found' "${blk}" 'export HDW4S_LOCAL_DATA='
+  sys="${T}/sys"; mkdir -p "${sys}/services" "${sys}/autostart"
+  printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.secrets' \
+    'Exec=/usr/bin/gnome-keyring-daemon --start --foreground --components=secrets' \
+    'SystemdService=gnome-keyring-daemon.service' > "${sys}/services/org.freedesktop.secrets.service"
+  printf '%s\n' '[Desktop Entry]' 'Exec=/usr/bin/gnome-keyring-daemon --start --components=ssh' \
+    > "${sys}/autostart/gnome-keyring-ssh.desktop"
+  printf '%s\n' '[D-BUS Service]' 'Name=org.freedesktop.impl.portal.Secret' \
+    'Exec=/usr/bin/gnome-keyring-daemon --start --foreground --components=secrets' \
+    > "${sys}/services/org.freedesktop.impl.portal.Secret.service"
+  printf '%s\n' '[D-BUS Service]' 'Name=org.example.Unrelated' 'Exec=/usr/bin/true' \
+    > "${sys}/services/org.example.Unrelated.service"
+  for c in pkcs11 secrets; do
+    printf '%s\n' '[Desktop Entry]' "Exec=/usr/bin/gnome-keyring-daemon --start --components=${c}" \
+      > "${sys}/autostart/gnome-keyring-${c}.desktop"
+  done
+  # A person's own entries, already in the profile before the desktop starts:
+  # ssh switched off; pkcs11 edited, carrying a prefix from an older path.
+  mkdir -p "${T}/p/config/autostart"
+  printf '%s\n' '[Desktop Entry]' 'Exec=/usr/bin/gnome-keyring-daemon --start --components=ssh' \
+    'X-GNOME-Autostart-enabled=false' > "${T}/p/config/autostart/gnome-keyring-ssh.desktop"
+  printf '%s\n' '[Desktop Entry]' 'Exec=/usr/bin/env XDG_DATA_HOME=/old/path /usr/bin/gnome-keyring-daemon --start --components=pkcs11' \
+    'Name=Mine' > "${T}/p/config/autostart/gnome-keyring-pkcs11.desktop"
+  # The machine's own files, swapped for fixtures in a copy of the block text.
+  fix() { sed -e "s#/usr/share/dbus-1/services#${sys}/services#g" -e "s#/etc/xdg/autostart#${sys}/autostart#g"; }
+  run() {  # run <home> <profile> <runtime> [VAR=value...] -- prints the result
+    local h="$1" p="$2" r="$3"; shift 3
+    mkdir -p "${h}" "${r}"
+    env -i PATH="${PATH}" HOME="${h}" HDW4S_ISOLATION=profile profile="${p}" \
+      XDG_RUNTIME_DIR="${r}" HDW4S_INDEXING=off "$@" bash -c "$(printf '%s\n' "${blk}" | fix)"'
+      printf "DATA=%s\nLOCAL=%s\nDIRS=%s\n" "${XDG_DATA_HOME}" "${HDW4S_LOCAL_DATA}" "${XDG_DATA_DIRS}"' 2>"${T}/err"; }
+  out="$(run "${T}/h" "${T}/p" "${T}/r")"
+  is  'named: the data directory is the home'"'"'s own' "$(grep '^DATA=' <<<"${out}")" "DATA=${T}/h/.local/share"
+  is  'named: what stays on this machine is the profile'"'"'s data' "$(grep '^LOCAL=' <<<"${out}")" "LOCAL=${T}/p/data"
+  is  'unset XDG_DATA_DIRS: the service directory goes before the specification'"'"'s default' \
+      "$(grep '^DIRS=' <<<"${out}")" "DIRS=${T}/r/hdw4s-share:/usr/local/share:/usr/share"
+  is  'the indexer'"'"'s shadow is in the service directory' \
+      "$(find "${T}/r/hdw4s-share/dbus-1/services" -name '*Tracker3*' | wc -l)" '2'
+  is  'and nothing is written into the home'"'"'s data directory' \
+      "$(find "${T}/h/.local/share" -mindepth 1 2>/dev/null | wc -l)" '0'
+  is  'the keyring'"'"'s D-Bus shadow runs the machine'"'"'s own command with this machine'"'"'s data' \
+      "$(grep '^Exec=' "${T}/r/hdw4s-share/dbus-1/services/org.freedesktop.secrets.service")" \
+      "Exec=/usr/bin/env XDG_DATA_HOME=${T}/p/data /usr/bin/gnome-keyring-daemon --start --foreground --components=secrets"
+  is  'without SystemdService, which would hand it to a manager there is none of' \
+      "$(grep -c '^SystemdService=' "${T}/r/hdw4s-share/dbus-1/services/org.freedesktop.secrets.service")" '0'
+  is  'every service that starts the daemon is shadowed, found by its Exec -- the portal'"'"'s too' \
+      "$(find "${T}/r/hdw4s-share/dbus-1/services" -type f ! -name '*Tracker3*' -printf '%f\n' | sort | tr '\n' ' ')" \
+      'org.freedesktop.impl.portal.Secret.service org.freedesktop.secrets.service '
+  is  'and the portal'"'"'s runs with this machine'"'"'s data' \
+      "$(grep -c "^Exec=/usr/bin/env XDG_DATA_HOME=${T}/p/data /usr/bin/gnome-keyring-daemon" "${T}/r/hdw4s-share/dbus-1/services/org.freedesktop.impl.portal.Secret.service")" '1'
+  is  'the keyring'"'"'s autostart is shadowed the same way' \
+      "$(grep '^Exec=' "${T}/p/config/autostart/gnome-keyring-secrets.desktop")" \
+      "Exec=/usr/bin/env XDG_DATA_HOME=${T}/p/data /usr/bin/gnome-keyring-daemon --start --components=secrets"
+  is  'one the person switched off is left exactly as it was' \
+      "$(grep -c '^X-GNOME-Autostart-enabled=false$' "${T}/p/config/autostart/gnome-keyring-ssh.desktop") $(grep -c 'env XDG_DATA_HOME' "${T}/p/config/autostart/gnome-keyring-ssh.desktop")" '1 0'
+  is  'one they edited keeps its edits, with exactly one prefix, the current one' \
+      "$(grep -c '^Name=Mine$' "${T}/p/config/autostart/gnome-keyring-pkcs11.desktop") $(grep '^Exec=' "${T}/p/config/autostart/gnome-keyring-pkcs11.desktop")" \
+      "1 Exec=/usr/bin/env XDG_DATA_HOME=${T}/p/data /usr/bin/gnome-keyring-daemon --start --components=pkcs11"
+  out="$(run "${T}/h2" "${T}/p2" "${T}/r2" XDG_DATA_DIRS=/opt/share:/usr/share)"
+  is  'a set XDG_DATA_DIRS is extended, not replaced' "$(grep '^DIRS=' <<<"${out}")" "DIRS=${T}/r2/hdw4s-share:/opt/share:/usr/share"
+  mkdir -p "${T}/r3/hdw4s-share/dbus-1/services"; : > "${T}/r3/hdw4s-share/dbus-1/services/stale.service"
+  run "${T}/h3" "${T}/p3" "${T}/r3" >/dev/null
+  is  'the service directory is rebuilt at every start' "$([ -e "${T}/r3/hdw4s-share/dbus-1/services/stale.service" ] && echo stale || echo fresh)" 'fresh'
+  out="$(run "${T}/h4" "${T}/p4" "${T}/r4" HDW4S_SESSION_TYPE=ephemeral)"
+  is  'ephemeral: its per-machine data IS its data' "$(grep '^LOCAL=' <<<"${out}")" "LOCAL=${T}/h4/.local/share"
+  is  'ephemeral: so its keyring needs no shadow' "$(find "${T}/r4/hdw4s-share/dbus-1/services" -name '*secrets*' | wc -l)" '0'
+  # The SAME profile started again: its entries are now the shadows themselves.
+  run "${T}/h" "${T}/p" "${T}/r" >/dev/null
+  is  'a second start of the same desktop does not stack prefixes' \
+      "$(grep -o 'env XDG_DATA_HOME' "${T}/p/config/autostart/gnome-keyring-secrets.desktop" "${T}/p/config/autostart/gnome-keyring-pkcs11.desktop" | wc -l)" '2'
+  env -i PATH="${PATH}" HOME="${T}/h5" HDW4S_ISOLATION=profile profile="${T}/p5" \
+    bash -c "$(printf '%s\n' "${blk}" | fix)"$'\n''echo REACHED' >/dev/null 2>"${T}/err5"; rc=$?
+  is  'no runtime directory: it refuses, rather than reach the shared home' "${rc} $(grep -c 'refusing to start' "${T}/err5")" '1 1'
+  out="$(env -i PATH="${PATH}" HOME="${T}/h6" HDW4S_ISOLATION=none profile="${T}/p6" XDG_RUNTIME_DIR="${T}/r6" \
+         XDG_DATA_DIRS=/x bash -c "${blk}"$'\n''printf "%s|%s" "${XDG_DATA_DIRS}" "${HDW4S_LOCAL_DATA:-unset}"')"
+  is  'isolation off: nothing of this, XDG_DATA_DIRS untouched' "${out} $([ -e "${T}/r6/hdw4s-share" ] && echo made || echo none)" '/x|unset none'
+  # RED ARM: the shadow without the per-machine prefix is caught.
+  blk_bad="$(printf '%s\n' "${blk}" | sed 's#/usr/bin/env XDG_DATA_HOME=${HDW4S_LOCAL_DATA} ##')"
+  blk_saved="${blk}"; blk="${blk_bad}"; run "${T}/h7" "${T}/p7" "${T}/r7" >/dev/null; blk="${blk_saved}"
+  is  'RED ARM: a shadow that lost the prefix is seen' \
+      "$(grep -c "XDG_DATA_HOME=${T}/p7/data" "${T}/r7/hdw4s-share/dbus-1/services/org.freedesktop.secrets.service")" '0'
+  rm -rf "${sys}/services/"*.service
+  run "${T}/h4c" "${T}/p4c" "${T}/r4c" >/dev/null
+  is  'a machine with no keyring service gets no shadow, and is told' \
+      "$(grep -c 'its D-Bus activation is not shadowed' "${T}/err")" '1'
+  # RED ARM: the version before this one put the data directory in the profile.
+  oldblk="$(git -C "${ROOT}" show 9c7a41a:hdw4s-session 2>/dev/null |
+            awk '/^if \[ "\$\{HDW4S_ISOLATION\}" = .profile. \]; then$/{f=1} f{print} f && /^fi$/{exit}')"
+  if [ -n "${oldblk}" ]; then
+    out="$(env -i PATH="${PATH}" HOME="${T}/h8" HDW4S_ISOLATION=profile profile="${T}/p8" XDG_RUNTIME_DIR="${T}/r8" \
+           bash -c "${oldblk}"$'\n''printf "%s" "${XDG_DATA_HOME}"' 2>/dev/null)"
+    is  'RED ARM: the old block is seen to strand the data directory' "${out}" "${T}/p8/data"
+  else
+    skip 'RED ARM: the old block is seen to strand the data directory' 'no git history in this tree'
+  fi
+
+  # The keyring daemon: every branch hdw4s-run-session starts it from.
+  kblk="$(awk '/^keyring_data=/{f=1} f{print} f && /^fi$/{exit}' "${ROOT}/hdw4s-run-session")"
+  has 'the keyring block is found' "${kblk}" 'keyring_data='
+  mkdir -p "${T}/bin"
+  printf '#!/bin/sh\necho "$XDG_DATA_HOME" >> %s/started\n' "${T}" > "${T}/bin/gnome-keyring-daemon"
+  chmod +x "${T}/bin/gnome-keyring-daemon"
+  krun() { rm -f "${T}/started"; env -i PATH="${T}/bin:${PATH}" HOME="${T}/kh" XDG_DATA_HOME="${T}/kh/.local/share" "$@" \
+           bash -c "${kblk}" >/dev/null 2>&1; cat "${T}/started" 2>/dev/null; }
+  is  'named, no keyring password: started anyway, with this machine'"'"'s data' \
+      "$(krun HDW4S_ISOLATION=profile HDW4S_LOCAL_DATA="${T}/kp/data")" "${T}/kp/data"
+  mkdir -p "${T}/cred"; echo pw > "${T}/cred/hdw4s-keyring"
+  is  'named, with a keyring password: the same directory' \
+      "$(krun HDW4S_ISOLATION=profile HDW4S_LOCAL_DATA="${T}/kp/data" CREDENTIALS_DIRECTORY="${T}/cred")" "${T}/kp/data"
+  is  'isolation off: nothing starts it here, as before' "$(krun)" ''
+
+  # The wrappers, in a copy whose browser is a stub that prints its arguments.
+  printf '#!/bin/sh\necho "ran $*"\n' > "${T}/bin/ff"; chmod +x "${T}/bin/ff"
+  for w in firefox thunderbird; do
+    sed "s#/usr/bin/${w}#${T}/bin/ff#g" "${ROOT}/wrappers/${w}" > "${T}/w-${w}"
+    wrun() { env -i PATH="${PATH}" "$@" sh "${T}/w-${w}" x 2>/dev/null; echo "rc=$?"; }
+    is  "${w}: isolated, its profile is this machine's" "$(wrun HDW4S_ISOLATION=profile HDW4S_LOCAL_DATA="${T}/L" XDG_DATA_HOME=/H)" \
+        "ran --profile ${T}/L/${w} --new-instance x
+rc=0"
+    is  "${w}: and the profile directory exists, which the browser requires" "$([ -d "${T}/L/${w}" ] && echo made)" 'made'
+    is  "${w}: isolated but told nowhere: refused, never the shared profile" "$(wrun HDW4S_ISOLATION=profile XDG_DATA_HOME=/H)" 'rc=1'
+    is  "${w}: not isolated: out of the way" "$(wrun XDG_DATA_HOME=/H)" 'ran x
+rc=0'
+    printf '#!/bin/sh\nexec /snap/bin/%s "$@"\n' "${w}" > "${T}/bin/ff"
+    is  "${w}: a snap is refused, with a reason" "$(wrun HDW4S_ISOLATION=profile HDW4S_LOCAL_DATA=/L)" 'rc=1'
+    printf '#!/bin/sh\necho "ran $*"\n' > "${T}/bin/ff"
+    # RED ARM: without the fail-closed check the shared profile comes back.
+    grep -v 'exit 1' "${T}/w-${w}" > "${T}/w-${w}-bad"
+    is  "RED ARM: ${w} without its refusal falls through" \
+        "$(env -i PATH="${PATH}" HDW4S_ISOLATION=profile sh "${T}/w-${w}-bad" x 2>/dev/null | head -1)" "ran --profile /${w} --new-instance x"
+  done
+  for v in HDW4S_ISOLATION HDW4S_LOCAL_DATA XDG_DATA_DIRS; do
+    is  "what a program is handed includes ${v}" "$(grep -c "^${v}\$" "${ROOT}/hdw4s-session-environment")" '1'
+  done
+  is  'shared-stores names the three kept on this machine' \
+      "$(awk '$1 == "local" {print $2}' "${ROOT}/shared-stores" | tr '\n' ' ')" \
+      '.local/share/keyrings .local/share/firefox .local/share/thunderbird '
+)
+
 echo '== every write into a named profile is one somebody decided on =='
 # Property 4 of the user-dirs ruling: a one-way copy into the profile silently
 # undoes what a person changed inside the desktop, and nothing fails. So every
@@ -4255,9 +4405,8 @@ echo '== every write into a named profile is one somebody decided on =='
                  sub(/^[[:space:]]+/, ""); print F ": " $0 }' "${f}"
            done | sort; }
   allowed='hdw4s-session: if ! cp -R --update=none "${profile}/data/." "${XDG_DATA_HOME}/" ||  ## ephemeral only: the template'"'"'s data half, into a home made for this visitor
-hdw4s-session: ln -s "${trash}" "${XDG_DATA_HOME}/Trash" ||  ## a link to the home'"'"'s own trash; it copies nothing
 hdw4s-session: > "${XDG_CONFIG_HOME}/autostart/tracker-miner-fs-3.desktop"  ## the product'"'"'s own file: the indexer is off (HDW4S_INDEXING)
-hdw4s-session: > "${XDG_DATA_HOME}/dbus-1/services/${svc}.service"  ## the product'"'"'s own shadow of the indexer'"'"'s service
+hdw4s-session: mv -f "${own}.hdw4s-new" "${XDG_CONFIG_HOME}/autostart/${src##*/}"  ## the keyring'"'"'s autostart, pointed at this machine'"'"'s data directory; a person'"'"'s own entry keeps its edits, and one they disabled is not touched
 hdw4s-session: > "${XDG_CONFIG_HOME}/autostart/gnome-initial-setup-first-login.desktop"  ## ephemeral only: no first-run wizard for a visitor
 hdw4s-session: : > "${XDG_CONFIG_HOME}/${d}/First Run"  ## ephemeral only: the browsers'"'"' first-run markers
 hdw4s-session: > "${XDG_CONFIG_HOME}/autostart/pulseaudio.desktop"  ## the product'"'"'s own file: PipeWire is the audio server
@@ -4358,24 +4507,41 @@ echo '== the browser print queue follows the machine'"'"'s paper size =='
   is  'a desktop on the machine'"'"'s printers is left alone' "$(cat "${T}/asked" 2>/dev/null)" ''
 )
 
-echo '== a named desktop'"'"'s trash is linked to the home'"'"'s own =='
-# shellcheck disable=SC2016  # matched as literal text in hdw4s-session
+echo '== no session script touches the Trash; the data directory is the home'"'"'s =='
+# A named desktop's Trash was a link from its profile to ~/.local/share/Trash,
+# made by a block in hdw4s-session. With XDG_DATA_HOME = ~/.local/share that
+# block deleted the home's real, empty Trash and replaced it with a link to
+# itself (measured 2026-10-14). The block is gone; this keeps it gone.
+# shellcheck disable=SC2016  # matched as literal text
 ( set +e; T="$(mktemp -d)"; trap 'rm -rf "${T}"' EXIT
-  # From the marker comment to the end of its one if-block.
-  blk="$(awk '/A NAMED DESKTOP.S TRASH/{f=1} f{print; if ($0 ~ /^  fi$/) exit}' \
-         "${ROOT}/hdw4s-session")"
-  has 'the block is found in hdw4s-session' "${blk}" 'ln -s "${trash}"'
-  mkdir -p "${T}/home" "${T}/data/Trash/files"
-  HOME="${T}/home" XDG_DATA_HOME="${T}/data" bash -c "${blk}" 2>/dev/null
-  is  'a named desktop'"'"'s empty profile Trash becomes a link to ~/.local/share/Trash' \
-      "$(readlink "${T}/data/Trash")" "${T}/home/.local/share/Trash"
-  rm -rf "${T}/data/Trash"; mkdir -p "${T}/data/Trash/files"; : > "${T}/data/Trash/files/kept"
-  HOME="${T}/home" XDG_DATA_HOME="${T}/data" bash -c "${blk}" 2>/dev/null
-  is  'a Trash holding files is left alone' "$([ -L "${T}/data/Trash" ] && echo link || echo dir)" 'dir'
-  rm -rf "${T}/data/Trash"; mkdir -p "${T}/data/Trash/files"
-  HOME="${T}/home" XDG_DATA_HOME="${T}/data" HDW4S_SESSION_TYPE=ephemeral bash -c "${blk}" 2>/dev/null
-  is  'an ephemeral desktop gets no link: its data is in its home' \
-      "$([ -L "${T}/data/Trash" ] && echo link || echo dir)" 'dir'
+  touches() { grep -nE '(rm|ln|mv)[[:space:]].*Trash' "$@" | grep -v '^[^:]*:[0-9]*:[[:space:]]*#'; }
+  is  'neither session script removes, links or moves a Trash' \
+      "$(touches "${ROOT}/hdw4s-session" "${ROOT}/hdw4s-run-session")" ''
+  # RED ARM: the deleted block's two lines, appended to a copy.
+  cp "${ROOT}/hdw4s-session" "${T}/s"
+  printf '%s\n' '      rm -rf "${XDG_DATA_HOME}/Trash"' '      ln -s "${trash}" "${XDG_DATA_HOME}/Trash" ||' >> "${T}/s"
+  is  'RED ARM: the old block is caught' "$(touches "${T}/s" | wc -l)" '2'
+  # And what the old block did, where the data directory is the home's own:
+  # the real Trash survives a session start. Run against the isolation block,
+  # from its opening line to the shared service directory.
+  blk="$(awk '/^if \[ "\$\{HDW4S_ISOLATION\}" = .profile. \]; then$/{f=1} f{print} /THE DESKTOP.S OWN SERVICE DIRECTORY/{exit}' "${ROOT}/hdw4s-session")"
+  has 'the isolation block is found' "${blk}" 'export XDG_DATA_HOME="${HOME}/.local/share"'
+  mkdir -p "${T}/home/.local/share/Trash/files" "${T}/home/.local/share/Trash/info" "${T}/p"
+  env -i PATH="${PATH}" HOME="${T}/home" HDW4S_ISOLATION=profile profile="${T}/p" \
+    bash -c "${blk}"$'\n''fi' >/dev/null 2>&1
+  trash_state() { [ -d "${T}/home/.local/share/Trash" ] && [ ! -L "${T}/home/.local/share/Trash" ] && echo dir || echo broken; }
+  is  'the block ran: it made the profile'"'"'s directories' "$([ -d "${T}/p/config" ] && echo ran)" 'ran'
+  is  'an empty real Trash in the home is still a directory, not a link' "$(trash_state)" 'dir'
+  # RED ARM: the same run with the old block's body put back at its end.
+  old="$(git -C "${ROOT}" show 9c7a41a:hdw4s-session 2>/dev/null |
+         awk '/^  trash="\$\{HOME\}\/.local\/share\/Trash"$/{f=1} f{print; if ($0 ~ /^  fi$/) exit}')"
+  if [ -n "${old}" ]; then
+    env -i PATH="${PATH}" HOME="${T}/home" HDW4S_ISOLATION=profile profile="${T}/p" \
+      bash -c "${blk}"$'\n'"${old}"$'\n''fi' >/dev/null 2>&1
+    is  'RED ARM: the old block, run there, breaks the Trash' "$(trash_state)" 'broken'
+  else
+    skip 'RED ARM: the old block, run there, breaks the Trash' 'no git history in this tree'
+  fi
 )
 
 echo '== a published Chrome keeps no rule checksum without its rules =='
@@ -9124,7 +9290,7 @@ STUB
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1741  # update when tests are added; a wrong number is the point
+EXPECTED=1786  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

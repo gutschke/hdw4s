@@ -3675,7 +3675,10 @@ cmd_seed() {
   # said nothing, so "--only .mozilla" -- the case the manual singles out --
   # copied silently less than the administrator asked for.
   local -A matched=()
-  for pair in "config:.config" "data:.local/share" "state:.local/state"; do
+  # Not ~/.local/share: an isolated desktop's data directory IS the home's own,
+  # so there is nothing to copy into the profile -- a copy there would sit in a
+  # directory nothing reads, beside the per-machine stores that do live in it.
+  for pair in "config:.config" "state:.local/state"; do
     to="${profile}/${pair%%:*}"
     from="${home}/${pair#*:}"
     [ -d "${from}" ] || continue
@@ -3721,7 +3724,7 @@ cmd_seed() {
   for entry in "${only[@]:-}"; do
     [ -n "${entry}" ] || continue
     [ -n "${matched[${entry}]:-}" ] || {
-      echo "  ${entry}: outside .config, .local/share and .local/state; not copied" >&2
+      echo "  ${entry}: outside .config and .local/state; not copied" >&2
     }
   done
 
@@ -3746,14 +3749,15 @@ cmd_keyring() {
   local inst="$1"
   require_slot "${inst}"
 
-  # A keyring is only separate if the data directory holding it is. Without
-  # isolation, XDG_DATA_HOME is the account's own ~/.local/share, so this would
-  # point gnome-keyring at the login keyring and try to unlock it with a
-  # freshly generated password. That fails, leaving one line on stderr -- after
-  # telling the administrator the two are separate, which they are not.
+  # A keyring is only separate if the directory holding it is this machine's.
+  # Isolation gives it one (HDW4S_LOCAL_DATA); without isolation the keyring
+  # is the account's own login keyring in ~/.local/share, so this would try to
+  # unlock that with a freshly generated password. That fails, leaving one line
+  # on stderr -- after telling the administrator the two are separate, which
+  # they are not.
   if [ "$(setting_of "${inst}" HDW4S_ISOLATION none)" != 'profile' ]; then
     die "hdw4s: ${inst} shares the account's home directory." \
-        '  A separate keyring needs a separate data directory. Set' \
+        '  A separate keyring needs a directory of its own on this machine. Set' \
         "  'hdw4s set ${inst} HDW4S_ISOLATION=profile' first, or the keyring" \
         "  this would create could not be reached and the account's own login" \
         '  keyring would be the one unlocked.'

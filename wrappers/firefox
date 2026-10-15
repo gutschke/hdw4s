@@ -4,8 +4,38 @@
 # desktop using this home. Worse, a second Firefox hands its command line to
 # the first and the window opens on the other desktop.
 #
+# The profile is this machine's: HDW4S_LOCAL_DATA, not XDG_DATA_HOME, which is
+# the home's own and shared with the person's other machines.
+#
 # Only act when the session asked to be isolated; otherwise get out of the way.
-if [ -n "${XDG_DATA_HOME}" ] && [ "${HDW4S_ISOLATION}" = 'profile' ]; then
-  exec /usr/bin/firefox --profile "${XDG_DATA_HOME}/firefox" --new-instance "$@"
+if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
+  # FAIL CLOSED. Without the per-machine directory the only profile left is
+  # the shared one -- the case this wrapper exists to prevent -- so a launch
+  # that arrived without it (a command that lost the session's environment)
+  # is refused rather than quietly sharing ~/.mozilla with the other machines.
+  if [ -z "${HDW4S_LOCAL_DATA}" ]; then
+    msg='Firefox was not started: this desktop keeps its own browser profile, and the program that launched Firefox did not say where. Start it from the desktop instead.'
+    echo "hdw4s: ${msg}" >&2
+    command -v notify-send >/dev/null && notify-send 'Firefox' "${msg}"
+    exit 1
+  fi
+  # A SNAP FIREFOX IS REFUSED, with a reason. Its confinement keeps its own
+  # profile under ~/snap in the shared home and may refuse one anywhere else,
+  # and snaps rarely work in a container in any case (owner, 2026-10-14: refuse,
+  # but do not fail horribly). The shim stock Ubuntu installs as /usr/bin/firefox
+  # runs /snap/bin/firefox.
+  case "$(readlink -f /usr/bin/firefox)" in /snap/*) snap=1;; *) snap=;; esac
+  if [ -n "${snap}" ] || grep -qs /snap/bin/firefox /usr/bin/firefox; then
+    msg='Firefox was not started: this machine has the snap package, which cannot keep a separate profile for this desktop. The administrator can install the Firefox .deb from Mozilla instead.'
+    echo "hdw4s: ${msg}" >&2
+    command -v notify-send >/dev/null && notify-send 'Firefox' "${msg}"
+    exit 1
+  fi
+  # Made here because nothing else makes it, and the browser refuses a
+  # --profile that does not exist ("Could not find profile folder", measured
+  # 2026-10-14) -- so until this line no isolated desktop's Firefox started.
+  [ -d "${HDW4S_LOCAL_DATA}/firefox" ] ||
+    { mkdir -p "${HDW4S_LOCAL_DATA}/firefox" && chmod 0700 "${HDW4S_LOCAL_DATA}/firefox"; }
+  exec /usr/bin/firefox --profile "${HDW4S_LOCAL_DATA}/firefox" --new-instance "$@"
 fi
 exec /usr/bin/firefox "$@"

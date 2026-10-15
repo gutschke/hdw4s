@@ -28,7 +28,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-templat
          hdw4s-slot-scrub@.service
          hdw4s-start hdw4s-start@.service hdw4s-start@.path
          hdw4s-incarnation hdw4s-incarnation@.service
-         hdw4s-enter hdw4s-session-environment hdw4s-background hdw4s-stage-wait
+         hdw4s-enter hdw4s-session-environment shared-stores hdw4s-background hdw4s-stage-wait
          hdw4s-stream-dir hdw4s-stream@.service hdw4s-sysusers.conf
          hdw4s-selkies-webrtc
          hdw4s-proxy@.socket hdw4s-proxy@.service
@@ -194,7 +194,7 @@ chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wa
 # that /opt/selkies/bin/python loads.
 chmod 0644 "${dst}"/hdw4s-selkies-webrtc "${dst}"/*.service "${dst}"/*.timer "${dst}"/*.slice \
            "${dst}"/*.conf "${dst}"/hdw4s.8* "${dst}"/hdw4s-shared-sweep.8 \
-           "${dst}"/hdw4s-names.js \
+           "${dst}"/hdw4s-names.js "${dst}"/shared-stores \
            "${dst}"/hdw4s-title.js
 
 # The settings layer every ephemeral session starts from, and the Chrome policy

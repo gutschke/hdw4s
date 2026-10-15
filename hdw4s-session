@@ -225,33 +225,46 @@ trap cleanup INT TERM QUIT HUP EXIT
 # filesystem.
 #
 # With HDW4S_ISOLATION=profile the session keeps the shared home for the user's
-# data but takes its settings, state and cache from a private directory on
-# local disk. That fixes three problems at once, because dconf's database and
-# the SQLite stores behind tracker and gvfs-metadata are all documented not to
-# work over NFS.
+# files AND data, but takes its settings, state and cache from a private
+# directory on local disk. dconf's database is documented not to work over NFS,
+# and two desktops writing one settings database with no lock that survives a
+# network filesystem is what this exists to stop.
 #
-# All four XDG base directories move together. Splitting them was tried and
-# abandoned; the reasoning is with the redirection itself, below.
+# CONFIG, STATE and CACHE move together. Splitting CONFIG from the rest was
+# tried and abandoned; the reasoning is with the redirection itself, below.
+#
+# THE DATA DIRECTORY STAYS IN THE HOME, for both kinds of desktop. It used to
+# move too, and that stranded what lives there on this one machine:
+# installers keep their payload under XDG_DATA_HOME and their launcher in
+# ~/.local/bin, which no variable moves, so a program installed or updated in
+# the desktop re-pointed the SHARED ~/.local/bin at a path that exists only
+# here, and every other machine mounting the home was left with a dangling
+# link (measured 2026-10-14, on the owner's own home). User data stranded the
+# same way, outside the home and its snapshots. The XDG specification defines
+# DATA as the portable class; STATE and CACHE are the per-machine ones.
+#
+# What must still be per-machine goes to HDW4S_LOCAL_DATA instead, one store at
+# a time and never by a mount (a mount into a root-squashed home cannot be set
+# up -- measured): the keyring (hdw4s-run-session, and its service shadows
+# below), and the browser profiles (the wrappers). gvfs-metadata needs nothing:
+# on a network filesystem it keeps its journal in XDG_RUNTIME_DIR (measured).
+# The list, and what is deliberately shared, is shared-stores.
 if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   export XDG_CONFIG_HOME="${profile}/config"
-  export XDG_DATA_HOME="${profile}/data"
+  export XDG_DATA_HOME="${HOME}/.local/share"
   export XDG_STATE_HOME="${profile}/state"
   export XDG_CACHE_HOME="${profile}/cache"
+  # Same path as when it was the whole data directory, so a named desktop's
+  # existing keyring and browser profiles are where they always were. The
+  # NAME no longer means XDG_DATA_HOME: it is what is left of it on this machine.
+  export HDW4S_LOCAL_DATA="${profile}/data"
 
-  # AN EPHEMERAL DESKTOP KEEPS ITS DATA IN ITS HOME, a real ~/.local/share. The
-  # profile split exists for named homes on shared filesystems, where settings
-  # databases misbehave; an ephemeral home is this desktop's own and is thrown
-  # away with it, so that reason does not apply -- and the split broke the
-  # trash. Trashing is a rename, which cannot cross mounts (EXDEV, measured,
-  # bind mounts included), and the Trash view (gvfsd-trash) ignores a Trash
-  # that is a symbolic link (measured: a real directory listed, a link to the
-  # same place did not). Both hold only if XDG_DATA_HOME is on the home's own
-  # mount. Owner, 2026-09-30: "the fix for visitors/template sounds absolutely
-  # correct."
+  # AN EPHEMERAL DESKTOP's per-machine data is simply its data: its home is its
+  # own and is thrown away with it, so there is nothing to keep apart from it.
   #
-  # A ~/.local/share LINK into the profile, left by the version before this one
-  # in a home that outlived it (the template editor's, until a reboot), is
-  # replaced by a real directory holding what it pointed at.
+  # A ~/.local/share LINK into the profile, left by an older version in a home
+  # that outlived it (the template editor's, until a reboot), is replaced by a
+  # real directory holding what it pointed at.
   if [ "${HDW4S_SESSION_TYPE:-}" = 'ephemeral' ]; then
     old="$(readlink "${HOME}/.local/share" 2>/dev/null || :)"
     if [ -n "${old}" ]; then
@@ -260,7 +273,7 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
       [ ! -d "${old}" ] || cp -R --update=none "${old}/." "${HOME}/.local/share/" ||
         echo "hdw4s-session: could not move ${old} into ~/.local/share." >&2
     fi
-    export XDG_DATA_HOME="${HOME}/.local/share"
+    export HDW4S_LOCAL_DATA="${XDG_DATA_HOME}"
   fi
 
   # THE ADMINISTRATOR'S TEMPLATE, copied into a profile that starts empty.
@@ -293,7 +306,7 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
     fi
   fi
 
-  install -d -m0700 "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" \
+  install -d -m0700 "${XDG_CONFIG_HOME}" "${XDG_DATA_HOME}" "${HDW4S_LOCAL_DATA}" \
                     "${XDG_STATE_HOME}" "${XDG_CACHE_HOME}"
 
   # ~/.config AND ITS SIBLINGS POINT AT THE PROFILE, in a desktop whose home and
@@ -342,42 +355,14 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   # undid every folder moved inside the desktop at its next start. Do not put
   # it back: a second writer of these files is a second rule about which wins.
 
-  # A NAMED DESKTOP'S TRASH IS THE HOME'S OWN, through a link. Trashing is a
-  # rename and cannot cross mounts, and a named desktop keeps XDG_DATA_HOME on
-  # local disk while its home is often elsewhere, so GIO's home trash
-  # ($XDG_DATA_HOME/Trash) could not take a single file from the home: "Unable
-  # to trash file ... across filesystem boundaries" (reported by the owner,
-  # 2026-09-30). The profile's Trash links to ~/.local/share/Trash -- the
-  # person's ordinary trash, shared with their other logins -- and GIO, which
-  # picks the home trash by the FILE's device, renames through the link onto
-  # the home's filesystem.
-  #
-  # THE COST, measured and accepted: the Trash VIEW (gvfsd-trash) ignores a
-  # Trash that is a link, so Files shows it empty here although the files are
-  # there and the person's other machines show them. A bind mount would satisfy
-  # the view and break trashing (rename across mount points is EXDEV even on
-  # one filesystem, measured), and moving XDG_DATA_HOME into the home would undo
-  # the isolation the profile exists for. An ephemeral desktop has neither
-  # problem: its data directory is in its home (above).
-  #
-  # A real Trash already holding something is left alone: those are files a
-  # person put there, and moving them is not this script's decision.
-  trash="${HOME}/.local/share/Trash"
-  if [ "${HDW4S_SESSION_TYPE:-}" != 'ephemeral' ] &&
-     [ "$(readlink "${XDG_DATA_HOME}/Trash" 2>/dev/null)" != "${trash}" ]; then
-    if [ -d "${XDG_DATA_HOME}/Trash" ] && [ ! -L "${XDG_DATA_HOME}/Trash" ] &&
-       [ -n "$(find "${XDG_DATA_HOME}/Trash" -mindepth 2 -print -quit 2>/dev/null)" ]; then
-      echo "hdw4s-session: ${XDG_DATA_HOME}/Trash holds files; left as it is, so" \
-           'files in the home cannot be moved to the trash.' >&2
-    elif mkdir -p "${trash}/files" "${trash}/info" 2>/dev/null; then
-      rm -rf "${XDG_DATA_HOME}/Trash"
-      ln -s "${trash}" "${XDG_DATA_HOME}/Trash" ||
-        echo 'hdw4s-session: could not link the trash into the home.' >&2
-    else
-      echo "hdw4s-session: could not create ${trash}; files in the home cannot" \
-           'be moved to the trash.' >&2
-    fi
-  fi
+  # NO TRASH HANDLING HERE ANY MORE. A named desktop's Trash used to be a link
+  # from its profile to ~/.local/share/Trash, because its data directory was on
+  # local disk and trashing is a rename that cannot cross mounts. The data
+  # directory is the home's own now, so GIO's home trash IS the person's real
+  # trash, with no link, and the Trash view shows it again. Do not put a block
+  # back here: with XDG_DATA_HOME = ~/.local/share, the old one deleted the
+  # home's real, empty Trash and replaced it with a link to itself (measured
+  # 2026-10-14). A profile's old Trash link is inert; nothing reads it.
 
   # XDG_CONFIG_HOME is redirected along with the rest, which is what puts the
   # settings database on local disk. That is the whole point: dconf's default
@@ -419,6 +404,32 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
   # or backs one up. Firefox does need the wrapper in /usr/lib/hdw4s/wrappers,
   # because it ignores the XDG variables entirely.
 
+  # THE DESKTOP'S OWN SERVICE DIRECTORY: per-machine files that change what the
+  # desktop starts, kept OUT of the shared home. A D-Bus service file under
+  # XDG_DATA_HOME shadows the system one by name -- and XDG_DATA_HOME is the
+  # home's own now, so a shadow written there would change what EVERY machine
+  # mounting the home starts (the indexer's would switch off the workstation's
+  # file search). This directory is searched first because it is prepended to
+  # XDG_DATA_DIRS (measured: a shadow there beats /usr/share's), it is rebuilt
+  # at every start in this desktop's runtime directory, and no other machine
+  # can see it. Only service files go in it, never applications, so nothing
+  # the desktop pins can come to name it.
+  #
+  # XDG_DATA_DIRS is EXTENDED, never set: when it is unset (measured, on this
+  # product's desktops) the specification's default applies, and replacing it
+  # with this one directory would hide every application and service the
+  # machine has. It is exported before dbus-run-session, because the bus reads
+  # its service directories when it starts.
+  [ -n "${XDG_RUNTIME_DIR:-}" ] || {
+    echo 'hdw4s-session: no XDG_RUNTIME_DIR, so the desktop cannot have its own' \
+         'service directory; refusing to start rather than reach the shared home.' >&2
+    exit 1
+  }
+  share="${XDG_RUNTIME_DIR}/hdw4s-share"
+  rm -rf "${share}"
+  install -d -m0700 "${share}" "${share}/dbus-1" "${share}/dbus-1/services"
+  export XDG_DATA_DIRS="${share}:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+
   # gnome-session runs its own service manager here, so the indexer's autostart
   # file is honoured: the X-GNOME-HiddenUnderSystemd that normally suppresses it
   # applies only under a systemd user manager, and there is none on this private
@@ -443,21 +454,71 @@ if [ "${HDW4S_ISOLATION}" = 'profile' ]; then
     # Miner.Files.service names it -- so anything that asks for the name starts
     # it, and nautilus asks.
     #
-    # A session service file in XDG_DATA_HOME shadows the system one by name,
-    # which is the same per-profile shape as the autostart entries and reaches
-    # nothing outside the session. SystemdService= is deliberately absent: with
+    # A session service file in the desktop's own service directory (above)
+    # shadows the system one by name, and reaches nothing outside this desktop.
+    # SystemdService= is deliberately absent: with
     # it, dbus hands the request to a user manager that this product does not
     # run, and the shadow would be ignored on a machine that does.
     #
     # The Control service goes too: it exists to start and steer the miner.
     # org.gnome.Nautilus.Tracker3.Miner.Files is left alone -- its Exec is a
     # Flatpak path that does not exist on a system install, so it starts nothing.
-    install -d -m0700 "${XDG_DATA_HOME}/dbus-1/services"
     for svc in org.freedesktop.Tracker3.Miner.Files \
                org.freedesktop.Tracker3.Miner.Files.Control; do
       printf '%s\n' '[D-BUS Service]' "Name=${svc}" 'Exec=/bin/false' \
-        > "${XDG_DATA_HOME}/dbus-1/services/${svc}.service"
+        > "${share}/dbus-1/services/${svc}.service"
     done
+  fi
+
+  # A NAMED DESKTOP'S KEYRING IS THIS MACHINE'S, on every path that can start
+  # the daemon. hdw4s-run-session starts it first, with HDW4S_LOCAL_DATA; but
+  # if it dies, the next request starts it by D-Bus activation, and gnome-session
+  # starts it from its autostart entries -- both with the session's environment,
+  # whose XDG_DATA_HOME is the home's. That would open the keyring of the
+  # person's other machines (measured: the replacement opened the home's data
+  # directory; with these shadows it stayed local). So each is shadowed with the
+  # same command run under env with the per-machine data directory.
+  #
+  # WHICH FILES is derived, never listed: every service and autostart entry
+  # whose Exec starts gnome-keyring-daemon. A list of two missed the Secret
+  # portal's backend, a third D-Bus route to the same daemon (measured on
+  # noble, 2026-10-14).
+  #
+  # A person's own autostart entry is theirs: one that switches the component
+  # off is left exactly as it is -- a disabled entry starts nothing, so there is
+  # nothing to point anywhere -- and one they edited keeps their edits, with only
+  # its Exec line given the prefix. Rewriting it whole at every start would turn
+  # a component they switched off back on, silently, every time.
+  #
+  # Only where the two differ: an ephemeral desktop's per-machine data IS its
+  # data. The path is checked before it is written into an Exec line, which
+  # has its own quoting rules; profile paths never need any.
+  if [ "${HDW4S_LOCAL_DATA}" != "${XDG_DATA_HOME}" ]; then
+    case "${HDW4S_LOCAL_DATA}" in
+      *[!A-Za-z0-9/_.-]*)
+        echo "hdw4s-session: ${HDW4S_LOCAL_DATA} cannot be written into a" \
+             'service file; the keyring may open the home'"'"'s data directory.' >&2 ;;
+      *)
+        # Idempotent: an earlier prefix (or one naming an old path) is replaced.
+        point="s|^Exec=\\(/usr/bin/env XDG_DATA_HOME=[^ ]* \\)*|Exec=/usr/bin/env XDG_DATA_HOME=${HDW4S_LOCAL_DATA} |"
+        n=0
+        for src in /usr/share/dbus-1/services/*.service; do
+          grep -qs '^Exec=.*gnome-keyring-daemon' "${src}" || continue
+          sed -e '/^SystemdService=/d' -e "${point}" "${src}" \
+            > "${share}/dbus-1/services/${src##*/}" && n=$((n + 1))
+        done
+        [ "${n}" -gt 0 ] || echo 'hdw4s-session: no service file starts' \
+          'gnome-keyring-daemon; its D-Bus activation is not shadowed.' >&2
+        install -d -m0700 "${XDG_CONFIG_HOME}/autostart"
+        for src in /etc/xdg/autostart/*.desktop; do
+          grep -qs '^Exec=.*gnome-keyring-daemon' "${src}" || continue
+          own="${XDG_CONFIG_HOME}/autostart/${src##*/}"
+          base="${src}"; [ -f "${own}" ] && base="${own}"
+          grep -qsE '^(Hidden=true|X-GNOME-Autostart-enabled=false)' "${base}" && continue
+          sed -e "${point}" "${base}" > "${own}.hdw4s-new" &&
+            mv -f "${own}.hdw4s-new" "${XDG_CONFIG_HOME}/autostart/${src##*/}"
+        done ;;
+    esac
   fi
 
   # The first-run wizard, for ephemeral sessions only.
