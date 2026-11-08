@@ -613,7 +613,7 @@ __ACT__
   // tab's return without a card. The same holds today for a hidden tab resuming.
   var switchPosted = 0;
   var NativeFetch = window.fetch;
-  if (SWITCH_UPSTREAM && typeof NativeFetch === 'function') {
+  if (typeof NativeFetch === 'function') {
     // OBSERVED, NEVER ALTERED: the caller gets back the very promise the browser
     // made, and the look at the answer hangs off it on a branch of its own, so a
     // fault in here cannot change what any fetch on this page returns.
@@ -623,15 +623,95 @@ __ACT__
         var obj = (input && typeof input === 'object');
         var url = (obj && 'url' in input) ? input.url : String(input);
         var method = String((init && init.method) || (obj && input.method) || 'GET');
-        if (method.toUpperCase() === 'POST'
-            && /\/api\/switch$/.test(new URL(url, location.href).pathname)) {
+        var path = new URL(url, location.href).pathname;
+        if (SWITCH_UPSTREAM && method.toUpperCase() === 'POST'
+            && /\/api\/switch$/.test(path)) {
           p.then(function(r){ if (r && r.ok) switchPosted = Date.now(); },
                  function(){});
+        }
+        if (method.toUpperCase() === 'GET' && /\/api\/websockets$/.test(path)) {
+          p.then(function(r){ streamNeverOpened(r ? r.status : 0); },
+                 function(){ streamNeverOpened('unreachable'); });
         }
       } catch(e){}
       return p;
     };
   }
+
+  // THE STREAM SOCKET NEVER OPENED: SAY HOW THIS PAGE GOT HERE, AND SAY IT AGAIN
+  // AFTER THE RELOAD.
+  //
+  // The defect this is for, reported twice by the owner from ChromeOS Chrome on the
+  // LAN: the page loads, its websocket fails with no reason given, the client
+  // reloads, and round it goes until something on the client side changes -- once a
+  // VPN being started and stopped, once nothing anybody could name. The proxy's log
+  // for those minutes holds the page and its assets and no websocket request at all:
+  // the browser opened a TLS connection and closed it without asking for anything.
+  // And the failing page carried two scripts injected by a CDN the LAN path does not
+  // pass through -- a copy from the browser's cache, revalidated with a 304, so the
+  // page had come from somewhere other than the connection it was being used on.
+  // By the time anyone could look, the reload had replaced the evidence.
+  //
+  // So the facts are taken at the failure and kept. The hook is the client's own
+  // probe: when a websocket page reloads WITHOUT ITS SOCKET HAVING EVER OPENED, it
+  // first sends a plain GET to the stream endpoint, to learn whether the server
+  // wants the other transport (reloadPossiblyFlippingMode, selkies-ws-core.js). The
+  // socket itself is not visible from here -- it lives in a worker, which is also why
+  // the WebSocket wrapper above cannot see a KILL frame -- but the probe is a fetch()
+  // on this page. A client that stops probing makes this silent, never wrong.
+  //
+  // WHAT IS RECORDED, all of it about the PAGE and the PATH, nothing about the person:
+  // how the document arrived (protocol; from the network, or a cached copy used with
+  // or without asking), which foreign hosts its scripts point at (a page we serve
+  // points at none -- a rewritten copy does), whether the browser thinks it is online,
+  // what the probe was answered (a status means the server is reachable over HTTP;
+  // "unreachable" means not even that). Kept in sessionStorage, this tab only, and
+  // printed and deleted on the next load: the console of the failing load is
+  // normally gone by the time anybody reads one, unless "Preserve log" was on.
+  var STREAM_FAIL = KEY + ':stream-never-opened';
+  function arrivalFacts(){
+    var f = {};
+    try {
+      var n = performance.getEntriesByType('navigation')[0];
+      if (n) {
+        f.pageProtocol = n.nextHopProtocol || '(unknown)';
+        f.pageFrom = (n.transferSize === 0) ? 'cache, used without asking'
+                   : (n.transferSize < n.encodedBodySize) ? 'cache, revalidated (304)'
+                   : 'network';
+        f.navigation = n.type;
+      }
+    } catch(e){}
+    try {
+      var hosts = [];
+      Array.prototype.forEach.call(document.querySelectorAll('script[src]'), function(s){
+        var u = new URL(s.src, location.href);
+        if (u.origin !== location.origin && hosts.indexOf(u.host) < 0) hosts.push(u.host);
+      });
+      f.foreignScriptHosts = hosts;
+    } catch(e){}
+    try { f.online = navigator.onLine; } catch(e){}
+    try { if (navigator.connection) f.network = navigator.connection.type || navigator.connection.effectiveType; } catch(e){}
+    return f;
+  }
+  function streamNeverOpened(probe){
+    try {
+      var f = arrivalFacts();
+      f.probe = probe;
+      f.at = new Date().toISOString();
+      console.warn('[hdw4s gate] the stream socket never opened on this load; the '
+                   + 'client is reloading. How this page arrived:', f);
+      sessionStorage.setItem(STREAM_FAIL, JSON.stringify(f));
+    } catch(e){}
+  }
+  try {
+    var lastFail = sessionStorage.getItem(STREAM_FAIL);
+    if (lastFail) {
+      sessionStorage.removeItem(STREAM_FAIL);
+      console.warn('[hdw4s gate] the previous load of this tab never opened its stream '
+                   + 'socket. How that page arrived, then how this one did:',
+                   JSON.parse(lastFail), arrivalFacts());
+    }
+  } catch(e){}
   function armSwitch(event){
     try {
       if (event.origin !== location.origin || event.source !== window) return;

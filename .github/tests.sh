@@ -6620,6 +6620,90 @@ JS
   fi
 )
 
+echo '== a load whose stream socket never opened says how the page arrived, then and after the reload =='
+# THE DEFECT: on the owner's ChromeOS Chrome the stream socket failed load after load
+# with no reason given, the client reloaded each time, and by the time anyone looked
+# the evidence of how the failing page had arrived (a cached copy, rewritten by a CDN
+# the LAN does not pass through) was gone. The page now notes those facts when the
+# client sends its never-opened probe, and prints them again on the next load.
+#
+# Run on the block the generator WRITES. Stood in for: the browser -- fetch() is a
+# promise with one answer, performance/document/navigator/sessionStorage are objects
+# with the fields the block reads. Nothing here shows a real socket failing.
+(
+  d="$(mktemp -d)"; trap 'rm -rf "${d}"' EXIT
+  printf '%s' '<html><body><script type="module" src="./x.js"></script></body></html>' \
+    > "${d}/in.html"
+  if ! command -v node >/dev/null; then
+    bad 'the page-script tests can run' 'node is needed to run the page script'
+    exit 0
+  fi
+  # $1: which request the client makes; $2: "ok"/"down"; $3: a stored record or ''.
+  # Prints: same-promise, what was logged, what is stored afterwards.
+  page_meets() {
+    rm -f "${d}/out.html"
+    python3 "${4:-${ROOT}/hdw4s-gate-index}" "${d}/in.html" "${d}/out.html" >/dev/null 2>&1 \
+      || { echo 'the generator refused the page'; return; }
+    python3 - "${d}/out.html" > "${d}/block.js" <<'PY'
+import re, sys
+html = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"\n  var NativeFetch = window\.fetch;\n.*?(?=\n  function armSwitch\()", html, re.S)
+print(m.group(0) if m else "")
+PY
+    node - "${d}/block.js" "$1" "$2" "${3:-}" <<'JS'
+const fs = require('fs');
+const [file, req, answer, stored] = process.argv.slice(2);
+const src = fs.readFileSync(file, 'utf8');
+if (!/streamNeverOpened/.test(src)) { process.stdout.write('no stream note in the page'); process.exit(0); }
+const store = new Map(stored ? [['K:stream-never-opened', stored]] : []);
+const sessionStorage = {getItem: k => store.has(k) ? store.get(k) : null,
+                        setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k)};
+const logged = [];
+const console = {log: () => {}, warn: (m, ...a) => logged.push(m.replace(/[:.].*$/, '') + ' ' + JSON.stringify(a))};
+let made;
+const window = {fetch: () => (made = answer === 'ok' ? Promise.resolve({status: 400}) : Promise.reject(new Error('x')))};
+const location = {href: 'https://h.example/', origin: 'https://h.example'};
+const performance = {getEntriesByType: () => [{nextHopProtocol: 'http/1.1', transferSize: 300, encodedBodySize: 88042, type: 'reload'}]};
+const document = {querySelectorAll: () => [{src: 'https://cdn.example/beacon.js'}, {src: 'https://h.example/assets/a.js'}]};
+const navigator = {onLine: true};
+new Function('window', 'location', 'performance', 'document', 'navigator', 'sessionStorage', 'console',
+             'KEY', 'SWITCH_UPSTREAM', src)(window, location, performance, document, navigator, sessionStorage, console, 'K', false);
+const [method, path] = req.split(' ');
+const got = window.fetch(path, {method});
+setImmediate(() => setImmediate(() => {
+  process.stdout.write('same=' + (got === made) + ' logged=' + logged.join(' | ').replace(/"at":"[^"]*"/g, '"at":T')
+    + ' stored=' + (store.get('K:stream-never-opened') || '').replace(/"at":"[^"]*"/g, '"at":T'));
+}));
+JS
+  }
+  facts='"pageProtocol":"http/1.1","pageFrom":"cache, revalidated (304)","navigation":"reload","foreignScriptHosts":["cdn.example"],"online":true'
+
+  # THE CONTROL FIRST: an ordinary request is handed back untouched and notes nothing,
+  # so a note below is the probe's doing and not every fetch's.
+  is 'an ordinary request is passed through and notes nothing' \
+    "$(page_meets 'GET /hdw4s-incarnation' ok)" 'same=true logged= stored='
+  # THE PROBE: noted, said, and kept for the next load -- with the caller still
+  # holding the browser's own promise.
+  is 'the never-opened probe notes how the page arrived, and keeps it' \
+    "$(page_meets 'GET /api/websockets' ok)" \
+    "same=true logged=[hdw4s gate] the stream socket never opened on this load; the client is reloading [{${facts},\"probe\":400,\"at\":T}] stored={${facts},\"probe\":400,\"at\":T}"
+  is 'a probe that never reaches the server says so' \
+    "$(page_meets 'GET /api/websockets' down | grep -o '"probe":"unreachable"' | head -1)" '"probe":"unreachable"'
+  # THE NEXT LOAD: the kept note is printed once, beside this load's own, and gone.
+  is 'the next load prints the kept note and deletes it' \
+    "$(page_meets 'GET /hdw4s-incarnation' ok '{"probe":400}')" \
+    "same=true logged=[hdw4s gate] the previous load of this tab never opened its stream socket [{\"probe\":400},{${facts}}] stored="
+
+  # RED ARM: the page without the probe hook keeps nothing for the next load.
+  sed 's|streamNeverOpened(r ? r.status : 0);|void r;|' "${ROOT}/hdw4s-gate-index" > "${d}/red"
+  if cmp -s "${ROOT}/hdw4s-gate-index" "${d}/red"; then
+    bad 'the red arm mutates the page' 'the sed matched nothing'
+  else
+    is 'a page that ignores the probe keeps nothing' \
+      "$(page_meets 'GET /api/websockets' ok '' "${d}/red")" 'same=true logged= stored='
+  fi
+)
+
 echo '== the page fits the desktop to its tab only after a start that is known to be over =='
 # THE PROBLEM: a first start often shows the desktop at the wrong size until the
 # visitor resizes the window. THE RULE, the owner's: resize only when the startup
@@ -9290,7 +9374,7 @@ STUB
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1786  # update when tests are added; a wrong number is the point
+EXPECTED=1791  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
