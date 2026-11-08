@@ -1,3 +1,13 @@
+hdw4s (2.5.1) unstable; urgency=medium
+
+  * When the desktop's stream connection never opens and the page reloads to
+    retry, the page now writes to the browser console how it arrived (from
+    the network or a cached copy, over which protocol, with any scripts
+    pointing at other sites) and writes it again after the reload, so the
+    cause can still be read once the failing page is gone.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Sun, 08 Nov 2026 15:00:00 -0800
+
 hdw4s (2.5.0) unstable; urgency=medium
 
   * A named desktop with HDW4S_ISOLATION=profile now keeps its data in the
