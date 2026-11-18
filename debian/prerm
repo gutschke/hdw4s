@@ -29,9 +29,20 @@ if [ "$1" = 'remove' ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ];
     /usr/lib/hdw4s/hdw4s-shared-expose --withdraw ||
       echo 'hdw4s: something is still mounted under /run/hdw4s/shared*; it was not ours to remove.' >&2
   fi
+  # hdw4s-ephemeral@ by name too: they used to go down with the firewall unit's
+  # stop, through Requires=, and that stop is now refused (see below).
   for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 'hdw4s@*' \
-             2>/dev/null | awk '{print $1}'); do
+             'hdw4s-ephemeral@*' 2>/dev/null | awk '{print $1}'); do
     systemctl stop "${u}" >/dev/null 2>&1 || :
+  done
+  # The firewall's tables, by hand: hdw4s-firewall.service refuses a manual
+  # stop (it says why), so debhelper's stop below is refused and its ExecStop=
+  # never runs. The sessions are stopped above, so nothing is left that the
+  # tables were protecting. Only our own tables; anything else is left alone.
+  for t in hdw4s hdw4s_net; do
+    if nft list table inet "${t}" >/dev/null 2>&1; then
+      nft delete table inet "${t}" || :
+    fi
   done
   # The root filesystem's /shared, if this package made it: here and not in
   # postrm, because by then the code that decides is gone. It is kept, and

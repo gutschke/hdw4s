@@ -371,7 +371,9 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
   * `firewall --apply`:
     Rewrite the package's nftables table and the kernel's reserved-port list
     from the current configuration. Run this after changing `HDW4S_PROXIES`,
-    `HDW4S_BASE_PORT` or `HDW4S_BLOCK_SIZE`.
+    `HDW4S_BASE_PORT` or `HDW4S_BLOCK_SIZE`. `systemctl reload hdw4s-firewall`
+    does the same. A manual stop or restart of that unit is refused: every
+    desktop requires it, and systemd would restart them all with it.
 
   * `firewall --check`:
     Report whether the table is loaded and whether every session listens on a

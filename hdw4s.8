@@ -189,7 +189,7 @@ Take a grant away\. Connections already open through it end at once\.
 Re\-apply \fBHDW4S_NET_ALLOW\fR, \fBHDW4S_NET_LAN\fR and the grants to running desktops without restarting them; without an instance, to every one\.
 .TP
 \fBfirewall \-\-apply\fR
-Rewrite the package's nftables table and the kernel's reserved\-port list from the current configuration\. Run this after changing \fBHDW4S_PROXIES\fR, \fBHDW4S_BASE_PORT\fR or \fBHDW4S_BLOCK_SIZE\fR\.
+Rewrite the package's nftables table and the kernel's reserved\-port list from the current configuration\. Run this after changing \fBHDW4S_PROXIES\fR, \fBHDW4S_BASE_PORT\fR or \fBHDW4S_BLOCK_SIZE\fR\. \fBsystemctl reload hdw4s\-firewall\fR does the same\. A manual stop or restart of that unit is refused: every desktop requires it, and systemd would restart them all with it\.
 .TP
 \fBfirewall \-\-check\fR
 Report whether the table is loaded and whether every session listens on a port the table actually covers\. Exits non\-zero if not\.

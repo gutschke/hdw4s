@@ -8042,6 +8042,20 @@ echo '== both session units check the web root, and neither needs a credential t
   done
 )
 
+echo '== restarting the firewall unit cannot restart every desktop =='
+# MEASURED 2026-11-18 (systemd 255): every desktop Requires= hdw4s-firewall.service,
+# and "systemctl restart" on it restarted them all. No dependency type separates a
+# stop from a restart, so the unit refuses a manual stop and offers reload.
+(
+  f=hdw4s-firewall.service
+  grep -qx 'RefuseManualStop=yes' "${f}" \
+    && ok 'the firewall unit refuses a manual stop or restart' \
+    || bad 'the firewall unit refuses a manual stop or restart' "no RefuseManualStop=yes in ${f}"
+  grep -qx 'ExecReload=/usr/lib/hdw4s/hdw4s-firewall --apply' "${f}" \
+    && ok 'the firewall unit reloads by re-applying' \
+    || bad 'the firewall unit reloads by re-applying' "no ExecReload= --apply in ${f}"
+)
+
 echo '== a session start that keeps failing has to stop, and this one could not =='
 # MEASURED 2026-09-25: hdw4s@.service looped 55 times in an hour and would have
 # gone on for ever. Its failure cycle is about ninety-five seconds -- up to
@@ -9549,7 +9563,7 @@ print(m.grant_refusal(sys.argv[2]) or "ALLOWED")' "${N}" "$1" 2>&1; }
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1846  # update when tests are added; a wrong number is the point
+EXPECTED=1848  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

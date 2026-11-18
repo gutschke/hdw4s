@@ -7,9 +7,23 @@ DefaultDependencies=no
 Wants=network-pre.target
 Before=network-pre.target shutdown.target
 Conflicts=shutdown.target
+# A manual stop or restart is REFUSED; "systemctl reload" (or "hdw4s firewall
+# --apply") is how the rules are re-read. Every desktop Requires= this unit, on
+# purpose: a stop runs ExecStop=, which deletes the tables that are all that
+# stands between a session and the network, so no session may outlive it. But
+# systemd carries a RESTART through Requires= as well, and no dependency type
+# separates the two (measured, systemd 255: Requires= and Requisite= restart the
+# desktop, StopPropagatedFrom= stops it and leaves it down). So "systemctl
+# restart hdw4s-firewall", typed to reload rules, restarted every desktop on the
+# machine. Refusing the manual stop keeps the stop's meaning for shutdown and
+# removal, which reach it by dependency, and leaves nothing to type that kills
+# sessions. debian/prerm deletes the tables itself on removal for that reason.
+RefuseManualStop=yes
 
 [Service]
 ExecStart=/usr/lib/hdw4s/hdw4s-firewall --apply
+# One nft transaction: the old tables are replaced, never absent.
+ExecReload=/usr/lib/hdw4s/hdw4s-firewall --apply
 # Only this package's own table is removed. Whatever else filters this machine
 # is left exactly as it was found.
 ExecStop=-/usr/sbin/nft delete table inet hdw4s
