@@ -1397,6 +1397,15 @@ else
   skip 'dependencies exist' 'apt-cache is not available'
 fi
 
+# The other direction: every command a shipped script runs is from a package
+# that is declared. mount(8) was run from the first release without "mount" in
+# Depends, which the check above cannot see by construction.
+if out="$(python3 "$(dirname "$0")/command-deps.py" debian/control debian/install)"; then
+  note 'commands are declared' 'ok'
+else
+  bad 'commands are declared' "${out}"
+fi
+
 if [ "${1:-}" = '--package' ]; then
   echo
   echo '== build =='
