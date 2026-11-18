@@ -304,8 +304,19 @@ bootstrap_with() (
       --setup-hook="${dns_hook}" \
       "${SUITE}" "${ROOT}" "$1" > "${BASE}/bootstrap.log" 2>&1;;
   *)
-    "${BOOTSTRAP}" --variant=minbase --components='main,universe' \
-      "${SUITE}" "${ROOT}" "$1" > "${BASE}/bootstrap.log" 2>&1;;
+    # debootstrap fetches with wget, whose read timeout is 900 s. One archive
+    # node that accepts the connection and then stalls (measured 2026-11-18:
+    # two of three archive.ubuntu.com addresses, from one host, in one hour)
+    # held a run for 50 minutes before anything retried. A short timeout makes
+    # wget give up on the stall and retry, which picks another address.
+    # Removed again at once: cleanup ends with an rmdir of ${BASE}, and a file
+    # left here made it report that the directory could not be removed.
+    printf 'read_timeout = 30\ntries = 10\nwaitretry = 2\n' > "${BASE}/wgetrc"
+    rc=0
+    WGETRC="${BASE}/wgetrc" "${BOOTSTRAP}" --variant=minbase --components='main,universe' \
+      "${SUITE}" "${ROOT}" "$1" > "${BASE}/bootstrap.log" 2>&1 || rc=$?
+    rm -f "${BASE}/wgetrc"
+    exit "${rc}";;
   esac
 )
 
