@@ -1,3 +1,12 @@
+hdw4s (2.5.2) unstable; urgency=medium
+
+  * A named desktop's page now fits the desktop to the browser tab once a
+    fresh start is over, as an ephemeral desktop's page already did. The
+    startup outcome it waits for was never published for named desktops,
+    so the page always got "not found" and left the size alone.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Wed, 18 Nov 2026 00:30:00 -0800
+
 hdw4s (2.5.1) unstable; urgency=medium
 
   * When the desktop's stream connection never opens and the page reloads to
