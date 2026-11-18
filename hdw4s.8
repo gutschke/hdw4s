@@ -1,6 +1,6 @@
 .\" generated with Ronn-NG/v0.9.1
 .\" http://github.com/apjanke/ronn-ng/tree/0.9.1
-.TH "HDW4S" "8" "October 2026" "hdw4s" "hdw4s"
+.TH "HDW4S" "8" "November 2026" "hdw4s" "hdw4s"
 .SH "NAME"
 \fBhdw4s\fR \- headless GNOME desktop streamed to a web browser
 .SH "SYNOPSIS"
@@ -176,6 +176,18 @@ Publish another hdw4s machine's template here, as an edit here would be, includi
 \fBtemplate export\fR \fIfile\fR
 Write the template published here to one archive, for \fBtemplate copyfrom\fR on another machine\. An existing file is never overwritten\.
 .TP
+\fBlan list\fR [\fIinstance\fR]
+What each named desktop has been granted on the LAN, beyond the public internet and the machine's essentials\. See \fBNETWORK\fR\.
+.TP
+\fBlan grant\fR \fIinstance\fR \fIhost\fR[:\fIport\fR[/tcp|/udp]]\|\.\|\.\|\.
+Let the named desktop \fIinstance\fR reach a host on the LAN: every port, or one port (TCP and UDP unless one is named)\. \fIhost\fR is an address or a name, which is resolved again whenever the rules are rebuilt\. The grant applies to a running desktop at once, survives restarts and reboots, and lasts until revoked\. Root only\. Refused for an ephemeral or authoring slot and for any account whose uid lies in the slot uid window: those uids are reused by the next visitor\. It prints what a firewall between this machine and the host must also allow, and changes nothing outside this machine\.
+.TP
+\fBlan revoke\fR \fIinstance\fR \fIhost\fR[:\fIport\fR]\|\.\|\.\|\. | \fB\-\-all\fR
+Take a grant away\. Connections already open through it end at once\.
+.TP
+\fBlan reload\fR [\fIinstance\fR\|\.\|\.\|\.]
+Re\-apply \fBHDW4S_NET_ALLOW\fR, \fBHDW4S_NET_LAN\fR and the grants to running desktops without restarting them; without an instance, to every one\.
+.TP
 \fBfirewall \-\-apply\fR
 Rewrite the package's nftables table and the kernel's reserved\-port list from the current configuration\. Run this after changing \fBHDW4S_PROXIES\fR, \fBHDW4S_BASE_PORT\fR or \fBHDW4S_BLOCK_SIZE\fR\.
 .TP
@@ -266,7 +278,11 @@ hdw4s pool set HDW4S_IDLE_DAYS=30d
 .IP
 Setting 0 without an instance name is refused too, on a machine that has ephemeral slots, since that value reaches them as well \-\- unless the pool has a window of its own, which it reads instead\. Set 0 on the named sessions that should never be stopped, or give the pool its own window first\.
 .IP "\[ci]" 4
-\fBHDW4S_MEDIA_PORTS\fR: Either \fBproxied\fR, the default, or \fBdirect\fR\. The streaming server scatters connection candidates across the ephemeral port range on every address the machine has\. \fBproxied\fR drops new inbound connections to that range, which closes them; \fBdirect\fR leaves them reachable, which is needed only when a browser reaches the streaming server without a proxy in between\.
+\fBHDW4S_MEDIA_PORTS\fR: Either \fBproxied\fR, the default, or \fBdirect\fR\. The streaming server scatters connection candidates across the ephemeral port range on every address the machine has\. \fBproxied\fR drops new inbound connections to that range, which closes them; \fBdirect\fR leaves them reachable, which is needed only when a browser reaches the streaming server without a proxy in between\. Since every desktop has a network namespace of its own (\fBNETWORK\fR), nothing reaches those candidates from outside it either way; see \fBLIMITATIONS\fR\.
+.IP "\[ci]" 4
+\fBHDW4S_NET_ALLOW\fR: Essentials: destinations every desktop this setting applies to may reach whatever else is refused, as a space\-separated list of \fIhost\fR[:\fIport\fR[/tcp|/udp]] entries\. An entry on the loopback, such as \fB127\.0\.0\.1:25\fR, is a service on this machine itself (a local mail transfer agent is the usual one) and is carried into the desktop's own loopback on that port\. Layered like every other setting: the machine's value, then the pool's (\fBhdw4s pool set\fR), then one desktop's\. Empty by default\. A private upstream DNS resolver is added without being listed\.
+.IP "\[ci]" 4
+\fBHDW4S_NET_LAN\fR: \fBrefused\fR, the default, or \fBopen\fR\. Whether a desktop is refused the private, carrier\-grade, link\-local and multicast ranges (and IPv6 outside 2000::/3)\. \fBopen\fR lifts that; this machine's own addresses stay refused\. Settable for the pool, a desktop or the machine\.
 .IP "\[ci]" 4
 \fBHDW4S_RESIZE\fR: Whether the desktop follows the size of the browser window\. Defaults to true\.
 .IP "\[ci]" 4
@@ -572,6 +588,12 @@ It is also worth making the address check mean something\. Where the network can
 .TP
 \fBTCP alone\fR (\fBtcp\fR, the default)
 The firewall's address list is the only control\. Adequate on a network where nothing untrusted can route to the machine, and the weakest of the three otherwise\.
+.SH "NETWORK"
+Every desktop, named or ephemeral, runs in a network namespace of its own, made when it starts and removed when it stops by \fBhdw4s\-net@<instance>\.service\fR, which the desktop's unit pulls in\. The namespace has its own loopback, so a program reaching its own helpers over \fB127\.0\.0\.1\fR works; nothing listening on the machine \-\- its loopback, its addresses, other desktops \-\- can be reached from inside\. Its one way out is pasta(1), from the passt package, which carries the desktop's connections out as its own\.
+.P
+Out of the namespace a desktop reaches the public internet and nothing else, unless \fBHDW4S_NET_ALLOW\fR names essentials, \fBHDW4S_NET_LAN=open\fR lifts the private\-range refusal, or a named desktop holds a grant (\fBhdw4s lan grant\fR)\. Refused: 10/8, 172\.16/12, 192\.168/16, 100\.64/10, 169\.254/16, 224/4, 0/8, 240/4, IPv6 outside 2000::/3, and this machine's own addresses\. A refused connection fails at once, with "connection refused" for TCP and an ICMP error otherwise: the refusal is made inside the namespace, by the desktop's own kernel\. A second table on the machine's side, keyed on the control group of the pasta processes, refuses the same ranges whatever the namespace's own table says\.
+.P
+A desktop does not start without its namespace, both tables and pasta\. In an unprivileged LXC container that needs \fB/dev/net/tun\fR passed in from the host; without it the desktop's start fails with a message naming the fix\. On a kernel older than 6\.11 inside a container the machine\-side table cannot be keyed on a control group, and a desktop refuses to start rather than run with only the table inside its own namespace, which its occupant may be able to remove; \fBhdw4s check\fR says so\. The desktop's \fB/etc/resolv\.conf\fR names the machine's upstream resolvers, since the namespace cannot reach a loopback stub\.
 .SH "REVERSE PROXY AND SECURITY"
 \fBA session performs no authentication of its own\.\fR It is built to sit behind a reverse proxy that has already identified the user, so that reaching the desktop takes no second login\. Anything that can open a TCP connection to a session port gets that user's desktop\.
 .P
@@ -614,6 +636,12 @@ Defaults for every session\.
 .TP
 \fB/etc/hdw4s/<instance>\.conf\fR
 Settings for one session\.
+.TP
+\fB/etc/hdw4s/lan/<instance>\fR
+A named desktop's LAN grants, one per line, written by \fBhdw4s lan\fR\.
+.TP
+\fB/run/netns/hdw4s\-<instance>\fR, \fB/run/hdw4s/net/<instance>/\fR
+A running desktop's network namespace, its \fBresolv\.conf\fR, and a read\-only view of its socket table that the router reads\.
 .TP
 \fB/etc/hdw4s/instances\fR
 Slot table mapping instances to ports\. Edit with \fBhdw4s release\fR, not by hand while a session is running\.
@@ -701,6 +729,8 @@ It is run every fifteen minutes by \fBhdw4s\-check\.timer\fR, which marks \fBhdw
 The X server's log is kept in the session's runtime directory rather than the home directory, so it disappears with the session instead of accumulating\.
 .SH "LIMITATIONS"
 There is no way to configure STUN\. A session starts on a single WebSocket and opens no UDP socket until the person in it switches to WebRTC from the side menu, which \fBHDW4S_WEBRTC=yes\fR (the default) offers\. From then on the browser must reach the machine directly; with \fBHDW4S_MEDIA_PORTS=proxied\fR the firewall admits that only from the proxy addresses, so elsewhere the switch fails to connect\. The server runs ICE\-lite and contacts no STUN server itself\.
+.P
+Since every desktop has its own network namespace, WebRTC's connection candidates are on the namespace's addresses and nothing is forwarded in, so a switch to WebRTC from the side menu does not connect\.
 .P
 TURN is a relay of your own or none: \fBHDW4S_TURN_HOST\fR and \fBHDW4S_TURN_SECRET\fR name one, and without them a session is pinned to a host that cannot resolve\. The secret is readable by every account with a desktop on that machine, because the streaming server runs as that account and has to hold it to sign each browser's credential\.
 .P

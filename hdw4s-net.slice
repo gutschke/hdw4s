@@ -1,0 +1,10 @@
+[Unit]
+Description=Slice for the network side of HDW4S desktops
+Documentation=man:hdw4s(8)
+Before=slices.target
+# Every desktop's pasta, and nothing else. The backstop table (inet hdw4s_net,
+# written by hdw4s-netns) refuses this whole slice the private ranges and this
+# machine's own addresses, so the slice must not be garbage collected while the
+# table names it: nft resolves the path to a number when the rule is loaded,
+# and a slice made again later is a different number that the rule no longer
+# matches. hdw4s-netns starts it before every rebuild, which pins it.

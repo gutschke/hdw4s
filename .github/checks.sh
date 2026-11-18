@@ -63,6 +63,7 @@ RULES_EXEMPT=(
   # dh_installsystemd handles service, socket, target, path, timer, mount, swap
   # and busname. It does not handle .slice, and passing it one is an error.
   hdw4s.slice
+  hdw4s-net.slice
 )
 
 fail=0

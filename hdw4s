@@ -231,6 +231,16 @@ Usage: hdw4s <command> [arguments]
   template copyfrom <host|file> publish another machine's template here
   template export <file>  write this machine's template to one archive
   --version               print the version
+  lan list [<instance>]   what each named desktop may reach on the LAN
+  lan grant <instance> <host[:port[/tcp|/udp]]>...
+                          let a named desktop reach a host on the LAN, now and
+                          until revoked; prints what a firewall upstream must
+                          also allow (it changes nothing outside this machine)
+  lan revoke <instance> <host[:port]>... | --all
+                          take that away again, ending live connections
+  lan reload [<instance>...]
+                          re-apply HDW4S_NET_ALLOW and the grants to running
+                          desktops
   firewall --apply        rewrite the package's nftables table
   firewall --check        report whether every session port is protected
   firewall --print        print the ruleset that --apply would load
@@ -1146,6 +1156,13 @@ cmd_check() {
   # early return for "no slot table" must not skip it.
   check_shared
 
+  # Every running desktop in a network namespace of its own, with its own table
+  # loaded, and the backstop behind them (hdw4s-netns check says each). Its own
+  # counter and sentence: a desktop on the container's network is not a session
+  # failing its token check, and the backstop is not any one desktop.
+  NETNS_BAD=0
+  "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-netns" check || NETNS_BAD=1
+
   # A table that is not there at all describes a machine where nobody has ever
   # configured a session, and that machine is not broken. A table that EXISTS
   # and cannot be read is a different answer wearing the same shape: the router
@@ -1164,7 +1181,9 @@ cmd_check() {
       exit 1
     fi
     echo 'hdw4s: no slot table, so no sessions to check.'
-    if [ "${SHARED_BAD}" -gt 0 ]; then
+    [ "${NETNS_BAD}" -eq 0 ] || printf '%s\n' '' \
+      'hdw4s: a desktop'"'"'s network namespace or its backstop is not as it must be.' >&2
+    if [ "${SHARED_BAD}" -gt 0 ] || [ "${NETNS_BAD}" -gt 0 ]; then
       printf '%s\n' '' "hdw4s: ${SHARED_BAD} thing(s) are wrong with /shared." >&2
       trap '' INT TERM QUIT HUP EXIT ERR
       exit 1
@@ -1559,7 +1578,8 @@ cmd_check() {
   done < <(sort -n "${SLOTS}")
 
   if [ "${bad}" -gt 0 ] || [ "${pool_bad}" -gt 0 ] || [ "${slice_bad}" -gt 0 ] ||
-     [ "${webrtc_bad}" -gt 0 ] || [ "${SHARED_BAD}" -gt 0 ] || [ "${named_bad}" -gt 0 ]; then
+     [ "${webrtc_bad}" -gt 0 ] || [ "${SHARED_BAD}" -gt 0 ] || [ "${named_bad}" -gt 0 ] ||
+     [ "${NETNS_BAD}" -gt 0 ]; then
     [ "${bad}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${bad} of ${live} running session(s) failed this check." >&2
     [ "${pool_bad}" -eq 0 ] || printf '%s\n' '' \
@@ -1578,6 +1598,8 @@ cmd_check() {
     # Its own sentence too: the drop area is not a session and not the pool.
     [ "${SHARED_BAD}" -eq 0 ] || printf '%s\n' '' \
       "hdw4s: ${SHARED_BAD} thing(s) are wrong with /shared." >&2
+    [ "${NETNS_BAD}" -eq 0 ] || printf '%s\n' '' \
+      'hdw4s: a desktop'"'"'s network namespace or its backstop is not as it must be.' >&2
     trap '' INT TERM QUIT HUP EXIT ERR
     exit 1
   fi
@@ -2189,6 +2211,8 @@ declare -A SETTABLE=(
   [HDW4S_LANG]='any'
   [HDW4S_IDLE_DAYS]='duration'
   [HDW4S_MEDIA_PORTS]='proxied|direct'
+  [HDW4S_NET_ALLOW]='netlist'
+  [HDW4S_NET_LAN]='refused|open'
   [HDW4S_DEBUG_DESKTOP]='off|on'
   [HDW4S_STARTUP_HOLD]='on|off'
   [HDW4S_ENCODER]='any'
@@ -2416,6 +2440,13 @@ check_value() {
               die "hdw4s: ${key} takes an address such as https://desktops.example.com, not '${value}'";;
     path)   case "${value}" in /*) :;;
               *) die "hdw4s: ${key} takes an absolute path, not '${value}'";; esac;;
+    # Checked by the program that reads it, so the two cannot disagree about
+    # the grammar: hdw4s-netns's own parser, which refuses what it would refuse
+    # at a desktop's start -- where a bad entry stops the desktop.
+    netlist)
+            # shellcheck disable=SC2086  # a list of entries, split on purpose
+            [ -z "${value}" ] || "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-netns" parse ${value} ||
+              die "hdw4s: ${key} takes entries such as 127.0.0.1:25 192.0.2.7:587/tcp mail.example.com, not '${value}'";;
     any)    :;;
     *)      case "|${rule}|" in
               *"|${value}|"*) :;;
@@ -3005,7 +3036,21 @@ clients_of() {
   # because nobody is there, and the difference decides whether a desktop in
   # use gets stopped: connections to the stream with no owner visible anywhere
   # are 'unknown', never 0.
-  ss -Hxp state established 2>/dev/null |
+  # BOTH ENDS, from the two namespaces they live in. The proxy's end is in this
+  # one; the desktop's end -- the row naming the stream path -- is in the
+  # desktop's OWN network namespace (hdw4s-netns), and the kernel's table of
+  # unix sockets is per namespace, so read from here alone it is never listed
+  # and every desktop would count 0 and be reaped while in use. Inodes are
+  # global, so the join below works across the two. A namespace that exists
+  # and cannot be read is 'unknown', never 0.
+  local rows ns="${HDW4S_NETNS_DIR:-/run/netns}/hdw4s-${inst}"
+  rows="$(ss -Hxp state established 2>/dev/null)" || { echo 'unknown'; return 0; }
+  if [ -e "${ns}" ]; then
+    rows="${rows}
+$(nsenter --net="${ns}" ss -Hxp state established 2>/dev/null)" ||
+      { echo 'unknown'; return 0; }
+  fi
+  printf '%s\n' "${rows}" |
     awk -v path="/run/hdw4s/stream/${inst}/s/stream.sock" -v who="pid=${pid}," '
       # Netid Recv-Q Send-Q Local Inode Peer PeerInode [users:(...)]
       /users:/ { owners = 1 }
@@ -4637,6 +4682,10 @@ case "${1:-}" in
             esac
             cmd_pool "$@";;
   firewall) shift; exec /usr/lib/hdw4s/hdw4s-firewall "$@";;
+  # One owner of what a desktop may reach: hdw4s-netns decides who may hold a
+  # grant (never a pooled slot, whose uid is the next visitor's) and applies it.
+  lan)      shift; [ $# -ge 1 ] || usage_error
+            exec "${HDW4S_LIBDIR:-/usr/lib/hdw4s}/hdw4s-netns" lan "$@";;
   # "edit" needs a slot to run the authoring desktop in, and makes one here, in
   # the program that owns the slot table, rather than in hdw4s-template: a second
   # writer of the table would be a second copy of alloc_slot's rules. Root is

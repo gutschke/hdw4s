@@ -347,6 +347,27 @@ desktop without a second login. See **REVERSE PROXY AND SECURITY**.
     Write the template published here to one archive, for `template copyfrom`
     on another machine. An existing file is never overwritten.
 
+  * `lan list` [<instance>]:
+    What each named desktop has been granted on the LAN, beyond the public
+    internet and the machine's essentials. See **NETWORK**.
+
+  * `lan grant` <instance> <host>[:<port>[/tcp|/udp]]...:
+    Let the named desktop <instance> reach a host on the LAN: every port, or
+    one port (TCP and UDP unless one is named). <host> is an address or a name,
+    which is resolved again whenever the rules are rebuilt. The grant applies to
+    a running desktop at once, survives restarts and reboots, and lasts until
+    revoked. Root only. Refused for an ephemeral or authoring slot and for any
+    account whose uid lies in the slot uid window: those uids are reused by the
+    next visitor. It prints what a firewall between this machine and the host
+    must also allow, and changes nothing outside this machine.
+
+  * `lan revoke` <instance> <host>[:<port>]... | `--all`:
+    Take a grant away. Connections already open through it end at once.
+
+  * `lan reload` [<instance>...]:
+    Re-apply `HDW4S_NET_ALLOW`, `HDW4S_NET_LAN` and the grants to running
+    desktops without restarting them; without an instance, to every one.
+
   * `firewall --apply`:
     Rewrite the package's nftables table and the kernel's reserved-port list
     from the current configuration. Run this after changing `HDW4S_PROXIES`,
@@ -524,7 +545,25 @@ belongs to the copy of the streaming server, of which there is one.
     connection candidates across the ephemeral port range on every address the
     machine has. `proxied` drops new inbound connections to that range, which
     closes them; `direct` leaves them reachable, which is needed only when a
-    browser reaches the streaming server without a proxy in between.
+    browser reaches the streaming server without a proxy in between. Since
+    every desktop has a network namespace of its own (**NETWORK**), nothing
+    reaches those candidates from outside it either way; see **LIMITATIONS**.
+
+  * `HDW4S_NET_ALLOW`:
+    Essentials: destinations every desktop this setting applies to may reach
+    whatever else is refused, as a space-separated list of
+    <host>[:<port>[/tcp|/udp]] entries. An entry on the loopback, such as
+    `127.0.0.1:25`, is a service on this machine itself (a local mail
+    transfer agent is the usual one) and is carried into the desktop's own
+    loopback on that port. Layered like every other setting: the machine's
+    value, then the pool's (`hdw4s pool set`), then one desktop's. Empty by
+    default. A private upstream DNS resolver is added without being listed.
+
+  * `HDW4S_NET_LAN`:
+    `refused`, the default, or `open`. Whether a desktop is refused the
+    private, carrier-grade, link-local and multicast ranges (and IPv6 outside
+    2000::/3). `open` lifts that; this machine's own addresses stay refused.
+    Settable for the pool, a desktop or the machine.
 
   * `HDW4S_RESIZE`:
     Whether the desktop follows the size of the browser window. Defaults to
@@ -1289,6 +1328,37 @@ machine itself can guarantee.
     where nothing untrusted can route to the machine, and the weakest of the
     three otherwise.
 
+## NETWORK
+
+Every desktop, named or ephemeral, runs in a network namespace of its own,
+made when it starts and removed when it stops by `hdw4s-net@<instance>.service`,
+which the desktop's unit pulls in. The namespace has its own loopback, so a
+program reaching its own helpers over `127.0.0.1` works; nothing listening on
+the machine -- its loopback, its addresses, other desktops -- can be reached from
+inside. Its one way out is pasta(1), from the passt package, which carries the
+desktop's connections out as its own.
+
+Out of the namespace a desktop reaches the public internet and nothing else,
+unless `HDW4S_NET_ALLOW` names essentials, `HDW4S_NET_LAN=open` lifts the
+private-range refusal, or a named desktop holds a grant (`hdw4s lan grant`).
+Refused: 10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16, 224/4, 0/8,
+240/4, IPv6 outside 2000::/3, and this machine's own addresses. A refused
+connection fails at once, with "connection refused" for TCP and an ICMP error
+otherwise: the refusal is made inside the namespace, by the desktop's own
+kernel. A second table on the machine's side, keyed on the control group of
+the pasta processes, refuses the same ranges whatever the namespace's own
+table says.
+
+A desktop does not start without its namespace, both tables and pasta. In an
+unprivileged LXC container that needs `/dev/net/tun` passed in from the host;
+without it the desktop's start fails with a message naming the fix. On a kernel
+older than 6.11 inside a container the machine-side table cannot be keyed on a
+control group, and a desktop refuses to start rather than run with only the
+table inside its own namespace, which its occupant may be able to remove;
+`hdw4s check` says so. The desktop's
+`/etc/resolv.conf` names the machine's upstream resolvers, since the namespace
+cannot reach a loopback stub.
+
 ## REVERSE PROXY AND SECURITY
 
 **A session performs no authentication of its own.** It is built to sit behind a
@@ -1396,6 +1466,13 @@ therefore open every desktop on the machine, so a session refuses to start as on
 
   * `/etc/hdw4s/<instance>.conf`:
     Settings for one session.
+
+  * `/etc/hdw4s/lan/<instance>`:
+    A named desktop's LAN grants, one per line, written by `hdw4s lan`.
+
+  * `/run/netns/hdw4s-<instance>`, `/run/hdw4s/net/<instance>/`:
+    A running desktop's network namespace, its `resolv.conf`, and a read-only
+    view of its socket table that the router reads.
 
   * `/etc/hdw4s/instances`:
     Slot table mapping instances to ports. Edit with `hdw4s release`, not by
@@ -1588,6 +1665,10 @@ menu, which `HDW4S_WEBRTC=yes` (the default) offers. From then on the browser
 must reach the machine directly; with `HDW4S_MEDIA_PORTS=proxied` the firewall
 admits that only from the proxy addresses, so elsewhere the switch fails to
 connect. The server runs ICE-lite and contacts no STUN server itself.
+
+Since every desktop has its own network namespace, WebRTC's connection
+candidates are on the namespace's addresses and nothing is forwarded in, so a
+switch to WebRTC from the side menu does not connect.
 
 TURN is a relay of your own or none: `HDW4S_TURN_HOST` and `HDW4S_TURN_SECRET`
 name one, and without them a session is pinned to a host that cannot resolve.

@@ -38,7 +38,7 @@ _hdw4s() {
   _init_completion -n = || return
 
   local cmds='list check show exec enable disable release set unset transport auth
-              noauth proxy seed reap keyring pool template firewall --version --help'
+              noauth proxy seed reap keyring pool template lan firewall --version --help'
   if [ "${cword}" -eq 1 ]; then
     COMPREPLY=($(compgen -W "${cmds}" -- "${cur}"))
     return
@@ -113,6 +113,13 @@ _hdw4s() {
              export)        _filedir ;;
              copyfrom)      _known_hosts_real -- "${cur}"; _filedir ;;
            esac ;;
+      esac ;;
+    lan)
+      case "${n}" in
+        1) COMPREPLY=($(compgen -W 'list grant revoke reload' -- "${cur}")) ;;
+        2) COMPREPLY=($(compgen -W "$(_hdw4s_instances)" -- "${cur}")) ;;
+        *) [ "${words[2]}" = revoke ] && [ "${n}" -eq 3 ] &&
+             COMPREPLY=($(compgen -W '--all' -- "${cur}")) ;;
       esac ;;
     firewall)
       [ "${n}" -eq 1 ] && COMPREPLY=($(compgen -W '--apply --check --print --restore' -- "${cur}")) ;;

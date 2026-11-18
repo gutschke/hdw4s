@@ -78,6 +78,8 @@ if [ "$1" = 'purge' ]; then
   # meant a reinstall came back up with stale User= and port assignments
   # attached to slots that had been handed out again in the meantime.
   rm -rf /etc/hdw4s/*.conf /etc/hdw4s/*.cred
+  # LAN grants ("hdw4s lan grant") are per-desktop configuration too.
+  rm -rf /etc/hdw4s/lan
   rm -rf /etc/systemd/system/hdw4s@*.service.d \
          /etc/systemd/system/hdw4s-ephemeral@*.service.d \
          /etc/systemd/system/hdw4s-proxy@*.service.d \

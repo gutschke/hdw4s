@@ -109,6 +109,10 @@ PROXY_RUNDIR = os.environ.get("HDW4S_PROXY_RUNDIR", os.path.join(RUN_DIR, "proxy
 # see stream_socket_path() and hdw4s-stream-dir.
 STREAM_DIR = os.environ.get("HDW4S_STREAM_DIR", os.path.join(RUN_DIR, "stream"))
 STATE_DIR = os.environ.get("HDW4S_DEMUX_STATE", os.path.join(RUN_DIR, "demux"))
+# Each desktop's own network namespace, as hdw4s-netns publishes it: the
+# kernel's table of that namespace's unix sockets, bound read-only at
+# <instance>/net/unix. See slot_listening().
+NET_DIR = os.environ.get("HDW4S_NET_DIR", os.path.join(RUN_DIR, "net"))
 
 def credential_dir():
     """Where credentials are actually readable from.
@@ -2900,7 +2904,23 @@ def stream_socket_path(instance, root=None):
 _ASK_KERNEL = object()
 
 
-def slot_door_open(instance, listening=_ASK_KERNEL, root=None):
+def slot_listening(instance, net_dir=None):
+    """The listening unix sockets of INSTANCE's OWN network namespace, or None.
+
+    The kernel's table of unix sockets is per network namespace, and every
+    desktop has a namespace of its own (hdw4s-netns): read from here, its stream
+    socket is simply not in /proc/net/unix, and a door check that asked that
+    table would call every live desktop shut. This process can neither enter a
+    namespace nor see another user's /proc, so hdw4s-netns keeps one root
+    process inside the namespace and binds ITS /proc/<pid>/net, read-only,
+    where this can read it. The occupant cannot write there, and once that
+    process has gone the read fails -- None, never an empty table.
+    """
+    return listening_paths(os.path.join(NET_DIR if net_dir is None else net_dir,
+                                        instance, "net", "unix"))
+
+
+def slot_door_open(instance, listening=_ASK_KERNEL, root=None, net_dir=None):
     """True, False, or None when the question could not be asked.
 
     THREE-VALUED ON PURPOSE. False is "this desktop has stopped answering" and
@@ -2913,7 +2933,7 @@ def slot_door_open(instance, listening=_ASK_KERNEL, root=None):
     socket that is bound but not accepting -- what a dying server leaves for an
     instant, and what a file left at the path looks like -- is not an open door.
     """
-    live = listening_paths() if listening is _ASK_KERNEL else listening
+    live = slot_listening(instance, net_dir) if listening is _ASK_KERNEL else listening
     if live is None:
         return None
     return stream_socket_path(instance, root) in live
@@ -3702,6 +3722,24 @@ def assert_door_only_refuses_what_it_measured(paths=None, door=None,
         assert door("_hdw4s_0", listening=None, root=root) is None, \
             "a table that could not be read answered a question nobody could " \
             "ask -- a missing instrument must never refuse"
+        # 4b. WHICH TABLE. The slot's listener is in its OWN namespace's table
+        #     and not in this process's: the door must be asked of the first.
+        #     The host table here lists nothing of this slot's, as the real one
+        #     does once desktops have namespaces of their own.
+        net = os.path.join(d, "net")
+        os.makedirs(os.path.join(net, "_hdw4s_0", "net"))
+        os.replace(netfile("unix-slot", [(mine, LISTENING)]),
+                   os.path.join(net, "_hdw4s_0", "net", "unix"))
+        assert mine in slot_listening("_hdw4s_0", net_dir=net), \
+            "the slot's own namespace table was not read, so its listener is " \
+            "invisible and every live desktop reads as shut"
+        assert slot_listening("_hdw4s_1", net_dir=net) is None, \
+            "a slot whose namespace table is absent answered instead of None"
+        # And the door's DEFAULT is that table: asked with nothing passed in,
+        # it must find this slot's listener there.
+        assert slot_door_open("_hdw4s_0", root=root, net_dir=net) is True, \
+            "the door, asked of the kernel, did not read the slot's own " \
+            "namespace table"
         # 5. AND IN session_replaced, WHERE IT COSTS SOMETHING. The door may
         #    only speak for a record whose desktop already answered us.
         rundir = os.path.join(d, "run")

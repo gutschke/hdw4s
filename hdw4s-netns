@@ -1,0 +1,1297 @@
+#!/usr/bin/python3
+"""Every hdw4s desktop in a network namespace of its own. Root only.
+
+    hdw4s-netns up|pasta|ready|down <instance>   the net unit's four steps
+    hdw4s-netns reload [<instance>...]           re-apply policy to running desktops
+    hdw4s-netns backstop                         rebuild the container-side table only
+    hdw4s-netns check                            report; exit 1 if anything is wrong
+    hdw4s-netns lan list [<instance>]
+    hdw4s-netns lan grant <instance> <host[:port]>...
+    hdw4s-netns lan revoke <instance> <host[:port]>... | --all
+    hdw4s-netns policy <instance>                what one desktop may reach, resolved
+    hdw4s-netns parse <entry>...                 grammar only; exit 2 on a bad one
+    hdw4s-netns print <instance> | print-backstop   the rulesets, unloaded
+
+hdw4s(8), "NETWORK". The unit is hdw4s-net@.service; the desktop units Require
+it, are ordered After it, and join the namespace with NetworkNamespacePath=.
+
+WHAT A DESKTOP GETS. Its own loopback (an application reaching its own forked
+copies works), and a way out through pasta(1), which turns the desktop's packets
+into ordinary sockets of its own on the container's side. Nothing listening on
+the container -- its loopback, its addresses, other desktops -- is reachable:
+the namespace has its own copies of all of them. Out of the namespace, the
+default is the public internet and nothing else: private, carrier-grade,
+link-local and multicast IPv4, everything IPv6 outside 2000::/3, and the
+container's own addresses are refused. On top of that, per desktop:
+
+  * HDW4S_NET_ALLOW, essentials, layered machine -> pool -> instance like every
+    other setting. An entry on the loopback (127.0.0.1:25) is a CONTAINER-LOCAL
+    service and is carried by pasta's -T/-U port forward; anything else is a
+    destination let through both tables.
+  * the container's private upstream DNS resolvers, added without being asked:
+    the namespace cannot reach a loopback stub, and its resolv.conf names the
+    upstream ones instead.
+  * grants (/etc/hdw4s/lan/<instance>), for a NAMED desktop only. Slot uids are
+    reused by the next visitor, so no grant can ever reach a pooled slot.
+  * HDW4S_NET_LAN=open lifts the private-range refusal (never the container's
+    own addresses); "refused" is the default, for the pool too.
+
+TWO TABLES, ONE POLICY. Both are generated here from policy(), so they cannot
+disagree about what a desktop may reach:
+
+  * inet hdw4s_ns, INSIDE the namespace. This is what makes a refusal
+    IMMEDIATE. Measured (2026-11-18): every verdict on the container's side
+    hangs the application for its full timeout, because this pasta does not
+    turn a host-side refusal into one the application can see; a tcp reset or
+    an ICMP error made inside the namespace arrives in milliseconds. It is
+    loaded BEFORE pasta attaches, so there is no instant with a way out and no
+    table. It accepts nothing as "established": every outgoing packet is
+    judged, so a revoked grant ends a live connection too.
+  * inet hdw4s_net, in the CONTAINER: the backstop, keyed on the cgroup of the
+    pasta units. Anything in hdw4s-net.slice is refused the private ranges and
+    the container's own addresses; each RUNNING net unit is let through to what
+    its own policy allows. nft resolves a cgroup path to a number when a rule is
+    LOADED, so a restarted unit's old rules match nothing and the slice-wide
+    refusal stands -- a stale grant fails closed. The table is rebuilt whole on
+    every change, under a lock, from the units whose cgroups exist at that
+    instant. A table of its own rather than chains in inet hdw4s, so that a
+    rebuild at every desktop start never resets the cross-reach counters
+    "hdw4s firewall --check" reads.
+
+WHY PASTA RUNS AS ROOT, and the rules key on its cgroup rather than its uid:
+--runas drops privileges BEFORE pasta joins the namespace and gets EPERM there
+(measured, 2026-11-17, in an unprivileged container).
+
+THE NAMESPACE OUTLIVES PASTA, NOT THE DESKTOP. It is made by "up" and removed by
+"down" only when the desktop is not running. A pasta that dies is started again
+by "pasta" itself, which supervises it, into the SAME namespace -- not by
+systemd, whose restart of this unit would be carried to the desktop -- so the
+desktop is neither stranded nor killed; while pasta is gone the desktop has
+only lo, which is the closed direction. A pooled slot's next occupant always gets a new namespace, because
+its desktop is stopped before its net unit is.
+
+THE ANCHOR. hdw4s-demux decides whether a slot's desktop still answers by
+looking for its stream socket in the kernel's table of listening unix sockets,
+and that table is per network namespace: from the container, a desktop's
+listener is simply not there. The router has no capabilities and cannot enter
+a namespace, and a file the desktop writes could be forged by its occupant. So
+"pasta" forks one root process into the namespace that does nothing but exist,
+and bind-mounts its /proc/<pid>/net, read-only, at /run/hdw4s/net/<instance>/net.
+Measured (2026-11-18): a DynamicUser reader with ProtectProc=invisible and no
+capabilities, already running when the bind was made, reads the namespace's
+own table there; the occupant cannot write through it; and once the anchor has
+gone a read FAILS rather than returning an empty table. The anchor lives in
+the net unit's cgroup and dies with it.
+
+FAILS CLOSED. No /dev/net/tun, no pasta, a configuration that does not parse,
+a table that does not load, a link that never comes up: the net unit fails, and
+the desktop does not start (its NetworkNamespacePath= finds no namespace).
+Each says what to do.
+"""
+
+import ctypes
+import errno
+import fcntl
+import ipaddress
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import time
+
+ETCDIR = os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s")
+RUNDIR = os.environ.get("HDW4S_RUNDIR", "/run/hdw4s")
+LIBDIR = os.environ.get("HDW4S_LIBDIR", "/usr/lib/hdw4s")
+NETDIR = os.path.join(RUNDIR, "net")
+NETNS_DIR = os.environ.get("HDW4S_NETNS_DIR", "/run/netns")
+GRANTS_DIR = os.path.join(ETCDIR, "lan")
+SLOTS = os.path.join(ETCDIR, "instances")
+CGROOT = "/sys/fs/cgroup"
+SLICE_PATH = "hdw4s.slice/hdw4s-net.slice"
+NS_TABLE = "hdw4s_ns"
+BACKSTOP = "hdw4s_net"
+LOCK = os.path.join(RUNDIR, "netns.lock")
+TUN = "/dev/net/tun"
+PASTA = os.environ.get("HDW4S_PASTA", "/usr/bin/pasta")
+READY_WAIT = 20.0
+
+# What every desktop is refused unless something lets it through. P2 of the
+# design: RFC 1918, carrier-grade NAT, link-local, multicast, and the reserved
+# and "this network" blocks that are never a real destination. IPv6 is refused
+# everything outside 2000::/3 by a rule rather than a set, so ULA, link-local,
+# multicast and the mapped and translated forms are all covered at once.
+REFUSED4 = [ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+    "224.0.0.0/4", "240.0.0.0/4")]
+GLOBAL6 = ipaddress.ip_network("2000::/3")
+
+INSTANCE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                         r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$")
+
+
+class Refusal(Exception):
+    """A refusal to be said to the administrator, not a crash."""
+
+
+def say(*lines):
+    for line in lines:
+        print(line, file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
+# The grammar: HOST | HOST:PORT | HOST:PORT/tcp | HOST:PORT/udp
+#
+# HOST is an IPv4 address or prefix, an IPv6 one in brackets (bare when there is
+# no port), or a DNS name. A name is resolved each time the tables are built, by
+# the container's own resolver, so a name that moves is followed at the next
+# start, grant or reload -- and one that does not resolve lets nothing through.
+# A port with no protocol means both TCP and UDP.
+
+class Entry:
+    __slots__ = ("text", "host", "net", "port", "protos")
+
+    def __init__(self, text, host, net, port, protos):
+        self.text, self.host, self.net, self.port, self.protos = \
+            text, host, net, port, protos
+
+    @property
+    def loopback(self):
+        return self.net is not None and self.net.is_loopback
+
+    def __repr__(self):
+        return self.text
+
+
+def parse_entry(text):
+    s = text.strip()
+    if not s:
+        raise ValueError("an empty entry")
+    protos = ("tcp", "udp")
+    m = re.match(r"^(.*)/(tcp|udp)$", s)
+    if m:
+        s, protos = m.group(1), (m.group(2),)
+        protoed = True
+    else:
+        protoed = False
+    port = None
+    if s.startswith("["):
+        m = re.match(r"^\[([^\]]+)\](?::(\d+))?$", s)
+        if not m:
+            raise ValueError("%r: an IPv6 address in brackets, then :PORT" % text)
+        host, port = m.group(1), m.group(2)
+    elif s.count(":") > 1:
+        host = s                       # a bare IPv6 address or prefix, no port
+    elif ":" in s:
+        host, port = s.rsplit(":", 1)
+        if not port.isdigit():
+            raise ValueError("%r: the port must be a number" % text)
+    else:
+        host = s
+    if port is not None:
+        port = int(port)
+        if not 1 <= port <= 65535:
+            raise ValueError("%r: a port is 1-65535" % text)
+    elif protoed:
+        raise ValueError("%r: /tcp or /udp needs a port" % text)
+    try:
+        net = ipaddress.ip_network(host, strict=False)
+    except ValueError:
+        net = None
+        if not HOSTNAME_RE.match(host) or host.replace(".", "").isdigit():
+            raise ValueError("%r: not an address or a host name" % text)
+    if net is not None and net.is_loopback:
+        if port is None:
+            raise ValueError("%r: a loopback entry is one service, so it needs a"
+                             " port (127.0.0.1:25)" % text)
+        if net.num_addresses != 1:
+            raise ValueError("%r: a loopback entry names one address" % text)
+    return Entry(text.strip(), host, net, port, protos)
+
+
+def resolve(entry):
+    """The networks ENTRY stands for now, and a warning if it stands for none."""
+    if entry.net is not None:
+        return [entry.net], None
+    try:
+        infos = socket.getaddrinfo(entry.host, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError) as e:
+        return [], "%s does not resolve here (%s), so it lets nothing through" \
+            % (entry.host, e)
+    nets = sorted({ipaddress.ip_network(i[4][0]) for i in infos},
+                  key=lambda n: (n.version, n))
+    return nets, None
+
+
+# --------------------------------------------------------------------------
+# Who an instance is: the slot table's type, read the way the CLI reads it.
+
+def kind_of(inst):
+    """'desktop', 'ephemeral' or 'template'. Raises Refusal when unknowable.
+
+    ABSENT IS NOT EQUAL. A table that exists and cannot be read is a refusal,
+    never "desktop": that guess would hand a pooled slot a named desktop's
+    grants.
+    """
+    if not os.path.exists(SLOTS):
+        return "desktop"
+    try:
+        with open(SLOTS) as f:
+            rows = f.read().splitlines()
+    except OSError as e:
+        raise Refusal("cannot read %s (%s), so whether %s is a pooled slot is"
+                      " unknown; refusing rather than guessing" % (SLOTS, e, inst))
+    for row in rows:
+        bits = row.split()
+        if len(bits) >= 2 and not bits[0].startswith("#") and bits[1] == inst:
+            return bits[2] if len(bits) >= 3 else "desktop"
+    return "desktop"
+
+
+def slot_uid_window():
+    try:
+        out = subprocess.run([os.path.join(LIBDIR, "hdw4s-ephemeral-slots"),
+                              "--uid-window"], capture_output=True, text=True,
+                             timeout=30).stdout.split()
+        return int(out[0]), int(out[1])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def grant_refusal(inst, kind=None):
+    """Why INST may hold no grant, or None. Three independent questions, any of
+    which refuses: the table's type, the slot passwd shadow hdw4s-is-slot asks
+    about, and whether the account's uid lies in the slot uid window. A uid in
+    that window is somebody else's next desktop."""
+    kind = kind or kind_of(inst)
+    if kind != "desktop":
+        return "%s is %s, and a pooled or authoring slot's uid is reused by the" \
+               " next visitor; grants are for named desktops only" \
+               % (inst, "an ephemeral slot" if kind == "ephemeral"
+                  else "the template-authoring slot" if kind == "template"
+                  else "of type %r" % kind)
+    if subprocess.run([os.path.join(LIBDIR, "hdw4s-is-slot"), inst],
+                      capture_output=True).returncode == 0:
+        return "%s is a pooled slot (it has a slot identity under %s/ns)" \
+               % (inst, RUNDIR)
+    try:
+        uid = int(subprocess.run(["getent", "passwd", "--", inst],
+                                 capture_output=True, text=True)
+                  .stdout.split(":")[2])
+    except (IndexError, ValueError):
+        return "%s is not an account on this machine" % inst
+    window = slot_uid_window()
+    if window is None:
+        return "the slot uid window could not be read, so whether uid %d is a" \
+               " pooled slot's is unknown; refusing rather than guessing" % uid
+    if window[0] <= uid <= window[1]:
+        return "%s has uid %d, inside the slot uid window %d-%d" \
+               % (inst, uid, window[0], window[1])
+    return None
+
+
+# --------------------------------------------------------------------------
+# Settings, layered exactly as the units read them.
+
+def settings(inst, kind):
+    files = [os.path.join(ETCDIR, "hdw4s.conf")]
+    if kind in ("ephemeral", "template"):
+        files.append(os.path.join(ETCDIR, "_hdw4s_pool.conf"))
+    files.append(os.path.join(ETCDIR, "%s.conf" % inst))
+    # Sourced by bash, as everything else here reads them, after "bash -n":
+    # sourcing a file with a syntax error applies the assignments before the
+    # error and none after, and a half-applied network policy is not one.
+    script = r'''
+for f in "$@"; do
+  [ -r "$f" ] || continue
+  bash -n "$f" || { echo "hdw4s: $f has a syntax error; refusing to start on a configuration that would apply only as far as the error" >&2; exit 3; }
+  . "$f" || :
+done
+printf '%s\0%s\0' "${HDW4S_NET_ALLOW-}" "${HDW4S_NET_LAN-}"
+'''
+    r = subprocess.run(["bash", "-c", script, "hdw4s-netns"] + files,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise Refusal(r.stderr.strip() or "the configuration could not be read")
+    allow, lan = (r.stdout.split("\0") + ["", ""])[:2]
+    lan = lan or "refused"
+    if lan not in ("refused", "open"):
+        raise Refusal("HDW4S_NET_LAN is %r; it is 'refused' or 'open'" % lan)
+    return allow, lan
+
+
+def read_grants(inst):
+    path = os.path.join(GRANTS_DIR, inst)
+    try:
+        with open(path) as f:
+            return [l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
+    except FileNotFoundError:
+        return []
+
+
+def resolver_file():
+    for p in (os.environ.get("HDW4S_NETNS_RESOLV", ""),
+              "/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"):
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+def resolv_conf():
+    """(text of the namespace's resolv.conf, [upstream resolver addresses]).
+
+    The container's own file with its loopback nameservers taken out. The
+    namespace cannot reach the container's 127.0.0.53 stub, and pasta will not
+    forward to a loopback resolver (--dns-forward did nothing in this pasta,
+    measured), so the namespace asks the upstream ones directly.
+    """
+    p = resolver_file()
+    lines, ups = ["# Written by hdw4s-netns: the container's resolvers, minus loopback."], []
+    if p:
+        with open(p) as f:
+            for line in f:
+                bits = line.split()
+                if bits[:1] == ["nameserver"] and len(bits) >= 2:
+                    try:
+                        a = ipaddress.ip_address(bits[1].split("%")[0])
+                    except ValueError:
+                        continue
+                    if a.is_loopback:
+                        continue
+                    ups.append(a)
+                    lines.append("nameserver %s" % a)
+                elif bits[:1] in (["search"], ["domain"], ["options"]):
+                    lines.append(line.rstrip("\n"))
+    return "\n".join(lines) + "\n", ups
+
+
+def own_addresses():
+    """Every address of the container's own network namespace, loopback aside."""
+    fixed = os.environ.get("HDW4S_NETNS_OWN")
+    if fixed is not None:
+        return [ipaddress.ip_address(a) for a in fixed.split()]
+    try:
+        data = json.loads(subprocess.run(["ip", "-j", "addr", "show"],
+                                         capture_output=True, text=True,
+                                         check=True).stdout)
+    except (OSError, ValueError, subprocess.CalledProcessError) as e:
+        raise Refusal("cannot list this machine's addresses (%s)" % e)
+    out = []
+    for link in data:
+        for a in link.get("addr_info", []):
+            try:
+                ip = ipaddress.ip_address(a["local"])
+            except (KeyError, ValueError):
+                continue
+            if not ip.is_loopback:
+                out.append(ip)
+    return out
+
+
+class Policy:
+    """What one desktop may reach. Built once; both tables are written from it."""
+
+    def __init__(self, inst):
+        self.inst = inst
+        self.kind = kind_of(inst)
+        allow, self.lan = settings(inst, self.kind)
+        self.warnings = []
+        self.essentials = []
+        for word in allow.split():
+            try:
+                self.essentials.append(parse_entry(word))
+            except ValueError as e:
+                raise Refusal("HDW4S_NET_ALLOW: %s" % e)
+        self.grants = []
+        if self.kind == "desktop":
+            for word in read_grants(inst):
+                try:
+                    e = parse_entry(word)
+                except ValueError as err:
+                    self.warnings.append("grant ignored: %s" % err)
+                    continue
+                if e.loopback:
+                    self.warnings.append("grant %s ignored: a container-local"
+                                         " service is an essential, not a grant" % e)
+                    continue
+                self.grants.append(e)
+        self.resolv, self.resolvers = resolv_conf()
+        self.own = own_addresses()
+        # DNS: the namespace asks the upstream resolvers itself, so where they
+        # are private they are let through, on 53 only.
+        self.dns = [Entry("%s:53" % (a if a.version == 4 else "[%s]" % a), str(a),
+                          ipaddress.ip_network(a), 53, ("tcp", "udp"))
+                    for a in self.resolvers]
+        self.forward = {"tcp": set(), "udp": set()}
+        self.allowed = []          # (network, protos or None, port or None, source)
+        for e in self.essentials + self.dns + self.grants:
+            if e.loopback:
+                for p in e.protos:
+                    self.forward[p].add(e.port)
+                continue
+            nets, warn = resolve(e)
+            if warn:
+                self.warnings.append(warn)
+            for n in nets:
+                # A grant or essential of exactly this machine's own address.
+                # A RANGE that merely contains one is kept: both tables refuse
+                # the machine's own addresses before they consult any allow.
+                if n.num_addresses == 1 and n.network_address in self.own:
+                    self.warnings.append(
+                        "%s names this machine's own address, which a desktop"
+                        " never reaches through the network; a container-local"
+                        " service is a loopback entry (127.0.0.1:PORT)" % e)
+                    continue
+                self.allowed.append((n, e.protos if e.port else None, e.port, e))
+
+    def refused4(self):
+        return list(REFUSED4) if self.lan == "refused" else []
+
+    def own_nets(self, version):
+        return list(ipaddress.collapse_addresses(
+            ipaddress.ip_network(a) for a in self.own if a.version == version))
+
+
+# --------------------------------------------------------------------------
+# The rulesets.
+
+def _elements(items):
+    items = list(items)
+    return ("\n\t\telements = { %s }" % ", ".join(items)) if items else ""
+
+
+def _host_sets(allowed, version):
+    nets = [n for n, protos, port, _ in allowed if port is None and n.version == version]
+    return [str(n) for n in ipaddress.collapse_addresses(nets)] if nets else []
+
+
+def _port_sets(allowed, version):
+    groups = {}
+    for n, protos, port, _ in allowed:
+        if port is None or n.version != version:
+            continue
+        for p in protos:
+            groups.setdefault((p, port), []).append(n)
+    out = []
+    for (p, port), nets in sorted(groups.items()):
+        for n in ipaddress.collapse_addresses(nets):
+            out.append("%s . %s . %d" % (n, p, port))
+    return out
+
+
+def ns_ruleset(pol):
+    """inet hdw4s_ns, loaded INSIDE the desktop's namespace."""
+    a4, a6 = _host_sets(pol.allowed, 4), _host_sets(pol.allowed, 6)
+    p4, p6 = _port_sets(pol.allowed, 4), _port_sets(pol.allowed, 6)
+    r4 = [str(n) for n in pol.refused4()]
+    o4 = [str(n) for n in pol.own_nets(4)]
+    o6 = [str(n) for n in pol.own_nets(6)]
+    v6rule = "\t\tip6 daddr != %s goto refuse\n" % GLOBAL6 if pol.lan == "refused" else ""
+    return """\
+# Written by hdw4s-netns for %(inst)s (%(kind)s, lan %(lan)s). Rebuilt whole on
+# every start, grant and reload; never edit it.
+table inet %(t)s {}
+delete table inet %(t)s
+table inet %(t)s {
+	counter refused {
+	}
+
+	set allow4 {
+		type ipv4_addr
+		flags interval%(a4)s
+	}
+
+	set allow6 {
+		type ipv6_addr
+		flags interval%(a6)s
+	}
+
+	set allow4p {
+		type ipv4_addr . inet_proto . inet_service
+		flags interval%(p4)s
+	}
+
+	set allow6p {
+		type ipv6_addr . inet_proto . inet_service
+		flags interval%(p6)s
+	}
+
+	set refuse4 {
+		type ipv4_addr
+		flags interval%(r4)s
+	}
+
+	# This machine's own addresses, refused BEFORE any allow: a range an
+	# administrator lets through may contain one, and the namespace's own copy
+	# of the address it shares with the machine never gets this far (it is
+	# delivered on lo).
+	set own4 {
+		type ipv4_addr
+		flags interval%(o4)s
+	}
+
+	set own6 {
+		type ipv6_addr
+		flags interval%(o6)s
+	}
+
+	# Refused HERE, by the desktop's own kernel, so the application learns at
+	# once: a reset for TCP, an ICMP error for everything else.
+	chain refuse {
+		counter name "refused"
+		meta l4proto tcp reject with tcp reset
+		reject with icmpx admin-prohibited
+	}
+
+	chain out {
+		type filter hook output priority filter; policy accept;
+		oif "lo" accept
+		# IPv6 neighbour discovery with pasta's end of the link: without it an
+		# IPv6 desktop could never resolve its gateway, and every public IPv6
+		# connection would fail. Link-local by construction (hop limit 255 is
+		# enforced by the receiver), it carries nothing out of the namespace.
+		# Seen (2026-11-18): an idle desktop's only refusals were its kernel's
+		# own router solicitations to ff02::2.
+		icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept
+		ip daddr @own4 goto refuse
+		ip6 daddr @own6 goto refuse
+		ip daddr @allow4 accept
+		ip6 daddr @allow6 accept
+		ip daddr . meta l4proto . th dport @allow4p accept
+		ip6 daddr . meta l4proto . th dport @allow6p accept
+		ip daddr @refuse4 goto refuse
+%(v6rule)s	}
+}
+""" % dict(inst=pol.inst, kind=pol.kind, lan=pol.lan, t=NS_TABLE,
+           a4=_elements(a4), a6=_elements(a6), p4=_elements(p4), p6=_elements(p6),
+           r4=_elements(r4), o4=_elements(o4), o6=_elements(o6), v6rule=v6rule)
+
+
+def unit_cgroup(inst):
+    return "%s/hdw4s-net@%s.service" % (SLICE_PATH, inst)
+
+
+def backstop_ruleset(policies):
+    """inet hdw4s_net, in the container. POLICIES: one per RUNNING net unit."""
+    sets, chains, jumps = [], [], []
+    for i, pol in enumerate(policies):
+        c = "u%d" % i
+        rules = []
+        # The loopback essentials: pasta's -T/-U forward connects to the
+        # container's loopback on that port, from its own cgroup. Exactly those
+        # ports, for exactly this unit, and before the refusal of this
+        # machine's own addresses, which every allow below comes after.
+        for p in ("tcp", "udp"):
+            ports = sorted(pol.forward[p])
+            if ports:
+                ps = ", ".join(str(x) for x in ports)
+                rules.append("\t\tip daddr 127.0.0.1 %s dport { %s } accept" % (p, ps))
+                rules.append("\t\tip6 daddr ::1 %s dport { %s } accept" % (p, ps))
+        rules.append("\t\tfib daddr type local goto refuse")
+        for name, typ, items in (
+                ("a4", "ipv4_addr", _host_sets(pol.allowed, 4)),
+                ("a6", "ipv6_addr", _host_sets(pol.allowed, 6)),
+                ("p4", "ipv4_addr . inet_proto . inet_service", _port_sets(pol.allowed, 4)),
+                ("p6", "ipv6_addr . inet_proto . inet_service", _port_sets(pol.allowed, 6))):
+            if not items:
+                continue
+            sets.append("\tset %s_%s {\n\t\ttype %s\n\t\tflags interval%s\n\t}\n"
+                        % (c, name, typ, _elements(items)))
+            fam = "ip" if name.endswith("4") else "ip6"
+            key = "%s daddr" % fam if name.startswith("a") else \
+                "%s daddr . meta l4proto . th dport" % fam
+            rules.append("\t\t%s @%s_%s accept" % (key, c, name))
+        if pol.lan == "open":
+            rules.append("\t\taccept")
+        chains.append("\t# %s (%s, lan %s)\n\tchain %s {\n%s\n\t}\n"
+                      % (pol.inst, pol.kind, pol.lan, c, "\n".join(rules)))
+        jumps.append('\t\tsocket cgroupv2 level 3 "%s" jump %s' % (unit_cgroup(pol.inst), c))
+    r4 = [str(n) for n in REFUSED4]
+    return """\
+# Written by hdw4s-netns: the backstop behind every desktop's own table. Keyed
+# on the cgroup of the pasta units; rebuilt whole whenever one starts or stops,
+# or a grant changes. Never edit it.
+table inet %(t)s {}
+delete table inet %(t)s
+table inet %(t)s {
+	counter seen {
+	}
+
+	counter refused {
+	}
+
+	set refuse4 {
+		type ipv4_addr
+		flags interval%(r4)s
+	}
+
+%(sets)s
+	chain refuse {
+		counter name "refused"
+		meta l4proto tcp reject with tcp reset
+		reject with icmpx admin-prohibited
+	}
+
+%(chains)s
+	chain pasta {
+		counter name "seen"
+%(jumps)s
+		fib daddr type local goto refuse
+		ip daddr @refuse4 goto refuse
+		ip6 daddr != %(g6)s goto refuse
+	}
+
+	chain out {
+		type filter hook output priority filter; policy accept;
+		socket cgroupv2 level 2 "%(slice)s" goto pasta
+	}
+}
+""" % dict(t=BACKSTOP, r4=_elements(r4), sets="\n".join(sets), chains="\n".join(chains),
+           jumps="\n".join(jumps), g6=GLOBAL6, slice=SLICE_PATH)
+
+
+# --------------------------------------------------------------------------
+# Machinery.
+
+def run(argv, input=None, check=True):
+    r = subprocess.run(argv, input=input, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise Refusal("%s failed: %s" % (" ".join(argv[:3]),
+                                         (r.stderr or r.stdout).strip()))
+    return r
+
+
+def ns_name(inst):
+    return "hdw4s-%s" % inst
+
+
+def ns_path(inst):
+    return os.path.join(NETNS_DIR, ns_name(inst))
+
+
+def inst_dir(inst):
+    return os.path.join(NETDIR, inst)
+
+
+def in_ns(inst, argv, input=None, check=True):
+    return run(["nsenter", "--net=%s" % ns_path(inst)] + argv, input=input, check=check)
+
+
+def session_unit(inst, kind=None):
+    kind = kind or kind_of(inst)
+    return ("hdw4s-ephemeral@%s.service" if kind in ("ephemeral", "template")
+            else "hdw4s@%s.service") % inst
+
+
+def unit_active(unit):
+    return subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0
+
+
+def check_name(inst):
+    if not INSTANCE_RE.match(inst or ""):
+        raise Refusal("%r is not an instance name" % inst)
+
+
+def backstop_usable():
+    """Can this kernel key a rule on a cgroup at the depth the backstop needs?
+    Asked of hdw4s-firewall, which owns the one copy of that question."""
+    return subprocess.run([os.path.join(LIBDIR, "hdw4s-firewall"),
+                           "--cgroup-level-usable"], capture_output=True).returncode == 0
+
+
+def take_lock():
+    os.makedirs(RUNDIR, exist_ok=True)
+    # Created under umask 077: a lock anybody can open is a lock any desktop's
+    # occupant can hold for ever (the reasoning in hdw4s-firewall's take_lock).
+    old = os.umask(0o077)
+    try:
+        fd = os.open(LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    finally:
+        os.umask(old)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def running_net_units():
+    base = os.path.join(CGROOT, SLICE_PATH)
+    try:
+        names = os.listdir(base)
+    except FileNotFoundError:
+        return []
+    out = []
+    for n in sorted(names):
+        m = re.match(r"^hdw4s-net@(.+)\.service$", n)
+        if m and INSTANCE_RE.match(m.group(1)):
+            out.append(m.group(1))
+    return out
+
+
+def rebuild_backstop(exclude=(), pin_wait=False):
+    """Rebuild inet hdw4s_net from the net units whose cgroups exist NOW.
+
+    A cgroup that vanishes between the listing and the load makes nft refuse
+    the whole file, so it is read again and retried; a table that cannot be
+    loaded leaves the previous one in place, which still refuses the slice."""
+    if not backstop_usable():
+        say("hdw4s-netns: this kernel cannot match a socket's cgroup at the depth the",
+            "  backstop needs (a container on a kernel older than 6.11), so there is",
+            "  no container-side backstop, and no desktop will start; 'hdw4s check'",
+            "  reports this.")
+        return False
+    # Pinned, so its cgroup is not collected and recreated under a rule that
+    # names the old one. Waited for only from "up": called from "down", a
+    # blocking start queues behind the very stop job that is running "down",
+    # and the stop hung for its whole 90 s timeout (measured, 2026-11-18). The
+    # slice is already active then -- this unit is in it.
+    subprocess.run(["systemctl", "start"] + ([] if pin_wait else ["--no-block"]) +
+                   ["hdw4s-net.slice"], capture_output=True)
+    fd = take_lock()
+    try:
+        last = None
+        for _ in range(4):
+            pols = []
+            for inst in running_net_units():
+                if inst in exclude:
+                    continue
+                try:
+                    pols.append(Policy(inst))
+                except Refusal as e:
+                    say("hdw4s-netns: %s: %s; it gets the slice's refusal only" % (inst, e))
+            r = run(["nft", "-f", "-"], input=backstop_ruleset(pols), check=False)
+            if r.returncode == 0:
+                return True
+            last = r.stderr.strip()
+            time.sleep(0.2)
+        raise Refusal("the backstop table did not load: %s" % last)
+    finally:
+        os.close(fd)
+
+
+def load_ns_table(inst, pol):
+    in_ns(inst, ["nft", "-f", "-"], input=ns_ruleset(pol))
+    if in_ns(inst, ["nft", "list", "table", "inet", NS_TABLE], check=False).returncode:
+        raise Refusal("the namespace's own table is not there after loading it")
+
+
+def delete_ns(inst):
+    bind = os.path.join(inst_dir(inst), "net")
+    subprocess.run(["umount", "-l", bind], capture_output=True)
+    if os.path.exists(ns_path(inst)):
+        run(["ip", "netns", "delete", ns_name(inst)], check=False)
+    shutil.rmtree(inst_dir(inst), ignore_errors=True)
+
+
+def tun_refusal():
+    try:
+        fd = os.open(TUN, os.O_RDWR)
+        os.close(fd)
+        return None
+    except OSError as e:
+        why = "missing" if e.errno == errno.ENOENT else "not openable (%s)" % e.strerror
+    return [
+        "hdw4s: %s is %s, so this desktop cannot have a network of its own," % (TUN, why),
+        "  and it does not start without one. Every hdw4s desktop runs in its own",
+        "  network namespace, reached through pasta, which needs the TUN device.",
+        "  * In an unprivileged LXC container, pass it in from the host. Proxmox:",
+        "      pct set <ctid> --dev<N> path=/dev/net/tun     (then restart the container)",
+        "    plain LXC, in the container's config:",
+        "      lxc.cgroup2.devices.allow = c 10:200 rwm",
+        "      lxc.mount.entry = /dev/net/tun dev/net/tun none bind,create=file",
+        "  * On a machine of its own: modprobe tun.",
+    ]
+
+
+# --------------------------------------------------------------------------
+# The net unit's steps.
+
+def cmd_up(inst):
+    check_name(inst)
+    if os.geteuid() != 0:
+        raise Refusal("hdw4s-netns up: needs root")
+    lines = tun_refusal()
+    if lines:
+        say(*lines)
+        raise Refusal("no %s" % TUN)
+    if not os.access(PASTA, os.X_OK):
+        raise Refusal("%s is not installed (package passt); a desktop does not start"
+                      " without the only way out of its namespace" % PASTA)
+    pol = Policy(inst)
+    for w in pol.warnings:
+        say("hdw4s-netns: %s: %s" % (inst, w))
+    unit = session_unit(inst, pol.kind)
+    made = False
+    if os.path.exists(ns_path(inst)):
+        if unit_active(unit):
+            # pasta was restarted under a running desktop: the same namespace,
+            # or the desktop would be stranded in one nothing serves.
+            say("hdw4s-netns: %s is running; pasta rejoins its namespace" % unit)
+        else:
+            delete_ns(inst)
+    if not os.path.exists(ns_path(inst)):
+        run(["ip", "netns", "add", ns_name(inst)])
+        made = True
+    try:
+        # An "ip netns add" namespace starts with lo DOWN (measured), and an
+        # application's own loopback listener then fails.
+        run(["ip", "-n", ns_name(inst), "link", "set", "lo", "up"])
+        d = inst_dir(inst)
+        os.makedirs(os.path.join(d, "net"), mode=0o755, exist_ok=True)
+        os.chmod(d, 0o755)
+        tmp = os.path.join(d, ".resolv.conf")
+        with open(tmp, "w") as f:
+            f.write(pol.resolv)
+        os.chmod(tmp, 0o644)
+        os.rename(tmp, os.path.join(d, "resolv.conf"))
+        if not pol.resolvers:
+            say("hdw4s-netns: %s: no non-loopback DNS resolver was found in %s, so"
+                " the desktop resolves no names" % (inst, resolver_file()))
+        with open(os.path.join(d, "forward"), "w") as f:
+            json.dump({p: sorted(v) for p, v in pol.forward.items()}, f)
+        load_ns_table(inst, pol)
+        rebuild_backstop(pin_wait=True)
+    except BaseException:
+        if made:
+            delete_ns(inst)
+        raise
+
+
+def cmd_pasta(inst):
+    check_name(inst)
+    d = inst_dir(inst)
+    with open(os.path.join(d, "forward")) as f:
+        fwd = json.load(f)
+    nsfd = os.open(ns_path(inst), os.O_RDONLY)
+    want = os.fstat(nsfd).st_ino
+    pid = os.fork()
+    if pid == 0:
+        # THE ANCHOR: into the namespace, hold nothing else open, and wait.
+        try:
+            os.setns(nsfd, os.CLONE_NEWNET)
+            os.closerange(0, 2**16)
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.prctl(1, signal.SIGKILL)        # PR_SET_PDEATHSIG
+            if os.getppid() == 1:
+                os._exit(0)
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            while True:
+                signal.pause()
+        finally:
+            os._exit(1)
+    os.close(nsfd)
+    bind = os.path.join(d, "net")
+    for _ in range(100):
+        try:
+            if os.stat("/proc/%d/ns/net" % pid).st_ino == want:
+                break
+        except OSError:
+            pass
+        time.sleep(0.02)
+    else:
+        raise Refusal("the anchor process never entered %s" % ns_path(inst))
+    subprocess.run(["umount", "-l", bind], capture_output=True)
+    os.makedirs(bind, mode=0o755, exist_ok=True)
+    run(["mount", "--bind", "/proc/%d/net" % pid, bind])
+    run(["mount", "-o", "remount,bind,ro", bind])
+    argv = [PASTA, "-f", "-q", "--config-net", "--netns-only",
+            "--netns", ns_path(inst),
+            # Nothing forwarded INTO the namespace, nothing mapped from the
+            # container's loopback except the loopback essentials, and the
+            # gateway is the real one, never this machine's own loopback.
+            "-t", "none", "-u", "none",
+            "-T", ",".join(str(p) for p in fwd.get("tcp", [])) or "none",
+            "-U", ",".join(str(p) for p in fwd.get("udp", [])) or "none",
+            "--no-map-gw"]
+    # SUPERVISED HERE, not exec'd and not restarted by systemd. The desktop
+    # Requires= this unit, and a restart of a required unit is carried to the
+    # desktop: measured (2026-11-18), killing pasta under Restart=on-failure
+    # restarted the desktop in a new namespace, and RestartMode=direct did not
+    # change that on systemd 255. So this process stays, starts pasta again into
+    # the SAME namespace when it dies, and gives up -- failing the unit, which
+    # leaves the desktop on its loopback alone -- only when pasta will not stay
+    # up. The anchor's PR_SET_PDEATHSIG is tied to this process, so it goes when
+    # this does.
+    child = [None]
+
+    def stop(signum, frame):
+        if child[0] is not None and child[0].poll() is None:
+            child[0].terminate()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    recent = []
+    sys.stdout.flush()
+    while True:
+        child[0] = subprocess.Popen(argv, close_fds=True)
+        rc = child[0].wait()
+        now = time.monotonic()
+        recent = [t for t in recent if now - t < 60] + [now]
+        if len(recent) >= 5:
+            say("hdw4s-netns: pasta for %s exited %d times in a minute (last: %s);"
+                " giving up -- the desktop keeps only its loopback until"
+                " hdw4s-net@%s.service is started again" % (inst, len(recent), rc, inst))
+            return 1
+        say("hdw4s-netns: pasta for %s exited (%s); starting it again into the"
+            " same namespace" % (inst, rc))
+        time.sleep(1)
+
+
+def ns_has_link(inst):
+    r = run(["ip", "-n", ns_name(inst), "-j", "addr", "show"], check=False)
+    try:
+        for link in json.loads(r.stdout or "[]"):
+            if link.get("ifname") == "lo":
+                continue
+            for a in link.get("addr_info", []):
+                ip = ipaddress.ip_address(a.get("local", "::"))
+                if ip.version == 4 or ip in GLOBAL6:
+                    return True
+    except ValueError:
+        pass
+    return False
+
+
+def cmd_ready(inst):
+    check_name(inst)
+    end = time.monotonic() + READY_WAIT
+    while not ns_has_link(inst):
+        if time.monotonic() >= end:
+            raise Refusal("pasta never gave %s an address within %d s; see its"
+                          " messages above" % (ns_name(inst), READY_WAIT))
+        time.sleep(0.1)
+    if in_ns(inst, ["nft", "list", "table", "inet", NS_TABLE], check=False).returncode:
+        raise Refusal("%s has no %s table; refusing to serve a desktop whose"
+                      " refusals are not loaded" % (ns_name(inst), NS_TABLE))
+    try:
+        with open(os.path.join(inst_dir(inst), "net", "unix")) as f:
+            f.readline()
+    except OSError as e:
+        raise Refusal("the namespace's socket table is not readable at %s (%s)"
+                      % (os.path.join(inst_dir(inst), "net"), e))
+    # Without the backstop a desktop is fenced only by a table inside its own
+    # namespace, and that is no fence against its occupant: sudo on a named
+    # desktop reaches a full root through systemd-run, which can flush it. So a
+    # kernel that cannot key the backstop refuses the start rather than run
+    # half-guarded (owner, 2026-11-18); there is no setting that allows it.
+    if not backstop_usable():
+        raise Refusal("this kernel cannot match a socket's cgroup at the depth the"
+                      " backstop needs (a container on a kernel older than 6.11);"
+                      " refusing to start a desktop whose only refusal is a table"
+                      " its occupant may be able to remove. Run a kernel 6.11 or"
+                      " newer, or run hdw4s outside a container")
+    if run(["nft", "list", "table", "inet", BACKSTOP], check=False).returncode:
+        raise Refusal("the backstop table inet %s is not loaded" % BACKSTOP)
+
+
+def cmd_down(inst):
+    check_name(inst)
+    unit = session_unit(inst)
+    if unit_active(unit):
+        say("hdw4s-netns: %s is still running; its namespace is kept for the next"
+            " pasta" % unit)
+    else:
+        delete_ns(inst)
+    try:
+        rebuild_backstop(exclude=(inst,))
+    except Refusal as e:
+        say("hdw4s-netns: %s" % e)
+
+
+def cmd_reload(insts):
+    if os.geteuid() != 0:
+        raise Refusal("hdw4s-netns reload: needs root")
+    if not insts:
+        try:
+            insts = sorted(n for n in os.listdir(NETDIR) if INSTANCE_RE.match(n))
+        except FileNotFoundError:
+            insts = []
+    bad = 0
+    for inst in insts:
+        check_name(inst)
+        if not os.path.exists(ns_path(inst)):
+            continue
+        try:
+            pol = Policy(inst)
+            load_ns_table(inst, pol)
+            for w in pol.warnings:
+                say("hdw4s-netns: %s: %s" % (inst, w))
+        except Refusal as e:
+            say("hdw4s-netns: %s: %s" % (inst, e))
+            bad += 1
+    rebuild_backstop()
+    return 1 if bad else 0
+
+
+# --------------------------------------------------------------------------
+# hdw4s check, and "lan".
+
+def unit_pids(unit):
+    cg = subprocess.run(["systemctl", "show", "-p", "ControlGroup", "--value", unit],
+                        capture_output=True, text=True).stdout.strip()
+    pids = []
+    if not cg:
+        return pids
+    for root, _, files in os.walk(CGROOT + cg):
+        if "cgroup.procs" in files:
+            try:
+                with open(os.path.join(root, "cgroup.procs")) as f:
+                    pids += [int(x) for x in f.read().split()]
+            except OSError:
+                pass
+    return pids
+
+
+def active_desktops():
+    r = subprocess.run(["systemctl", "list-units", "--plain", "--no-legend",
+                        "--state=active", "hdw4s@*.service", "hdw4s-ephemeral@*.service"],
+                       capture_output=True, text=True)
+    out = []
+    for line in r.stdout.splitlines():
+        m = re.match(r"^(hdw4s(?:-ephemeral)?@(.+)\.service)\s", line)
+        if m:
+            out.append((m.group(2), m.group(1)))
+    return out
+
+
+def cmd_check():
+    rc = 0
+    if os.geteuid() != 0:
+        print("netns       not checked: entering a desktop's namespace needs root")
+        return 0
+    host = os.stat("/proc/1/ns/net").st_ino
+    lines = tun_refusal()
+    if lines:
+        print("netns       NO %s -- no desktop can start (hdw4s-netns says how to fix it)" % TUN)
+        rc = 1
+    if not os.access(PASTA, os.X_OK):
+        print("netns       %s is not installed -- no desktop can start" % PASTA)
+        rc = 1
+    n = 0
+    for inst, unit in active_desktops():
+        n += 1
+        problems = []
+        try:
+            want = os.stat(ns_path(inst)).st_ino
+        except OSError:
+            want = None
+            problems.append("no namespace at %s" % ns_path(inst))
+        for pid in unit_pids(unit):
+            try:
+                got = os.stat("/proc/%d/ns/net" % pid).st_ino
+            except OSError:
+                continue
+            if got == host:
+                problems.append("pid %d is in the CONTAINER's network namespace" % pid)
+                break
+            if want is not None and got != want:
+                problems.append("pid %d is in a namespace that is not %s" % (pid, ns_name(inst)))
+                break
+        if want is not None and in_ns(inst, ["nft", "list", "table", "inet", NS_TABLE],
+                                      check=False).returncode:
+            problems.append("its own table inet %s is not loaded" % NS_TABLE)
+        if not unit_active("hdw4s-net@%s.service" % inst):
+            problems.append("hdw4s-net@%s.service is not running: it has only lo" % inst)
+        if problems:
+            rc = 1
+            print("netns       %s: %s" % (inst, "; ".join(problems)))
+    if n:
+        print("netns       %d running desktop(s) checked" % n)
+    if not backstop_usable():
+        print("netns       backstop: not available on this kernel (6.11 or newer is"
+              " needed inside a container), so no desktop will start")
+        rc = 1
+    elif run(["nft", "list", "table", "inet", BACKSTOP], check=False).returncode:
+        print("netns       backstop: inet %s is MISSING -- run 'hdw4s firewall --restore'"
+              % BACKSTOP)
+        rc = 1
+    else:
+        r = run(["nft", "-j", "list", "chain", "inet", BACKSTOP, "out"], check=False)
+        if ('"%s"' % SLICE_PATH) not in r.stdout:
+            print("netns       backstop: STALE -- its rule no longer names %s; run"
+                  " 'hdw4s lan reload'" % SLICE_PATH)
+            rc = 1
+        else:
+            print("netns       backstop: loaded, keyed on %s" % SLICE_PATH)
+    return rc
+
+
+def need_root(what):
+    if os.geteuid() != 0:
+        raise Refusal("hdw4s lan %s: only root may change what a desktop can reach" % what)
+
+
+def write_grants(inst, entries):
+    os.makedirs(GRANTS_DIR, mode=0o755, exist_ok=True)
+    path = os.path.join(GRANTS_DIR, inst)
+    tmp = path + ".new"
+    with open(tmp, "w") as f:
+        f.write("# Written by \"hdw4s lan\". What the named desktop %s may reach\n"
+                "# beyond the public internet and the machine's essentials.\n" % inst)
+        for e in entries:
+            f.write("%s\n" % e)
+    os.chmod(tmp, 0o644)
+    if entries:
+        os.rename(tmp, path)
+    else:
+        os.unlink(tmp)
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def apply_live(inst):
+    if os.path.exists(ns_path(inst)):
+        rc = cmd_reload([inst])
+        print("Applied to the running desktop %s." % inst if rc == 0 else
+              "NOT applied to the running desktop %s; see above." % inst)
+        return rc
+    print("%s is not running; this applies when it starts." % inst)
+    return 0
+
+
+def upstream_note(pol, entries):
+    srcs = sorted({str(a) for a in pol.own if not a.is_link_local})
+    print("A firewall between this machine and these hosts must allow them too;"
+          " hdw4s changes nothing outside this machine:")
+    for e in entries:
+        nets, _ = resolve(e)
+        what = ("%s %d" % ("/".join(e.protos), e.port)) if e.port else "any port"
+        for n in nets:
+            print("  from %s to %s, %s" % (" ".join(srcs) or "(this machine)", n, what))
+
+
+def cmd_lan(args):
+    sub = args[0] if args else ""
+    if sub == "list":
+        insts = args[1:] or sorted(n for n in (os.listdir(GRANTS_DIR)
+                                               if os.path.isdir(GRANTS_DIR) else [])
+                                   if INSTANCE_RE.match(n))
+        for inst in insts:
+            check_name(inst)
+            g = read_grants(inst)
+            print("%s: %s" % (inst, " ".join(g) if g else "(no grants)"))
+        return 0
+    if sub == "reload":
+        need_root("reload")
+        return cmd_reload(args[1:])
+    if sub not in ("grant", "revoke") or len(args) < 3:
+        say("usage: hdw4s lan list [<instance>]",
+            "       hdw4s lan grant <instance> <host[:port[/tcp|/udp]]>...",
+            "       hdw4s lan revoke <instance> <host[:port]>... | --all",
+            "       hdw4s lan reload [<instance>...]")
+        return 2
+    need_root(sub)
+    inst = args[1]
+    check_name(inst)
+    have = read_grants(inst)
+    if sub == "revoke":
+        if args[2:] == ["--all"]:
+            gone, keep = have, []
+        else:
+            want = {parse_entry(a).text for a in args[2:]}
+            gone = [g for g in have if g in want]
+            keep = [g for g in have if g not in want]
+            missing = want - set(gone)
+            if missing:
+                raise Refusal("%s holds no grant %s; 'hdw4s lan list %s' shows what"
+                              " it holds" % (inst, " ".join(sorted(missing)), inst))
+        write_grants(inst, keep)
+        print("Revoked from %s: %s" % (inst, " ".join(gone) or "(nothing)"))
+        return apply_live(inst)
+    why = grant_refusal(inst)
+    if why:
+        raise Refusal("refusing to grant: %s." % why)
+    new = []
+    for a in args[2:]:
+        try:
+            e = parse_entry(a)
+        except ValueError as err:
+            raise Refusal(str(err))
+        if e.loopback:
+            raise Refusal("%s is a service on this machine's own loopback, which is"
+                          " not the LAN; container-local services are essentials"
+                          " (HDW4S_NET_ALLOW)" % e)
+        if e.net is not None and e.net.num_addresses != 1:
+            raise Refusal("%s is a network; a grant names a host" % e)
+        nets, warn = resolve(e)
+        if warn:
+            raise Refusal(warn)
+        if e.text not in have and e.text not in new:
+            new.append(e.text)
+    write_grants(inst, have + new)
+    print("Granted to %s: %s" % (inst, " ".join(new) or "(already held)"))
+    rc = apply_live(inst)
+    upstream_note(Policy(inst), [parse_entry(t) for t in new])
+    return rc
+
+
+def cmd_policy(inst):
+    pol = Policy(inst)
+    print("instance    %s (%s)" % (inst, pol.kind))
+    print("lan         %s" % pol.lan)
+    print("essentials  %s" % (" ".join(map(str, pol.essentials)) or "(none)"))
+    print("dns         %s" % (" ".join(map(str, pol.resolvers)) or "(none)"))
+    print("grants      %s" % (" ".join(map(str, pol.grants)) or "(none)"))
+    print("forwarded   tcp %s  udp %s" % (
+        ",".join(map(str, sorted(pol.forward["tcp"]))) or "-",
+        ",".join(map(str, sorted(pol.forward["udp"]))) or "-"))
+    for n, protos, port, e in pol.allowed:
+        print("reaches     %s %s  (%s)" % (n, ("%s/%d" % ("+".join(protos), port))
+                                           if port else "any port", e))
+    for w in pol.warnings:
+        print("warning     %s" % w)
+    return 0
+
+
+def main(argv):
+    if not argv:
+        say(__doc__.split("\n\n")[0])
+        return 2
+    cmd, args = argv[0], argv[1:]
+    try:
+        if cmd in ("up", "pasta", "ready", "down") and len(args) == 1:
+            return {"up": cmd_up, "pasta": cmd_pasta, "ready": cmd_ready,
+                    "down": cmd_down}[cmd](args[0]) or 0
+        if cmd == "reload":
+            return cmd_reload(args)
+        if cmd == "backstop" and not args:
+            rebuild_backstop()
+            return 0
+        if cmd == "check" and not args:
+            return cmd_check()
+        if cmd == "lan":
+            return cmd_lan(args)
+        if cmd == "policy" and len(args) == 1:
+            check_name(args[0])
+            return cmd_policy(args[0])
+        if cmd == "parse" and args:
+            bad = 0
+            for a in args:
+                try:
+                    parse_entry(a)
+                except ValueError as e:
+                    say("hdw4s: %s" % e)
+                    bad = 1
+            return 2 if bad else 0
+        if cmd == "print" and len(args) == 1:
+            check_name(args[0])
+            sys.stdout.write(ns_ruleset(Policy(args[0])))
+            return 0
+        if cmd == "print-backstop":
+            for a in args:
+                check_name(a)
+            sys.stdout.write(backstop_ruleset([Policy(a) for a in args]))
+            return 0
+    except Refusal as e:
+        say("hdw4s: %s" % e)
+        return 1
+    say(__doc__.split("\n\n")[0])
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

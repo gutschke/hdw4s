@@ -17,9 +17,10 @@ trap 'rc="$?"
 }
 
 src="$(cd "$(dirname "$0")" && pwd)"
-SOURCES=(hdw4s{,-session,-run-session,-firewall,-update,-wait,-duration,-template}
+SOURCES=(hdw4s{,-session,-run-session,-firewall,-netns,-update,-wait,-duration,-template}
          hdw4s-is-slot hdw4s-slot-scrub 60-hdw4s-slots.rules
          hdw4s{.8,.8.md,.xorg.conf,.conf,.slice}
+         hdw4s-net.slice hdw4s-net@.service
          hdw4s@.service hdw4s-ephemeral@.service hdw4s-ephemeral-slots.service
          hdw4s-ephemeral-slots hdw4s-webroot hdw4s-gate-index hdw4s-names.js
          hdw4s-title.js
@@ -181,7 +182,7 @@ if [ "${src}" != "${dst}" ]; then
   done
   cp -f "${src}"/wrappers/* "${dst}/wrappers/"
 fi
-chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,update,wait} \
+chmod 0755 "${dst}"/hdw4s "${dst}"/hdw4s-{session,run-session,firewall,netns,update,wait} \
            "${dst}"/hdw4s-duration "${dst}"/hdw4s-template \
            "${dst}"/hdw4s-is-slot "${dst}"/hdw4s-slot-scrub \
            "${dst}"/hdw4s-shared-sweep \

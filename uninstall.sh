@@ -103,6 +103,10 @@ echo -n 'Removing the firewall table...'
 if nft list table inet hdw4s >/dev/null 2>&1; then
   nft delete table inet hdw4s || :
 fi
+# And the desktops' backstop, which hdw4s-netns writes beside it.
+if nft list table inet hdw4s_net >/dev/null 2>&1; then
+  nft delete table inet hdw4s_net || :
+fi
 echo ' done.'
 
 echo -n 'Removing units...'

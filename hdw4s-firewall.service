@@ -13,6 +13,9 @@ ExecStart=/usr/lib/hdw4s/hdw4s-firewall --apply
 # Only this package's own table is removed. Whatever else filters this machine
 # is left exactly as it was found.
 ExecStop=-/usr/sbin/nft delete table inet hdw4s
+# The desktops' backstop (hdw4s-netns) goes with it: every desktop Requires=
+# this unit through its net unit, so none outlives the stop.
+ExecStop=-/usr/sbin/nft delete table inet hdw4s_net
 RemainAfterExit=yes
 Type=oneshot
 

@@ -1205,7 +1205,24 @@ for unit in "${units[@]}"; do
         # found by joining the two ends on inode: the session's end is named
         # by the path, and its peer is the proxy's. Owners that cannot be seen
         # at all mean somebody may be there, never that nobody is.
-        attached="$(ss -Hxp state established 2>/dev/null |
+        # Both ends, from both namespaces: the desktop's end is in its own
+        # network namespace (hdw4s-netns), invisible from here; inodes are
+        # global, so the join works across the two. As in clients_of(). A
+        # namespace that cannot be read counts as somebody being there.
+        ns="${HDW4S_NETNS_DIR:-/run/netns}/hdw4s-${inst}"
+        rows="$(ss -Hxp state established 2>/dev/null)" || rows=''
+        if [ -z "${rows}" ] && ! ss -Hx >/dev/null 2>&1; then
+          attached=1; break
+        fi
+        if [ -e "${ns}" ]; then
+          if inner="$(nsenter --net="${ns}" ss -Hxp state established 2>/dev/null)"; then
+            rows="${rows}
+${inner}"
+          else
+            attached=1; break
+          fi
+        fi
+        attached="$(printf '%s\n' "${rows}" |
           awk -v path="/run/hdw4s/stream/${inst}/s/stream.sock" \
               -v who="pid=${proxy_pid}," '
             /users:/ { owners = 1 }

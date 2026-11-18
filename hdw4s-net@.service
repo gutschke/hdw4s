@@ -1,0 +1,49 @@
+[Unit]
+Description=Network namespace of the HDW4S desktop %i
+Documentation=man:hdw4s(8)
+# A desktop's only way out of its own network namespace, and the two tables that
+# decide where that way leads. hdw4s-netns says why each step is the shape it
+# is; this file only says when they run.
+#
+# Pulled in by the desktop (Requires= and After= in hdw4s@.service and
+# hdw4s-ephemeral@.service), never started on its own, and stopped when nothing
+# needs it -- the same lifecycle as hdw4s-stream@.service. PartOf= carries a stop
+# or restart of the desktop here; a restart of THIS unit alone, when pasta dies,
+# does not touch the desktop, which keeps its namespace and has only lo until
+# pasta is back.
+StopWhenUnneeded=yes
+PartOf=hdw4s@%i.service hdw4s-ephemeral@%i.service
+# The backstop is a table of its own, but it is rebuilt by the same machinery
+# the firewall unit loads, and the slice it keys on is pinned there.
+Requires=hdw4s-firewall.service
+After=hdw4s-firewall.service hdw4s-ephemeral-slots.service
+
+[Service]
+# pasta runs as ROOT, which the rules key on its cgroup to allow for: --runas
+# drops privileges before pasta joins the namespace and is refused there. A
+# dash nests a slice, so this cgroup is hdw4s.slice/hdw4s-net.slice/<unit>,
+# the path both tables in hdw4s-netns name.
+Slice=hdw4s-net.slice
+Type=simple
+# NO filesystem sandboxing on this unit, deliberately. "up" makes the
+# namespace with "ip netns add", which is a bind mount under /run/netns, and
+# "pasta" bind-mounts the namespace's socket table under /run/hdw4s/net: both
+# must land in the machine's own mount namespace, where the desktop's unit and
+# the router look for them, and a unit with ProtectSystem= or PrivateTmp= would
+# make them in a private one that nobody else sees. pasta sandboxes itself once
+# it is running (its own empty mount namespace, capabilities dropped).
+ExecStartPre=/usr/lib/hdw4s/hdw4s-netns up %i
+ExecStart=/usr/lib/hdw4s/hdw4s-netns pasta %i
+# The unit is not active -- and the desktop, ordered After= it, does not start --
+# until pasta has given the namespace an address and both tables are loaded.
+ExecStartPost=/usr/lib/hdw4s/hdw4s-netns ready %i
+ExecStopPost=/usr/lib/hdw4s/hdw4s-netns down %i
+# NO Restart=. A restart of this unit is carried to the desktop, which Requires=
+# it, and the desktop would come back in a new namespace. pasta dying is
+# handled by the main process, "hdw4s-netns pasta", which starts it again
+# into the same namespace; this unit fails only when pasta will not stay up,
+# and the desktop then keeps only its loopback.
+Restart=no
+RestartSec=1
+TimeoutStartSec=60
+KillMode=control-group

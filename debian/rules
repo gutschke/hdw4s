@@ -67,6 +67,9 @@ override_dh_installsystemd:
 # The stream directory of one session, pulled in by Requires= on the session unit
 # and stopped when that session no longer needs it (StopWhenUnneeded=).
 	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-stream@.service
+# A desktop's network namespace and pasta, pulled in by Requires= on the desktop
+# unit and stopped when it no longer needs it, exactly as the stream directory.
+	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-net@.service
 	dh_installsystemd -phdw4s --no-enable --no-start hdw4s-refuse@.service
 # The teardown watcher and the teardown itself. --no-enable --no-start for
 # the same reason as the two above and one of its own: HOW MANY SLOTS THERE

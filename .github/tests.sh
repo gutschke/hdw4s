@@ -9375,10 +9375,137 @@ STUB
   has 'and without root it says so' "$(command grep '^_hdw4s_3 ' <<<"${out}")" '(root)'
 )
 
+echo '== netns: what a desktop may reach, written into both tables from one policy =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  # hdw4s-netns decides what every desktop may reach; a desktop starts only
+  # once the two tables it writes are loaded. Here: the grammar, the policy and
+  # the rulesets it produces, and who may hold a grant -- each from a failure
+  # this design had, or would have had, on a real box. nft itself is not here
+  # (no root); the rulesets were parsed by nft on a test container.
+  N="${ROOT}/hdw4s-netns"
+  mkdir -p "${SB}/etc/lan" "${SB}/lib"
+  export HDW4S_ETCDIR="${SB}/etc" HDW4S_NETNS_OWN='192.0.2.10 10.20.0.9 fe80::1'
+  export HDW4S_NETNS_RESOLV="${SB}/resolv" HDW4S_LIBDIR="${SB}/lib"
+  printf 'nameserver 127.0.0.53\nnameserver 192.168.77.1\nsearch example.lan\n' > "${SB}/resolv"
+  printf '0 alice desktop\n1 _hdw4s_0 ephemeral\n2 _hdw4s_author template\n' > "${SB}/etc/instances"
+  printf "HDW4S_NET_ALLOW='127.0.0.1:25 10.20.0.0/16 192.0.2.7:587/tcp'\n" > "${SB}/etc/hdw4s.conf"
+  printf '172.16.5.7:22\n' > "${SB}/etc/lan/alice"
+  printf '172.16.5.7:22\n' > "${SB}/etc/lan/_hdw4s_0"
+  # The stand-ins this group holds fixed, named because a constant in a
+  # comparison is a claim: the slot uid window is 60900-60999, alice is uid
+  # 1000, and nothing here is a pooled slot by its passwd shadow.
+  printf '#!/bin/sh\necho "60900 60999"\n' > "${SB}/lib/hdw4s-ephemeral-slots"
+  printf '#!/bin/sh\nexit 1\n' > "${SB}/lib/hdw4s-is-slot"
+  chmod +x "${SB}/lib/"*
+
+  # The grammar. A bad entry must be refused when it is SET, not when a desktop
+  # starts and does not.
+  for e in 192.0.2.7 192.0.2.7:587 192.0.2.7:587/tcp '[2001:db8::1]:22' 2001:db8::/32 \
+           mail.example.com mail.example.com:25/udp 127.0.0.1:25 10.0.0.0/8; do
+    "${N}" parse "${e}" 2>/dev/null && ok "parses ${e}" || bad "parses ${e}"
+  done
+  for e in 'bad!host' 192.0.2.7:0 192.0.2.7:65536 192.0.2.7/tcp 127.0.0.1 '[::1]' 300.1.1.1 x.example:22/sctp; do
+    "${N}" parse "${e}" 2>/dev/null && bad "refuses ${e}" || ok "refuses ${e}"
+  done
+  out="$(HDW4S_LIBDIR="${ROOT}" "${ROOT}/hdw4s" set 'HDW4S_NET_ALLOW=bad!host' 2>&1)" && rc=0 || rc=$?
+  is  'hdw4s set refuses an entry the netns parser refuses' "${rc}" '1'
+  HDW4S_LIBDIR="${ROOT}" "${ROOT}/hdw4s" set HDW4S_NET_ALLOW= >/dev/null 2>&1 \
+    && ok 'and accepts an empty list (no essentials)' || bad 'and accepts an empty list (no essentials)'
+  printf "HDW4S_NET_ALLOW='127.0.0.1:25 10.20.0.0/16 192.0.2.7:587/tcp'\n" > "${SB}/etc/hdw4s.conf"
+
+  # The policy. The DNS stub is loopback and unreachable from a namespace, so the
+  # upstream resolver it uses is what the namespace asks, and is let through.
+  pol="$("${N}" policy alice 2>&1)"
+  has   'a private upstream resolver is let through on 53'     "${pol}" 'reaches     192.168.77.1/32 tcp+udp/53'
+  hasnt 'the loopback stub is not'                              "${pol}" '127.0.0.53'
+  has   'a loopback essential is a port forward, not an allow'  "${pol}" 'forwarded   tcp 25  udp 25'
+  has   "a named desktop's grant is in its policy"              "${pol}" 'reaches     172.16.5.7/32 tcp+udp/22'
+  # ABSENT IS NOT EQUAL: a grants file beside a pooled slot's name is never read.
+  pol="$("${N}" policy _hdw4s_0 2>&1)"
+  hasnt "a pooled slot never gets a grant, even with a file"     "${pol}" '172.16.5.7'
+  printf "HDW4S_NET_ALLOW=''\n" > "${SB}/etc/_hdw4s_pool.conf"
+  hasnt 'the pool layer overrides the machine (no essentials)' "$("${N}" policy _hdw4s_0 2>&1)" '192.0.2.7'
+  printf 'HDW4S_NET_ALLOW=x\nif [ x\n' > "${SB}/etc/alice.conf"
+  out="$("${N}" print alice 2>&1)" && rc=0 || rc=$?
+  is  'a configuration with a syntax error refuses (a half-applied policy is not one)' "${rc}" '1'
+  rm -f "${SB}/etc/alice.conf" "${SB}/etc/_hdw4s_pool.conf"
+
+  # The namespace's own table. Order is the property: the machine's own
+  # addresses before any allow (10.20.0.9 is inside the allowed 10.20.0.0/16),
+  # every allow before the private-range refusal, and refusals that answer.
+  t="$("${N}" print alice 2>&1)"
+  rule() { grep -n "$1" <<<"${t}" | head -n1 | cut -d: -f1; }
+  own="$(rule 'ip daddr @own4 goto refuse')"; allow="$(rule 'ip daddr @allow4 accept')"
+  ref="$(rule 'ip daddr @refuse4 goto refuse')"
+  [ -n "${own}" ] && [ -n "${allow}" ] && [ "${own}" -lt "${allow}" ] \
+    && ok "this machine's own addresses are refused before any allow" \
+    || bad "this machine's own addresses are refused before any allow" "own ${own} allow ${allow}"
+  [ -n "${ref}" ] && [ "${allow}" -lt "${ref}" ] \
+    && ok 'every allow comes before the private-range refusal' || bad 'every allow comes before the private-range refusal'
+  has   'TCP is refused with a reset (immediate, not a hang)'   "${t}" 'meta l4proto tcp reject with tcp reset'
+  has   'everything else with an ICMP error'                    "${t}" 'reject with icmpx admin-prohibited'
+  has   'IPv6 outside 2000::/3 is refused'                       "${t}" 'ip6 daddr != 2000::/3 goto refuse'
+  has   'IPv6 neighbour discovery with pasta is not'             "${t}" 'icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept'
+  hasnt 'nothing is accepted as "established" (a revoke ends a live flow)' "${t}" 'established'
+  has   'the private ranges are refused'                         "${t}" '10.0.0.0/8, 100.64.0.0/10'
+  printf 'HDW4S_NET_LAN=open\n' > "${SB}/etc/alice.conf"
+  t="$("${N}" print alice 2>&1)"
+  hasnt 'HDW4S_NET_LAN=open lifts the private-range refusal'    "${t}" '10.0.0.0/8, 100.64.0.0/10'
+  has   "but never this machine's own addresses"               "${t}" '10.20.0.9'
+  rm -f "${SB}/etc/alice.conf"
+
+  # The backstop: one per-unit chain, keyed on that unit's cgroup, whose
+  # loopback forward is let through BEFORE the refusal of local addresses.
+  b="$("${N}" print-backstop alice 2>&1)"
+  has 'the slice-wide rule names the pasta slice'  "${b}" 'socket cgroupv2 level 2 "hdw4s.slice/hdw4s-net.slice" goto pasta'
+  has "each unit is keyed on its own cgroup"       "${b}" 'socket cgroupv2 level 3 "hdw4s.slice/hdw4s-net.slice/hdw4s-net@alice.service" jump u0'
+  fwd="$(grep -n 'ip daddr 127.0.0.1 tcp dport { 25 } accept' <<<"${b}" | cut -d: -f1)"
+  loc="$(grep -n 'fib daddr type local goto refuse' <<<"${b}" | head -n1 | cut -d: -f1)"
+  [ -n "${fwd}" ] && [ -n "${loc}" ] && [ "${fwd}" -lt "${loc}" ] \
+    && ok 'the mail forward is let through before local addresses are refused' \
+    || bad 'the mail forward is let through before local addresses are refused'
+
+  # Who may hold a grant. Root is checked first, so these run as a stand-in
+  # root: the refusals below are about the INSTANCE, which is the guard.
+  grant() { python3 -c '
+import importlib.machinery, sys
+sys.dont_write_bytecode = True
+m = importlib.machinery.SourceFileLoader("netns", sys.argv[1]).load_module()
+print(m.grant_refusal(sys.argv[2]) or "ALLOWED")' "${N}" "$1" 2>&1; }
+  has 'a grant to a pooled slot is refused'       "$(grant _hdw4s_0)"      'an ephemeral slot'
+  has 'a grant to the authoring slot is refused'  "$(grant _hdw4s_author)" 'template-authoring'
+  printf '#!/bin/sh\necho "1000 1999"\n' > "${SB}/lib/hdw4s-ephemeral-slots"
+  # shellcheck disable=SC2016  # the stub's own $1, expanded when IT runs
+  printf '#!/bin/sh\n[ "$1" = passwd ] && echo "alice:x:1000:1000::/home/alice:/bin/sh"\n' > "${SB}/lib/getent"
+  chmod +x "${SB}/lib/getent"
+  has 'RED ARM: a desktop-typed account whose uid is in the slot window is refused' \
+      "$(PATH="${SB}/lib:${PATH}" grant alice)" 'inside the slot uid window'
+  printf '#!/bin/sh\nexit 1\n' > "${SB}/lib/hdw4s-ephemeral-slots"
+  has 'an unreadable uid window refuses rather than guesses' \
+      "$(PATH="${SB}/lib:${PATH}" grant alice)" 'refusing rather than guessing'
+  printf '#!/bin/sh\necho "60900 60999"\n' > "${SB}/lib/hdw4s-ephemeral-slots"
+  is  'and a named desktop outside it is allowed' "$(PATH="${SB}/lib:${PATH}" grant alice)" 'ALLOWED'
+  chmod 000 "${SB}/etc/instances"
+  if [ -r "${SB}/etc/instances" ]; then
+    skip 'an unreadable slot table refuses' 'running as root, which reads it anyway'
+  else
+    has 'an unreadable slot table refuses, never "desktop"' "$(grant alice)" 'refusing rather than guessing'
+  fi
+  chmod 644 "${SB}/etc/instances"
+  out="$("${N}" lan grant alice 172.16.5.8 2>&1)" && rc=0 || rc=$?
+  if [ "$(id -u)" -ne 0 ]; then
+    is  'lan grant by a non-root user is refused' "${rc}" '1'
+    has 'and says why' "${out}" 'only root may change what a desktop can reach'
+  else
+    skip 'lan grant by a non-root user is refused' 'running as root'
+    skip 'and says why' 'running as root'
+  fi
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1791  # update when tests are added; a wrong number is the point
+EXPECTED=1838  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

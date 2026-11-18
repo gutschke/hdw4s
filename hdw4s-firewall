@@ -123,6 +123,13 @@ generate() {
   # Set HDW4S_MEDIA_PORTS=direct for a deployment where the browser really does
   # reach the streaming server directly rather than through a proxy, which
   # needs those sockets reachable.
+  #
+  # SINCE hdw4s-netns those sockets are in the desktop's own namespace, on its
+  # own copies of the addresses, and pasta forwards nothing inward (-t none
+  # -u none), so nothing off the desktop reaches them whatever this chain says;
+  # HDW4S_MEDIA_PORTS=direct therefore no longer opens them either. The chain
+  # is kept as defence in depth for anything in hdw4s.slice still in this
+  # namespace.
   local media_chain=''
   if [ "${HDW4S_MEDIA_PORTS:-proxied}" != 'direct' ]; then
     # Match the sockets themselves, not the ports they happen to be on. The
@@ -215,6 +222,14 @@ CHAIN
   fi
 
   # ---- one desktop must not reach another --------------------------------
+  #
+  # SINCE EVERY DESKTOP HAS A NETWORK NAMESPACE OF ITS OWN (hdw4s-netns), a
+  # desktop's packets never reach this chain: a desktop cannot address this
+  # machine's loopback or its session ports at all. What still runs in
+  # hdw4s.slice in THIS namespace is pasta (hdw4s-net.slice, whose own backstop
+  # refuses this machine's addresses before this table is consulted) and the
+  # units' "+" and "!" lines. The chain is kept as defence in depth for those;
+  # removing it is a change of its own, with its counters watched first.
   #
   # A desktop is reached through its own front door, which is where
   # authentication happens. Nothing else on this machine has any business
@@ -343,6 +358,9 @@ CHAIN
     echo '       6.11 or newer.' >&2
   fi
 
+  # SINCE hdw4s-netns, a slot's own namespace has no route to this machine's
+  # 631 at all; this chain is kept as defence in depth, as sessions_out is.
+  #
   # PRINTING FROM AN EPHEMERAL DESKTOP GOES ONLY THROUGH SELKIES. The unit hides
   # the machine's CUPS socket and points applications at Selkies' queue, but CUPS
   # also listens on the loopback at 631, and an application that ignores the
@@ -556,6 +574,14 @@ cmd_apply() {
 # no reason; the point is to notice a table that vanished, not to keep
 # rewriting one that is already correct.
 cmd_restore() {
+  # The desktops' backstop is a table of its own, inet hdw4s_net, written by
+  # hdw4s-netns from the net units running at that instant; a flush takes it
+  # with this one. Rebuilt here rather than from cmd_apply, which it would
+  # otherwise depend on for nothing.
+  if cgroup_level_usable && ! nft list table inet hdw4s_net >/dev/null 2>&1; then
+    echo 'hdw4s: the desktops'"'"' backstop table was missing; rebuilding it.' >&2
+    "$(dirname "$0")/hdw4s-netns" backstop || :
+  fi
   if nft list table inet hdw4s >/dev/null 2>&1; then
     return 0
   fi
@@ -835,5 +861,11 @@ case "${1:-}" in
     exit "${rc}"
     ;;
   --print) generate;;
+  # Asked by hdw4s-netns, whose backstop keys on the pasta units' cgroup two and
+  # three levels down; this file owns the one copy of the question.
+  --cgroup-level-usable)
+    trap '' INT TERM QUIT HUP EXIT ERR
+    cgroup_level_usable && exit 0 || exit 1
+    ;;
   *) echo 'Usage: hdw4s firewall --apply | --check | --print' >&2; exit 2;;
 esac

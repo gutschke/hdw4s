@@ -39,6 +39,18 @@ After=hdw4s-incarnation@%i.service
 # directory can be reached by nobody, and starting it anyway only hides why.
 Requires=hdw4s-stream@%i.service
 After=hdw4s-stream@%i.service
+
+# ITS OWN NETWORK NAMESPACE, with pasta as its only way out (hdw4s-netns says
+# what that allows and why). Requires=: a desktop whose namespace, tables or
+# pasta did not come up does not start -- the alternative is a desktop on the
+# container's own network, which is what this exists to end. Not BindsTo=, and
+# the net unit never restarts itself: a restart of a unit this one Requires= is
+# carried here, and measured (2026-11-18) killing pasta then restarted the
+# desktop in a NEW namespace. pasta is restarted INSIDE the net unit instead
+# ("hdw4s-netns pasta"), into the same namespace, and the desktop keeps only its
+# loopback meanwhile, which is the closed direction.
+Requires=hdw4s-net@%i.service
+After=hdw4s-net@%i.service
 # A home directory that arrives over the network has to be there before a
 # desktop tries to read settings out of it.
 
@@ -361,6 +373,12 @@ ReadWritePaths=/run/hdw4s/stream/%i
 # must not stop a desktop starting; the writer reports it.
 ReadWritePaths=-/run/hdw4s/ledger
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# The namespace hdw4s-net@%i.service made. systemd refuses to start the
+# desktop if it is not there, so this is the second refusal behind Requires=.
+NetworkNamespacePath=/run/netns/hdw4s-%i
+# The namespace cannot reach the machine's loopback DNS stub, so it asks the
+# upstream resolvers that stub uses, named in a file written for it.
+BindReadOnlyPaths=/run/hdw4s/net/%i/resolv.conf:/etc/resolv.conf
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 # A soak of fifty browser reconnects against one session left the streaming
