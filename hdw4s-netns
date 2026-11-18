@@ -820,11 +820,19 @@ def check_name(inst):
         raise Refusal("%r is not an instance name" % inst)
 
 
-def backstop_usable():
-    """Can this kernel key a rule on a cgroup at the depth the backstop needs?
-    Asked of hdw4s-firewall, which owns the one copy of that question."""
-    return subprocess.run([os.path.join(LIBDIR, "hdw4s-firewall"),
-                           "--cgroup-level-usable"], capture_output=True).returncode == 0
+KERNEL_TOO_OLD = ("this kernel cannot match a socket's cgroup at the depth the"
+                  " backstop needs (a container on a kernel older than 6.11)")
+
+
+def backstop_state():
+    """Can a rule be keyed on a cgroup at the depth the backstop needs?
+
+    "ok"; "kernel" -- never, on this kernel; or "slice" -- hdw4s.slice does not
+    exist yet, which only means no desktop has started since boot. Asked of
+    hdw4s-firewall, which owns the one copy of that question."""
+    rc = subprocess.run([os.path.join(LIBDIR, "hdw4s-firewall"),
+                         "--cgroup-level-usable"], capture_output=True).returncode
+    return {0: "ok", 2: "slice"}.get(rc, "kernel")
 
 
 def take_lock():
@@ -860,11 +868,14 @@ def rebuild_backstop(exclude=(), pin_wait=False):
     A cgroup that vanishes between the listing and the load makes nft refuse
     the whole file, so it is read again and retried; a table that cannot be
     loaded leaves the previous one in place, which still refuses the slice."""
-    if not backstop_usable():
-        say("hdw4s-netns: this kernel cannot match a socket's cgroup at the depth the",
-            "  backstop needs (a container on a kernel older than 6.11), so there is",
-            "  no container-side backstop, and no desktop will start; 'hdw4s check'",
-            "  reports this.")
+    state = backstop_state()
+    if state == "kernel":
+        say("hdw4s-netns: %s, so there is no container-side backstop, and no" % KERNEL_TOO_OLD,
+            "  desktop will start; 'hdw4s check' reports this.")
+        return False
+    if state != "ok":
+        # No desktop has started since boot, so there is nothing to back and no
+        # slice for a rule to name; the first desktop's "up" builds it.
         return False
     # Pinned, so its cgroup is not collected and recreated under a rule that
     # names the old one. Waited for only from "up": called from "down", a
@@ -1133,12 +1144,14 @@ def cmd_ready(inst):
     # desktop reaches a full root through systemd-run, which can flush it. So a
     # kernel that cannot key the backstop refuses the start rather than run
     # half-guarded (owner, 2026-11-18); there is no setting that allows it.
-    if not backstop_usable():
-        raise Refusal("this kernel cannot match a socket's cgroup at the depth the"
-                      " backstop needs (a container on a kernel older than 6.11);"
-                      " refusing to start a desktop whose only refusal is a table"
-                      " its occupant may be able to remove. Run a kernel 6.11 or"
-                      " newer, or run hdw4s outside a container")
+    state = backstop_state()
+    if state == "kernel":
+        raise Refusal("%s; refusing to start a desktop whose only refusal is a"
+                      " table its occupant may be able to remove. Run a kernel 6.11"
+                      " or newer, or run hdw4s outside a container" % KERNEL_TOO_OLD)
+    if state != "ok":
+        raise Refusal("hdw4s.slice does not exist, although this unit runs in it;"
+                      " the backstop has no cgroup to name")
     if run(["nft", "list", "table", "inet", BACKSTOP], check=False).returncode:
         raise Refusal("the backstop table inet %s is not loaded" % BACKSTOP)
 
@@ -1261,11 +1274,18 @@ def cmd_check():
             print("netns       %s: %s" % (inst, "; ".join(problems)))
     if n:
         print("netns       %d running desktop(s) checked" % n)
-    if not backstop_usable():
+    state = backstop_state()
+    loaded = not run(["nft", "list", "table", "inet", BACKSTOP], check=False).returncode
+    if state == "kernel":
         print("netns       backstop: not available on this kernel (6.11 or newer is"
               " needed inside a container), so no desktop will start")
         rc = 1
-    elif run(["nft", "list", "table", "inet", BACKSTOP], check=False).returncode:
+    elif not loaded and not n:
+        # Measured 2026-11-18: every freshly booted, idle machine. Nothing runs,
+        # so nothing is unguarded, and "ready" refuses a start without it.
+        print("netns       backstop: not loaded yet; no desktop is running, and the"
+              " first one to start loads it")
+    elif not loaded:
         print("netns       backstop: inet %s is MISSING -- run 'hdw4s firewall --restore'"
               % BACKSTOP)
         rc = 1

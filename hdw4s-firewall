@@ -87,7 +87,11 @@ internal_last=$(( HDW4S_BASE_PORT + 2 * HDW4S_BLOCK_SIZE - 1 ))
 # looking perfectly healthy. A guard that cannot tell you it is not guarding is
 # worse than no guard, so where that combination holds we say so and do
 # something else.
-cgroup_level_usable() {
+# Two questions, kept apart because their answers mean different things: the
+# KERNEL one is permanent (no desktop will ever start), the SLICE one only means
+# no desktop has started since boot. One answer for both made an idle, freshly
+# booted machine report "not available on this kernel" (measured, 2026-11-18).
+kernel_cgroup_level_ok() {
   local kmaj kmin kver
   kver="$(uname -r)"; kmaj="${kver%%.*}"; kmin="${kver#*.}"; kmin="${kmin%%.*}"
   case "${kmaj}${kmin}" in
@@ -96,7 +100,9 @@ cgroup_level_usable() {
   if [ "${kmaj}" -lt 6 ] || { [ "${kmaj}" -eq 6 ] && [ "${kmin}" -lt 11 ]; }; then
     [ "$(systemd-detect-virt --container 2>/dev/null)" = 'none' ] || return 1
   fi
-  [ -d /sys/fs/cgroup/hdw4s.slice ]
+}
+cgroup_level_usable() {
+  kernel_cgroup_level_ok && [ -d /sys/fs/cgroup/hdw4s.slice ]
 }
 
 generate() {
@@ -864,10 +870,13 @@ case "${1:-}" in
     ;;
   --print) generate;;
   # Asked by hdw4s-netns, whose backstop keys on the pasta units' cgroup two and
-  # three levels down; this file owns the one copy of the question.
+  # three levels down; this file owns the one copy of the question. 1: the
+  # kernel cannot; 2: it can, but hdw4s.slice does not exist yet.
   --cgroup-level-usable)
     trap '' INT TERM QUIT HUP EXIT ERR
-    cgroup_level_usable && exit 0 || exit 1
+    kernel_cgroup_level_ok || exit 1
+    [ -d /sys/fs/cgroup/hdw4s.slice ] || exit 2
+    exit 0
     ;;
   *) echo 'Usage: hdw4s firewall --apply | --check | --print' >&2; exit 2;;
 esac
