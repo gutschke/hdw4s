@@ -1,3 +1,15 @@
+hdw4s (2.6.1) unstable; urgency=medium
+
+  * "systemctl restart hdw4s-firewall" is now refused: every desktop
+    requires the firewall unit, so restarting it restarted every desktop on
+    the machine. "systemctl reload hdw4s-firewall" or "hdw4s firewall
+    --apply" re-reads the rules without touching a session.
+  * "hdw4s check" no longer fails on a freshly booted machine where no
+    desktop has started yet, and no longer blames the kernel for it.
+  * Depends on mount, whose mount and umount commands the package runs.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Wed, 18 Nov 2026 15:00:00 -0800
+
 hdw4s (2.6.0) unstable; urgency=medium
 
   * Every desktop, named and ephemeral, now runs in a network namespace of
