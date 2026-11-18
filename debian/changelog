@@ -1,3 +1,24 @@
+hdw4s (2.6.0) unstable; urgency=medium
+
+  * Every desktop, named and ephemeral, now runs in a network namespace of
+    its own, reaching the outside through pasta (new dependency: passt). A
+    desktop reaches the public internet and nothing else: private, link-local
+    and multicast ranges and this machine's own addresses are refused at
+    once, with "connection refused" rather than a timeout. Its own loopback
+    works as before. HDW4S_NET_ALLOW names essentials such as a local mail
+    transfer agent, and HDW4S_NET_LAN=open lifts the private-range refusal.
+  * New "hdw4s lan grant|revoke|list": root can let a named desktop reach
+    particular LAN hosts until revoked, applied to the running desktop. It
+    prints what a firewall upstream must also allow.
+  * In an unprivileged LXC container, /dev/net/tun must be passed in; a
+    desktop refuses to start without it and says how. A container on a
+    kernel older than 6.11 cannot load the machine-side backstop, and its
+    desktops refuse to start.
+  * WebRTC keeps working: each desktop that offers it gets one UDP port
+    carried into its namespace, and HDW4S_MEDIA_PORTS means what it did.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Wed, 18 Nov 2026 12:00:00 -0800
+
 hdw4s (2.5.2) unstable; urgency=medium
 
   * A named desktop's page now fits the desktop to the browser tab once a
