@@ -508,8 +508,8 @@ ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate %i
 #
 # NOT on the named unit, deliberately: its "ExecStartPre=+... provision" rebuilds the
 # tree with "rm -rf", and "+" keeps this unit's mounts, so the directory would be a
-# mount point there and the rebuild -- and the start -- would fail. A named desktop
-# publishes nothing and its page does not resize.
+# mount point there and the rebuild -- and the start -- would fail. The named unit
+# runs its announced-gate as "+" instead, which can write /usr without this line.
 ReadWritePaths=-/usr/share/hdw4s/webroot/%i/hdw4s-startup
 # /run IS NOT READ-ONLY HERE. ProtectSystem=strict leaves /run writable --
 # measured inside a running desktop of each kind, 2026-10-04: /run is a

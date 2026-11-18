@@ -1698,7 +1698,7 @@ children+=($!)
 stream_pid="$!"
 
 # THE THIRD CHECK IS NOT HERE ANY MORE, and since 2026-09-26 it is not a request
-# either. It is "ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate" in
+# either. It is the "hdw4s-webroot announced-gate" ExecStartPost= line in
 # the session units, and both changes were forced rather than chosen.
 #
 # WHAT IT DOES NOW: it reads the streaming server's own startup announcement out

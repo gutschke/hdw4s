@@ -8023,9 +8023,13 @@ echo '== both session units check the web root, and neither needs a credential t
       && ok "${u} checks the web root it was given" \
       || bad "${u} checks the web root it was given" \
              'no "ExecStartPre=!hdw4s-webroot gate %i" -- nothing asserts this start'"'"'s identity'
-    grep -qE '^ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate %i$' "${f}" \
-      && ok "${u} reads what the server accepted" \
-      || bad "${u} reads what the server accepted" 'no announced-gate line'
+    # "+" on the named unit, "!" on the ephemeral one: the named unit cannot open the
+    # outcome directory with ReadWritePaths= (see its comment), so its line has to be
+    # able to write /usr, and "!" there 404'd every named page's outcome until 2.5.2.
+    case "${u}" in hdw4s@.service) pfx='+' ;; *) pfx='!' ;; esac
+    grep -qE "^ExecStartPost=[${pfx}]/usr/lib/hdw4s/hdw4s-webroot announced-gate %i\$" "${f}" \
+      && ok "${u} reads what the server accepted (${pfx})" \
+      || bad "${u} reads what the server accepted (${pfx})" "no ExecStartPost=${pfx} announced-gate line"
     # THE NAME THAT WAS REMOVED, searched for deliberately. A unit still calling
     # "serving-gate" would fail at start with "usage:", which is loud -- but a
     # COMMENT still describing a fetch that no longer happens is silent, and that

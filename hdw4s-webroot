@@ -204,8 +204,9 @@ for p in sorted(paths):
 PY
   # WHERE THE STARTUP HOLD'S OUTCOME IS PUBLISHED for this tree's page -- see
   # publish_outcome below. An empty root-owned directory, made here because this is
-  # the one writer that runs as root outside every session; the session unit makes
-  # it, and only it, writable to root inside its namespace. 0755 and root's, never
+  # the one writer that runs as root outside every session. The ephemeral unit makes
+  # it, and only it, writable to root inside its namespace; the named unit's writer
+  # runs as "+", outside ProtectSystem=. 0755 and root's, never
   # the occupant's: a directory the occupant could write would let a session serve
   # pages of its own choosing from the pool's one origin.
   install -d -m 0755 "${stage}/hdw4s-startup" ||

@@ -231,7 +231,7 @@ ExecStartPre=+/usr/lib/hdw4s/hdw4s-webroot provision %i
 #
 # "!" and NOT "+": "+" drops ProtectHome= while KEEPING BindPaths= and
 # TemporaryFileSystem=, so a drop-in's /home mount lands on the REAL /home. The
-# ExecStartPost below says what that costs. What this needs is root -- the /run
+# ephemeral unit says what that costs. What this needs is root -- the /run
 # record is 0600 root-owned so the occupant cannot forge it -- with the
 # namespace intact, and "!" is exactly that.
 ExecStartPre=!/usr/lib/hdw4s/hdw4s-webroot gate %i
@@ -275,16 +275,28 @@ ExecStopPost=-!/usr/lib/hdw4s/hdw4s-ledger record %i
 # session port; there is no connection now. The reason now is that this reads the unit's
 # own journal, and the occupant's uid is in no group that may.
 #
-# "!" and NOT "+", unchanged: "+" keeps BindPaths= and TemporaryFileSystem= while
-# dropping ProtectHome=, which lands this unit's /home/user mount on the real /home --
-# fatal on an NFS home and a silent stray directory on a local one.
+# "+" HERE, where the ephemeral unit has "!", because this line also PUBLISHES the
+# startup hold's outcome into the web root (hdw4s-webroot, publish_outcome), and
+# ProtectSystem=strict leaves /usr read-only to a "!" line. The ephemeral unit opens
+# the one directory with ReadWritePaths=; this unit cannot, because the "+" provision
+# above rebuilds the tree with "rm -rf" inside this unit's mounts, and a directory
+# that is a mount point there fails the rebuild and the start. "+" is what provision
+# itself already runs as, so it widens nothing this unit did not already do as root.
+# Until 2.5.2 this was "!", the write found /usr read-only, and every named desktop's
+# page asked for hdw4s-startup/outcome, got a 404, and never fitted itself to the tab.
+#
+# The trap "+" carries -- it keeps BindPaths= and TemporaryFileSystem= while dropping
+# ProtectHome=, so a /home mount lands on the real /home -- is the ephemeral unit's,
+# whose /home/user is such a mount. This unit has no mount under /home: the home is
+# the occupant's real one (ProtectHome=no, ReadWritePaths= from "hdw4s enable"). A
+# drop-in that adds one meets the trap here and in provision alike.
 #
 # It does not depend on running in any particular position. It needs no credential, and
 # systemd puts INVOCATION_ID in the environment of every Exec line, so it can name THIS
 # start rather than reading a journal that a restart loop has interleaved. It waits for
 # the announcement and reports the expiry as a failure that says WHICH thing it could not
 # establish -- never as a pass.
-ExecStartPost=!/usr/lib/hdw4s/hdw4s-webroot announced-gate %i
+ExecStartPost=+/usr/lib/hdw4s/hdw4s-webroot announced-gate %i
 KillMode=control-group
 LockPersonality=yes
 # Readiness is reported once the stream is accepting connections, so that
