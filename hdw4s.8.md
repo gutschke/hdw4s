@@ -546,8 +546,9 @@ belongs to the copy of the streaming server, of which there is one.
     machine has. `proxied` drops new inbound connections to that range, which
     closes them; `direct` leaves them reachable, which is needed only when a
     browser reaches the streaming server without a proxy in between. Since
-    every desktop has a network namespace of its own (**NETWORK**), nothing
-    reaches those candidates from outside it either way; see **LIMITATIONS**.
+    every desktop has a network namespace of its own (**NETWORK**), its
+    candidates share one UDP port from that range, which pasta carries in;
+    this setting decides who may reach it, exactly as before.
 
   * `HDW4S_NET_ALLOW`:
     Essentials: destinations every desktop this setting applies to may reach
@@ -1359,6 +1360,15 @@ table inside its own namespace, which its occupant may be able to remove;
 `/etc/resolv.conf` names the machine's upstream resolvers, since the namespace
 cannot reach a loopback stub.
 
+Nothing is carried into the namespace but WebRTC. A desktop that offers it
+(`HDW4S_WEBRTC=yes`, the default) is given one UDP port when it starts, taken
+from the ephemeral range like any other; its streaming server puts every WebRTC
+candidate on that port, and pasta forwards that port, and only that port, from
+the machine into that desktop alone. Answers leave from it only as replies to
+what a browser sent. Who may send is `HDW4S_MEDIA_PORTS`, as it was before
+desktops had namespaces. A desktop whose port is held by anything but its own
+pasta does not start, and `hdw4s check` reports one that loses it.
+
 ## REVERSE PROXY AND SECURITY
 
 **A session performs no authentication of its own.** It is built to sit behind a
@@ -1666,9 +1676,9 @@ must reach the machine directly; with `HDW4S_MEDIA_PORTS=proxied` the firewall
 admits that only from the proxy addresses, so elsewhere the switch fails to
 connect. The server runs ICE-lite and contacts no STUN server itself.
 
-Since every desktop has its own network namespace, WebRTC's connection
-candidates are on the namespace's addresses and nothing is forwarded in, so a
-switch to WebRTC from the side menu does not connect.
+The candidates name only the address pasta copies into the namespace, the one
+on the machine's default route, where a desktop outside a namespace offered every
+address the machine has.
 
 TURN is a relay of your own or none: `HDW4S_TURN_HOST` and `HDW4S_TURN_SECRET`
 name one, and without them a session is pinned to a host that cannot resolve.

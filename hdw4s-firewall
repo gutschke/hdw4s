@@ -125,11 +125,11 @@ generate() {
   # needs those sockets reachable.
   #
   # SINCE hdw4s-netns those sockets are in the desktop's own namespace, on its
-  # own copies of the addresses, and pasta forwards nothing inward (-t none
-  # -u none), so nothing off the desktop reaches them whatever this chain says;
-  # HDW4S_MEDIA_PORTS=direct therefore no longer opens them either. The chain
-  # is kept as defence in depth for anything in hdw4s.slice still in this
-  # namespace.
+  # own copies of the addresses, and share ONE UDP port there, which pasta
+  # forwards in from this namespace (hdw4s-netns, "WebRTC: one UDP port per
+  # desktop"). The socket that receives a browser's media here is therefore
+  # pasta's, in hdw4s.slice/hdw4s-net.slice -- level 1 is still hdw4s.slice, so
+  # this chain matches it unchanged and HDW4S_MEDIA_PORTS keeps its meaning.
   local media_chain=''
   if [ "${HDW4S_MEDIA_PORTS:-proxied}" != 'direct' ]; then
     # Match the sockets themselves, not the ports they happen to be on. The
@@ -691,11 +691,13 @@ cmd_check() {
         sub(/%.*/, "", host)                               # strip any %iface scope
         if (host ~ /^127\./ || host == "[::1]") next       # loopback is fine
         if (port + 0 >= a && port + 0 <= b) next            # inside the block
-        if ($0 ~ /selkies|systemd-socket-|Xorg/) print port
+        if ($0 ~ /selkies|systemd-socket-|Xorg|pasta/) print port
       }' | sort -un | tr '\n' ' ')"
 
   # Most of what turns up here is the streaming server's connection-candidate
-  # sockets, which it scatters across the ephemeral range on every address. They
+  # sockets, which it scatters across the ephemeral range on every address --
+  # or, since every desktop has a namespace, the one ephemeral port per desktop
+  # that pasta binds here to carry its candidates in (hence "pasta" above). They
   # are covered by the media chain unless that was turned off, so say which case
   # this is rather than printing thirty port numbers and leaving it to the
   # reader.

@@ -1325,6 +1325,15 @@ case "${HDW4S_WEBRTC}" in
       turn_secret="$(head -c 18 /dev/urandom | base64)"
       export SELKIES_TURN_SHARED_SECRET="${turn_secret}"
     fi
+    # Every WebRTC candidate on ONE port, the one pasta forwards into this
+    # desktop's network namespace (hdw4s-netns, "WebRTC: one UDP port per
+    # desktop"; the unit reads it from the net unit's record). Without it the
+    # server binds a port per candidate in the namespace, the browser sends to
+    # the machine's address on that port, and nothing carries it in: the
+    # switch never connects. Unset only where no namespace made one.
+    if [ -n "${HDW4S_WEBRTC_UDP_PORT:-}" ]; then
+      webrtc+=(--webrtc-udp-mux-port="${HDW4S_WEBRTC_UDP_PORT}")
+    fi
     ;;
   *)
     # No client-initiated switch to WebRTC, so no ICE, STUN, TURN or mDNS socket

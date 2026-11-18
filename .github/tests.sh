@@ -9465,6 +9465,50 @@ echo '== netns: what a desktop may reach, written into both tables from one poli
     && ok 'the mail forward is let through before local addresses are refused' \
     || bad 'the mail forward is let through before local addresses are refused'
 
+  # WebRTC: one UDP port per desktop, recorded by "up" in the namespace's own
+  # directory and read back by every rebuild. Its answers leave from that port
+  # only as REPLIES -- in both tables -- so the port cannot open a flow of its
+  # own to anything the policy refuses (red-armed live on a test container).
+  export HDW4S_RUNDIR="${SB}/run"
+  t="$("${N}" print alice 2>&1)"; b="$("${N}" print-backstop alice 2>&1)"
+  hasnt 'no WebRTC port recorded: nothing answers from one'          "${t}${b}" 'ct direction reply'
+  mkdir -p "${SB}/run/net/alice"
+  printf '{"tcp": [25], "udp": [], "media": 45123}' > "${SB}/run/net/alice/forward"
+  t="$("${N}" print alice 2>&1)"; b="$("${N}" print-backstop alice 2>&1)"
+  has   "the desktop's WebRTC port answers, as replies only"          "${t}" 'udp sport 45123 ct direction reply accept'
+  hasnt 'and never as a flow of its own'                              "${t}${b}" 'udp sport 45123 accept'
+  med="$(grep -n 'udp sport 45123' <<<"${t}" | cut -d: -f1)"
+  own="$(grep -n 'ip daddr @own4 goto refuse' <<<"${t}" | cut -d: -f1)"
+  ref="$(grep -n 'ip daddr @refuse4 goto refuse' <<<"${t}" | cut -d: -f1)"
+  [ -n "${med}" ] && [ "${own}" -lt "${med}" ] && [ "${med}" -lt "${ref}" ] \
+    && ok "its answers come after this machine's own addresses and before the private ranges" \
+    || bad "its answers come after this machine's own addresses and before the private ranges" \
+           "own ${own} media ${med} refuse ${ref}"
+  has   "the backstop lets pasta's answers from that port through, replies only" "${b}" 'udp sport 45123 ct direction reply accept'
+  loc="$(grep -n 'fib daddr type local goto refuse' <<<"${b}" | head -n1 | cut -d: -f1)"
+  med="$(grep -n 'udp sport 45123' <<<"${b}" | cut -d: -f1)"
+  [ -n "${med}" ] && [ "${loc}" -lt "${med}" ] \
+    && ok "and only after this machine's own addresses are refused" \
+    || bad "and only after this machine's own addresses are refused" "local ${loc} media ${med}"
+  printf 'HDW4S_WEBRTC=no\n' > "${SB}/etc/alice.conf"
+  t="$("${N}" print alice 2>&1)"; b="$("${N}" print-backstop alice 2>&1)"
+  hasnt 'HDW4S_WEBRTC=no: no port answers, whatever is recorded'      "${t}${b}" 'udp sport 45123'
+  rm -f "${SB}/etc/alice.conf" "${SB}/run/net/alice/forward"
+  port="$(python3 -c '
+import importlib.machinery, sys, socket
+sys.dont_write_bytecode = True
+m = importlib.machinery.SourceFileLoader("netns", sys.argv[1]).load_module()
+p = m.pick_media_port(); s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("0.0.0.0", p))
+print(p)' "${N}" 2>&1)"
+  read -r elo ehi < /proc/sys/net/ipv4/ip_local_port_range
+  case "${port}" in
+    ''|*[!0-9]*) bad 'the picked port is free and in the ephemeral range' "${port}" ;;
+    *) [ "${port}" -ge "${elo}" ] && [ "${port}" -le "${ehi}" ] \
+         && ok 'the picked port is free and in the ephemeral range' \
+         || bad 'the picked port is free and in the ephemeral range' "${port} not in ${elo}-${ehi}" ;;
+  esac
+  unset HDW4S_RUNDIR
+
   # Who may hold a grant. Root is checked first, so these run as a stand-in
   # root: the refusals below are about the INSTANCE, which is the guard.
   grant() { python3 -c '
@@ -9505,7 +9549,7 @@ print(m.grant_refusal(sys.argv[2]) or "ALLOWED")' "${N}" "$1" 2>&1; }
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1838  # update when tests are added; a wrong number is the point
+EXPECTED=1846  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

@@ -388,6 +388,13 @@ NetworkNamespacePath=/run/netns/hdw4s-%i
 # The namespace cannot reach the machine's loopback DNS stub, so it asks the
 # upstream resolvers that stub uses, named in a file written for it.
 BindReadOnlyPaths=/run/hdw4s/net/%i/resolv.conf:/etc/resolv.conf
+# The one UDP port pasta forwards into that namespace, for WebRTC: written by
+# hdw4s-netns "up" (HDW4S_WEBRTC_UDP_PORT, empty where WebRTC is not offered)
+# and read by systemd before the desktop starts. Not a setting -- read after
+# the configuration files, so a value written there cannot replace it -- and
+# not optional: the net unit always writes it, so a missing file means the
+# namespace was not made, and the desktop must not start.
+EnvironmentFile=/run/hdw4s/net/%i/media.env
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 

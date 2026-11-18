@@ -36,6 +36,12 @@ container's own addresses are refused. On top of that, per desktop:
   * HDW4S_NET_LAN=open lifts the private-range refusal (never the container's
     own addresses); "refused" is the default, for the pool too.
 
+INTO the desktop, one thing only: where it offers WebRTC (HDW4S_WEBRTC=yes, the
+default), ONE UDP port, forwarded by pasta from the container to this
+namespace, which its streaming server binds every WebRTC candidate to; its
+answers leave from that port only as replies. "WebRTC: one UDP port per
+desktop" below says why that shape and which port.
+
 TWO TABLES, ONE POLICY. Both are generated here from policy(), so they cannot
 disagree about what a desktop may reach:
 
@@ -313,17 +319,18 @@ for f in "$@"; do
   bash -n "$f" || { echo "hdw4s: $f has a syntax error; refusing to start on a configuration that would apply only as far as the error" >&2; exit 3; }
   . "$f" || :
 done
-printf '%s\0%s\0' "${HDW4S_NET_ALLOW-}" "${HDW4S_NET_LAN-}"
+printf '%s\0%s\0%s\0' "${HDW4S_NET_ALLOW-}" "${HDW4S_NET_LAN-}" "${HDW4S_WEBRTC-}"
 '''
     r = subprocess.run(["bash", "-c", script, "hdw4s-netns"] + files,
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise Refusal(r.stderr.strip() or "the configuration could not be read")
-    allow, lan = (r.stdout.split("\0") + ["", ""])[:2]
+    allow, lan, webrtc = (r.stdout.split("\0") + ["", "", ""])[:3]
     lan = lan or "refused"
     if lan not in ("refused", "open"):
         raise Refusal("HDW4S_NET_LAN is %r; it is 'refused' or 'open'" % lan)
-    return allow, lan
+    # hdw4s-run-session's own default, and its own test: only "yes" offers it.
+    return allow, lan, (webrtc or "yes") == "yes"
 
 
 def read_grants(inst):
@@ -400,7 +407,12 @@ class Policy:
     def __init__(self, inst):
         self.inst = inst
         self.kind = kind_of(inst)
-        allow, self.lan = settings(inst, self.kind)
+        allow, self.lan, self.webrtc = settings(inst, self.kind)
+        # The desktop's WebRTC port, once "up" has chosen it ("WebRTC: one
+        # UDP port per desktop" below); read back from the namespace's own
+        # record, so a rebuild of the backstop names the port the running
+        # pasta actually holds.
+        self.media = recorded_media(inst) if self.webrtc else None
         self.warnings = []
         self.essentials = []
         for word in allow.split():
@@ -459,6 +471,99 @@ class Policy:
 
 
 # --------------------------------------------------------------------------
+# WebRTC: one UDP port per desktop, carried in by pasta.
+#
+# A desktop switched to WebRTC offers the browser host candidates on the
+# namespace's own copy of the machine's address, and the browser sends to that
+# address and port. With nothing forwarded in, the datagrams reach the machine
+# and stop. So each desktop that offers WebRTC is given ONE UDP port: the
+# streaming server binds every candidate there (its own UDP mux,
+# --webrtc-udp-mux-port), and pasta forwards exactly that port, from the
+# machine, into exactly this namespace (-u). Nothing else is forwarded in, and
+# no other desktop's namespace has it, so one desktop cannot receive another's
+# media.
+#
+# WHICH PORT: one the kernel hands out as an ephemeral port at that moment.
+# That is the range a streaming server's candidates were in before desktops
+# had namespaces, so an upstream firewall an administrator opened for
+# HDW4S_MEDIA_PORTS=direct already passes it, and HDW4S_MEDIA_PORTS keeps its
+# meaning with no change: the media chain matches pasta's socket by its cgroup,
+# which is under hdw4s.slice. Why not a fixed block: it would be a new setting
+# every administrator has to get right and open, and a pool of seventy seats
+# would need seventy ports reserved whether or not anybody switches. Why not
+# the desktop's front-door number: only a named desktop has one.
+#
+# THE RACE, and what closes it: the port is free when it is picked and pasta
+# binds it a moment later. Measured (2026-11-18, passt 0.0~git20240220): a pasta
+# whose -u port a plain socket holds exits ("Failed to bind port"), and "pasta"
+# below restarts it until it gives up -- that fails closed by itself. But pasta
+# binds with SO_REUSEADDR, so anything else on the machine that also asks for
+# it can SHARE the port, and the more specific address then gets the datagrams
+# -- silently, on both sides. So "ready" does not trust the pick, and "check"
+# keeps asking: the port must be held by this unit's pasta and by nothing else.
+# (A thief would hold DTLS ciphertext and STUN checks it cannot answer; what it
+# can do is break the call. It needs a shell on the machine, not a desktop.)
+
+def recorded_media(inst):
+    try:
+        with open(os.path.join(inst_dir(inst), "forward")) as f:
+            port = json.load(f).get("media")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return port if isinstance(port, int) and 1024 <= port <= 65535 else None
+
+
+def pick_media_port():
+    """A UDP port free on every family pasta forwards, from the ephemeral range."""
+    for _ in range(20):
+        s4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s4.bind(("0.0.0.0", 0))
+            port = s4.getsockname()[1]
+            try:
+                s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            except OSError:
+                return port                      # no IPv6 at all
+            try:
+                s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                s6.bind(("::", port))
+                return port
+            except OSError as e:
+                if e.errno != errno.EADDRINUSE:
+                    return port                  # no usable IPv6 address family
+            finally:
+                s6.close()
+        finally:
+            s4.close()
+    raise Refusal("could not find a UDP port free for both IPv4 and IPv6 in 20 tries")
+
+
+def media_holders(port):
+    """pids holding UDP <port> in the CONTAINER's namespace (both families)."""
+    r = run(["ss", "-Hulnp", "sport = :%d" % port], check=False)
+    pids, sockets = set(), 0
+    for line in r.stdout.splitlines():
+        sockets += 1
+        found = [int(x) for x in re.findall(r"pid=(\d+)", line)]
+        pids.update(found or [-1])               # a socket with no owner we can see
+    return sockets, pids
+
+
+def media_refusal(inst, port):
+    """Why <port> is not this desktop's own forward, or None."""
+    sockets, pids = media_holders(port)
+    if not sockets:
+        return "pasta holds no socket on its WebRTC port %d" % port
+    ours = set(unit_pids("hdw4s-net@%s.service" % inst))
+    stray = sorted(pids - ours)
+    if stray:
+        return ("its WebRTC port %d is also held by %s, not only by its pasta"
+                % (port, ", ".join("pid %d" % p if p > 0 else "an unseen owner"
+                                   for p in stray)))
+    return None
+
+
+# --------------------------------------------------------------------------
 # The rulesets.
 
 def _elements(items):
@@ -483,6 +588,19 @@ def _port_sets(allowed, version):
         for n in ipaddress.collapse_addresses(nets):
             out.append("%s . %s . %d" % (n, p, port))
     return out
+
+
+def media_rule(pol):
+    """The one way a WebRTC answer leaves: from the desktop's own port, and only
+    as the REPLY to a flow the browser opened. Conntrack decides the direction,
+    so nothing in the desktop can use the port to open a flow of its own to a
+    destination the rest of the table refuses. The streaming server runs
+    ICE-lite: it answers checks and never sends the first packet, so this is
+    all it needs."""
+    if not pol.media:
+        return ""
+    return ("\t\t# WebRTC answers from this desktop's own port, replies only.\n"
+            "\t\tudp sport %d ct direction reply accept\n" % pol.media)
 
 
 def ns_ruleset(pol):
@@ -561,7 +679,7 @@ table inet %(t)s {
 		icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept
 		ip daddr @own4 goto refuse
 		ip6 daddr @own6 goto refuse
-		ip daddr @allow4 accept
+%(media)s		ip daddr @allow4 accept
 		ip6 daddr @allow6 accept
 		ip daddr . meta l4proto . th dport @allow4p accept
 		ip6 daddr . meta l4proto . th dport @allow6p accept
@@ -570,7 +688,8 @@ table inet %(t)s {
 }
 """ % dict(inst=pol.inst, kind=pol.kind, lan=pol.lan, t=NS_TABLE,
            a4=_elements(a4), a6=_elements(a6), p4=_elements(p4), p6=_elements(p6),
-           r4=_elements(r4), o4=_elements(o4), o6=_elements(o6), v6rule=v6rule)
+           r4=_elements(r4), o4=_elements(o4), o6=_elements(o6), v6rule=v6rule,
+           media=media_rule(pol))
 
 
 def unit_cgroup(inst):
@@ -594,6 +713,9 @@ def backstop_ruleset(policies):
                 rules.append("\t\tip daddr 127.0.0.1 %s dport { %s } accept" % (p, ps))
                 rules.append("\t\tip6 daddr ::1 %s dport { %s } accept" % (p, ps))
         rules.append("\t\tfib daddr type local goto refuse")
+        if pol.media:
+            # pasta's own answers from the forwarded WebRTC port: replies only.
+            rules.append("\t\tudp sport %d ct direction reply accept" % pol.media)
         for name, typ, items in (
                 ("a4", "ipv4_addr", _host_sets(pol.allowed, 4)),
                 ("a6", "ipv6_addr", _host_sets(pol.allowed, 6)),
@@ -826,6 +948,13 @@ def cmd_up(inst):
         say("hdw4s-netns: %s: %s" % (inst, w))
     unit = session_unit(inst, pol.kind)
     made = False
+    # The WebRTC port. KEPT when pasta is being started again under a running
+    # desktop: its streaming server is bound to that number and advertises it.
+    # Otherwise a fresh one: a pooled slot's next occupant never inherits the
+    # last one's.
+    if pol.webrtc:
+        if not (pol.media and os.path.exists(ns_path(inst)) and unit_active(unit)):
+            pol.media = pick_media_port()
     if os.path.exists(ns_path(inst)):
         if unit_active(unit):
             # pasta was restarted under a running desktop: the same namespace,
@@ -851,8 +980,19 @@ def cmd_up(inst):
         if not pol.resolvers:
             say("hdw4s-netns: %s: no non-loopback DNS resolver was found in %s, so"
                 " the desktop resolves no names" % (inst, resolver_file()))
+        rec = {p: sorted(v) for p, v in pol.forward.items()}
+        if pol.media:
+            rec["media"] = pol.media
         with open(os.path.join(d, "forward"), "w") as f:
-            json.dump({p: sorted(v) for p, v in pol.forward.items()}, f)
+            json.dump(rec, f)
+        # For the desktop's unit, which reads it as an EnvironmentFile= (systemd
+        # does, as root, before the desktop starts): the port its streaming
+        # server binds. Empty when the desktop does not offer WebRTC.
+        tmp = os.path.join(d, ".media.env")
+        with open(tmp, "w") as f:
+            f.write("HDW4S_WEBRTC_UDP_PORT=%s\n" % (pol.media or ""))
+        os.chmod(tmp, 0o644)
+        os.rename(tmp, os.path.join(d, "media.env"))
         load_ns_table(inst, pol)
         rebuild_backstop(pin_wait=True)
     except BaseException:
@@ -900,10 +1040,12 @@ def cmd_pasta(inst):
     run(["mount", "-o", "remount,bind,ro", bind])
     argv = [PASTA, "-f", "-q", "--config-net", "--netns-only",
             "--netns", ns_path(inst),
-            # Nothing forwarded INTO the namespace, nothing mapped from the
-            # container's loopback except the loopback essentials, and the
-            # gateway is the real one, never this machine's own loopback.
-            "-t", "none", "-u", "none",
+            # Nothing forwarded INTO the namespace but the desktop's one
+            # WebRTC port ("WebRTC: one UDP port per desktop"), nothing
+            # mapped from the container's loopback except the loopback
+            # essentials, and the gateway is the real one, never this
+            # machine's own loopback.
+            "-t", "none", "-u", str(fwd["media"]) if fwd.get("media") else "none",
             "-T", ",".join(str(p) for p in fwd.get("tcp", [])) or "none",
             "-U", ",".join(str(p) for p in fwd.get("udp", [])) or "none",
             "--no-map-gw"]
@@ -967,6 +1109,19 @@ def cmd_ready(inst):
     if in_ns(inst, ["nft", "list", "table", "inet", NS_TABLE], check=False).returncode:
         raise Refusal("%s has no %s table; refusing to serve a desktop whose"
                       " refusals are not loaded" % (ns_name(inst), NS_TABLE))
+    # The WebRTC port must be pasta's, and only pasta's: anything sharing it
+    # (pasta's own socket allows that; "WebRTC: one UDP port per desktop") would
+    # be sent this desktop's media. Refused rather than started without; the
+    # next start picks a port afresh.
+    port = recorded_media(inst)
+    if port:
+        why = media_refusal(inst, port)
+        while why and time.monotonic() < end:
+            time.sleep(0.1)
+            why = media_refusal(inst, port)
+        if why:
+            raise Refusal("%s: %s; refusing to start a desktop whose WebRTC"
+                          " media could go elsewhere" % (inst, why))
     try:
         with open(os.path.join(inst_dir(inst), "net", "unix")) as f:
             f.readline()
@@ -1096,6 +1251,11 @@ def cmd_check():
             problems.append("its own table inet %s is not loaded" % NS_TABLE)
         if not unit_active("hdw4s-net@%s.service" % inst):
             problems.append("hdw4s-net@%s.service is not running: it has only lo" % inst)
+        else:
+            port = recorded_media(inst)
+            why = media_refusal(inst, port) if port else None
+            if why:
+                problems.append(why)
         if problems:
             rc = 1
             print("netns       %s: %s" % (inst, "; ".join(problems)))
@@ -1236,6 +1396,9 @@ def cmd_policy(inst):
     print("essentials  %s" % (" ".join(map(str, pol.essentials)) or "(none)"))
     print("dns         %s" % (" ".join(map(str, pol.resolvers)) or "(none)"))
     print("grants      %s" % (" ".join(map(str, pol.grants)) or "(none)"))
+    print("webrtc      %s" % ("UDP %d, forwarded in by pasta" % pol.media if pol.media
+                               else "offered; its port is chosen when the desktop starts"
+                               if pol.webrtc else "not offered (HDW4S_WEBRTC)"))
     print("forwarded   tcp %s  udp %s" % (
         ",".join(map(str, sorted(pol.forward["tcp"]))) or "-",
         ",".join(map(str, sorted(pol.forward["udp"]))) or "-"))
