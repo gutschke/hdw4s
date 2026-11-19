@@ -55,6 +55,12 @@ if command -v dpkg-query >/dev/null 2>&1 &&
 fi
 
 echo -n 'Stopping sessions...'
+# The per-slot start and teardown watchers first, so nothing they trigger can
+# start a slot or tear one down while the rest is going away. They were never
+# stopped here, and stayed active with their files gone until the next reboot.
+mapfile -t units < <(systemctl list-units --plain --no-legend --all \
+                       'hdw4s-start@*.path' 'hdw4s-teardown@*.path' | awk '{print $1}')
+[ "${#units[@]}" -eq 0 ] || systemctl stop "${units[@]}" >/dev/null 2>&1 || :
 mapfile -t units < <(systemctl list-units --plain --no-legend --all \
                        'hdw4s@*' 'hdw4s-ephemeral@*' | awk '{print $1}')
 [ "${#units[@]}" -eq 0 ] || systemctl disable --now "${units[@]}" >/dev/null 2>&1 || :

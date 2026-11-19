@@ -29,6 +29,13 @@ if [ "$1" = 'remove' ] && [ -z "${DPKG_ROOT:-}" ] && [ -d /run/systemd/system ];
     /usr/lib/hdw4s/hdw4s-shared-expose --withdraw ||
       echo 'hdw4s: something is still mounted under /run/hdw4s/shared*; it was not ours to remove.' >&2
   fi
+  # The per-slot start and teardown watchers first, so nothing they trigger
+  # can start or tear down a slot while the rest goes; nothing stopped them,
+  # and they stayed active with their files gone until the next reboot.
+  for u in $(systemctl list-units --plain --no-legend --all \
+             'hdw4s-start@*.path' 'hdw4s-teardown@*.path' 2>/dev/null | awk '{print $1}'); do
+    systemctl stop "${u}" >/dev/null 2>&1 || :
+  done
   # hdw4s-ephemeral@ by name too: they used to go down with the firewall unit's
   # stop, through Requires=, and that stop is now refused (see below).
   for u in $(systemctl list-units --plain --no-legend 'hdw4s-proxy@*' 'hdw4s@*' \
