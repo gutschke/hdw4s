@@ -1,3 +1,14 @@
+hdw4s (2.6.6) unstable; urgency=medium
+
+  * New: `sudo hdw4s-root [-- command]` gives root on the machine from a
+    named desktop. sudo there stays inside the desktop's sandbox, where the
+    system is read-only; hdw4s-root runs outside it, keeping the desktop's
+    /tmp and display, the current directory and the terminal, and reports
+    the command's exit status, signals included. sudoers decides who may run
+    it, as for any other command. hdw4s(8), "RUNNING SOMETHING AS ROOT".
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Fri, 20 Nov 2026 18:00:00 -0800
+
 hdw4s (2.6.5) unstable; urgency=medium
 
   * When pasta fails because a newer passt's AppArmor profile for it is loaded
