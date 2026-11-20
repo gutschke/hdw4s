@@ -1,3 +1,11 @@
+hdw4s (2.6.3) unstable; urgency=medium
+
+  * A desktop with a port in HDW4S_NET_ALLOW or a LAN grant starts again on
+    kernels that refuse a protocol field in a range set's key (Proxmox
+    7.0.14-30 is one); its network namespace failed to load its firewall.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Thu, 19 Nov 2026 21:00:00 -0800
+
 hdw4s (2.6.2) unstable; urgency=medium
 
   * Removing the package no longer leaves the per-slot start and teardown
