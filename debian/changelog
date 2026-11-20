@@ -1,3 +1,11 @@
+hdw4s (2.6.5) unstable; urgency=medium
+
+  * When pasta fails because a newer passt's AppArmor profile for it is loaded
+    (Debian's since trixie ships one), the message says so and how to set it
+    aside, and `hdw4s check` warns before a desktop starts without a network.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Fri, 20 Nov 2026 15:30:00 -0800
+
 hdw4s (2.6.4) unstable; urgency=medium
 
   * Idle connections out of a desktop no longer die after about two hours
