@@ -333,13 +333,16 @@ euid=0  caps=cap_net_raw=ep
 The missing capability stopped the \fIgroup\fR change, which only programs on the legitimate path \-\- \fBsudo\fR, \fBsu\fR, \fBlogin\fR \-\- ever ask for\. It could not deny root to anybody \fBsudoers\fR denies it to\. It could only deny it to the administrators \fBsudoers\fR allows\.
 .P
 What does constrain a root process inside a session is the unit's sandbox, not its capabilities\. \fBProtectSystem=strict\fR makes the file system read\-only apart from the session's own directories, so the writes above fail there \-\- with one exception: it leaves \fB/run\fR writable, and the machine's \fB/run\fR is what a session sees there, so a root process in a session can write in it\. Devices are hidden and kernel tunables are not writable\. \fBCAP_SYS_ADMIN\fR, \fBCAP_SYS_MODULE\fR and \fBCAP_NET_ADMIN\fR are still out of the bounding set, so mounting, loading a module and reconfiguring the network stay impossible for uid 0 in a session\.
+.P
+That sandbox stops nobody \fBsudoers\fR allows \-\- a root process can always ask systemd for one outside it \-\- so for an administrator it is only in the way: \fBsudo apt install\fR fails with "Read\-only file system"\. Root on the machine is
 .IP "" 4
 .nf
-sudo systemd\-run \-\-pty \-\-collect \-\-uid=0 \-\- bash
+sudo hdw4s\-root                  # root's shell
+sudo hdw4s\-root \-\- <command>\|\.\|\.\|\.  # one command
 .fi
 .IP "" 0
 .P
-is the way out to a root shell without those restrictions\. systemd does not consult polkit for a caller that is already root, and the shell it starts is a transient unit outside the session's control group \-\- which also means it is named in the journal, rather than being an unremarked setuid transition\.
+which runs outside the desktop, as an \fBssh\fR login to the machine would: its file system, devices and network\. It keeps what the terminal means: the desktop's \fB/tmp\fR (where the display lives, so a graphical program as root can open windows), the current directory, the environment \fBsudo\fR leaves, and a terminal when there is one\. It stops when the desktop stops, its exit status is the command's, a signal included (\fB^C\fR gives 130), and the journal names it "hdw4s\-root for \fIuser\fR in \fIdesktop\fR"\. \fBsudoers\fR decides who may run it, as for any other command; it offers nothing to anyone \fBsudoers\fR does not already let run a shell as root\. In an ephemeral desktop, where nobody can \fBsudo\fR, it refuses; outside any desktop it simply runs the command\.
 .P
 \fBA desktop whose account can \fBsudo\fR is a desktop whose compromise is root\.\fR That is true of any Linux machine\. What is particular here is that the desktop is reachable through a reverse proxy, so more people are in a position to try\. If an account should not administer the machine from a browser, say so in \fBsudoers\fR: that is where an administrator looks for the answer, and it is the only place that decides it\.
 .SH "SHARED HOME DIRECTORIES"

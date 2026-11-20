@@ -728,12 +728,23 @@ and kernel tunables are not writable. `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`
 and `CAP_NET_ADMIN` are still out of the bounding set, so mounting, loading a
 module and reconfiguring the network stay impossible for uid 0 in a session.
 
-    sudo systemd-run --pty --collect --uid=0 -- bash
+That sandbox stops nobody `sudoers` allows -- a root process can always ask
+systemd for one outside it -- so for an administrator it is only in the way:
+`sudo apt install` fails with "Read-only file system". Root on the machine is
 
-is the way out to a root shell without those restrictions. systemd does not
-consult polkit for a caller that is already root, and the shell it starts is a
-transient unit outside the session's control group -- which also means it is
-named in the journal, rather than being an unremarked setuid transition.
+    sudo hdw4s-root                  # root's shell
+    sudo hdw4s-root -- <command>...  # one command
+
+which runs outside the desktop, as an `ssh` login to the machine would: its file
+system, devices and network. It keeps what the terminal means: the desktop's
+`/tmp` (where the display lives, so a graphical program as root can open
+windows), the current directory, the environment `sudo` leaves, and a terminal
+when there is one. It stops when the desktop stops, its exit status is the
+command's, a signal included (`^C` gives 130), and the journal names it
+"hdw4s-root for <user> in <desktop>". `sudoers` decides who may run it, as for
+any other command; it offers nothing to anyone `sudoers` does not already let
+run a shell as root. In an ephemeral desktop, where nobody can `sudo`, it
+refuses; outside any desktop it simply runs the command.
 
 **A desktop whose account can `sudo` is a desktop whose compromise is root.**
 That is true of any Linux machine. What is particular here is that the desktop

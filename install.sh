@@ -29,7 +29,7 @@ SOURCES=(hdw4s{,-session,-run-session,-firewall,-netns,-update,-wait,-duration,-
          hdw4s-slot-scrub@.service
          hdw4s-start hdw4s-start@.service hdw4s-start@.path
          hdw4s-incarnation hdw4s-incarnation@.service
-         hdw4s-enter hdw4s-session-environment shared-stores hdw4s-background hdw4s-stage-wait
+         hdw4s-enter hdw4s-root hdw4s-session-environment shared-stores hdw4s-background hdw4s-stage-wait
          hdw4s-stream-dir hdw4s-stream@.service hdw4s-sysusers.conf
          hdw4s-selkies-webrtc
          hdw4s-proxy@.socket hdw4s-proxy@.service
@@ -278,6 +278,8 @@ echo ' done.'
 
 echo -n 'Linking...'
 ln -sf "${dst}/hdw4s" "${sys}/sbin/hdw4s"
+# Run as "sudo hdw4s-root", so it must be on sudo's secure_path.
+ln -sf "${dst}/hdw4s-root" "${sys}/sbin/hdw4s-root"
 # The /shared tool is run by hand on a machine that owns a store, so it is on
 # the PATH too. Its units are templates on a store's path: none is enabled
 # here; hdw4s starts the ones for a store it owns at boot.
@@ -301,6 +303,8 @@ echo ' done.'
 
 echo -n 'Installing documentation...'
 gzip -9c "${dst}/hdw4s.8" > "${man}/hdw4s.8.gz"
+# hdw4s-root is documented in hdw4s(8), "RUNNING SOMETHING AS ROOT".
+ln -sf hdw4s.8.gz "${man}/hdw4s-root.8.gz"
 gzip -9c "${dst}/hdw4s-shared-sweep.8" > "${man}/hdw4s-shared-sweep.8.gz"
 # Tab completion, where bash-completion looks for an installed program's own
 # file under the same prefix; loaded the first time "hdw4s" is completed.

@@ -9683,10 +9683,72 @@ spec = importlib.util.spec_from_loader("netns", ld)
 m = importlib.util.module_from_spec(spec); ld.exec_module(m); print("%s|%s" % (m.pasta_apparmor(), m.apparmor_hint() or "none"))' "${N}")" 'None|none'
 )
 
+
+echo '== hdw4s-root: root on the machine from a named desktop =='
+( set +e; SB="$(mktemp -d)"; trap 'rm -rf "${SB}"' EXIT
+  # What can be checked without root: how the command's end is reported, who is
+  # refused, which desktop it decides it is in, and the exact systemd-run line.
+  # That the line does what it says (the desktop's /tmp and display, exit codes
+  # through the unit, PartOf= stopping it) was measured live on a test container.
+  R="${ROOT}/hdw4s-root"
+  "${R}" --child -- sh -c 'exit 7'; is 'the child reports the command'\''s exit status' "$?" '7'
+  # SIGINT: a command that kills itself with it -- python, because dash survives
+  # its own SIGINT -- launched by a caller that IGNORES SIGINT, as a background
+  # shell does. The child must hand the command a default ^C anyway.
+  python3 -I -c 'import signal, os, sys; signal.signal(signal.SIGINT, signal.SIG_IGN); os.execvp(sys.argv[1], sys.argv[1:])' \
+    "${R}" --child -- python3 -I -c 'import os, signal; os.kill(os.getpid(), signal.SIGINT)' 2>/dev/null
+  is 'RED ARM: death by SIGINT is 130 (systemd would report 0), even from a caller ignoring it' "$?" '130'
+  "${R}" --child -- sh -c 'kill -TERM $$'; is 'and SIGTERM is 143' "$?" '143'
+  "${R}" --child -- "${SB}/nonexistent" 2>/dev/null; is 'a command that does not exist is 127' "$?" '127'
+  printf '0::/hdw4s.slice/hdw4s-ephemeral@_hdw4s_3.service/app\n' > "${SB}/cg-eph"
+  out="$(HDW4S_ROOT_CGROUP="${SB}/cg-eph" "${R}" -- true 2>&1)"; rc=$?
+  is  'an ephemeral desktop is refused' "${rc}" '1'
+  has 'and told so' "${out}" 'not offered in an ephemeral desktop'
+  out="$("${R}" --bogus 2>&1)"; is 'a malformed command line is a usage error' "$?" '2'
+  if [ "$(id -u)" -ne 0 ]; then
+    printf '0::/user.slice/user-1000.slice/session-1.scope\n' > "${SB}/cg-out"
+    out="$(HDW4S_ROOT_CGROUP="${SB}/cg-out" "${R}" -- true 2>&1)"; rc=$?
+    is  'without root it refuses' "${rc}" '1'
+    has 'and says how to run it' "${out}" 'sudo hdw4s-root'
+  else
+    skip 'without root it refuses' 'running as root'
+    skip 'and says how to run it' 'running as root'
+  fi
+  rt="$(python3 -I - "${R}" <<'PY'
+import importlib.machinery, importlib.util, sys
+ld = importlib.machinery.SourceFileLoader("hroot", sys.argv[1])
+spec = importlib.util.spec_from_loader("hroot", ld)
+m = importlib.util.module_from_spec(spec); ld.exec_module(m)
+print("named=%s" % (m.desktop_unit("1:name=x:/\n0::/hdw4s.slice/hdw4s@alice.service/app.scope\n"),))
+print("outside=%s" % (m.desktop_unit("0::/user.slice/user-1000.slice/session-3.scope\n"),))
+print("lookalike=%s" % (m.desktop_unit("0::/system.slice/nothdw4s@alice.service\n"),))
+env = {"DISPLAY": ":0", "NOTIFY_SOCKET": "/run/x", "INVOCATION_ID": "abc", "SUDO_USER": "alice"}
+a = m.systemd_run_argv("hdw4s@alice.service", ["apt", "install", "hello"], env, True, "/usr/lib/hdw4s/hdw4s-root", "alice")
+b = m.systemd_run_argv("hdw4s@alice.service", ["tee", "/etc/x"], env, False, "/usr/lib/hdw4s/hdw4s-root", "alice")
+print("tty=%s" % ("--pty" in a and "--pipe" not in a))
+print("notty=%s" % ("--pipe" in b and "--pty" not in b))
+print("joins=%s" % (all(x in a for x in ("JoinsNamespaceOf=hdw4s@alice.service", "PrivateTmp=yes", "PartOf=hdw4s@alice.service", "--same-dir", "--wait", "--collect", "--uid=0"))))
+print("tail=%s" % " ".join(a[a.index("--", a.index("--uid=0")):]))
+print("env=%s" % " ".join(x for x in a if x.startswith("--setenv=")))
+print("shell=%s" % (m.command_of([]) == [__import__("pwd").getpwuid(0).pw_shell or "/bin/sh"]))
+PY
+)"
+  rv() { sed -n "s/^$1=//p" <<<"${rt}"; }
+  is  'inside a named desktop it names that unit'            "$(rv named)"     "('hdw4s@alice.service', False)"
+  is  'outside any desktop: none'                            "$(rv outside)"   'None'
+  is  'RED ARM: a unit merely ending in hdw4s@ is not one'   "$(rv lookalike)" 'None'
+  is  'a terminal gets a pty'                                "$(rv tty)"       'True'
+  is  'a pipe gets pipes'                                    "$(rv notty)"     'True'
+  is  "the unit joins the desktop's /tmp, stops with it, runs as root" "$(rv joins)" 'True'
+  is  'and runs the command through the child, which reports signals' "$(rv tail)" '-- /usr/lib/hdw4s/hdw4s-root --child -- apt install hello'
+  is  "sudo's environment goes along, systemd's own does not" "$(rv env)" '--setenv=DISPLAY=:0 --setenv=SUDO_USER=alice'
+  is  "no command is root's shell"                           "$(rv shell)"     'True'
+)
+
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1870  # update when tests are added; a wrong number is the point
+EXPECTED=1888  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

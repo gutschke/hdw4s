@@ -1,1 +1,3 @@
 usr/lib/hdw4s/hdw4s usr/sbin/hdw4s
+usr/lib/hdw4s/hdw4s-root usr/sbin/hdw4s-root
+usr/share/man/man8/hdw4s.8.gz usr/share/man/man8/hdw4s-root.8.gz

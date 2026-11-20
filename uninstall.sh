@@ -286,9 +286,12 @@ for sys in /usr/local /usr "${own}"; do
   # install.sh links into sbin, so bin alone left the real symlink dangling.
   [ ! -L "${sys}/sbin/hdw4s" ] || rm -f "${sys}/sbin/hdw4s"
   [ ! -L "${sys}/sbin/hdw4s-shared-sweep" ] || rm -f "${sys}/sbin/hdw4s-shared-sweep"
+  [ ! -L "${sys}/sbin/hdw4s-root" ] || rm -f "${sys}/sbin/hdw4s-root"
   [ ! -L "${sys}/bin/hdw4s" ] || rm -f "${sys}/bin/hdw4s"
   [ ! -e "${sys}/share/man/man8/hdw4s.8.gz" ] ||
     rm -f "${sys}/share/man/man8/hdw4s.8.gz"
+  [ ! -L "${sys}/share/man/man8/hdw4s-root.8.gz" ] ||
+    rm -f "${sys}/share/man/man8/hdw4s-root.8.gz"
   [ ! -e "${sys}/share/man/man8/hdw4s-shared-sweep.8.gz" ] ||
     rm -f "${sys}/share/man/man8/hdw4s-shared-sweep.8.gz"
   [ ! -e "${sys}/share/bash-completion/completions/hdw4s" ] ||

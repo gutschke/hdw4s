@@ -1,0 +1,145 @@
+#!/usr/bin/python3 -I
+"""Root on the machine, from inside a named hdw4s desktop.
+
+    sudo hdw4s-root                  root's shell
+    sudo hdw4s-root -- <command>...  one command
+
+hdw4s(8), "RUNNING SOMETHING AS ROOT". sudo inside a desktop works, and its root
+is still inside the desktop's sandbox: the system is read-only, devices and the
+network are the desktop's. That stops nobody sudoers allows -- "sudo
+systemd-run" has always been the way out -- so the sandbox was only a nuisance
+to an administrator. This is that way out, named and made to behave: sudoers
+decides who may run it, exactly as for any other command, and nothing here
+widens that.
+
+WHAT THE COMMAND GETS. A transient system service, outside the desktop:
+  * the machine's file system, devices and network, as an ssh login would have;
+  * the desktop's /tmp (JoinsNamespaceOf=, PrivateTmp=), so paths the user typed
+    and the X display socket -- which lives there -- mean what they meant in the
+    terminal. Measured (2026-11-20): without it the desktop's /tmp is invisible;
+  * NOT the desktop's network namespace: there a transient unit resolves no
+    names at all (measured), and root would act on the desktop's own refusal
+    table. Root on the machine is what this is for;
+  * the environment sudo left (its env_reset already applied: DISPLAY and
+    XAUTHORITY are on sudo's keep list), the current directory, a pty when the
+    terminal is one and plain pipes otherwise;
+  * PartOf= the desktop: it stops when the desktop stops (measured).
+
+EXIT STATUS. The command's. systemd counts death by SIGTERM, SIGINT, SIGHUP or
+SIGPIPE as a CLEAN exit, and "systemd-run --wait" then returns 0 (measured: ^C
+looked like success). So the unit runs this file again as "--child", which
+waits for the command and exits 128+N when it died of signal N, as a shell
+reports it.
+
+OUTSIDE A DESKTOP it runs the command directly: the caller is root on the
+machine already. In an EPHEMERAL desktop it refuses: nobody there can sudo, and
+this is not offered to visitors.
+"""
+
+import os
+import pwd
+import re
+import shlex
+import signal
+import subprocess
+import sys
+
+CGROUP = os.environ.get("HDW4S_ROOT_CGROUP", "/proc/self/cgroup")
+UNIT_RE = re.compile(r"/(hdw4s(-ephemeral)?@[^/]+\.service)(?:/|$)")
+# Variables that describe THIS process's place in systemd, not the user's
+# intent; the transient unit gets its own.
+NOT_FORWARDED = {"INVOCATION_ID", "JOURNAL_STREAM", "NOTIFY_SOCKET", "LISTEN_FDS",
+                 "LISTEN_PID", "LISTEN_FDNAMES", "MANAGERPID", "SYSTEMD_EXEC_PID",
+                 "WATCHDOG_PID", "WATCHDOG_USEC", "MAINPID"}
+
+
+def say(msg):
+    print("hdw4s-root: %s" % msg, file=sys.stderr)
+
+
+def desktop_unit(text):
+    """(unit, ephemeral) for the desktop this cgroup line set is inside, or None."""
+    for line in text.splitlines():
+        if line.startswith("0::"):
+            m = UNIT_RE.search(line[3:])
+            if m:
+                return m.group(1), bool(m.group(2))
+    return None
+
+
+def command_of(args):
+    """The command to run: what follows "--", or root's shell."""
+    if not args:
+        return [pwd.getpwuid(0).pw_shell or "/bin/sh"]
+    if args[0] == "--" and len(args) > 1:
+        return args[1:]
+    raise ValueError("usage: sudo hdw4s-root [-- <command> [args...]]")
+
+
+def systemd_run_argv(unit, cmd, env, tty, self_path, user):
+    argv = ["systemd-run", "--quiet", "--wait", "--collect", "--same-dir",
+            "--service-type=exec", "--uid=0",
+            "--description=hdw4s-root for %s in %s: %s"
+            % (user, unit, " ".join(shlex.quote(c) for c in cmd))[:200],
+            "--pty" if tty else "--pipe",
+            "-p", "JoinsNamespaceOf=%s" % unit, "-p", "PrivateTmp=yes",
+            "-p", "PartOf=%s" % unit, "-p", "After=%s" % unit]
+    for k in sorted(env):
+        if k not in NOT_FORWARDED and "\n" not in env[k]:
+            argv.append("--setenv=%s=%s" % (k, env[k]))
+    return argv + ["--", self_path, "--child", "--"] + cmd
+
+
+def child(cmd):
+    """Run CMD and exit as a shell would report it, signals included."""
+    try:
+        # The command gets ^C and ^\ as in any terminal, whatever this process
+        # inherited: a caller started in the background hands both on IGNORED,
+        # and then ^C would not end it (the suite, run in the background, did).
+        p = subprocess.Popen(cmd, preexec_fn=lambda: (
+            signal.signal(signal.SIGINT, signal.SIG_DFL),
+            signal.signal(signal.SIGQUIT, signal.SIG_DFL)))
+    except OSError as e:
+        say("%s: %s" % (cmd[0], e.strerror))
+        return 127 if isinstance(e, FileNotFoundError) else 126
+    # ^C and ^\ go to the whole foreground group; the command decides what they
+    # mean, and this process only reports the outcome.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGQUIT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, lambda s, f: p.send_signal(s))
+    signal.signal(signal.SIGHUP, lambda s, f: p.send_signal(s))
+    rc = p.wait()
+    return 128 - rc if rc < 0 else rc
+
+
+def main(argv):
+    if argv[:1] == ["--child"]:
+        return child(argv[2:] if argv[1:2] == ["--"] else argv[1:])
+    try:
+        cmd = command_of(argv)
+    except ValueError as e:
+        say(str(e))
+        return 2
+    try:
+        with open(CGROUP) as f:
+            where = desktop_unit(f.read())
+    except OSError:
+        where = None
+    if where and where[1]:
+        say("not offered in an ephemeral desktop")
+        return 1
+    if os.geteuid() != 0:
+        say("needs root; run it as: sudo hdw4s-root [-- <command>]")
+        return 1
+    if where is None:
+        os.execvp(cmd[0], cmd)
+    unit = where[0]
+    tty = os.isatty(0) and os.isatty(1)
+    user = os.environ.get("SUDO_USER") or "root"
+    r = subprocess.run(systemd_run_argv(unit, cmd, dict(os.environ), tty,
+                                        os.path.realpath(sys.argv[0]), user))
+    return r.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
