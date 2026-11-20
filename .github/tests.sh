@@ -9567,12 +9567,101 @@ print(m.grant_refusal(sys.argv[2]) or "ALLOWED")' "${N}" "$1" 2>&1; }
     skip 'lan grant by a non-root user is refused' 'running as root'
     skip 'and says why' 'running as root'
   fi
+
+  # The keepalive probe. Whether a REAL pasta answers needs root and a TUN
+  # device; that was measured on a test container (noble's passt: "ignores" at
+  # ~2 s; Debian's 0.0~git20250503, 20260728, 20261002: "answers"). Here: that
+  # pasta's word gets out, that the client classifies a real kernel correctly
+  # (the trap: since Python 3.10 a read timeout and the kernel's ETIMEDOUT are
+  # the same class), and the decision around it -- especially that EVERY failure,
+  # and several desktops starting at once, end with keepalive raised.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/pasta.args"\necho answers\n' "${SB}" > "${SB}/pasta-ok"
+  printf '#!/bin/sh\necho ignores\n' > "${SB}/pasta-bad"
+  printf '#!/bin/sh\nexit 3\n' > "${SB}/pasta-dies"
+  chmod +x "${SB}/pasta-"*
+  is  "keepalive-probe prints pasta's verdict"  "$(HDW4S_PASTA="${SB}/pasta-ok" "${N}" keepalive-probe 2>&1)" 'answers'
+  has 'and runs the client through pasta, in a namespace of its own' "$(tr '\n' ' ' < "${SB}/pasta.args")" '--config-net -- '
+  is  'whichever verdict pasta gives'  "$(HDW4S_PASTA="${SB}/pasta-bad" "${N}" keepalive-probe 2>&1)" 'ignores'
+  has 'RED ARM: a pasta that exits is inconclusive, never a verdict' "$(HDW4S_PASTA="${SB}/pasta-dies" "${N}" keepalive-probe 2>&1)" 'error: pasta exited 3'
+
+  mkdir -p "${SB}/kbin" "${SB}/krun"
+  cat > "${SB}/ka.py" <<'PY'
+import importlib.machinery, importlib.util, os, socket, subprocess, sys, threading
+ld = importlib.machinery.SourceFileLoader("netns", sys.argv[1])
+spec = importlib.util.spec_from_loader("netns", ld)
+m = importlib.util.module_from_spec(spec); ld.exec_module(m)
+sb = sys.argv[2]
+def client(close):
+    l = socket.socket(); l.bind(("127.0.0.1", 0)); l.listen(1)
+    def srv():
+        c, _ = l.accept()
+        if close: c.close()
+        else: held.append(c)
+    held = []; threading.Thread(target=srv, daemon=True).start()
+    r = subprocess.run([sys.executable, "-I", "-c", m.KEEPALIVE_CLIENT, str(l.getsockname()[1]), "127.0.0.1"],
+                       capture_output=True, text=True, timeout=15)
+    return r.stdout.strip() or r.stderr.strip()[-80:]
+print("client-live=" + client(False))
+print("client-closed=" + client(True))
+def stub(body):
+    with open(os.path.join(sb, "kbin", "systemd-run"), "w") as f: f.write("#!/bin/sh\n" + body + "\n")
+    os.chmod(os.path.join(sb, "kbin", "systemd-run"), 0o755)
+def reset():
+    for f in ("pasta-keepalive.json", "nsenter.log", "probes"):
+        try: os.unlink(os.path.join(sb, "krun", f) if f != "nsenter.log" and f != "probes" else os.path.join(sb, f))
+        except OSError: pass
+def raised():
+    try: return "sysctl -q -w net.ipv4.tcp_keepalive_time=1000000" in open(os.path.join(sb, "nsenter.log")).read()
+    except OSError: return False
+def run(name, body, callers=1):
+    reset(); stub(body)
+    errs = []
+    def one():
+        try: m.apply_keepalive("alice")
+        except Exception as e: errs.append(repr(e))
+    ts = [threading.Thread(target=one) for _ in range(callers)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    n = sum(1 for _ in open(os.path.join(sb, "nsenter.log"))) if raised() else 0
+    probes = sum(1 for _ in open(os.path.join(sb, "probes"))) if os.path.exists(os.path.join(sb, "probes")) else 0
+    print("%s=raised:%s errors:%d raisedcount:%d probes:%d" % (name, raised(), len(errs), n, probes))
+count = 'echo x >> "%s/probes"; ' % sb
+run("answers", count + "echo answers")
+run("ignores", count + "echo ignores")
+run("garbage", count + "echo hello")
+run("exit1", count + "exit 1")
+run("concurrent", count + "sleep 0.5; echo ignores", callers=4)
+reset(); stub(count + "echo answers"); m.apply_keepalive("alice"); m.apply_keepalive("alice")
+print("cached=probes:%d" % sum(1 for _ in open(os.path.join(sb, "probes"))))
+# No systemd-run anywhere: PATH is the stub directory alone, so the real one --
+# which on a root runner would start a real transient unit -- cannot be reached.
+reset(); os.unlink(os.path.join(sb, "kbin", "systemd-run"))
+os.environ["PATH"] = os.path.join(sb, "kbin")
+try:
+    m.apply_keepalive("alice"); err = 0
+except Exception:
+    err = 1
+print("missing=raised:%s errors:%d" % (raised(), err))
+PY
+  printf '#!/bin/sh\necho "$*" >> "%s/nsenter.log"\n' "${SB}" > "${SB}/kbin/nsenter"
+  chmod +x "${SB}/kbin/nsenter"
+  ka="$(PATH="${SB}/kbin:${PATH}" HDW4S_RUNDIR="${SB}/krun" HDW4S_PASTA="${SB}/pasta-ok" \
+        python3 -I "${SB}/ka.py" "${N}" "${SB}" 2>&1)"
+  kv() { sed -n "s/^$1=//p" <<<"${ka}"; }
+  is  'the client: a live peer whose kernel answers reads "answers" (not "ignores")' "$(kv client-live)" 'answers'
+  is  'the client: a peer that closes reads "ended", not a verdict'        "$(kv client-closed)" 'ended'
+  is  'a pasta that answers: the defaults stand'                 "$(kv answers)"    'raised:False errors:0 raisedcount:0 probes:1'
+  is  'a pasta that ignores: keepalive raised'                   "$(kv ignores)"    'raised:True errors:0 raisedcount:1 probes:1'
+  is  'a probe that says something else: raised'                 "$(kv garbage)"    'raised:True errors:0 raisedcount:1 probes:1'
+  is  'a probe that fails: raised'                               "$(kv exit1)"      'raised:True errors:0 raisedcount:1 probes:1'
+  is  'four desktops starting at once: one probe, every one raised, no error' "$(kv concurrent)" 'raised:True errors:0 raisedcount:4 probes:1'
+  is  'a kept verdict is not probed again'                        "$(kv cached)"     'probes:1'
+  is  'no systemd-run at all: raised, not an error'              "$(kv missing)"    'raised:True errors:0'
 )
 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1852  # update when tests are added; a wrong number is the point
+EXPECTED=1865  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

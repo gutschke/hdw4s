@@ -1362,6 +1362,21 @@ table inside its own namespace, which its occupant may be able to remove;
 `/etc/resolv.conf` names the machine's upstream resolvers, since the namespace
 cannot reach a loopback stub.
 
+The pasta in Ubuntu 24.04 (passt 0.0~git20240220) never answers a TCP
+keepalive probe, so a desktop's own kernel would end every idle connection that
+uses keepalive -- an idle `ssh` session after about 2 hours 11 minutes. So the
+first desktop to start after boot, or after passt changes, tests whether pasta
+answers one; this takes a few seconds, once, and desktops starting at the same
+time wait for that one test. When pasta does not answer, or the test cannot
+tell, every desktop's namespace raises its keepalive defaults
+(`net.ipv4.tcp_keepalive_time` and `_intvl` to 1000000 seconds, `_probes` to
+255). That keeps a program that uses the defaults, as `ssh` does; one that sets
+its own keepalive timing lasts 255 of its intervals instead of 9, and one that
+also sets its own probe count is not helped -- only a passt from 2024-11 or
+later answers for them all. When pasta answers, the defaults stand. `hdw4s
+check` says which, and reports a running desktop that should have them raised
+but has not.
+
 Nothing is carried into the namespace but WebRTC. A desktop that offers it
 (`HDW4S_WEBRTC=yes`, the default) is given one UDP port when it starts, taken
 from the ephemeral range like any other; its streaming server puts every WebRTC

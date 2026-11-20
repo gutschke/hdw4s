@@ -37,7 +37,7 @@ TABLE = {
     "xrandr": "x11-xserver-utils",
     "dconf": "dconf-cli",
     "gsettings": "libglib2.0-bin", "gdbus": "libglib2.0-bin",
-    "pgrep": "procps", "pkill": "procps",
+    "pgrep": "procps", "pkill": "procps", "sysctl": "procps",
     "systemctl": "systemd", "systemd-run": "systemd",
 }
 

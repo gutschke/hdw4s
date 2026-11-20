@@ -11,6 +11,7 @@
     hdw4s-netns policy <instance>                what one desktop may reach, resolved
     hdw4s-netns parse <entry>...                 grammar only; exit 2 on a bad one
     hdw4s-netns print <instance> | print-backstop   the rulesets, unloaded
+    hdw4s-netns keepalive-probe                  does pasta answer TCP keepalive?
 
 hdw4s(8), "NETWORK". The unit is hdw4s-net@.service; the desktop units Require
 it, are ordered After it, and join the namespace with NetworkNamespacePath=.
@@ -108,6 +109,8 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 
 ETCDIR = os.environ.get("HDW4S_ETCDIR", "/etc/hdw4s")
@@ -965,6 +968,207 @@ def tun_refusal():
 
 
 # --------------------------------------------------------------------------
+# TCP keepalive, and a pasta that does not answer it.
+#
+# THE DEFECT. Ubuntu 24.04's pasta (passt 0.0~git20240220) never answers a TCP
+# keepalive probe: it takes the probe (SEQ = SND.NXT-1) for a duplicate ACK and
+# sends nothing back. So the desktop's own kernel declares every idle connection
+# with SO_KEEPALIVE dead once its probes run out -- at the Linux defaults
+# (7200 s, then 9 probes 75 s apart) an idle ssh session dies at 2h11m. Fixed
+# upstream in passt 2024_11_21 ("tcp: Acknowledge keep-alive segments"); noble
+# has never updated passt.
+#
+# WHAT THIS DOES. The keepalive defaults are per network namespace, so a desktop
+# whose pasta has the defect gets them raised in its own namespace only
+# (KEEPALIVE_RAISED). That costs little such a pasta was giving: its own socket
+# toward the far end has no keepalive, so the probes never left the box -- they
+# could only kill. What is lost: a connection pasta itself forgot (it was
+# restarted under the desktop) is no longer cleaned up by keepalive, only when
+# the program next writes. Who is helped, by kernel arithmetic (unmeasured
+# beyond 40 s): a program that relies on the defaults, ssh's TCPKeepAlive
+# included, is kept; one that sets its own idle time and interval but not the
+# count dies after 255 intervals instead of 9 (later, not never); one that sets
+# all three is not helped. Only a fixed pasta helps them all.
+#
+# WHY IT IS DECIDED BY BEHAVIOUR, not by passt's version: a fixed pasta must
+# keep the defaults. From 2025-12 pasta arms keepalive on its own socket only
+# when it sees the desktop's probes, so raised defaults there would leave a dead
+# peer undetected by anyone. A version string is a claim -- a patched build keeps
+# its old date -- and the probe is a measurement: a socket in a throwaway
+# namespace, through this pasta to the container's loopback, with a 1 s
+# keepalive. Measured on noble (2026-11-20): the defective pasta kills it at
+# ~2 s; 0.0~git20250503, 20260728 and 20261002 keep it to the 4 s deadline.
+#
+# WHY IT RUNS OUTSIDE THIS UNIT: the backstop refuses this machine's own
+# addresses to anything in hdw4s-net.slice, the probe's loopback listener
+# included, so "up" starts it through systemd-run in system.slice, bounded well
+# inside the unit's start timeout. The verdict is kept per pasta binary (its
+# inode, size and mtime) in KEEPALIVE_CACHE, under /run: probed once per boot and
+# again after passt changes. AT BOOT EVERY ENABLED DESKTOP STARTS AT ONCE, so
+# the probe runs under KEEPALIVE_LOCK -- one probes, the others wait and read its
+# verdict -- and the cache is written through a temporary file of its own (a
+# shared temporary name lost the race in most of 20 measured rounds, leaving a
+# desktop behind a defective pasta with the defaults).
+#
+# ANY FAILURE RAISES THE DEFAULTS: a probe that cannot run, times out, says
+# something else, or a cache that cannot be written. Losing a dead-peer check is
+# the cheaper mistake than killing every idle connection. A transient failure is
+# not kept and is probed again at the next start; a lasting one -- no IPv4
+# default route for the probe to aim at, as on an IPv6-only machine -- is kept,
+# so it does not cost every start a probe.
+
+KEEPALIVE_CACHE = os.path.join(RUNDIR, "pasta-keepalive.json")
+KEEPALIVE_LOCK = os.path.join(RUNDIR, "pasta-keepalive.lock")
+KEEPALIVE_TIMEOUT = 25        # the probe's pasta is bounded at 20 s itself
+# Near the top of what the kernel takes (the sysctl stores jiffies in an int, so
+# 2147483 s at HZ=1000), not at it: 11.6 days before the first probe, the same
+# again between probes, and 255 of them.
+KEEPALIVE_RAISED = (("net.ipv4.tcp_keepalive_time", 1000000),
+                    ("net.ipv4.tcp_keepalive_intvl", 1000000),
+                    ("net.ipv4.tcp_keepalive_probes", 255))
+# Run inside the probe's throwaway namespace. It aims at the namespace's IPv4
+# gateway, which pasta maps to the machine's loopback; the suite passes an
+# address instead, to run this same classification against its own loopback.
+KEEPALIVE_CLIENT = r"""
+import socket, struct, sys
+gw = sys.argv[2] if len(sys.argv) > 2 else None
+for line in ([] if gw else open("/proc/net/route").read().splitlines()[1:]):
+    f = line.split()
+    if f[1] == "00000000" and f[2] != "00000000":
+        gw = socket.inet_ntoa(struct.pack("<L", int(f[2], 16)))
+if not gw:
+    print("noroute"); sys.exit()
+s = socket.create_connection((gw, int(sys.argv[1])), timeout=5)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 1)
+s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+s.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 1)
+s.settimeout(4)
+try:
+    s.recv(1)
+    print("ended")
+except TimeoutError as e:
+    # Since Python 3.10 the read timeout IS TimeoutError; only the kernel's
+    # ETIMEDOUT, which is the keepalive giving up, carries an errno.
+    print("ignores" if e.errno else "answers")
+except OSError as e:
+    print("error %s" % (e.strerror or type(e).__name__))
+"""
+
+
+def pasta_identity():
+    out = []
+    for p in (PASTA, PASTA + ".avx2"):
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out.append([os.path.realpath(p), st.st_ino, st.st_size, st.st_mtime_ns])
+    return out
+
+
+def cmd_keepalive_probe():
+    """Print this pasta's verdict: "answers", "ignores", "noroute", or anything
+    else for inconclusive. Run as root, OUTSIDE hdw4s-net.slice (see above)."""
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    lsock.settimeout(15)
+    held = []
+
+    def hold():
+        try:
+            held.append(lsock.accept())
+        except OSError:
+            pass
+    threading.Thread(target=hold, daemon=True).start()
+    try:
+        r = subprocess.run([PASTA, "-q", "--config-net", "--", sys.executable, "-I", "-c",
+                            KEEPALIVE_CLIENT, str(lsock.getsockname()[1])],
+                           capture_output=True, text=True, timeout=20)
+        words = r.stdout.split()
+        print(" ".join(words) if words else
+              "error: pasta exited %d (%s)" % (r.returncode, r.stderr.strip()[:200]))
+    except subprocess.TimeoutExpired:
+        print("error: the probe did not finish in 20 s")
+    return 0
+
+
+def read_keepalive_cache():
+    """The kept verdict for the pasta installed NOW, or None."""
+    try:
+        with open(KEEPALIVE_CACHE) as f:
+            cached = json.load(f)
+        if cached.get("pasta") == pasta_identity():
+            return cached
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
+def probe_keepalive():
+    """Probe through systemd-run, keep a lasting verdict, return it."""
+    cmd = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--slice=system.slice"]
+    if "HDW4S_PASTA" in os.environ:
+        cmd.append("--setenv=HDW4S_PASTA=%s" % PASTA)
+    r = subprocess.run(cmd + ["--", os.path.realpath(sys.argv[0]), "keepalive-probe"],
+                       capture_output=True, text=True, timeout=KEEPALIVE_TIMEOUT)
+    got = r.stdout.strip()
+    if got not in ("answers", "ignores", "noroute"):
+        return "unknown", got or ("systemd-run exited %d: %s" % (r.returncode, r.stderr.strip()[:200]))
+    verdict, detail = (got, "probed now") if got != "noroute" else \
+        ("unknown", "no IPv4 default route to probe through")
+    try:
+        fd, tmp = tempfile.mkstemp(dir=RUNDIR, prefix=".pasta-keepalive.")
+        with os.fdopen(fd, "w") as f:
+            json.dump({"pasta": pasta_identity(), "verdict": verdict, "detail": detail,
+                       "when": time.strftime("%Y-%m-%d %H:%M:%S")}, f)
+        os.rename(tmp, KEEPALIVE_CACHE)
+    except OSError as e:
+        say("hdw4s-netns: the keepalive verdict could not be kept (%s); the next start"
+            " probes again" % e)
+    return verdict, detail
+
+
+def keepalive_verdict():
+    """("answers"|"ignores"|"unknown", detail). Never raises: any failure is "unknown"."""
+    try:
+        os.makedirs(RUNDIR, exist_ok=True)
+        with open(KEEPALIVE_LOCK, "a") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            cached = read_keepalive_cache()
+            if cached and cached.get("verdict") in ("answers", "ignores", "unknown"):
+                return cached["verdict"], cached.get("detail") or "probed %s" % cached.get("when", "earlier")
+            return probe_keepalive()
+    except Exception as e:
+        return "unknown", "%s: %s" % (type(e).__name__, e)
+
+
+def apply_keepalive(inst):
+    verdict, detail = keepalive_verdict()
+    if verdict == "answers":
+        return
+    in_ns(inst, ["sysctl", "-q", "-w"] + ["%s=%d" % kv for kv in KEEPALIVE_RAISED])
+    if verdict == "ignores":
+        say("hdw4s-netns: %s: %s does not answer TCP keepalive probes (passt older than"
+            " 2024-11), which would end every idle connection that uses them; keepalive"
+            " is raised in this desktop's namespace instead (%s)" % (inst, PASTA, detail))
+    else:
+        say("hdw4s-netns: %s: could not tell whether %s answers TCP keepalive probes"
+            " (%s); keepalive is raised in this desktop's namespace, as for one that"
+            " does not" % (inst, PASTA, detail))
+
+
+def ns_keepalive(inst):
+    """The namespace's keepalive values, in KEEPALIVE_RAISED's order, or None."""
+    r = in_ns(inst, ["sysctl", "-n"] + [k for k, _ in KEEPALIVE_RAISED], check=False)
+    try:
+        return tuple(int(x) for x in r.stdout.split())
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------------------------------
 # The net unit's steps.
 
 def cmd_up(inst):
@@ -1004,6 +1208,11 @@ def cmd_up(inst):
         # An "ip netns add" namespace starts with lo DOWN (measured), and an
         # application's own loopback listener then fails.
         run(["ip", "-n", ns_name(inst), "link", "set", "lo", "up"])
+        try:
+            apply_keepalive(inst)
+        except (Refusal, OSError, subprocess.SubprocessError) as e:
+            # Not a boundary: a desktop without it still starts, and says so.
+            say("hdw4s-netns: %s: keepalive left at the kernel's defaults: %s" % (inst, e))
         d = inst_dir(inst)
         os.makedirs(os.path.join(d, "net"), mode=0o755, exist_ok=True)
         os.chmod(d, 0o755)
@@ -1263,6 +1472,20 @@ def cmd_check():
     if not os.access(PASTA, os.X_OK):
         print("netns       %s is not installed -- no desktop can start" % PASTA)
         rc = 1
+    cached = read_keepalive_cache()
+    verdict = cached.get("verdict") if cached else None
+    if verdict == "answers":
+        print("netns       keepalive: pasta answers TCP keepalive probes; the defaults stand")
+    elif verdict == "ignores":
+        print("netns       keepalive: pasta does NOT answer TCP keepalive probes (passt older"
+              " than 2024-11); each desktop's namespace raises keepalive instead")
+    elif verdict == "unknown":
+        print("netns       keepalive: could not tell whether pasta answers TCP keepalive"
+              " probes (%s); each desktop's namespace raises keepalive"
+              % cached.get("detail", "inconclusive"))
+    else:
+        print("netns       keepalive: not probed for this pasta yet; the next desktop to"
+              " start probes it")
     n = 0
     for inst, unit in active_desktops():
         n += 1
@@ -1293,6 +1516,11 @@ def cmd_check():
             why = media_refusal(inst, port) if port else None
             if why:
                 problems.append(why)
+        if want is not None and verdict in ("ignores", "unknown"):
+            vals = ns_keepalive(inst)
+            if vals != tuple(v for _, v in KEEPALIVE_RAISED):
+                problems.append("keepalive is NOT raised in its namespace (%s), so its idle"
+                                " connections die; restart it" % (vals,))
         if problems:
             rc = 1
             print("netns       %s: %s" % (inst, "; ".join(problems)))
@@ -1470,6 +1698,8 @@ def main(argv):
             return 0
         if cmd == "check" and not args:
             return cmd_check()
+        if cmd == "keepalive-probe" and not args:
+            return cmd_keepalive_probe()
         if cmd == "lan":
             return cmd_lan(args)
         if cmd == "policy" and len(args) == 1:
