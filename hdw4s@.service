@@ -141,12 +141,15 @@ StartLimitBurst=25
 # could not deny root to anyone sudoers denies it to, only to the administrators
 # sudoers allows.
 #
-# What keeps a session from acting on that is the sandbox below -- ProtectSystem=
-# strict makes the writes above fail inside this unit -- and sudoers, which is
-# where "who may become root" belongs and where an administrator will look for
-# it. The rest of the bounding set still does real work: CAP_SYS_ADMIN,
-# CAP_SYS_MODULE, CAP_NET_ADMIN and everything else remain out, so mounting,
-# module loading and network reconfiguration stay impossible for uid 0 here.
+# What decides who becomes root is sudoers, and nothing in this unit changes
+# that. The sandbox below only CONSTRAINS a root process while it stays inside
+# this unit -- ProtectSystem=strict makes the writes above fail here, and
+# CAP_SYS_ADMIN, CAP_SYS_MODULE, CAP_NET_ADMIN and the rest stay out of the
+# bounding set -- and a root process need not stay: "sudo systemd-run" asks
+# PID 1, which does not consult polkit for root, for a unit outside this one,
+# with none of these limits (measured 2026-11-17: full CapEff, /usr writable).
+# So the sandbox is no boundary against anyone sudoers allows, only a hindrance;
+# hdw4s(8), "RUNNING SOMETHING AS ROOT", says the same to administrators.
 # NO DAC CAPABILITY HERE, and the reason is worth more than the line.
 #
 # For several hours on 2026-09-25 this granted one (first CAP_DAC_READ_SEARCH,
