@@ -576,17 +576,25 @@ def _host_sets(allowed, version):
     return [str(n) for n in ipaddress.collapse_addresses(nets)] if nets else []
 
 
-def _port_sets(allowed, version):
+def _port_sets(allowed, version, proto):
+    """ADDRESS . PORT for one protocol. One set per protocol, matched with
+    "tcp dport" or "udp dport", never one "addr . proto . port" set matched
+    with "meta l4proto . th dport": Proxmox's 7.0.14-30 kernel refuses any
+    range set whose key holds meta l4proto ("Operation not supported"), and
+    with it the whole table, while ip protocol, th dport, meta mark and
+    iifname in the same place still load (measured 2026-11-19). It left every
+    desktop with a port grant unable to start after the host's reboot. The
+    protocol is not a field of the key at all, so no kernel can object to how
+    it is read."""
     groups = {}
     for n, protos, port, _ in allowed:
-        if port is None or n.version != version:
+        if port is None or n.version != version or proto not in protos:
             continue
-        for p in protos:
-            groups.setdefault((p, port), []).append(n)
+        groups.setdefault(port, []).append(n)
     out = []
-    for (p, port), nets in sorted(groups.items()):
+    for port, nets in sorted(groups.items()):
         for n in ipaddress.collapse_addresses(nets):
-            out.append("%s . %s . %d" % (n, p, port))
+            out.append("%s . %d" % (n, port))
     return out
 
 
@@ -606,7 +614,8 @@ def media_rule(pol):
 def ns_ruleset(pol):
     """inet hdw4s_ns, loaded INSIDE the desktop's namespace."""
     a4, a6 = _host_sets(pol.allowed, 4), _host_sets(pol.allowed, 6)
-    p4, p6 = _port_sets(pol.allowed, 4), _port_sets(pol.allowed, 6)
+    p4t, p4u = _port_sets(pol.allowed, 4, "tcp"), _port_sets(pol.allowed, 4, "udp")
+    p6t, p6u = _port_sets(pol.allowed, 6, "tcp"), _port_sets(pol.allowed, 6, "udp")
     r4 = [str(n) for n in pol.refused4()]
     o4 = [str(n) for n in pol.own_nets(4)]
     o6 = [str(n) for n in pol.own_nets(6)]
@@ -630,14 +639,24 @@ table inet %(t)s {
 		flags interval%(a6)s
 	}
 
-	set allow4p {
-		type ipv4_addr . inet_proto . inet_service
-		flags interval%(p4)s
+	set allow4t {
+		type ipv4_addr . inet_service
+		flags interval%(p4t)s
 	}
 
-	set allow6p {
-		type ipv6_addr . inet_proto . inet_service
-		flags interval%(p6)s
+	set allow4u {
+		type ipv4_addr . inet_service
+		flags interval%(p4u)s
+	}
+
+	set allow6t {
+		type ipv6_addr . inet_service
+		flags interval%(p6t)s
+	}
+
+	set allow6u {
+		type ipv6_addr . inet_service
+		flags interval%(p6u)s
 	}
 
 	set refuse4 {
@@ -681,13 +700,16 @@ table inet %(t)s {
 		ip6 daddr @own6 goto refuse
 %(media)s		ip daddr @allow4 accept
 		ip6 daddr @allow6 accept
-		ip daddr . meta l4proto . th dport @allow4p accept
-		ip6 daddr . meta l4proto . th dport @allow6p accept
+		ip daddr . tcp dport @allow4t accept
+		ip daddr . udp dport @allow4u accept
+		ip6 daddr . tcp dport @allow6t accept
+		ip6 daddr . udp dport @allow6u accept
 		ip daddr @refuse4 goto refuse
 %(v6rule)s	}
 }
 """ % dict(inst=pol.inst, kind=pol.kind, lan=pol.lan, t=NS_TABLE,
-           a4=_elements(a4), a6=_elements(a6), p4=_elements(p4), p6=_elements(p6),
+           a4=_elements(a4), a6=_elements(a6), p4t=_elements(p4t), p4u=_elements(p4u),
+           p6t=_elements(p6t), p6u=_elements(p6u),
            r4=_elements(r4), o4=_elements(o4), o6=_elements(o6), v6rule=v6rule,
            media=media_rule(pol))
 
@@ -719,15 +741,17 @@ def backstop_ruleset(policies):
         for name, typ, items in (
                 ("a4", "ipv4_addr", _host_sets(pol.allowed, 4)),
                 ("a6", "ipv6_addr", _host_sets(pol.allowed, 6)),
-                ("p4", "ipv4_addr . inet_proto . inet_service", _port_sets(pol.allowed, 4)),
-                ("p6", "ipv6_addr . inet_proto . inet_service", _port_sets(pol.allowed, 6))):
+                ("p4t", "ipv4_addr . inet_service", _port_sets(pol.allowed, 4, "tcp")),
+                ("p4u", "ipv4_addr . inet_service", _port_sets(pol.allowed, 4, "udp")),
+                ("p6t", "ipv6_addr . inet_service", _port_sets(pol.allowed, 6, "tcp")),
+                ("p6u", "ipv6_addr . inet_service", _port_sets(pol.allowed, 6, "udp"))):
             if not items:
                 continue
             sets.append("\tset %s_%s {\n\t\ttype %s\n\t\tflags interval%s\n\t}\n"
                         % (c, name, typ, _elements(items)))
-            fam = "ip" if name.endswith("4") else "ip6"
+            fam = "ip" if name[1] == "4" else "ip6"
             key = "%s daddr" % fam if name.startswith("a") else \
-                "%s daddr . meta l4proto . th dport" % fam
+                "%s daddr . %s dport" % (fam, "tcp" if name[2] == "t" else "udp")
             rules.append("\t\t%s @%s_%s accept" % (key, c, name))
         if pol.lan == "open":
             rules.append("\t\taccept")

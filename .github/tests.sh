@@ -9462,6 +9462,15 @@ echo '== netns: what a desktop may reach, written into both tables from one poli
   has   'IPv6 neighbour discovery with pasta is not'             "${t}" 'icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept'
   hasnt 'nothing is accepted as "established" (a revoke ends a live flow)' "${t}" 'established'
   has   'the private ranges are refused'                         "${t}" '10.0.0.0/8, 100.64.0.0/10'
+  # A range set whose key holds meta l4proto is refused by Proxmox's 7.0.14-30
+  # kernel, and with it the whole table: after the host's reboot onto it no
+  # desktop with a port grant could start. A grant's port is matched per
+  # protocol, so the protocol is never part of a key.
+  b="$("${N}" print-backstop alice 2>&1)"
+  hasnt 'no set key holds meta l4proto (a 7.0 kernel refuses it)' "${t}${b}" 'meta l4proto .'
+  has   'a TCP port grant is matched with tcp dport'           "${t}" 'ip daddr . tcp dport @allow4t accept'
+  has   'and in the backstop too'                              "${b}" 'ip daddr . tcp dport @u0_p4t accept'
+  has   'its addresses and port are the elements'              "${t}" '192.0.2.7/32 . 587'
   printf 'HDW4S_NET_LAN=open\n' > "${SB}/etc/alice.conf"
   t="$("${N}" print alice 2>&1)"
   hasnt 'HDW4S_NET_LAN=open lifts the private-range refusal'    "${t}" '10.0.0.0/8, 100.64.0.0/10'
@@ -9563,7 +9572,7 @@ print(m.grant_refusal(sys.argv[2]) or "ALLOWED")' "${N}" "$1" 2>&1; }
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1848  # update when tests are added; a wrong number is the point
+EXPECTED=1852  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
