@@ -1169,6 +1169,48 @@ def ns_keepalive(inst):
 
 
 # --------------------------------------------------------------------------
+# An AppArmor profile for pasta.
+#
+# noble's passt confines passt but not pasta. Newer passt packages (Debian's
+# since trixie, and so Ubuntu's after noble) also ship a profile named "pasta",
+# written for rootless podman, and it refuses the way hdw4s runs pasta -- as
+# root, joining a namespace under /run/netns. Measured (2026-11-20, passt
+# 0.0~git20261002 on noble): pasta dies of SIGSEGV with no message, five times,
+# and the desktop is left with only lo; the denials go to the kernel log, which
+# a container cannot read. So nothing here refuses on the profile's NAME -- a
+# later profile may well allow us -- but every place that sees pasta fail says
+# which profile is loaded and how to set it aside, and "hdw4s check" says so
+# before anything fails.
+
+APPARMOR_PROFILES = os.environ.get("HDW4S_APPARMOR_PROFILES",
+                                   "/sys/kernel/security/apparmor/profiles")
+
+
+def pasta_apparmor():
+    """The mode of a loaded AppArmor profile named "pasta" ("enforce",
+    "complain", ...), or None."""
+    try:
+        with open(APPARMOR_PROFILES) as f:
+            for line in f:
+                m = re.match(r"^pasta \((\w+)\)$", line.strip())
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def apparmor_hint():
+    """A sentence to add to a pasta failure, or ""."""
+    if pasta_apparmor() != "enforce":
+        return ""
+    return (" -- the AppArmor profile \"pasta\" is loaded in enforce mode, and the one"
+            " passt ships refuses hdw4s's pasta without a message. To set it aside:"
+            " ln -s /etc/apparmor.d/usr.bin.pasta /etc/apparmor.d/disable/ &&"
+            " apparmor_parser -R /etc/apparmor.d/usr.bin.pasta (hdw4s(8), NETWORK)")
+
+
+# --------------------------------------------------------------------------
 # The net unit's steps.
 
 def cmd_up(inst):
@@ -1320,10 +1362,11 @@ def cmd_pasta(inst):
         if len(recent) >= 5:
             say("hdw4s-netns: pasta for %s exited %d times in a minute (last: %s);"
                 " giving up -- the desktop keeps only its loopback until"
-                " hdw4s-net@%s.service is started again" % (inst, len(recent), rc, inst))
+                " hdw4s-net@%s.service is started again%s"
+                % (inst, len(recent), rc, inst, apparmor_hint()))
             return 1
         say("hdw4s-netns: pasta for %s exited (%s); starting it again into the"
-            " same namespace" % (inst, rc))
+            " same namespace%s" % (inst, rc, apparmor_hint()))
         time.sleep(1)
 
 
@@ -1348,7 +1391,7 @@ def cmd_ready(inst):
     while not ns_has_link(inst):
         if time.monotonic() >= end:
             raise Refusal("pasta never gave %s an address within %d s; see its"
-                          " messages above" % (ns_name(inst), READY_WAIT))
+                          " messages above%s" % (ns_name(inst), READY_WAIT, apparmor_hint()))
         time.sleep(0.1)
     if in_ns(inst, ["nft", "list", "table", "inet", NS_TABLE], check=False).returncode:
         raise Refusal("%s has no %s table; refusing to serve a desktop whose"
@@ -1472,6 +1515,12 @@ def cmd_check():
     if not os.access(PASTA, os.X_OK):
         print("netns       %s is not installed -- no desktop can start" % PASTA)
         rc = 1
+    if pasta_apparmor() == "enforce":
+        # A warning, not a failure: a later profile may allow hdw4s's pasta.
+        print("netns       AppArmor: the profile \"pasta\" is loaded in enforce mode; the one"
+              " passt ships refuses hdw4s's pasta, so a desktop that starts now may get no"
+              " network. Set it aside: ln -s /etc/apparmor.d/usr.bin.pasta"
+              " /etc/apparmor.d/disable/ && apparmor_parser -R /etc/apparmor.d/usr.bin.pasta")
     cached = read_keepalive_cache()
     verdict = cached.get("verdict") if cached else None
     if verdict == "answers":

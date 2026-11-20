@@ -9656,12 +9656,37 @@ PY
   is  'four desktops starting at once: one probe, every one raised, no error' "$(kv concurrent)" 'raised:True errors:0 raisedcount:4 probes:1'
   is  'a kept verdict is not probed again'                        "$(kv cached)"     'probes:1'
   is  'no systemd-run at all: raised, not an error'              "$(kv missing)"    'raised:True errors:0'
+
+  # An AppArmor profile named "pasta" (newer passt packages ship one that kills
+  # hdw4s's pasta without a message) is explained where pasta fails, never
+  # refused on its name. The profiles file is stood in; the crash itself was
+  # measured on a test container.
+  aa() { printf '%b' "$1" > "${SB}/aa-profiles"; HDW4S_APPARMOR_PROFILES="${SB}/aa-profiles" python3 -I -c '
+import importlib.machinery, importlib.util, sys
+ld = importlib.machinery.SourceFileLoader("netns", sys.argv[1])
+spec = importlib.util.spec_from_loader("netns", ld)
+m = importlib.util.module_from_spec(spec); ld.exec_module(m)
+print("%s|%s" % (m.pasta_apparmor(), "hint" if m.apparmor_hint() else "none"))' "${N}"; }
+  is  'a "pasta" profile in enforce mode is named where pasta fails'  "$(aa 'passt (enforce)\npasta (enforce)\n')" 'enforce|hint'
+  has 'and the hint says how to set it aside' "$(HDW4S_APPARMOR_PROFILES="${SB}/aa-profiles" python3 -I -c '
+import importlib.machinery, importlib.util, sys
+ld = importlib.machinery.SourceFileLoader("netns", sys.argv[1])
+spec = importlib.util.spec_from_loader("netns", ld)
+m = importlib.util.module_from_spec(spec); ld.exec_module(m); print(m.apparmor_hint())' "${N}")" 'apparmor_parser -R /etc/apparmor.d/usr.bin.pasta'
+  is  'in complain mode it refuses nothing, so nothing is said'      "$(aa 'pasta (complain)\n')" 'complain|none'
+  is  'RED ARM: another profile with pasta in its name is not it'      "$(aa 'passt (enforce)\npasta-helper (enforce)\n')" 'None|none'
+  rm -f "${SB}/aa-profiles"
+  is  'no AppArmor at all: nothing is said'                           "$(HDW4S_APPARMOR_PROFILES="${SB}/none" python3 -I -c '
+import importlib.machinery, importlib.util, sys
+ld = importlib.machinery.SourceFileLoader("netns", sys.argv[1])
+spec = importlib.util.spec_from_loader("netns", ld)
+m = importlib.util.module_from_spec(spec); ld.exec_module(m); print("%s|%s" % (m.pasta_apparmor(), m.apparmor_hint() or "none"))' "${N}")" 'None|none'
 )
 
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1865  # update when tests are added; a wrong number is the point
+EXPECTED=1870  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then

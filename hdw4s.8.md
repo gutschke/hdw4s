@@ -1377,6 +1377,19 @@ later answers for them all. When pasta answers, the defaults stand. `hdw4s
 check` says which, and reports a running desktop that should have them raised
 but has not.
 
+Newer passt packages than Ubuntu 24.04's (Debian's since trixie) also ship an
+AppArmor profile named `pasta`, written for rootless containers, and it refuses
+the way hdw4s runs pasta: pasta dies without a message and the desktop has no
+network. hdw4s does not refuse to start because of it, since a later profile may
+allow it, but when pasta fails with that profile in enforce mode the message
+says so, and `hdw4s check` warns before anything fails. To set it aside, as
+Ubuntu 24.04 does by not confining pasta at all:
+
+    ln -s /etc/apparmor.d/usr.bin.pasta /etc/apparmor.d/disable/
+    apparmor_parser -R /etc/apparmor.d/usr.bin.pasta
+
+The link keeps it set aside across reboots and upgrades of passt.
+
 Nothing is carried into the namespace but WebRTC. A desktop that offers it
 (`HDW4S_WEBRTC=yes`, the default) is given one UDP port when it starts, taken
 from the ephemeral range like any other; its streaming server puts every WebRTC
