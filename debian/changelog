@@ -1,3 +1,13 @@
+hdw4s (2.6.4) unstable; urgency=medium
+
+  * Idle connections out of a desktop no longer die after about two hours
+    with Ubuntu 24.04's pasta, which never answers a TCP keepalive probe:
+    the first desktop to start tests pasta once, and when it does not
+    answer, each desktop's network namespace raises its keepalive defaults.
+    A pasta that answers keeps them. `hdw4s check` says which.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Fri, 20 Nov 2026 13:00:00 -0800
+
 hdw4s (2.6.3) unstable; urgency=medium
 
   * A desktop with a port in HDW4S_NET_ALLOW or a LAN grant starts again on
