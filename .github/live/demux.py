@@ -852,6 +852,13 @@ class Rig:
         # was. The MUTATION IS THE SUBJECT, never the checker: the assertions
         # the red arms run are byte-identical to the green one's.
         self.demux = DEMUX if demux is None else demux
+        # How long the stand-in for hdw4s-start@ takes to act on a request. 0 is
+        # the old behaviour; the real one is path-activated and never instant.
+        # A red arm that needs "the router connected BEFORE the start was taken"
+        # sets it, because with 0 that ordering is a race between this thread's
+        # 10 ms poll and the router: red_the_first_request_is_refused passed
+        # (wrongly) 1 in 20 runs idle and 4 in 20 under load (2026-11-20).
+        self.start_latency = 0.0
         threading.Thread(target=self._take_start_requests, daemon=True).start()
         self._spawn()
 
@@ -874,7 +881,10 @@ class Rig:
                 self.start_requests.append(name)
                 for sl in self.slots + self.strays:
                     if sl.name == name and not sl.stop:
-                        sl.start_desktop()
+                        if self.start_latency:
+                            threading.Timer(self.start_latency, sl.start_desktop).start()
+                        else:
+                            sl.start_desktop()
             time.sleep(0.01)
 
     # The spawn is a method rather than eight lines of __init__ because the
@@ -6554,6 +6564,10 @@ def red_the_first_request_is_refused():
     """RED ARM for requirement 2: no wait for the desktop before connecting."""
     path = scratch_demux("-nowait.py", CONNECT_WITHOUT_WAITING)
     rig = Rig(gate=None, demux=path)
+    # The start is taken 1.5 s after it is asked for, so a router that does not
+    # wait reaches the slot before its desktop exists -- every time, not only
+    # when the stand-in's poll happens to come late (see Rig.start_latency).
+    rig.start_latency = 1.5
     try:
         test_the_first_request_after_a_mint_reaches_its_desktop(rig)
     finally:
