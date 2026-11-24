@@ -1,3 +1,13 @@
+hdw4s (2.6.7) unstable; urgency=medium
+
+  * "hdw4s check" no longer fails a desktop running Chrome. Chrome, Electron,
+    flatpak and rootless podman put sandboxed processes in a network
+    namespace of their own, nested in the desktop's; the check took that for
+    a process outside the desktop's network. A process in the machine's own
+    network namespace, or in another desktop's, still fails it.
+
+ -- Markus Gutschke <gutschke@users.noreply.github.com>  Mon, 23 Nov 2026 20:00:00 -0800
+
 hdw4s (2.6.6) unstable; urgency=medium
 
   * New: `sudo hdw4s-root [-- command]` gives root on the machine from a
