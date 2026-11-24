@@ -1490,6 +1490,45 @@ def unit_pids(unit):
     return pids
 
 
+# _IO(0xb7, 0x1) from <linux/nsfs.h>: a file descriptor for the user namespace
+# that owns a namespace.
+NS_GET_USERNS = 0xb701
+
+
+def made_by_root(pid):
+    """Whether the network namespace pid is in was made with this box's root
+    privilege, rather than inside a user namespace one of its own processes made.
+
+    Chrome, Electron, flatpak and rootless podman put their sandboxed processes
+    in a network namespace of their own, nested in the desktop's: it is owned by
+    a user namespace the session made, and starts with nothing but a down lo.
+    Anything it can reach goes through a helper that is itself still in the
+    desktop's namespace, behind the same tables. A namespace owned by OUR user
+    namespace was made by root -- by hdw4s for another desktop, or by an admin
+    -- and is exactly what a desktop's process must never be in. One owned by a
+    user namespace ABOVE ours (EPERM) is not the session's either.
+
+    Why not judge by what the namespace holds (no routes, lo down): a sandbox may
+    bring its own lo up, and a root-made namespace may look empty at the moment
+    it is sampled. Who made it does not change."""
+    try:
+        fd = os.open("/proc/%d/ns/net" % pid, os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        owner = fcntl.ioctl(fd, NS_GET_USERNS)
+    except OSError as e:
+        if e.errno == errno.EPERM:
+            return True
+        raise
+    finally:
+        os.close(fd)
+    try:
+        return os.fstat(owner).st_ino == os.stat("/proc/self/ns/user").st_ino
+    finally:
+        os.close(owner)
+
+
 def active_desktops():
     r = subprocess.run(["systemctl", "list-units", "--plain", "--no-legend",
                         "--state=active", "hdw4s@*.service", "hdw4s-ephemeral@*.service"],
@@ -1552,7 +1591,7 @@ def cmd_check():
             if got == host:
                 problems.append("pid %d is in the CONTAINER's network namespace" % pid)
                 break
-            if want is not None and got != want:
+            if want is not None and got != want and made_by_root(pid):
                 problems.append("pid %d is in a namespace that is not %s" % (pid, ns_name(inst)))
                 break
         if want is not None and in_ns(inst, ["nft", "list", "table", "inet", NS_TABLE],

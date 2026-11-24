@@ -9681,6 +9681,32 @@ import importlib.machinery, importlib.util, sys
 ld = importlib.machinery.SourceFileLoader("netns", sys.argv[1])
 spec = importlib.util.spec_from_loader("netns", ld)
 m = importlib.util.module_from_spec(spec); ld.exec_module(m); print("%s|%s" % (m.pasta_apparmor(), m.apparmor_hint() or "none"))' "${N}")" 'None|none'
+
+  # "hdw4s check" fails a desktop with a process in a network namespace not its
+  # own -- unless the namespace was made inside a user namespace the session
+  # made: Chrome's sandbox does exactly that, and was reported as a failure on a
+  # real desktop every 15 minutes. Who made a namespace is asked of the kernel,
+  # so a REAL unprivileged sandbox is made here; a root-made one needs root, so
+  # this process's own namespace stands in for it (owned by our user namespace,
+  # which is the property the check keys on). Another desktop's namespace and the
+  # container's were refused on a test container.
+  mbr() { python3 -I -c '
+import importlib.machinery, importlib.util, sys
+ld = importlib.machinery.SourceFileLoader("netns", sys.argv[1])
+spec = importlib.util.spec_from_loader("netns", ld)
+m = importlib.util.module_from_spec(spec); ld.exec_module(m); print(m.made_by_root(int(sys.argv[2])))' "${N}" "$1"; }
+  is  'RED ARM: a namespace owned by our user namespace counts as root-made' "$(mbr $$)" 'True'
+  if unshare -Urn true 2>/dev/null; then
+    unshare -Urn sleep 30 & sbx=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      [ "$(readlink /proc/${sbx}/ns/user)" != "$(readlink /proc/$$/ns/user)" ] && break; sleep 0.1
+    done
+    is  'a sandbox the session made (a user and network namespace of its own) is not' "$(mbr "${sbx}")" 'False'
+    kill "${sbx}" 2>/dev/null; wait "${sbx}" 2>/dev/null
+  else
+    skip 'a sandbox the session made is not root-made' 'no unprivileged user namespaces here'
+  fi
+  is  'a process that is gone is not reported' "$(mbr 999999999)" 'False'
 )
 
 
@@ -9748,7 +9774,7 @@ PY
 echo
 # A group that dies partway leaves its remaining assertions unrecorded, which
 # looks identical to a shorter suite. Counting them is the only way to notice.
-EXPECTED=1888  # update when tests are added; a wrong number is the point
+EXPECTED=1891  # update when tests are added; a wrong number is the point
 pass="$(grep -c '^ok$'   "${RESULTS}" || :)"
 fail="$(grep -c '^fail$' "${RESULTS}" || :)"
 if [ $(( pass + fail )) -ne "${EXPECTED}" ]; then
